@@ -24,8 +24,11 @@ from decimal import Decimal
 from decimal import ROUND_HALF_UP
 from pathlib import Path
 from time import monotonic as monotonic_clock
+from time import time as wall_clock
 from typing import Any
+from typing import Callable
 
+from . import stats_families
 from .common import STATE_DIR
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
@@ -44,11 +47,27 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 21
+STATSD_PROTOCOL_VERSION = 22
 STATSD_COMPAT_PROTOCOL_VERSION = 8
+
+def _statsd_code_revision() -> str:
+    """Deployment stamp for the stats daemon's code: a short content hash of the
+    modules that define its behavior. The registry retires-and-respawns a daemon
+    whose ping reports a different stamp, closing the same-protocol stale-daemon
+    class (daemons repeatedly survived restarts while serving old code)."""
+    digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent
+    for relative in ("statsd.py", "stats_families.py", str(Path("local_services") / "stats_store.py")):
+        try:
+            digest.update((root / relative).read_bytes())
+        except OSError:
+            digest.update(relative.encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
+STATSD_CODE_REVISION = _statsd_code_revision()
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
-STATS_READER_SOCKET_NAME = "stats-reader.sock"
 STATSD_DATABASE_NAME = "stats-history.sqlite3"
 STATSD_LEGACY_IMPORT_VERSION = 1
 STATSD_LEGACY_IMPORT_MARKER = "legacy_import_version"
@@ -66,6 +85,11 @@ STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
 STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 60
+# One retention schedule for EVERY family, token detail included. The 12-24h
+# band retains 600s buckets, so 12-24h token bars render at 600s — the same
+# tier the retired compact token side-stream really served there (its 300s
+# request was a floor clamped by max(requested, retained); regression:
+# tests/test_statsd.py::test_token_detail_12_to_24h_band_serves_at_the_600s_tier_like_the_legacy_stream).
 STATS_HISTORY_TIERS = (
     (STATS_HISTORY_RAW_WINDOW_SECONDS, 1),
     (STATS_HISTORY_MIDDLE_WINDOW_SECONDS, 10),
@@ -74,13 +98,14 @@ STATS_HISTORY_TIERS = (
     (12 * 60 * 60, 5 * 60),
     (STATS_HISTORY_RETENTION_SECONDS, 10 * 60),
 )
-STATS_HISTORY_PERSISTED_ROLLUP_SECONDS = (10, 60, 300, 600)
-STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS = 4
-STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS = 0.08
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
-STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_samples")
+STATS_AGENT_TOKEN_HISTORY_FIELDS = stats_families.TOKEN_DETAIL_BUCKET_FIELDS
+# BOUND: a history record folds all but the top-N agents of ``agent_token_rates``
+# into one aggregate ``other`` row (totals preserved), so a many-agent host
+# cannot blow the 24h single-stream payload budget.
+STATS_AGENT_TOKEN_RATES_MAX_AGENTS = 24
 STATS_COST_COMPONENT_DIMENSION_FIELDS = (
     "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
     "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
@@ -101,9 +126,19 @@ STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 # simple record count suggests on a memory-constrained host.
 STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 1
 STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 1
-# A page executes on statsd's sole SQLite/RPC owner. One atom is the bounded
-# unit: a "record" may carry expensive pricing and summary projection work.
-STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 1
+# The atom drain executes on statsd's sole SQLite/RPC owner. Each MERGE stays the bounded
+# unit — one atom, since a single record can carry expensive pricing/summary projection —
+# so no merge can starve the one-second CPU writer. But one atom PER DRAIN was too slow to
+# matter: after an offline rebuild the live spool holds tens of thousands of already-merged
+# atoms that re-drain as no-op dedups, and at 1/cycle the cursor never reaches the recent
+# atoms, so the spool stays stale (its newest atom hours old), new atom scans cannot install
+# over the undrained spool, and the Cost summary reads 0 tokens on recent ranges while the
+# token charts (a separate path) stay current. The fix loops one-atom merges within a small
+# wall-clock BUDGET per drain: cheap dedup atoms clear fast (thousands/sec), while a genuinely
+# expensive merge still yields after one. STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS is the rows
+# READ per drain (an upper bound); the budget is the real limiter.
+STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 2000
+STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS = 0.01
 
 
 def _scan_agent_token_rows_in_worker(
@@ -707,7 +742,53 @@ def agent_token_rates_response(value: Any, cost_value: Any) -> list[dict[str, An
             "billable_tokens": billable_tokens,
             "billable_samples": billable_samples,
         })
-    return result
+    return _fold_agent_token_rates(result)
+
+
+def _fold_agent_token_rates(rows: list[dict[str, Any]], limit: int = STATS_AGENT_TOKEN_RATES_MAX_AGENTS) -> list[dict[str, Any]]:
+    """Fold all but the top-``limit`` agents into one ``other`` row.
+
+    Token detail rides every history record of the single history stream, so a
+    record's per-agent detail must stay bounded. The kept rows are the largest
+    by billable-or-output volume; the fold row preserves every numeric total
+    (scalars, model rates, billable dimensions) so chart sums and Σ-displayed
+    reconciliation stay exact.
+    """
+    if len(rows) <= limit:
+        return rows
+
+    def volume(row: dict[str, Any]) -> float:
+        billable_all = float((row.get("billable_tokens") or {}).get("all") or 0.0)
+        return max(billable_all, float(row.get("tokens") or 0.0), float(row.get("total") or 0.0))
+
+    ranked = sorted(rows, key=lambda row: (-volume(row), str(row.get("key") or "")))
+    kept, folded = ranked[: limit - 1], ranked[limit - 1:]
+    other = {
+        "key": "other",
+        "label": f"other ({len(folded)} agents)",
+        "total": 0.0,
+        "samples": 0.0,
+        "tokens": 0.0,
+        "seconds": 0.0,
+        "source": "fold",
+        "model_rates": {},
+        "billable_available": any(row.get("billable_available") for row in folded),
+        "billable_tokens": {"input": 0.0, "cache_read": 0.0, "cache_write": 0.0, "all": 0.0},
+        "billable_samples": {"input": 0, "cache_read": 0, "cache_write": 0, "all": 0},
+    }
+    for row in folded:
+        for field in ("total", "samples", "tokens", "seconds"):
+            other[field] += float(row.get(field) or 0.0)
+        for dimension in ("input", "cache_read", "cache_write", "all"):
+            other["billable_tokens"][dimension] += float((row.get("billable_tokens") or {}).get(dimension) or 0.0)
+            other["billable_samples"][dimension] += int((row.get("billable_samples") or {}).get(dimension) or 0)
+        for model, values in (row.get("model_rates") or {}).items():
+            if not isinstance(values, dict):
+                continue
+            merged = other["model_rates"].setdefault(str(model), {"label": str(values.get("label") or model), "total": 0.0, "samples": 0.0, "tokens": 0.0, "seconds": 0.0})
+            for field in ("total", "samples", "tokens", "seconds"):
+                merged[field] = float(merged.get(field) or 0.0) + float(values.get(field) or 0.0)
+    return sorted(kept, key=lambda row: str(row.get("key") or "")) + [other]
 
 
 def _tmux_usage_fields_from_row(row: dict[str, Any], *, key: str = "", label: str = "", kind: str = "") -> dict[str, str]:
@@ -737,10 +818,6 @@ def _tmux_usage_fields_from_row(row: dict[str, Any], *, key: str = "", label: st
 
 def default_socket_path() -> Path:
     return safe_socket_path(STATE_DIR / "services" / STATSD_SOCKET_NAME, prefix="yolomux-statsd")
-
-
-def default_reader_socket_path() -> Path:
-    return safe_socket_path(STATE_DIR / "services" / STATS_READER_SOCKET_NAME, prefix="yolomux-stats-reader")
 
 
 def default_database_path() -> Path:
@@ -780,8 +857,12 @@ class PersistentStatsService:
         self.stop_event = threading.Event()
         self.leases: dict[str, int] = {}
         self.idle_seconds = max(1.0, float(idle_seconds))
-        self.started_at = time.time()
-        self.last_client_at = time.monotonic()
+        # Import-time clock bindings: this engine is also constructed inside
+        # the web process (StatsHistoryReader), where tests pin time.time /
+        # time.monotonic sequences for app sample math — infrastructure
+        # timestamps must not consume those pinned values.
+        self.started_at = wall_clock()
+        self.last_client_at = monotonic_clock()
         self._encoded_query_cache: dict[tuple[Any, ...], tuple[dict[str, Any], float]] = {}
         self._query_cache_ttl_seconds = 1.0
         self.last_history_profile: dict[str, Any] = {}
@@ -823,12 +904,6 @@ class PersistentStatsService:
         # SQLite owner. This state makes it cooperative instead of blocking
         # startup until the full retained history has been rewritten.
         self.pricing_reprojection: dict[str, Any] | None = None
-        self.rollup_backfill: dict[str, int] | None = None
-        # Dirty raw writes coalesce by durable rollup window.  A recovery page
-        # may touch dozens of records in the same four windows; it must not
-        # rebuild those windows inline on the RPC thread.
-        self.rollup_pending: set[tuple[int, int]] = set()
-        self.rollup_jobs: dict[tuple[int, int], dict[str, Any]] = {}
         self.retention_compaction: dict[str, Any] | None = None
         self.retention_normalization_complete = False
         self.maintenance_turn = 0
@@ -860,15 +935,13 @@ class PersistentStatsService:
     def _idle_shutdown_ready(self) -> bool:
         # The listener and SQLite writer are intentionally one thread. Advance
         # exactly one maintenance family after an actual 100ms accept timeout;
-        # doing token + pricing + rollup work in one turn starves queued CPU RPCs.
-        maintenance_kind = self.maintenance_turn % 4
+        # doing token + pricing + retention work in one turn starves queued CPU RPCs.
+        maintenance_kind = self.maintenance_turn % 3
         self.maintenance_turn += 1
         if maintenance_kind == 0:
             self._drain_agent_token_scan_result()
         elif maintenance_kind == 1:
             self._maybe_reproject_cost_summaries()
-        elif maintenance_kind == 2:
-            self._rollup_maintenance_step()
         else:
             self._retention_maintenance_step()
         with self.agent_token_scan_lock:
@@ -881,8 +954,7 @@ class PersistentStatsService:
             )
         # An elected sampler is active work even while no browser reads YO!stats.
         maintenance_pending = self.pricing_reprojection is not None
-        rollup_pending = bool(self.rollup_pending or self.rollup_jobs or self.rollup_backfill is not None)
-        return not scan_active and not maintenance_pending and not rollup_pending and self.retention_compaction is None and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        return not scan_active and not maintenance_pending and self.retention_compaction is None and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     @staticmethod
     def _legacy_client_bucket(snapshot: Any) -> dict[str, Any] | None:
@@ -1037,7 +1109,6 @@ class PersistentStatsService:
             client["sequence"] = next_sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             self.store.upsert_bucket(bucket)
-            self._enqueue_persisted_rollups(sample_time)
             changed += 1
         if changed:
             if compact:
@@ -1143,7 +1214,6 @@ class PersistentStatsService:
         *,
         now: float | None = None,
         compact: bool = True,
-        refresh_rollups: bool = True,
     ) -> dict[str, Any]:
         """Apply owner-only server, process, token, and host deltas durably."""
         if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
@@ -1238,13 +1308,7 @@ class PersistentStatsService:
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             coverage_samples: list[dict[str, Any]] = []
             if coverage_valid:
-                if coverage_family == "agent_tokens":
-                    coverage_families = ("agent_tokens", "cost")
-                elif coverage_family == "cpu":
-                    coverage_families = ("cpu", "raw")
-                else:
-                    coverage_families = (coverage_family,)
-                for family in coverage_families:
+                for family in stats_families.coverage_families_for(coverage_family):
                     coverage_start = max(0, int(math.floor(sample_time)))
                     coverage_cadence_seconds = max(1, int(math.ceil(coverage_cadence)))
                     coverage_samples.append({
@@ -1256,10 +1320,6 @@ class PersistentStatsService:
                         "owner_generation": coverage_generation,
                     })
             self.store.upsert_bucket_with_coverage(bucket, coverage_samples)
-            if refresh_rollups:
-                self._refresh_persisted_rollups(sample_time)
-            else:
-                self._enqueue_persisted_rollups(sample_time)
             changed += 1
         if changed and compact:
             self._compact_history(sample_now)
@@ -1268,85 +1328,6 @@ class PersistentStatsService:
         if changed:
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
-
-    def _refresh_persisted_rollups(self, sample_time: float) -> None:
-        """Rebuild only the aggregate windows touched by one durable write."""
-
-        for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS:
-            start = int(math.floor(sample_time / duration) * duration)
-            self._refresh_persisted_rollup_window(start, duration)
-
-    def _refresh_persisted_rollup_window(self, start: int, duration: int) -> None:
-        sources = self.store.query_buckets(start=start, end=start + duration)
-        if not sources:
-            return
-        aggregate = stats_store.empty_bucket(start, duration)
-        for source in sources:
-            self._merge_bucket(aggregate, source)
-        self.store.upsert_rollup(aggregate)
-
-    def _enqueue_persisted_rollups(self, sample_time: float) -> None:
-        for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS:
-            start = int(math.floor(sample_time / duration) * duration)
-            key = (start, duration)
-            # A partially accumulated job cannot include a new raw write
-            # safely; discard it and recompute the coalesced window.
-            self.rollup_jobs.pop(key, None)
-            self.rollup_pending.add(key)
-
-    def _rollup_maintenance_step(self) -> dict[str, Any]:
-        """Cooperatively converge dirty and startup rollups between requests."""
-        deadline = monotonic_clock() + STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS
-        progressed = 0
-        if self.rollup_pending:
-            start, duration = min(self.rollup_pending)
-            self.rollup_pending.remove((start, duration))
-            self.rollup_jobs[(start, duration)] = {
-                "after_start": start - 1,
-                "after_duration": -1,
-                "aggregate": stats_store.empty_bucket(start, duration),
-            }
-            progressed = 1
-        elif self.rollup_jobs and monotonic_clock() < deadline:
-            start, duration = min(self.rollup_jobs)
-            job = self.rollup_jobs[(start, duration)]
-            rows = self.store.rollup_source_page(
-                start=start, end=start + duration,
-                after_start=int(job["after_start"]), after_duration=int(job["after_duration"]),
-                limit=STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS,
-            )
-            if rows:
-                for source in rows:
-                    self._merge_bucket(job["aggregate"], source)
-                last = rows[-1]
-                job["after_start"], job["after_duration"] = int(last["start"]), int(last["duration"])
-                progressed = len(rows)
-            else:
-                aggregate = job["aggregate"]
-                self.rollup_jobs.pop((start, duration), None)
-                if int(aggregate.get("sequence") or 0):
-                    self.store.upsert_rollup(aggregate)
-                progressed = 1
-        elif self.rollup_backfill is not None and monotonic_clock() < deadline:
-            rows = self.store.maintenance_buckets_after(
-                after_start=int(self.rollup_backfill["after_start"]),
-                after_duration=int(self.rollup_backfill["after_duration"]), limit=1,
-            )
-            if not rows:
-                self.rollup_backfill = None
-            else:
-                source = rows[0]
-                self.rollup_backfill["after_start"] = int(source["start"])
-                self.rollup_backfill["after_duration"] = int(source["duration"])
-                self.rollup_backfill["processed"] = int(self.rollup_backfill["processed"]) + 1
-                self._enqueue_persisted_rollups(float(source["start"]))
-                progressed = 1
-        pending = bool(self.rollup_pending or self.rollup_jobs or self.rollup_backfill is not None)
-        return {"ok": True, "pending": pending, "processed": progressed}
-
-    def _rollup_backfill_step(self) -> dict[str, Any]:
-        """Compatibility name for focused callers; use the shared queue."""
-        return self._rollup_maintenance_step()
 
     def _enqueue_retention_compaction(self, now: float) -> None:
         if self.retention_compaction is None:
@@ -1383,16 +1364,10 @@ class PersistentStatsService:
                         target = self.store.bucket(target_start, target_duration) or stats_store.empty_bucket(target_start, target_duration)
                         self._merge_bucket(target, source)
                         self.store.replace_compacted_bucket(start, duration, target)
-                        # A rollup job may have observed the source before this
-                        # atomic move. Invalidate it so its eventual projection
-                        # is derived wholly from the final compacted sources.
-                        self._enqueue_persisted_rollups(float(target_start))
                     elif normalized:
                         self.store.upsert_bucket(source)
                 return {"ok": True, "pending": True, "processed": 1}
-            if self.retention_normalization_complete:
-                state["phase"] = "rollups"
-            else:
+            if not self.retention_normalization_complete:
                 state.update({"phase": "normalize", "after_start": -1, "after_duration": -1})
         if state["phase"] == "normalize":
             rows = self.store.maintenance_buckets_after(
@@ -1406,11 +1381,6 @@ class PersistentStatsService:
                     self.store.upsert_bucket(source)
                 return {"ok": True, "pending": True, "processed": 1}
             self.retention_normalization_complete = True
-            state["phase"] = "rollups"
-        stale_rollup = self.store.oldest_rollup_before(cutoff)
-        if stale_rollup is not None:
-            self.store.delete_rollup(*stale_rollup)
-            return {"ok": True, "pending": True, "processed": 1}
         # Epoch intervals are independent of raw-row compaction, but obey the
         # same retention window once the row pass has converged.
         self.store.retain_after(cutoff)
@@ -1766,25 +1736,28 @@ class PersistentStatsService:
                 path.unlink(missing_ok=True)
                 return True
             connection.close()
-            records: list[dict[str, Any]] = []
-            for raw_start, raw_duration, _event_key, raw_payload in rows:
-                bucket_start, duration = int(raw_start), int(raw_duration)
-                if not records or records[-1]["_statsd_duration"] != duration or records[-1]["time"] != bucket_start:
-                    records.append({"time": bucket_start, "_statsd_duration": duration, "usage_atoms": []})
-                records[-1]["usage_atoms"].append(json.loads(str(raw_payload)))
-            merged = self.merge_server_records(
-                records,
-                now=float(persistence.get("sample_time") or time.time()),
-                compact=False,
-                refresh_rollups=False,
-            )
+            # Merge ONE atom per merge (the bounded projection unit) but loop within a small
+            # wall-clock budget so a backlog of cheap dedup atoms clears fast, while a single
+            # expensive merge still yields after one. The cursor advances to the last merged
+            # atom, so a mid-batch stop safely resumes next drain.
+            sample_time = float(persistence.get("sample_time") or time.time())
+            budget_deadline = time.monotonic() + STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS
+            total_changed = 0
+            processed_atoms = 0
+            for raw_start, raw_duration, raw_event, raw_payload in rows:
+                record = {"time": int(raw_start), "_statsd_duration": int(raw_duration), "usage_atoms": [json.loads(str(raw_payload))]}
+                merged = self.merge_server_records([record], now=sample_time, compact=False)
+                total_changed += int(merged.get("changed") or 0)
+                persistence["cursor_start"] = int(raw_start)
+                persistence["cursor_duration"] = int(raw_duration)
+                persistence["cursor_event"] = str(raw_event)
+                processed_atoms += 1
+                if time.monotonic() >= budget_deadline:
+                    break
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             self.last_sampler_failure = redact_local_service_text(exc)
             return True
-        persistence["cursor_start"] = int(rows[-1][0])
-        persistence["cursor_duration"] = int(rows[-1][1])
-        persistence["cursor_event"] = str(rows[-1][2])
-        persistence["changed"] = int(persistence.get("changed") or 0) + int(merged.get("changed") or 0)
+        persistence["changed"] = int(persistence.get("changed") or 0) + total_changed
         self._store_agent_token_atom_spool(persistence)
         return True
 
@@ -2135,7 +2108,7 @@ class PersistentStatsService:
             # stall. Normal live maintenance keeps its existing compaction
             # path; recovery deliberately defers it.
             merged = self.merge_server_records(
-                page, now=persistence["sample_time"], compact=False, refresh_rollups=False,
+                page, now=persistence["sample_time"], compact=False,
             ) if page else {"ok": True, "changed": 0}
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             # Keep the exact pending cursor and uncommitted baseline. A later
@@ -2781,7 +2754,17 @@ class PersistentStatsService:
         return {"ok": True, "imported": True, "rows": len(buckets)}
 
     @staticmethod
-    def _record_from_bucket(bucket: dict[str, Any], client_id: str = "", *, include_agent_tokens: bool = True) -> dict[str, Any]:
+    def _record_from_bucket(
+        bucket: dict[str, Any],
+        client_id: str = "",
+        *,
+        field_groups: frozenset[str] = stats_families.ALL_FIELD_GROUPS,
+    ) -> dict[str, Any]:
+        # Wire-group filtering (see stats_families): 'always' groups are
+        # re-added by normalized_field_groups, so no selection derived from one
+        # family's slimming can strip an unrelated family from the record.
+        groups = stats_families.normalized_field_groups(field_groups)
+        encoded_fields = frozenset(stats_families.bucket_fields_for_groups(groups))
         clients = bucket.get("clients") if isinstance(bucket.get("clients"), dict) else {}
         clean_requested_client_id = stats_history_client_id(client_id)
         client = clients.get(clean_requested_client_id) if clean_requested_client_id else clients.get("")
@@ -2819,15 +2802,22 @@ class PersistentStatsService:
             **{
                 field: float(bucket.get(field) or 0.0)
                 for field in stats_store.SERVER_FIELDS
-                if include_agent_tokens or field not in STATS_AGENT_TOKEN_HISTORY_FIELDS
+                if field in encoded_fields
             },
         }
-        if include_agent_tokens:
+        if stats_families.FIELD_GROUP_AGENT_TOKEN_RATES in groups:
             record["agent_token_rates"] = agent_token_rates_response(
                 bucket.get("agent_token_rates"), bucket.get("cost_summary")
             )
-            record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
+        if stats_families.FIELD_GROUP_COST_SUMMARY in groups:
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
+        # Host metrics ride EVERY history record: they are an 'always' wire
+        # group in the manifest because Server Load / System memory / GPU have
+        # no other delivery path. Gating them on the retired token slimming
+        # blanked those charts at every range >= 4h (2026-07-14). Token detail
+        # now rides every record too; only the legacy compat path slims it.
+        if stats_families.FIELD_GROUP_HOST_METRICS in groups:
+            record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
         return record
 
     def _merge_bucket(
@@ -2835,10 +2825,18 @@ class PersistentStatsService:
         target: dict[str, Any],
         source: dict[str, Any],
         *,
-        merge_cost_summary: bool = True,
-        merge_agent_details: bool = True,
+        field_groups: frozenset[str] = stats_families.ALL_FIELD_GROUPS,
     ) -> None:
-        for field in stats_store.SERVER_FIELDS:
+        """Merge ``source`` into ``target`` for the selected manifest field groups.
+
+        Durable merges (compaction, imports) pass every group. The
+        response-only history aggregation narrows to the wire groups a record
+        will carry — and 'always' groups (host metrics, server scalars) are
+        structurally non-excludable via ``normalized_field_groups``, so a
+        token-slimming selection can never strip an unrelated family again.
+        """
+        groups = stats_families.normalized_field_groups(field_groups)
+        for field in stats_families.bucket_fields_for_groups(groups):
             target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
         target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(source.get("server_sequence") or 0))
         target["server_sequence"] = max(int(target.get("server_sequence") or 0), int(source.get("server_sequence") or 0))
@@ -2853,7 +2851,7 @@ class PersistentStatsService:
                             existing[field] = float(existing.get(field) or 0.0) + float(value)
                         elif field not in existing or value:
                             existing[field] = value
-        if merge_agent_details:
+        if stats_families.FIELD_GROUP_AGENT_TOKEN_RATES in groups:
             target_rates = target.setdefault("agent_token_rates", {})
             source_rates = source.get("agent_token_rates") if isinstance(source.get("agent_token_rates"), dict) else {}
             for rate_key, values in source_rates.items():
@@ -2866,7 +2864,7 @@ class PersistentStatsService:
                 if values.get("source"):
                     existing["source"] = str(values["source"])
                 PersistentStatsService._merge_agent_token_model_rates(existing, values.get("model_rates"))
-        if merge_cost_summary:
+        if stats_families.FIELD_GROUP_COST_SUMMARY in groups:
             target_summary = target.setdefault("cost_summary", {})
             source_summary = source.get("cost_summary") if isinstance(source.get("cost_summary"), dict) else {}
             target_components = target_summary.get("components") if isinstance(target_summary.get("components"), list) else []
@@ -2898,52 +2896,61 @@ class PersistentStatsService:
                 target_summary["active_catalog_revision"] = 0
             if source_summary.get("freshness"):
                 target_summary["freshness"] = str(source_summary["freshness"])
-            # Durable rollups retain the storage byte/count bounds and
+            # Durable merges retain the storage byte/count bounds and
             # transcript de-duplication enforced by the canonical projector.
             # Response-only history aggregation bypasses this branch and uses
             # its incremental dimension accumulator instead.
             self._merge_usage_components(target, [])
-        source_metrics = source.get("host_metrics") if merge_agent_details and isinstance(source.get("host_metrics"), dict) else {}
-        if source_metrics:
+        # Host metrics (Server Load / System memory / GPU) are an 'always' wire
+        # group: normalized_field_groups re-adds them to every selection, so no
+        # token-slimming flag can strip them again (they were once gated on the
+        # agent-token flags, which blanked those charts at every range >= 4h).
+        # Field names and merge kinds come from the manifest's canonical
+        # HOST_METRIC_FIELDS table, in storage order.
+        source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
+        if source_metrics and stats_families.FIELD_GROUP_HOST_METRICS in groups:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
-            for field in ("cpu_label", "system_memory_label"):
-                if source_metrics.get(field):
-                    target_metrics[field] = str(source_metrics[field])
-            for field in ("system_memory_used_total_bytes", "system_memory_capacity_total_bytes", "system_memory_count"):
-                target_metrics[field] = float(target_metrics.get(field) or 0.0) + float(source_metrics.get(field) or 0.0)
-            for mapping_field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):
-                source_items = source_metrics.get(mapping_field) if isinstance(source_metrics.get(mapping_field), dict) else {}
-                target_items = target_metrics.setdefault(mapping_field, {})
-                for item_key, source_item in source_items.items():
+            for field, kind in stats_families.HOST_METRIC_FIELDS:
+                if kind == "label":
+                    if source_metrics.get(field):
+                        target_metrics[field] = str(source_metrics[field])
+                    continue
+                if kind == "sum":
+                    target_metrics[field] = float(target_metrics.get(field) or 0.0) + float(source_metrics.get(field) or 0.0)
+                    continue
+                source_items = source_metrics.get(field) if isinstance(source_metrics.get(field), dict) else {}
+                target_items = target_metrics.setdefault(field, {})
+                if kind == "map_sum":
+                    for item_key, source_item in source_items.items():
+                        if not isinstance(source_item, dict):
+                            continue
+                        item = target_items.setdefault(str(item_key), {"label": str(source_item.get("label") or item_key)})
+                        item["label"] = str(source_item.get("label") or item.get("label") or item_key)
+                        for item_field, value in source_item.items():
+                            if item_field == "label":
+                                continue
+                            if isinstance(value, (int, float)):
+                                item[item_field] = float(item.get(item_field) or 0.0) + float(value)
+                    continue
+                # kind == "service_load": total/samples/min/max per cpu and rss
+                for service_key, source_item in source_items.items():
                     if not isinstance(source_item, dict):
                         continue
-                    item = target_items.setdefault(str(item_key), {"label": str(source_item.get("label") or item_key)})
-                    item["label"] = str(source_item.get("label") or item.get("label") or item_key)
-                    for field, value in source_item.items():
-                        if field == "label":
+                    item = target_items.setdefault(str(service_key), {"label": str(source_item.get("label") or service_key)})
+                    item["label"] = str(source_item.get("label") or item.get("label") or service_key)
+                    for prefix in ("cpu", "rss"):
+                        unit = "percent" if prefix == "cpu" else "bytes"
+                        total_key, samples_key = f"{prefix}_total_{unit}", f"{prefix}_samples"
+                        minimum_key, maximum_key = f"{prefix}_min_{unit}", f"{prefix}_max_{unit}"
+                        source_samples = float(source_item.get(samples_key) or 0.0)
+                        if source_samples <= 0:
                             continue
-                        if isinstance(value, (int, float)):
-                            item[field] = float(item.get(field) or 0.0) + float(value)
-            source_services = source_metrics.get("service_load") if isinstance(source_metrics.get("service_load"), dict) else {}
-            target_services = target_metrics.setdefault("service_load", {})
-            for service_key, source_item in source_services.items():
-                if not isinstance(source_item, dict):
-                    continue
-                item = target_services.setdefault(str(service_key), {"label": str(source_item.get("label") or service_key)})
-                item["label"] = str(source_item.get("label") or item.get("label") or service_key)
-                for prefix in ("cpu", "rss"):
-                    unit = "percent" if prefix == "cpu" else "bytes"
-                    total_key, samples_key = f"{prefix}_total_{unit}", f"{prefix}_samples"
-                    minimum_key, maximum_key = f"{prefix}_min_{unit}", f"{prefix}_max_{unit}"
-                    source_samples = float(source_item.get(samples_key) or 0.0)
-                    if source_samples <= 0:
-                        continue
-                    previous_samples = float(item.get(samples_key) or 0.0)
-                    source_minimum = float(source_item.get(minimum_key) or 0.0)
-                    item[total_key] = float(item.get(total_key) or 0.0) + float(source_item.get(total_key) or 0.0)
-                    item[samples_key] = previous_samples + source_samples
-                    item[minimum_key] = min(float(item.get(minimum_key) or source_minimum), source_minimum) if previous_samples > 0 else source_minimum
-                    item[maximum_key] = max(float(item.get(maximum_key) or 0.0), float(source_item.get(maximum_key) or 0.0))
+                        previous_samples = float(item.get(samples_key) or 0.0)
+                        source_minimum = float(source_item.get(minimum_key) or 0.0)
+                        item[total_key] = float(item.get(total_key) or 0.0) + float(source_item.get(total_key) or 0.0)
+                        item[samples_key] = previous_samples + source_samples
+                        item[minimum_key] = min(float(item.get(minimum_key) or source_minimum), source_minimum) if previous_samples > 0 else source_minimum
+                        item[maximum_key] = max(float(item.get(maximum_key) or 0.0), float(source_item.get(maximum_key) or 0.0))
 
     def _encoded_history(self, request: dict[str, Any]) -> dict[str, Any]:
         history_started = time.perf_counter()
@@ -2972,6 +2979,11 @@ class PersistentStatsService:
         resolution = max(0, int(request.get("resolution_seconds") or 0))
         max_points = max(0, int(request.get("max_points") or 0))
         client_id = stats_history_client_id(request.get("client_id") or "")
+        # LEGACY COMPAT (retire in a later release): current clients send NO
+        # token_* params — token detail rides every history record of the ONE
+        # history stream. Old clients still send token_resolution > 0 and are
+        # served the pre-Phase-2 wire unchanged: slimmed main records plus the
+        # separate compact agent_token_history payload below.
         token_resolution = max(0, int(request.get("token_resolution_seconds", request.get("token_resolution", 0)) or 0))
         include_agent_tokens = bool(request.get("include_agent_tokens", token_resolution <= 0))
         generation = self.store.latest_sequence()
@@ -2995,7 +3007,10 @@ class PersistentStatsService:
             generation,
         )
         cached = self._encoded_query_cache.get(cache_key)
-        if cached is not None and time.monotonic() - cached[1] <= self._query_cache_ttl_seconds:
+        # monotonic_clock (bound at import) rather than time.monotonic: the
+        # encode path runs in-process in the web server, so it must not be
+        # perturbed by app-level clock monkeypatching in tests.
+        if cached is not None and monotonic_clock() - cached[1] <= self._query_cache_ttl_seconds:
             if public_request:
                 self.history_cache_hit_count += 1
             self.last_history_profile = {
@@ -3020,27 +3035,25 @@ class PersistentStatsService:
         if max_points:
             span = max(1, (end or available_end) - (start or available_start))
             effective_resolution = max(effective_resolution, math.ceil(span / max_points))
-        # Live cursor deltas must remain raw so their sequence semantics are
-        # exact. Persisted rollups serve bounded range/zoom reads only.
-        persisted_rollup = (
-            next((duration for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS if duration >= effective_resolution), 0)
-            if end and effective_resolution >= STATS_HISTORY_PERSISTED_ROLLUP_SECONDS[1]
-            else 0
-        )
+        # Every read — live cursor delta or bounded range/zoom — serves from
+        # the ONE graduated stats_buckets store; explicit resolution picks
+        # (1/10/60/300s) map onto the graduated tiers via the group-by-target-
+        # resolution encode below.  (The persisted rollup tables are retired:
+        # live systems always served ranges from the graduated buckets anyway.)
         query_started = time.perf_counter()
-        source_buckets = (
-            self.store.query_rollups(duration=persisted_rollup, start=start, end=end)
-            if persisted_rollup and end
-            else self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
-        )
-        # A new database has no historic rollups yet; range reads must stay
-        # exact while incremental writes backfill the durable aggregate tiers.
-        if persisted_rollup and end and not source_buckets:
-            source_buckets = self.store.query_buckets(start=start, end=end)
-            persisted_rollup = 0
+        source_buckets = self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
         query_ms = (time.perf_counter() - query_started) * 1000
-        if persisted_rollup:
-            effective_resolution = persisted_rollup
+        # The manifest wire groups a returned record carries: everything —
+        # token detail (rates, cost, token scalars) rides every record of the
+        # single history stream. Only the legacy compat path (an old client
+        # sending token_resolution > 0) still receives the slimmed records.
+        record_field_groups = stats_families.wire_field_groups(legacy_token_stream=not include_agent_tokens)
+        include_cost_projection = stats_families.FIELD_GROUP_COST_SUMMARY in record_field_groups
+        # Cost components accumulate through the incremental dimension
+        # accumulator below (rebuilding a growing component list per merge is
+        # quadratic for token-heavy ranges), so the per-bucket merge excludes
+        # the cost_summary group and the projection is applied after grouping.
+        merge_field_groups = record_field_groups - {stats_families.FIELD_GROUP_COST_SUMMARY}
         def encode_records(target_resolution: int) -> list[dict[str, Any]]:
             grouped: dict[tuple[int, int], dict[str, Any]] = {}
             cost_groups: dict[tuple[int, int], dict[tuple[str, ...], dict[str, Any]]] = {}
@@ -3058,13 +3071,8 @@ class PersistentStatsService:
                 # quadratic for token-heavy ranges.  Accumulate billing
                 # dimensions once and project the public summary after all
                 # source buckets have been merged.
-                self._merge_bucket(
-                    target,
-                    bucket,
-                    merge_cost_summary=False,
-                    merge_agent_details=include_agent_tokens,
-                )
-                if include_agent_tokens:
+                self._merge_bucket(target, bucket, field_groups=merge_field_groups)
+                if include_cost_projection:
                     source_summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
                     source_components = [
                         item for item in source_summary.get("components", []) if isinstance(item, dict)
@@ -3089,7 +3097,7 @@ class PersistentStatsService:
                         pass
                     if source_summary.get("freshness"):
                         metadata["freshness"] = str(source_summary["freshness"])
-            if include_agent_tokens:
+            if include_cost_projection:
                 for bucket_key, target in grouped.items():
                     metadata = cost_metadata.get(bucket_key, {})
                     summary = target.setdefault("cost_summary", {})
@@ -3101,7 +3109,7 @@ class PersistentStatsService:
                     if metadata.get("freshness"):
                         summary["freshness"] = str(metadata["freshness"])
             return [
-                self._record_from_bucket(bucket, client_id, include_agent_tokens=include_agent_tokens)
+                self._record_from_bucket(bucket, client_id, field_groups=record_field_groups)
                 for _key, bucket in sorted(grouped.items())
                 if int(bucket.get("sequence") or 0) > after_sequence
             ]
@@ -3163,6 +3171,10 @@ class PersistentStatsService:
             "client_id": client_id,
             "usage_atom_backfill": self._usage_atom_migration_status(),
         }
+        # LEGACY COMPAT (retire in a later release): the separate compact token
+        # side-stream, served ONLY when an old client still sends
+        # token_resolution > 0. Current clients never request it — their token
+        # detail arrived inline on the records above.
         if token_resolution:
             token_request = {
                 "_internal_history": True,
@@ -3198,14 +3210,14 @@ class PersistentStatsService:
                 "sequence": token_payload["sequence"],
                 "latest_sequence": token_payload["latest_sequence"],
                 "records": [
-                    {key: record[key] for key in ("start", "duration", "sequence", "tokens_per_agent_total", "agent_token_samples", "agent_token_rates", "cost_summary")}
+                    {key: record[key] for key in stats_families.LEGACY_TOKEN_STREAM_RECORD_KEYS}
                     for record in token_payload["records"]
                 ],
                 "resolution_seconds": token_request["resolution_seconds"],
                 "snapshot": token_request["after_sequence"] == 0 and token_history_end <= 0,
                 "coverage": token_coverage,
             }
-        self._encoded_query_cache = {cache_key: (copy.deepcopy(payload), time.monotonic())}
+        self._encoded_query_cache = {cache_key: (copy.deepcopy(payload), monotonic_clock())}
         self.last_history_profile = {
             "cache_hit": False,
             "coverage_ms": round(coverage_ms, 3),
@@ -3215,12 +3227,6 @@ class PersistentStatsService:
             "returned_records": len(records),
         }
         return payload
-
-    def encoded_history_from_buckets(self, buckets: list[dict[str, Any]], request: dict[str, Any]) -> bytes:
-        """Encode a bounded legacy snapshot without making the caller serialize it."""
-        self.store.replace_buckets(buckets)
-        self._encoded_query_cache.clear()
-        return json.dumps(self._encoded_history(request), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], query: dict[str, Any]) -> bytes:
         """Encode the complete public stats response without an HTTP round-trip through Python objects."""
@@ -3289,11 +3295,12 @@ class PersistentStatsService:
         }
 
     def handle_with_binary(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        """Return response metadata plus optional pre-encoded JSON bytes.
+        """Handle one writer RPC action.
 
-        ``write_encoded_history`` is the only RPC action that returns a binary
-        payload.  This keeps cached history opaque after statsd encodes it;
-        HTTP still owns compression, HEAD, auth cookies, and response metrics.
+        No writer action returns a binary payload anymore: public history and
+        sample encoding run in-process in the web server through
+        ``StatsHistoryReader`` against a read-only WAL handle, so the socket
+        carries only bounded JSON control/write responses.
         """
         action = str(request.get("action") or "")
         try:
@@ -3303,7 +3310,7 @@ class PersistentStatsService:
         response_protocol = STATSD_PROTOCOL_VERSION if requested_protocol >= STATSD_PROTOCOL_VERSION else STATSD_COMPAT_PROTOCOL_VERSION
         hot_version = {"version": STATSD_PROTOCOL_VERSION} if requested_protocol >= STATSD_PROTOCOL_VERSION else {}
         if action == "ping":
-            return {"ok": True, "version": response_protocol, "pid": os.getpid(), "started_at": self.started_at}, b""
+            return {"ok": True, "version": response_protocol, "pid": os.getpid(), "started_at": self.started_at, "code_revision": STATSD_CODE_REVISION}, b""
         if action == "status":
             return {**self.common_status(), "version": response_protocol}, b""
         if action == "profile":
@@ -3402,7 +3409,6 @@ class PersistentStatsService:
                     [record for record in records if isinstance(record, dict)],
                     now=request.get("now"),
                     compact=request.get("compact") is not False,
-                    refresh_rollups=request.get("refresh_rollups") is not False,
                 )
                 return {**merged, **hot_version}, b""
             except (TypeError, ValueError, sqlite3.Error) as exc:
@@ -3492,33 +3498,6 @@ class PersistentStatsService:
             except (TypeError, ValueError, sqlite3.Error) as exc:
                 return {"ok": False, "error": str(exc)}, b""
             return {"ok": True, "buckets": buckets, "status": self.store.diagnostics()}, b""
-        if action == "write_encoded_history":
-            try:
-                encoded = json.dumps(self._encoded_history(request), sort_keys=True, separators=(",", ":")).encode("utf-8")
-            except (TypeError, ValueError, sqlite3.Error) as exc:
-                return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
-        if action == "write_encoded_sample":
-            sample = request.get("sample")
-            shared_stats = request.get("shared_stats")
-            query = request.get("query")
-            if not isinstance(sample, dict) or not isinstance(shared_stats, dict) or not isinstance(query, dict):
-                return {"ok": False, "error": "sample, shared_stats, and query are required"}, b""
-            try:
-                encoded = self.encoded_sample(sample, shared_stats, query)
-            except (TypeError, ValueError, sqlite3.Error) as exc:
-                return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
-        if action == "replace_and_write_encoded_history":
-            buckets = request.get("buckets")
-            query = request.get("query")
-            if not isinstance(buckets, list) or not isinstance(query, dict):
-                return {"ok": False, "error": "buckets and query are required"}, b""
-            try:
-                encoded = self.encoded_history_from_buckets([bucket for bucket in buckets if isinstance(bucket, dict)], query)
-            except (TypeError, ValueError, sqlite3.Error) as exc:
-                return {"ok": False, "error": str(exc)}, b""
-            return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
         if action == "history":
             try:
                 return {"ok": True, **self._encoded_history(request)}, b""
@@ -3557,9 +3536,6 @@ class PersistentStatsService:
         """Open/migrate the durable store only after this daemon owns the lock."""
         self.import_legacy_history_once()
         self.agent_token_atom_persistence = self._load_agent_token_atom_spool()
-        # Socket publication must mean it can answer immediately. The full
-        # retained-history pass advances in bounded listener idle turns.
-        self.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
         self._schedule_cost_reprojection()
 
     def _shutdown(self) -> None:
@@ -3596,112 +3572,86 @@ class PersistentStatsService:
         self.store.close()
 
 
-class StatsReaderService:
-    """Read-only WAL peer for aggregation and JSON encoding."""
+class StatsHistoryReader:
+    """In-process read-only YO!stats history facade for the web server.
 
-    READ_ACTIONS = {"history", "write_encoded_history", "write_encoded_sample"}
+    This replaces the retired ``stats-reader`` process: the web server encodes
+    history and sample responses directly from the durable SQLite database
+    through a read-only WAL connection, while the ``statsd`` owner remains the
+    sole writer.  It reuses ``PersistentStatsService``'s encode internals
+    (`_encoded_history` and friends) against a read-only store handle; every
+    method here is a pure read — the encode path never upserts, compacts, or
+    replaces buckets.
 
-    def __init__(self, socket_path: Path, database_path: Path, *, idle_seconds: float = STATSD_DEFAULT_IDLE_SECONDS):
-        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-stats-reader")
-        self.lock_path = self.socket_path.with_suffix(".lock")
-        self.stop_event = threading.Event()
-        self.idle_seconds = max(1.0, float(idle_seconds))
-        self.started_at = time.time()
-        self.last_client_at = monotonic_clock()
-        self.last_failure = ""
-        self.engine = PersistentStatsService(self.socket_path, database_path, pricing_catalog=None)
-        self.engine.store = StatsStore(database_path, read_only=True)
+    Concurrency: request threads share ONE engine (so the short encoded-query
+    cache keeps working) and one lock serializes encodes exactly like the old
+    single-threaded reader socket did.  The read-only SQLite connection opens
+    lazily and is shared across request threads (``check_same_thread=False``
+    in the read-only store open), which is safe because the lock serializes
+    every use.
 
-    def handle_with_binary(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        action = str(request.get("action") or "")
-        if action == "ping":
-            return {
-                "ok": True, "version": STATSD_PROTOCOL_VERSION,
-                "pid": os.getpid(), "started_at": self.started_at,
-            }, b""
-        if action == "status":
-            try:
-                cache = self.engine.store.diagnostics()
-            except sqlite3.Error as exc:
-                cache = {"error": str(exc)}
-                self.last_failure = str(exc)
-            return {
-                "ok": True, "version": STATSD_PROTOCOL_VERSION, "pid": os.getpid(),
-                "started_at": self.started_at, "socket": str(self.socket_path),
-                "cache": cache, "last_failure": self.last_failure,
-                "queues": {"interactive": 0, "normal": 0, "maintenance": 0},
-                "history_requests": self.engine.history_request_count,
-                "history_cache_hits": self.engine.history_cache_hit_count,
-            }, b""
-        if action == "shutdown":
-            self.stop_event.set()
-            return {"ok": True}, b""
-        if action not in self.READ_ACTIONS:
-            return {"ok": False, "error": f"stats reader rejects action: {action}"}, b""
-        return self.engine.handle_with_binary(request)
+    WAL read-only open quirk: opening ``mode=ro`` can raise
+    ``sqlite3.OperationalError`` when the database file does not exist yet
+    (fresh state directory before the statsd owner has created it) or while a
+    concurrent open races schema creation.  Both cases degrade to one lazy
+    close-and-reopen retry, and a persistent failure returns an error payload
+    instead of crashing the request thread.
+    """
 
-    def _idle_shutdown_ready(self) -> bool:
-        return monotonic_clock() - self.last_client_at >= self.idle_seconds
-
-    def run(self) -> int:
-        return run_local_rpc_service(
-            socket_path=self.socket_path,
-            lock_path=self.lock_path,
-            service_name="stats-reader",
-            stop_event=self.stop_event,
-            handle=self.handle_with_binary,
-            on_idle=self._idle_shutdown_ready,
-            on_client=lambda: setattr(self, "last_client_at", monotonic_clock()),
-            on_start=self.engine.store.open,
-            on_shutdown=self.engine.store.close,
-        )
-
-
-class StatsReaderClient(LocalServiceClient):
-    def __init__(self, socket_path: Path, database_path: Path):
+    def __init__(self, database_path: Path):
         self.database_path = Path(database_path)
-        super().__init__(
-            "stats-reader", "yolomux_lib.statsd", socket_path, STATSD_PROTOCOL_VERSION,
-            idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
-            extra_args=("--reader", "--database", str(self.database_path)),
+        self.lock = threading.Lock()
+        self.last_failure = ""
+        # The engine is never run as a service: the socket path is required by
+        # the constructor but never bound, and the writer store it builds is
+        # swapped for a read-only handle before anything opens a connection.
+        self.engine = PersistentStatsService(
+            self.database_path.with_name("stats-history-reader.unbound.sock"),
+            self.database_path,
+            pricing_catalog=None,
         )
+        self.engine.store = StatsStore(self.database_path, read_only=True)
+
+    def _reopen_store(self) -> None:
+        try:
+            self.engine.store.close()
+        except sqlite3.Error:
+            pass
+        self.engine.store = StatsStore(self.database_path, read_only=True)
+
+    def _read(self, operation: Callable[[], Any]) -> Any:
+        with self.lock:
+            try:
+                return operation()
+            except sqlite3.OperationalError:
+                # WAL read-only open quirk (see class docstring): retry once on
+                # a fresh lazy connection so a writer that appeared, restarted,
+                # or checkpointed between requests cannot strand this handle.
+                self._reopen_store()
+                return operation()
 
     def history(self, **request: Any) -> dict[str, Any]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "stats reader unavailable"}
-        return self.request({"action": "history", **request}, timeout=10.0)
-
-    def runtime_status(self) -> dict[str, Any]:
-        status = self.registry.status()
-        payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        pid = int(payload.get("pid") or 0)
-        return {
-            "service": "stats-reader", "pid": pid,
-            "started_at": float(payload.get("started_at") or 0.0),
-            "version": int(payload.get("version") or 0),
-            "socket": str(payload.get("socket") or self.socket_path),
-            "healthy": bool(status.get("healthy")),
-            "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
-            "last_failure": str(payload.get("last_failure") or ""),
-            "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {},
-            "history_requests": int(payload.get("history_requests") or 0),
-            "history_cache_hits": int(payload.get("history_cache_hits") or 0),
-            "resources": self.registry.resources(pid),
-            "record": status.get("record") if isinstance(status.get("record"), dict) else {},
-        }
-
-    def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "stats reader unavailable"}, b""
-        return self.request_with_binary({"action": "write_encoded_history", **request}, timeout=10.0)
+        try:
+            payload = self._read(lambda: self.engine._encoded_history(dict(request)))
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_failure = str(exc)
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **payload}
 
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], query: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "stats reader unavailable"}, b""
-        return self.request_with_binary(
-            {"action": "write_encoded_sample", "sample": sample, "shared_stats": shared_stats, "query": query},
-            timeout=10.0,
-        )
+        try:
+            encoded = self._read(lambda: self.engine.encoded_sample(sample, shared_stats, dict(query)))
+        except (TypeError, ValueError, sqlite3.Error) as exc:
+            self.last_failure = str(exc)
+            return {"ok": False, "error": str(exc)}, b""
+        return {"ok": True, "encoding": "json", "size": len(encoded)}, encoded
+
+    def close(self) -> None:
+        with self.lock:
+            try:
+                self.engine.store.close()
+            except sqlite3.Error:
+                pass
 
 
 def remove_legacy_zero_byte_service_database(service_dir: Path, configured_database: Path) -> bool:
@@ -3725,10 +3675,7 @@ def remove_legacy_zero_byte_service_database(service_dir: Path, configured_datab
 class StatsClient(LocalServiceClient):
     """Thin cross-port client for the ``statsd`` durable owner."""
 
-    def __init__(
-        self, socket_path: Path | None = None, database_path: Path | None = None,
-        reader_socket_path: Path | None = None,
-    ):
+    def __init__(self, socket_path: Path | None = None, database_path: Path | None = None):
         self.database_path = Path(database_path or default_database_path())
         writer_socket = Path(socket_path or default_socket_path())
         remove_legacy_zero_byte_service_database(writer_socket.parent, self.database_path)
@@ -3739,24 +3686,20 @@ class StatsClient(LocalServiceClient):
             STATSD_PROTOCOL_VERSION,
             idle_seconds=STATSD_DEFAULT_IDLE_SECONDS,
             extra_args=("--database", str(self.database_path), "--sampler-owner", str(default_sampler_owner_path(self.database_path.parent))),
+            code_revision=STATSD_CODE_REVISION,
         )
-        reader_socket = reader_socket_path or (
-            default_reader_socket_path()
-            if socket_path is None
-            else writer_socket.with_name(f"{writer_socket.stem}-reader{writer_socket.suffix}")
-        )
-        self.reader = StatsReaderClient(reader_socket, self.database_path)
-
-    def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
-        # A deliberate writer shutdown owns cleanup of its read peer too;
-        # crashes remain independently recoverable through each registry.
-        if str(payload.get("action") or "") == "shutdown":
-            self.reader.request({"action": "shutdown"}, timeout=min(timeout, 0.5))
-        return super().request(payload, timeout=timeout)
+        # History/sample reads no longer cross a socket: the web process
+        # encodes them in-process from a read-only WAL handle on the same
+        # durable database the statsd owner writes.
+        self.history_reader = StatsHistoryReader(self.database_path)
 
     def healthy(self) -> bool:
         response = self.request({"action": "ping", "protocol_version": STATSD_PROTOCOL_VERSION}, timeout=0.15)
-        return bool(response.get("ok")) and int(response.get("version") or 0) == STATSD_PROTOCOL_VERSION
+        return (
+            bool(response.get("ok"))
+            and int(response.get("version") or 0) == STATSD_PROTOCOL_VERSION
+            and str(response.get("code_revision") or "") == STATSD_CODE_REVISION
+        )
 
     def runtime_status(self) -> dict[str, Any]:
         status = self.registry.status()
@@ -3774,9 +3717,12 @@ class StatsClient(LocalServiceClient):
             "sampler_missed_cycles": int(payload.get("sampler_missed_cycles") or 0),
             "sampler_late_cycles": int(payload.get("sampler_late_cycles") or 0),
             "sampler_last_cycle_seconds": float(payload.get("sampler_last_cycle_seconds") or 0.0),
-            "history_profile": payload.get("history_profile") if isinstance(payload.get("history_profile"), dict) else {},
-            "history_requests": int(payload.get("history_requests") or 0),
-            "history_cache_hits": int(payload.get("history_cache_hits") or 0),
+            # History encoding is in-process (StatsHistoryReader) since the
+            # stats-reader process retired; these diagnostics are honest only
+            # when they come from where history is actually served now.
+            "history_profile": dict(self.history_reader.engine.last_history_profile),
+            "history_requests": int(self.history_reader.engine.history_request_count),
+            "history_cache_hits": int(self.history_reader.engine.history_cache_hit_count),
             "sampler_alive": payload.get("sampler_alive") is True,
             "sampler_families": payload.get("sampler_families") if isinstance(payload.get("sampler_families"), dict) else {},
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - monotonic_clock()),
@@ -3785,9 +3731,12 @@ class StatsClient(LocalServiceClient):
         }
 
     def history(self, **request: Any) -> dict[str, Any]:
+        # The writer owner must exist first: it creates/migrates the database
+        # and holds the WAL open, which is what makes the in-process read-only
+        # open below reliable (see StatsHistoryReader's quirk note).
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}
-        return self.reader.history(**request)
+        return self.history_reader.history(**request)
 
     def merge_records(self, records: list[dict[str, Any]], *, client_id: str, now: float | None = None, clear: bool = False) -> dict[str, Any]:
         return self._request_live_or_start(
@@ -3802,7 +3751,7 @@ class StatsClient(LocalServiceClient):
         merged = self.merge_records(records, client_id=client_id, now=now, clear=clear)
         if not merged.get("ok"):
             return merged
-        history = self.reader.history(**query)
+        history = self.history_reader.history(**query)
         if not history.get("ok"):
             return history
         return {"ok": True, "merged": merged, "history": history, "version": STATSD_PROTOCOL_VERSION}
@@ -3839,13 +3788,12 @@ class StatsClient(LocalServiceClient):
         *,
         now: float | None = None,
         compact: bool = False,
-        refresh_rollups: bool = False,
         timeout: float = 3.0,
     ) -> dict[str, Any]:
         return self._request_live_or_start(
             {
                 "action": "merge_server_records", "records": records, "now": now,
-                "compact": compact, "refresh_rollups": refresh_rollups,
+                "compact": compact,
             },
             timeout=timeout,
         )
@@ -3936,29 +3884,15 @@ class StatsClient(LocalServiceClient):
             {"action": "update_sampler_family", "family": family, "status": status}, timeout=1.0,
         )
 
-    def encoded_history(self, **request: Any) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.reader.encoded_history(**request)
-
     def encoded_sample(self, sample: dict[str, Any], shared_stats: dict[str, Any], *, query: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
             return {"ok": False, "error": "statsd unavailable"}, b""
-        return self.reader.encoded_sample(sample, shared_stats, query)
-
-    def replace_and_encoded_history(self, buckets: list[dict[str, Any]], **query: Any) -> tuple[dict[str, Any], bytes]:
-        if not self.ensure_started():
-            return {"ok": False, "error": "statsd unavailable"}, b""
-        replaced = self.request({"action": "replace_buckets", "buckets": buckets}, timeout=3.0)
-        if not replaced.get("ok"):
-            return replaced, b""
-        return self.reader.encoded_history(**query)
+        return self.history_reader.encoded_sample(sample, shared_stats, query)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="YOLOmux persistent stats service")
     parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--reader", action="store_true")
     parser.add_argument("--socket", default=str(default_socket_path()))
     parser.add_argument("--database", default=str(default_database_path()))
     parser.add_argument("--sampler-owner", default=str(default_sampler_owner_path()))
@@ -3967,10 +3901,6 @@ def main(argv: list[str] | None = None) -> int:
     if not args.serve:
         parser.error("--serve is required")
     apply_service_process_priority()
-    if args.reader:
-        return StatsReaderService(
-            Path(args.socket), Path(args.database), idle_seconds=args.idle_seconds,
-        ).run()
     # The daemon, rather than an individual web process, owns projection onto
     # the shared catalog.  Direct unit-service construction can still inject a
     # fake catalog or leave it absent without touching a developer's cache.

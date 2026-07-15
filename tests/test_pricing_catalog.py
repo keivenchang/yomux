@@ -42,12 +42,19 @@ def test_fresh_catalog_prices_current_models_with_provenance_and_effective_dates
     sonnet_now = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-5", direction="output", timestamp="2026-08-31T23:59:59Z")
     sonnet_later = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-5", direction="output", timestamp="2026-09-01T00:00:00Z")
     fable = catalog.resolve_rate(provider="anthropic", model="claude-fable-5", direction="output", timestamp="2026-07-11T00:00:00Z")
+    # The canonical Sonnet id matches Anthropic's price sheet ("Claude Sonnet 4.6");
+    # the legacy claude-sonnet-5 spelling remains an alias so either prices.
+    sonnet_46 = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-4-6", direction="input", cache_role="none", timestamp="2026-09-01T00:00:00Z")
+    sonnet_46_write5m = catalog.resolve_rate(provider="anthropic", model="claude-sonnet-4.6", direction="input", cache_role="write_5m", timestamp="2026-09-01T00:00:00Z")
 
     assert sol is not None and str(sol.usd) == "30.00" and sol.source_url.startswith("https://developers.openai.com/")
     assert terra is not None and str(terra.usd) == "2.50" and terra.effective_from == "2026-07-09T00:00:00Z"
     assert sonnet_now is not None and str(sonnet_now.usd) == "10.00"
     assert sonnet_later is not None and str(sonnet_later.usd) == "15.00"
     assert fable is not None and str(fable.usd) == "50.00"
+    # Base input $3 / 5m cache write $3.75, exactly the Anthropic sheet.
+    assert sonnet_46 is not None and str(sonnet_46.usd) == "3.00"
+    assert sonnet_46_write5m is not None and str(sonnet_46_write5m.usd) == "3.75"
 
 
 def test_catalog_requires_exact_alias_and_effective_date(tmp_path):
@@ -170,7 +177,7 @@ def test_refresh_uses_etag_and_activates_normalized_official_catalog(tmp_path):
     body = json.dumps(seed).encode()
     adapter = PricingSourceAdapter("openai", "https://platform.openai.com/docs/pricing", "official", lambda value: json.loads(value.decode()))
     result = catalog.refresh([adapter], fetch=lambda *_args: (200, {"etag": "new-etag"}, body))
-    assert result == {"ok": True, "status": "updated", "catalog_revision": 3}
+    assert result == {"ok": True, "status": "updated", "catalog_revision": load_packaged_seed()["catalog_revision"] + 1}
     rate = catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input")
     assert rate is not None and str(rate.usd) == "3.00" and rate.source_kind == "official"
     assert catalog.source_check(adapter.url)["etag"] == "new-etag"
@@ -235,7 +242,7 @@ def test_refresh_carries_forward_official_model_omitted_by_partial_revision(tmp_
     assert result["status"] == "updated"
     assert result["carried_forward_models"] == ["openai/gpt-removed"]
     retained = catalog.resolve_rate(provider="openai", model="gpt-removed", direction="input")
-    assert retained is not None and retained.catalog_revision == 3
+    assert retained is not None and retained.catalog_revision == load_packaged_seed()["catalog_revision"] + 1
     assert catalog.resolve_rate(provider="openai", model="gpt-replacement", direction="input") is not None
     with catalog._transaction() as connection:
         coverage_after = connection.execute("SELECT COUNT(DISTINCT provider || '/' || alias) FROM model_aliases WHERE source_kind = 'official'").fetchone()[0]
@@ -548,7 +555,7 @@ def test_seed_downgrade_does_not_replace_newer_official_catalog(monkeypatch, tmp
     catalog.reconcile_seed()
     selected = catalog.resolve_rate(provider="openai", model="gpt-4.1", direction="input")
     assert selected is not None and str(selected.usd) == "4.00" and selected.source_kind == "official"
-    assert catalog.status()["catalog_revision"] == 3
+    assert catalog.status()["catalog_revision"] == load_packaged_seed()["catalog_revision"] + 1
 
 
 def test_public_rate_and_catalog_payload_expose_only_safe_source_evidence(tmp_path):
@@ -559,10 +566,11 @@ def test_public_rate_and_catalog_payload_expose_only_safe_source_evidence(tmp_pa
     assert evidence["effective_from"] == "2025-01-01T00:00:00Z"
     assert evidence["source_url"] == "https://developers.openai.com/api/docs/pricing"
     public = catalog.public_payload()
+    seed_revision = load_packaged_seed()["catalog_revision"]
     assert public["status"]["state"] == "seed-only"
     assert public["sources"] == [
-        {"kind": "seed", "url": "https://developers.openai.com/api/docs/pricing", "revision": 2},
-        {"kind": "seed", "url": "https://platform.claude.com/docs/en/about-claude/pricing", "revision": 2},
+        {"kind": "seed", "url": "https://developers.openai.com/api/docs/pricing", "revision": seed_revision},
+        {"kind": "seed", "url": "https://platform.claude.com/docs/en/about-claude/pricing", "revision": seed_revision},
     ]
     assert safe_source_url("javascript:alert(1)") == ""
     assert safe_source_url("https://example.invalid/pricing") == ""

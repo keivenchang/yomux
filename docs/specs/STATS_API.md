@@ -3,10 +3,14 @@
 `GET /api/stats-sample` returns the current server sample and optional durable
 history. Integer query parameters are non-negative; `history_resolution` is
 at most 86,400 seconds and `history_max_points` at most 100,000. `history=0`
-returns no history. `token_*` parameters select independently cursorable
-Agent/Model token history. The GET reads the latest cached CPU sample and
-durable history; it never invokes CPU, Agent Status, GPU, memory, or transcript
-collectors in the request thread.
+returns no history. There is ONE history stream: token rates and the cost
+summary ride every history record, and current clients send no `token_*`
+parameters. The server still ACCEPTS the legacy `token_*` parameters and, when
+an old client sends `token_resolution > 0`, serves the pre-cutover wire
+(slimmed records plus the separate `agent_token_history` payload) — a compat
+path scheduled for retirement in a later release. The GET reads the latest
+cached CPU sample and durable history; it never invokes CPU, Agent Status,
+GPU, memory, or transcript collectors in the request thread.
 
 `POST /api/stats-history` accepts at most 1,000 records and 128 KiB.
 `ack_only` returns an empty record list and durable sequence, never a retained
@@ -45,18 +49,62 @@ restart, owner change, or a wall-clock discontinuity cannot paint a stale roster
 through the outage. `epochs` describes those bounded sampler segments and
 `epochs_truncated` reports list truncation.
 
+Family facts have ONE owner: the frozen manifest in
+`yolomux_lib/stats_families.py` (mirrored client-side as
+`jsDebugStatsFamilyManifest` in `static_src/js/yolomux/83_debug_panel.js`, the
+two pinned against each other by `tests/yostats_performance.test.js`). Per
+family it declares the canonical name — identical to the
+`stats_coverage_intervals` family — plus legacy coverage aliases, sampler
+cadence, storage fields, wire field group, delivery path, merge rule, chart
+groups, and coverage companions. Wire field groups replace the retired
+cross-family booleans (`include_agent_tokens` field branching,
+`merge_agent_details`, `merge_cost_summary`): `always` groups (server scalars,
+host metrics) are structurally non-excludable, so no future flag derived from
+one family's needs can strip an unrelated family, and `token_detail` groups
+(token scalars, agent token rates, cost summary) ALSO ride every history
+record — they stay excludable only for the response-path cost merge
+optimization and for the legacy old-client compat path above. A record's
+`agent_token_rates` is bounded: beyond 24 agents the smallest fold into one
+aggregate `other` row that preserves every numeric total. Token bars in the
+12-24h band render at the 600s retention tier — the same tier the retired
+compact stream actually served there (its 300s request was a floor clamped by
+the retained resolution). `tests/test_stats_wire_parity.py` pins the encoded
+wire bytes for current-client and legacy shapes alike.
+
 The requested/available/covered bounds, `complete`, older-page facts,
 resolution, source/returned counts, and cursor facts remain as a compatibility
 envelope during migration, but they do not replace the interval list or prove
-that a middle span is covered. Missing or malformed `intervals` is a contract
-violation; transport failure is the other bounded Retry state. Ranges are
+that a middle span is covered. A missing or non-array top-level `intervals` list
+is a contract violation; a structurally invalid entry in that required
+top-level list (reversed, non-object) is also rejected. But the client never
+blanks a whole multi-family response for a single bad family: the interval-count
+bound degrades by capping to the most recent entries rather than rejecting, and
+a per-family `store_intervals` list is lenient — an individual malformed
+interval is skipped (its span renders as honest no-data) and a
+structurally-unusable family is dropped with a Logs warning while every other
+family still renders. Transport failure is the other bounded Retry state. Ranges are
 inclusive `start`, exclusive `end`. A legacy schema-2 read-only database derives
 intervals and epochs from retained bucket gaps without mutating the database.
 
-Range reads may use persisted rollups, but one instant has one durable source;
-consumers must not sum overlapping raw and rollup records. A lower-bound or
-truncated cost summary is explicitly incomplete while token counters remain
+One instant has one durable source: every read — live cursor delta or bounded
+range/zoom — serves from the graduated `stats_buckets` tiers, with coarser
+requested resolutions aggregated at serve time by the group-by-target-resolution
+encode (the persisted rollup tiers are retired; they were empty on live
+systems and serving always fell back to the graduated buckets). A lower-bound
+or truncated cost summary is explicitly incomplete while token counters remain
 independently visible.
+
+The durable store (schema 4) is exactly three tables: `stats_buckets` — each
+fact stored once, in `bucket_json` — plus `stats_coverage_intervals` and
+`schema_meta`. Every write path is a full-bucket read-modify-write of
+`bucket_json`, which is why the four legacy normalized side tables
+(`stats_clients`/`stats_processes`/`stats_agent_rates`/`stats_host_metrics`)
+were pure duplication and were retired together with `stats_rollups`. The
+writer migrates a legacy schema-3 database once on open (side-table groups
+missing from a `bucket_json` are folded in, rollup projections are dropped);
+the read-only `StatsHistoryReader` never migrates — it reads only the three
+surviving tables, which exist under both schemas, so it serves an un-migrated
+database unchanged and follows the owner's migration transparently.
 
 Pricing is an offline-first, effective-dated catalog. The packaged seed covers
 current common model families with reviewed HTTPS provenance, check dates, and
@@ -73,12 +121,17 @@ daily attempt, while failure publishes status and retries with bounded
 exponential backoff. Fetching and parsing run on a daemon worker and never
 block an HTTP request or startup thread.
 
-statsd is the sole SQLite writer. A separate persistent `stats-reader` service
-opens the same WAL database with SQLite `mode=ro` and `PRAGMA query_only=ON`.
-It accepts only `history`, `write_encoded_history`, and
-`write_encoded_sample` (plus lifecycle/status actions), and returns the
-history envelope or pre-encoded bounded JSON bytes plus metadata. Long-range
-aggregation therefore cannot occupy the statsd listener that owns CPU writes.
+statsd is the sole SQLite writer. The `stats-reader` process is retired: each
+web server reads the same durable WAL database directly through its in-process
+`StatsHistoryReader` facade, which opens SQLite with `mode=ro` and
+`PRAGMA query_only=ON` (lazily, with one close-and-reopen retry for the WAL
+read-only open quirk — a database file that does not exist yet or a racing
+concurrent open) and runs the writer's encode internals (`_encoded_history`,
+`encoded_sample`) as pure reads. One facade lock serializes encodes per web
+process, so long-range aggregation still cannot occupy the statsd listener
+that owns CPU writes — it never touches the writer socket at all, and the
+reader socket, spawn-on-demand reader lifecycle, JSON socket size cap, and
+`write_encoded_history` binary side-channel are gone with the process.
 Bucket queries and merges are bounded; merges accept at most 1,000 records. A
 timed-out current-protocol request is not replayed through legacy transport.
 Restart/failover may return unavailable, but subsequent cursors remain
@@ -95,8 +148,7 @@ errors do not fall back to a second writer or replay through a legacy request.
 | --- | --- | --- |
 | Lifecycle | `ping`, `status`, `profile`, `lease`, `release`, `shutdown_if_idle`, `shutdown` | Protocol/process identity, bounded diagnostics, lease identifiers, or an explicit shutdown decision. These actions never return history bytes. |
 | Sampler diagnostics/demand | `set_token_consumer_until`, `update_sampler_family`, `mark_sampler_success` | A finite token-consumer deadline, named bounded family status, or compatibility success timestamp. Family status exposes cadence, attempt/success/failure, late/missed, runtime, alive/running, and failure text. There is no statsd-to-web sampler-owner RPC. |
-| Bucket reads | `stats-reader: history`; `statsd: query_buckets` | The public history envelope is isolated on the read-only peer; the writer's bounded normalized bucket query remains an internal maintenance/compatibility action. `since`/`after_sequence`, inclusive `start`, exclusive `end`, resolution, client, token, and point-limit selectors are non-negative. |
-| Encoded reads | `stats-reader: write_encoded_history`, `write_encoded_sample` | Metadata `{ok:true,encoding:"json",size}` plus one JSON byte frame. Sample bytes contain the public sample, optional history, and shared-owner facts. A compatibility replacement commits through statsd first, then reads the committed WAL snapshot through stats-reader. |
+| Bucket reads | `statsd: history`, `query_buckets` | The writer keeps a JSON `history` action for direct service tests/compat and a bounded normalized bucket query as an internal maintenance action. The PUBLIC history envelope is not an RPC at all: the web process encodes it in-process (`StatsHistoryReader.history` / `.encoded_sample`) from a read-only WAL handle. `since`/`after_sequence`, inclusive `start`, exclusive `end`, resolution, client, token, and point-limit selectors are non-negative. |
 | Browser writes | `merge_records`, `merge_and_history` | At most 1,000 normalized browser records plus client/cursor facts. The first returns a compact changed/sequence acknowledgement; the compatibility form returns that acknowledgement plus a bounded history envelope. |
 | Server writes | `upsert_bucket`, `merge_server_records`, `replace_buckets`, `retain_after` | Single-writer normalized upsert/merge, explicit maintenance replacement, or retention cutoff; returns changed/sequence/store diagnostics, never an unbounded bucket echo. |
 | Token counters | `claim_agent_token_deltas`, `claim_agent_token_deltas_from_rows`, `recover_agent_token_history`, `recover_agent_token_history_from_rows`, `finish_agent_token_scan` | Validated counter/row snapshots or a scan identifier. Large filesystem work is single-flight and detached; finish/drain responses stay metadata-bounded and stable event IDs make retries idempotent. |
@@ -107,13 +159,15 @@ second, Agent Status and GPU every 10 seconds, system memory every 60 seconds,
 and tokens every 10 seconds while watched or 60 seconds while idle. Each
 worker merges only its partial record into statsd; a slow family cannot delay
 another family's deadline. Hot family writes address the live socket directly
-and do not synchronously compact history or rebuild rollups. Queued RPC writes
-run before maintenance; after a real listener-idle turn, statsd round-robins
-one bounded token, cost, rollup, or retention step. Browser/client uploads also
-enqueue rollup and retention work instead of compacting the full store inline.
-History and response encoding use stats-reader's independent read-only process;
-the System view reports both services separately, including process/version,
-socket, health, cache/failure, queue, and resource facts.
+and do not synchronously compact history. Queued RPC writes run before
+maintenance; after a real listener-idle turn, statsd round-robins one bounded
+token, cost, or retention step. Browser/client uploads also enqueue retention
+work instead of compacting the full store inline.
+History and response encoding run in-process in each web server against a
+read-only WAL handle; the System view's Local-services roster reports the four
+spawned services (indexd, statsd, jobd, approvald) — the statsd row's history
+request/cache-hit/profile diagnostics come from the web process's in-process
+encoder, which is where history is actually served now.
 Retention atomically advances one expired or mis-tiered row per turn and lets
 concurrent live writes schedule the next frozen pass. A timeout never triggers daemon launch
 arbitration; only a structured absent/refused socket does. CPU uses a

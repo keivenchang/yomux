@@ -17,14 +17,22 @@ const jsDebugGraphGeometry = (() => {
     hoverBottom: plotTop + plotHeight,
   });
 })();
-const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
-const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
+// The readiness machine has FOUR phases; `reason` qualifies the one loading phase
+// ('initial' | 'older' | 'retry', '' otherwise). The DOM/data-attribute contract and
+// the test snapshot still emit the historical composite names (loading-initial /
+// loading-older / retrying) derived from phase+reason via
+// jsDebugHistoryReadinessStateName, so CSS hooks, specs, and tests keep one stable
+// state vocabulary while the machine itself carries fewer states.
+const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading', 'ready', 'error']);
+const jsDebugHistoryReadinessReasonByLegacyPhase = Object.freeze({'loading-initial': 'initial', 'loading-older': 'older', 'retrying': 'retry'});
+const jsDebugHistoryLegacyPhaseByReason = Object.freeze({initial: 'loading-initial', older: 'loading-older', retry: 'retrying'});
 const jsDebugHistoryOlderOverlayDelayMs = 120;
 const jsDebugHistoryRetryInitialDelayMs = 10_000;
 const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
 const jsDebugHistoryCoverageIntervalLimit = 256;
 const jsDebugHistoryReadiness = {
   phase: 'idle',
+  reason: '',
   requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
   targetStartSeconds: 0,
   targetEndSeconds: 0,
@@ -55,13 +63,17 @@ const jsDebugSystemState = {
   updatedAt: 0,
 };
 const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
+// Fresh state hides the chatty info/debug levels; warnings and errors are the
+// signal a first-time viewer needs. Info/Debug remain one toggle away and their
+// selection persists (see save/load of jsDebugStatsUiPreferences).
+const jsDebugLogDefaultLevels = Object.freeze(['warning', 'error']);
 const jsDebugLogsState = {
   payload: [],
   error: '',
   inFlight: false,
   updatedAt: 0,
   clearedAt: 0,
-  levels: new Set(jsDebugLogLevels),
+  levels: new Set(jsDebugLogDefaultLevels),
 };
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
 let jsDebugGraphResolutionOverrideSeconds = 0;
@@ -78,15 +90,24 @@ const jsDebugStatsPollState = {
   firstSampleReceived: false,
   lastSampleAtMs: 0,
 };
+// Background prefetch of the full retention window into the shared bucket cache so a
+// range/zoom switch renders cached (stale) content instantly while the normal poll
+// revalidates the switched-to range on top. Pure cache-fill: it never touches the
+// readiness state machine or overlay (the current view owns those).
+const jsDebugHistoryPrefetchState = {
+  inFlight: false,
+  didInitial: false,
+  lastFullPrefetchAtMs: 0,
+  // Bumped whenever the bucket cache is cleared; an in-flight prefetch whose fetch
+  // resolves after a clear must NOT apply its (now stale) buckets.
+  generation: 0,
+};
 const jsDebugStatsUploadState = {
   timer: null,
   worker: null,
   generation: 0,
 };
 let jsDebugStatsServerSequence = 0;
-let jsDebugStatsAgentTokenSequence = 0;
-let jsDebugStatsAgentTokenResolutionSeconds = 0;
-let jsDebugStatsAgentTokenSchemaVersion = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
 let jsDebugStatsServerStartedAt = null;
@@ -99,6 +120,7 @@ let jsDebugGraphSelectionState = null;
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveFrame = 0;
 let jsDebugGraphLiveFrameLastMs = 0;
+let jsDebugGraphLiveFrameTicking = false;
 let jsDebugCostAgeNextRefreshAtMs = 0;
 let jsDebugCostPanelNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
@@ -110,7 +132,7 @@ const jsDebugGraphModelTokenDimensions = Object.freeze([
   Object.freeze({key: 'output', labelKey: 'debug.cost.output', fallback: 'Output'}),
   Object.freeze({key: 'all', labelKey: 'debug.modelTokens.allBillable', fallback: 'All billable'}),
   Object.freeze({key: 'input', labelKey: 'debug.cost.input', fallback: 'Input'}),
-  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache read'}),
+  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache hits & refreshes'}),
   Object.freeze({key: 'cacheWrite', labelKey: 'debug.modelTokens.cacheWrite', fallback: 'Cache write'}),
 ]);
 let jsDebugGraphModelTokenDimension = 'output';
@@ -133,8 +155,9 @@ const jsDebugGraphMaxDisplayPoints = 120;
 const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
 // User-directed Resolution picker universe. Deliberately DECOUPLED from the AUTO
 // effective-resolution set (jsDebugGraphDisplayBucketMs): each of these four values
-// maps 1:1 onto a stored tier (raw 1s + persisted 10/60/300s rollups) so an explicit
-// pick is served straight from a precomputed tier with no server-side re-aggregation.
+// matches a durable graduated retention tier (raw 1s + the 10/60/300s bands), so an
+// explicit pick is served from the graduated buckets — buckets at or coarser than the
+// pick pass through unchanged; finer newer buckets group up to it at serve time.
 // AUTO/effective clamping may still RENDER coarser values (e.g. 600s for the oldest
 // retention windows) — that honest retained resolution is shown in the label, not the
 // picker. Persisted/deeplinked out-of-set overrides normalize into this set.
@@ -162,7 +185,25 @@ const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
+// Full-retention background prefetch: one request spans the whole retention window and
+// (via the server's per-span tiers) returns a few hundred coarse buckets covering EVERY
+// range, so every range switch renders from cache. The current short range keeps its own
+// fast live cadence (1s SSE / minute poll); this only refreshes the wider windows, which
+// change slowly -> a several-minute cadence keeps them fresh cheaply (the 24h window is
+// re-pulled by the same request but barely moves between pulls).
+const jsDebugHistoryPrefetchRetentionSeconds = Math.floor(jsDebugGraphRetentionMs / 1000);
+const jsDebugHistoryPrefetchIntervalMs = 5 * 60 * 1000;
 const jsDebugStatsLivePushRangeSeconds = 30 * 60;
+// Wall-clock slide cadence for live (<=30m, non-zoomed) views. One render per
+// second advances the axis and drifts content left without a data tick.
+// Display/animation cadence (AGENTS.md timing rule) -> round 1000, not an odd
+// backend poll interval: this only re-paints the view, it never fetches.
+const jsDebugGraphSlideRenderMs = 1000;
+// The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
+// non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
+// left between the coarser (60s) data fetches — the chart stays visibly live even where
+// data no longer streams. Ranges over 1h, zoomed, and hidden views stay static.
+const jsDebugGraphSlideMaxRangeSeconds = 60 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
 const jsDebugStatsHistoryFlushMs = 30000;
@@ -313,10 +354,16 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
   'var(--link-soft)',
   'var(--accent-gold)',
 ]);
-const jsDebugGraphRawBuckets = new Map();
-const jsDebugGraphRollupBuckets = new Map();
-const jsDebugGraphAgentTokenBuckets = new Map();
+// THE one client display cache: every retained bucket of every tier lives here,
+// keyed `${startMs}:${durationMs}`. Tier membership is the key's durationMs (the
+// jsDebugGraphTiers graduated-compaction owner rewrites keys as buckets age); the
+// former raw/rollup Map split was only bookkeeping over the same keyspace.
+const jsDebugGraphBuckets = new Map();
 const jsDebugGraphEventRecords = new Map();
+// NOT display cache: upload staging for client-observed metrics awaiting POST
+// /api/stats-history (snake_case wire records; drained by flushJsDebugStatsHistory,
+// re-queued on failure). Its lifecycle is pending-until-acknowledged, so it cannot
+// merge into the display Map above without losing upload dedupe on flush/clear.
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
@@ -332,11 +379,34 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
 ]);
+// Mirror of yolomux_lib/stats_families.py — the ONE YO!stats family manifest.
+// Per family: the canonical name (identical to the server's
+// stats_coverage_intervals family), the legacy alias names an OLDER server may
+// still write into coverage payloads (canonical is tried first), the true
+// sampler cadence, and the owning chart groups / series. Coverage lookups and
+// chart->family mapping READ this table; inline per-family if/alias chains
+// outside it are contract-banned (tests/yostats_performance.test.js pins both
+// mirrors against each other). modelTokenDimension names which modelTokens
+// chart dimension the family backs ('output' is the generated-token counter;
+// 'default' covers every billing dimension).
+const jsDebugStatsFamilyManifest = Object.freeze({
+  cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
+  service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
+  agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
+  agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
+  cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
+  gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
+  system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory'])}),
+});
+const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
+  .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
+const jsDebugStatsFamilyByModelTokenDimension = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
+  .filter(([, entry]) => entry.modelTokenDimension).map(([family, entry]) => [entry.modelTokenDimension, family])));
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: 10},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10, statusNoDataOverlay: true},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
@@ -412,6 +482,12 @@ function loadJsDebugStatsUiPreferences() {
   for (const key of Array.isArray(saved.hiddenCharts) ? saved.hiddenCharts : []) hidden.add(String(key || ''));
   jsDebugGraphHiddenCharts = hidden;
   jsDebugGraphVisibleCharts = visible;
+  // Respect a previously-persisted level selection (including an intentionally
+  // empty one); only fresh state falls back to the warning+error default.
+  const storedLogLevels = Array.isArray(saved.logLevels)
+    ? saved.logLevels.map(value => String(value || '')).filter(value => jsDebugLogLevels.includes(value))
+    : null;
+  jsDebugLogsState.levels = new Set(storedLogLevels || jsDebugLogDefaultLevels);
   syncDebugGraphResolutionOverride(Date.now(), {persist: true});
 }
 
@@ -426,6 +502,7 @@ function saveJsDebugStatsUiPreferences() {
       modelTokenDimension: jsDebugGraphModelTokenDimension,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
+      logLevels: [...jsDebugLogsState.levels].sort(),
     }));
   } catch (_) {
   }
@@ -475,13 +552,28 @@ function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date
 }
 
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
-  return jsDebugHistoryLoadingPhases.has(String(state?.phase || ''));
+  return String(state?.phase || '') === 'loading';
+}
+
+// Error-like states share retry backoff semantics: an explicit error, or a loading
+// pass that exists to retry one (reason is '' outside the loading phase).
+function jsDebugHistoryReadinessErrorLike(state = jsDebugHistoryReadiness) {
+  return state?.phase === 'error' || state?.reason === 'retry';
+}
+
+// The composite state name the DOM contract, snapshot, and diagnostics emit:
+// loading + reason folds back to the historical loading-initial / loading-older /
+// retrying strings; every other phase passes through unchanged.
+function jsDebugHistoryReadinessStateName(state = jsDebugHistoryReadiness) {
+  if (state?.phase !== 'loading') return String(state?.phase || 'idle');
+  return jsDebugHistoryLegacyPhaseByReason[state.reason] || 'loading-initial';
 }
 
 function jsDebugHistoryReadinessSnapshot() {
   const state = jsDebugHistoryReadiness;
   return {
-    phase: state.phase,
+    phase: jsDebugHistoryReadinessStateName(state),
+    reason: state.reason,
     requestedRangeSeconds: state.requestedRangeSeconds,
     targetStartSeconds: state.targetStartSeconds,
     targetEndSeconds: state.targetEndSeconds,
@@ -510,7 +602,7 @@ function jsDebugHistoryRetryDelayMs(attemptCount = jsDebugHistoryReadiness.attem
 }
 
 function jsDebugHistoryAutoRetryDue(state = jsDebugHistoryReadiness, nowMs = performanceNow()) {
-  return !['error', 'retrying'].includes(state.phase) || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
+  return !jsDebugHistoryReadinessErrorLike(state) || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
 }
 
 function clearJsDebugHistoryOverlayTimer() {
@@ -526,7 +618,7 @@ function syncJsDebugHistoryReadinessSurfaces() {
   const content = debugGraphHistoryOverlayContentHtml(state);
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     graph.setAttribute('aria-busy', busy ? 'true' : 'false');
-    graph.dataset.jsDebugHistoryState = state.phase;
+    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName(state);
     let overlay = graph.querySelector('[data-js-debug-history-overlay]');
     if (!overlay && (busy || state.phase === 'error')) {
       refreshDebugGraphElement(graph, {force: true});
@@ -536,13 +628,31 @@ function syncJsDebugHistoryReadinessSurfaces() {
     overlay.hidden = state.overlayVisible !== true;
     if (overlay.innerHTML !== content) overlay.innerHTML = content;
   }
+  // YO!cost chart areas are not [data-js-debug-graph] surfaces (the graph-refresh
+  // loops would rebuild them with YO!stats content); toggle their always-present
+  // shared overlay directly so range/resolution changes show "Loading…" there too.
+  for (const area of document.querySelectorAll('[data-js-yocost-chart-area]')) {
+    area.setAttribute('aria-busy', busy ? 'true' : 'false');
+    area.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName(state);
+    const overlay = area.querySelector('[data-js-debug-history-overlay]');
+    if (!overlay) continue;
+    overlay.hidden = state.overlayVisible !== true;
+    if (overlay.innerHTML !== content) overlay.innerHTML = content;
+  }
 }
 
 function setJsDebugHistoryReadiness(phase, updates = {}) {
-  const nextPhase = String(phase || 'idle');
+  // Legacy composite names (loading-initial / loading-older / retrying) remain valid
+  // inputs — tests and older callers use them — and normalize to loading + reason.
+  const requestedPhase = String(phase || 'idle');
+  const legacyReason = jsDebugHistoryReadinessReasonByLegacyPhase[requestedPhase];
+  const nextPhase = legacyReason ? 'loading' : requestedPhase;
   if (!jsDebugHistoryReadinessPhases.includes(nextPhase)) throw new Error(`unknown YO!stats history state: ${nextPhase}`);
+  const nextReason = nextPhase === 'loading'
+    ? (legacyReason || (jsDebugHistoryLegacyPhaseByReason[String(updates.reason)] ? String(updates.reason) : 'initial'))
+    : '';
   const state = jsDebugHistoryReadiness;
-  const previousPhase = state.phase;
+  const previousStateName = jsDebugHistoryReadinessStateName(state);
   const wasBusy = jsDebugHistoryReadinessBusy(state);
   const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
   clearJsDebugHistoryOverlayTimer();
@@ -550,19 +660,23 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
     if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
   }
   state.phase = nextPhase;
+  state.reason = nextReason;
   const busy = jsDebugHistoryReadinessBusy(state);
-  state.overlayVisible = nextPhase === 'loading-initial' || nextPhase === 'retrying' || nextPhase === 'error';
-  if (nextPhase === 'loading-older' && typeof setTimeout === 'function') {
+  // Older/refined loads keep the current chart and delay the overlay by 120ms to
+  // avoid a flash; initial/retry loads and errors surface the overlay immediately.
+  const olderLoad = nextPhase === 'loading' && nextReason === 'older';
+  state.overlayVisible = (nextPhase === 'loading' && !olderLoad) || nextPhase === 'error';
+  if (olderLoad && typeof setTimeout === 'function') {
     const generation = state.generation;
     state.overlayTimer = setTimeout(() => {
       state.overlayTimer = null;
-      if (state.phase !== 'loading-older' || state.generation !== generation) return;
+      if (state.phase !== 'loading' || state.reason !== 'older' || state.generation !== generation) return;
       state.overlayVisible = true;
       syncJsDebugHistoryReadinessSurfaces();
     }, jsDebugHistoryOlderOverlayDelayMs);
   }
   if (wasBusy && !busy) {
-    recordClientPerfCounter('statsHistoryLoading', performanceNow() - previousStartedAt, {state: nextPhase, previousState: previousPhase});
+    recordClientPerfCounter('statsHistoryLoading', performanceNow() - previousStartedAt, {state: jsDebugHistoryReadinessStateName(state), previousState: previousStateName});
     state.loadingStartedAtMs = 0;
   }
   syncJsDebugHistoryReadinessSurfaces();
@@ -573,8 +687,8 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
 function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = 1, retry = false} = {}) {
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
-  const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
-  const snapshot = setJsDebugHistoryReadiness(phase, {
+  const snapshot = setJsDebugHistoryReadiness('loading', {
+    reason: retry ? 'retry' : (Number(state.loadedStartSeconds) > 0 ? 'older' : 'initial'),
     requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
@@ -603,18 +717,41 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const fallbackResolution = Number(raw.resolution_seconds);
   const fallbackSourceResolution = Number(raw.source_resolution_seconds);
-  const normalizeIntervals = intervals => {
-    if (!Array.isArray(intervals) || intervals.length > jsDebugHistoryCoverageIntervalLimit) return null;
+  // Degrade granularly rather than rejecting a whole multi-family response so a
+  // single malformed family can never blank every chart. The interval-count
+  // bound always degrades by capping to the most recent entries (never a hard
+  // reject). The top-level required list stays structurally strict (a reversed
+  // or non-object interval is a real contract violation), but a per-family
+  // store list is lenient: an individual bad interval is skipped (its span
+  // renders as honest no-data) and a structurally-unusable family is dropped,
+  // keeping every other family's charts alive.
+  const normalizeIntervals = (intervals, {strict = false} = {}) => {
+    if (!Array.isArray(intervals)) return null;
+    const bounded = intervals.length > jsDebugHistoryCoverageIntervalLimit
+      ? intervals.slice(-jsDebugHistoryCoverageIntervalLimit)
+      : intervals;
     const normalized = [];
-    for (const interval of intervals) {
-      if (!interval || typeof interval !== 'object' || Array.isArray(interval)) return null;
+    for (const interval of bounded) {
+      if (!interval || typeof interval !== 'object' || Array.isArray(interval)) {
+        if (strict) return null;
+        continue;
+      }
       const startSeconds = Number(interval.start ?? interval.start_seconds);
       const endSeconds = Number(interval.end ?? interval.end_seconds);
       const resolutionSeconds = Number(interval.resolution_seconds ?? interval.resolution ?? fallbackResolution);
       const sourceResolutionSeconds = Number(interval.source_resolution_seconds ?? interval.source_resolution ?? fallbackSourceResolution) || 0;
-      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return null;
-      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return null;
-      if (!Number.isFinite(sourceResolutionSeconds) || sourceResolutionSeconds < 0) return null;
+      if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) {
+        if (strict) return null;
+        continue;
+      }
+      if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) {
+        if (strict) return null;
+        continue;
+      }
+      if (!Number.isFinite(sourceResolutionSeconds) || sourceResolutionSeconds < 0) {
+        if (strict) return null;
+        continue;
+      }
       normalized.push({
         startSeconds,
         endSeconds,
@@ -625,15 +762,22 @@ function normalizedJsDebugHistoryCoverage(history = {}) {
     }
     return mergeJsDebugHistoryCoverageIntervals(normalized);
   };
-  const intervals = normalizeIntervals(raw.intervals);
+  const intervals = normalizeIntervals(raw.intervals, {strict: true});
   if (!intervals) return null;
   const rawStores = raw.store_intervals ?? raw.family_intervals ?? {};
   if (!rawStores || typeof rawStores !== 'object' || Array.isArray(rawStores)) return null;
   const storeIntervals = {};
+  const droppedFamilies = [];
   for (const [key, value] of Object.entries(rawStores)) {
     const normalized = normalizeIntervals(value);
-    if (!normalized) return null;
+    if (!normalized) {
+      droppedFamilies.push(String(key));
+      continue;
+    }
     storeIntervals[String(key)] = normalized;
+  }
+  if (droppedFamilies.length) {
+    recordJsDebugStatsDiagnostic('warning', `coverage degraded: dropped malformed families ${droppedFamilies.join(', ')}; other families render`);
   }
   const intervalStart = intervals.length ? Math.min(...intervals.map(interval => interval.startSeconds)) : 0;
   const intervalEnd = intervals.length ? Math.max(...intervals.map(interval => interval.endSeconds)) : 0;
@@ -788,18 +932,31 @@ function applyJsDebugHistoryCoverage(coverage, request = null) {
   return jsDebugHistoryReadinessSnapshot();
 }
 
-function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds) {
+function jsDebugHistoryAcceptableResolutionSeconds(rangeStartSeconds, requestedResolutionSeconds, sourceResolutionSeconds, nowMs = Date.now()) {
+  // The coarsest resolution a cached interval may use to satisfy this range. We trust an
+  // interval's server-reported `sourceResolutionSeconds` (its retention floor) ONLY up to
+  // the age-derived tier for the requested range start: a wide 16h/24h response stamps one
+  // whole-query MAX(duration)=600s across ALL its coverage — including the recent portion
+  // that truly retains 1s — and that inflated claim must not certify coarse data over a
+  // recent domain. Capping at the range-start age tier keeps genuinely old 120s/300s/600s
+  // retention acceptable (no infinite retry) while rejecting the stale wide-superset claim.
+  const rangeTierSeconds = debugGraphBucketDurationForTime(Math.max(0, Number(rangeStartSeconds) || 0) * 1000, nowMs) / 1000;
+  const trustedSource = Math.min(Math.max(0, Number(sourceResolutionSeconds) || 0), rangeTierSeconds);
+  return Math.max(Number(requestedResolutionSeconds) || 0, trustedSource);
+}
+
+function jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, maxResolutionSeconds, nowMs = Date.now()) {
+  const acceptableFor = interval => jsDebugHistoryAcceptableResolutionSeconds(startSeconds, maxResolutionSeconds, interval.sourceResolutionSeconds, nowMs);
   const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
-    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(maxResolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .filter(interval => Number(interval.resolutionSeconds) <= acceptableFor(interval))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
   for (const interval of intervals) {
     const intervalStart = Number(interval.startSeconds);
     const intervalEnd = Number(interval.endSeconds);
-    const sourceResolution = Math.max(0, Number(interval.sourceResolutionSeconds) || 0);
     if (!Number.isFinite(intervalStart) || intervalEnd <= cursor) continue;
     if (intervalStart > cursor) return false;
-    if (Number(interval.resolutionSeconds) > Math.max(maxResolutionSeconds, sourceResolution)) return false;
+    if (Number(interval.resolutionSeconds) > acceptableFor(interval)) return false;
     cursor = Math.max(cursor, intervalEnd);
     if (cursor >= endSeconds) return true;
   }
@@ -813,11 +970,11 @@ function jsDebugHistoryCoverageResolutionForRange(startSeconds, endSeconds) {
   return resolutions.find(resolution => jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolution)) ?? Infinity;
 }
 
-function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds) {
+function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolutionSeconds, nowMs = Date.now()) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) return true;
-  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds)) return false;
+  if (jsDebugHistoryIntervalsCoverRange(startSeconds, endSeconds, resolutionSeconds, nowMs)) return false;
   const intervals = jsDebugHistoryReadiness.requestCoverageIntervals
-    .filter(interval => Number(interval.resolutionSeconds) <= Math.max(resolutionSeconds, Number(interval.sourceResolutionSeconds) || 0))
+    .filter(interval => Number(interval.resolutionSeconds) <= jsDebugHistoryAcceptableResolutionSeconds(startSeconds, resolutionSeconds, interval.sourceResolutionSeconds, nowMs))
     .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds) || Number(right.endSeconds) - Number(left.endSeconds));
   let cursor = startSeconds;
   for (const interval of intervals) {
@@ -1298,8 +1455,7 @@ function debugGraphBucketForTime(timeMs, nowMs = Date.now()) {
   if (!Number.isFinite(timeMs) || timeMs < retentionCutoff) return null;
   const durationMs = debugGraphBucketDurationForTime(timeMs, nowMs);
   const startMs = Math.floor(timeMs / durationMs) * durationMs;
-  const map = durationMs < jsDebugGraphMiddleBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
-  return debugGraphBucket(map, startMs, durationMs);
+  return debugGraphBucket(jsDebugGraphBuckets, startMs, durationMs);
 }
 
 function debugGraphServerBucketRefForTime(timeMs, nowMs = Date.now()) {
@@ -1648,20 +1804,17 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
 
 function compactJsDebugGraphBuckets(nowMs = Date.now()) {
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
-  for (const buckets of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const [key, bucket] of [...buckets.entries()]) {
-      if (bucket.startMs < retentionCutoff) {
-        buckets.delete(key);
-        continue;
-      }
-      const targetDurationMs = debugGraphBucketDurationForTime(bucket.startMs, nowMs);
-      if (bucket.durationMs >= targetDurationMs) continue;
-      const targetStartMs = Math.floor(bucket.startMs / targetDurationMs) * targetDurationMs;
-      const targetBuckets = targetDurationMs === jsDebugGraphRawBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
-      const target = debugGraphBucket(targetBuckets, targetStartMs, targetDurationMs);
-      debugGraphMergeBucket(target, bucket);
-      buckets.delete(key);
+  for (const [key, bucket] of [...jsDebugGraphBuckets.entries()]) {
+    if (bucket.startMs < retentionCutoff) {
+      jsDebugGraphBuckets.delete(key);
+      continue;
     }
+    const targetDurationMs = debugGraphBucketDurationForTime(bucket.startMs, nowMs);
+    if (bucket.durationMs >= targetDurationMs) continue;
+    const targetStartMs = Math.floor(bucket.startMs / targetDurationMs) * targetDurationMs;
+    const target = debugGraphBucket(jsDebugGraphBuckets, targetStartMs, targetDurationMs);
+    debugGraphMergeBucket(target, bucket);
+    jsDebugGraphBuckets.delete(key);
   }
   const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
   for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
@@ -1841,12 +1994,12 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 }
 
 function clearJsDebugGraphData() {
-  jsDebugGraphRawBuckets.clear();
-  jsDebugGraphRollupBuckets.clear();
-  resetDebugGraphAgentTokenHistory();
-  jsDebugStatsAgentTokenSchemaVersion = 0;
+  jsDebugGraphBuckets.clear();
   jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
+  // Invalidate any in-flight silent prefetch so its late response cannot repopulate
+  // the cache we just cleared (kept the reload-idempotency of the rendered history).
+  jsDebugHistoryPrefetchState.generation += 1;
 }
 
 function debugGraphBucketForServerRecord(record) {
@@ -1856,8 +2009,7 @@ function debugGraphBucketForServerRecord(record) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return null;
   const durationMs = Math.max(jsDebugGraphRawBucketMs, durationSeconds * 1000);
   const startMs = Math.floor(startSeconds * 1000);
-  const map = durationMs < jsDebugGraphMiddleBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
-  return debugGraphBucket(map, startMs, durationMs);
+  return debugGraphBucket(jsDebugGraphBuckets, startMs, durationMs);
 }
 
 function debugGraphApplyServerRecord(record) {
@@ -2114,15 +2266,19 @@ function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resoluti
   const resolutionMs = Number(resolutionSeconds) * 1000;
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Number.isFinite(resolutionMs) || resolutionMs <= 0) return 0;
   let removed = 0;
-  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const [key, bucket] of map.entries()) {
-      const bucketStart = Number(bucket?.startMs);
-      const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
-      const bucketEnd = bucketStart + bucketDuration;
-      if (bucketDuration <= resolutionMs || bucketStart < startMs || bucketEnd > endMs) continue;
-      map.delete(key);
-      removed += 1;
-    }
+  for (const [key, bucket] of jsDebugGraphBuckets.entries()) {
+    const bucketStart = Number(bucket?.startMs);
+    const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+    const bucketEnd = bucketStart + bucketDuration;
+    // Remove EVERY coarser bucket that intersects the authoritative finer interval, not
+    // only those fully contained. A coarse boundary bucket that merely straddles the
+    // interval edge otherwise survives, claims an aggregate prefix around a real no-data
+    // gap, and forces the whole view back to its coarse duration. Its portion outside the
+    // domain is re-provided by the shared wide-range/prefetch cache; a straddling partial
+    // aggregate must never be retained inside a finer-covered domain.
+    if (bucketDuration <= resolutionMs || bucketEnd <= startMs || bucketStart >= endMs) continue;
+    jsDebugGraphBuckets.delete(key);
+    removed += 1;
   }
   return removed;
 }
@@ -2142,11 +2298,6 @@ function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, r
   // Compact local fine buckets before applying an authoritative server coarse bucket. Applying
   // first would merge the same measurements a second time at the 1h/2h tier boundaries.
   compactJsDebugGraphBuckets();
-  const tokenSchemaVersion = Number(history.agent_token_schema_version);
-  if (Number.isFinite(tokenSchemaVersion) && tokenSchemaVersion > 0 && tokenSchemaVersion !== jsDebugStatsAgentTokenSchemaVersion) {
-    clearDebugGraphAgentTokenData();
-    jsDebugStatsAgentTokenSchemaVersion = tokenSchemaVersion;
-  }
   const sequence = Number(history.latest_sequence ?? history.sequence);
   if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
   const backfill = history.usage_atom_backfill;
@@ -2158,63 +2309,18 @@ function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, r
   }
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
-  debugGraphApplyServerAgentTokenHistory(history.agent_token_history, {advanceLiveCursor});
   compactJsDebugGraphBuckets();
 }
 
-function debugGraphApplyServerAgentTokenHistory(history = {}, {advanceLiveCursor = true} = {}) {
-  if (!history || typeof history !== 'object') return;
-  const resolutionSeconds = Number(history.resolution_seconds);
-  if (!Number.isFinite(resolutionSeconds) || resolutionSeconds <= 0) return;
-  if (history.snapshot || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds) jsDebugGraphAgentTokenBuckets.clear();
-  jsDebugStatsAgentTokenResolutionSeconds = resolutionSeconds;
-  const sequence = Number(history.sequence);
-  if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsAgentTokenSequence = Math.max(0, sequence);
-  const records = Array.isArray(history.records) ? history.records : [];
-  for (const record of records) {
-    const startSeconds = Number(record?.start);
-    const durationSeconds = Number(record?.duration);
-    if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) continue;
-    const bucket = debugGraphBucket(jsDebugGraphAgentTokenBuckets, Math.floor(startSeconds * 1000), durationSeconds * 1000);
-    bucket.tokensPerAgentTotal = Math.max(bucket.tokensPerAgentTotal, Number(record.tokens_per_agent_total || 0));
-    bucket.agentTokenSamples = Math.max(bucket.agentTokenSamples, Number(record.agent_token_samples || 0));
-    debugGraphApplyServerAgentTokenRates(bucket, record.agent_token_rates);
-    debugGraphApplyServerCostSummary(bucket, record.cost_summary);
-  }
-}
-
+// The compact token side-stream is gone (ONE history stream since 2026-07):
+// token detail rides every history record and lands in the same unified bucket
+// cache. This per-range value survives ONLY as the token charts' display
+// floor, so wide-range token bars keep their pre-unification widths
+// (>=120s at 4h+, >=300s at 16h+); it is not a second fetch resolution.
 function debugGraphAgentTokenResolution(nowMs = Date.now()) {
   const rangeSeconds = debugGraphDomain(nowMs).rangeSeconds;
   if (rangeSeconds < 4 * 60 * 60) return 0;
   return rangeSeconds >= 16 * 60 * 60 ? 5 * 60 : 2 * 60;
-}
-
-function resetDebugGraphAgentTokenHistory() {
-  jsDebugStatsAgentTokenSequence = 0;
-  jsDebugStatsAgentTokenResolutionSeconds = 0;
-  jsDebugGraphAgentTokenBuckets.clear();
-}
-
-function syncDebugGraphAgentTokenResolution() {
-  const resolutionSeconds = debugGraphAgentTokenResolution();
-  if (resolutionSeconds === jsDebugStatsAgentTokenResolutionSeconds) return false;
-  resetDebugGraphAgentTokenHistory();
-  // Long ranges intentionally omit token rates from normal history and use the separate compact
-  // token stream. Returning to a short range must fetch normal history again with token rates;
-  // otherwise the old coverage marker leaves only new live samples to render.
-  if (resolutionSeconds === 0) resetJsDebugHistoryReadiness();
-  return true;
-}
-
-function clearDebugGraphAgentTokenData() {
-  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const bucket of map.values()) {
-      bucket.tokensPerAgentTotal = 0;
-      bucket.agentTokenSamples = 0;
-      bucket.agentTokenRates = new Map();
-    }
-  }
-  resetDebugGraphAgentTokenHistory();
 }
 
 function debugGraphAggregateBucket(map, source, scaleMs, multiplier = 1) {
@@ -2291,6 +2397,14 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
   // A display set has one bar width. Its scale must therefore accommodate the
   // coarsest retained source in the whole domain, not merely the tier at its
   // left edge. This also covers server history overlapping the live raw tail.
+  // The retained-tier minimum (`debugGraphMinimumDisplayResolutionMs`) already
+  // coarsens to the server's authoritative resolution for the domain from the
+  // ACTUALLY-LOADED source buckets. Do NOT additionally clamp to
+  // `jsDebugHistoryCoverageResolutionForRange`: that scans the last request's
+  // coverage intervals, which can be STALE from a wider range (e.g. a 24h fetch
+  // whose old tail is 600s), and would wrongly coarsen a 10s pick at 1h to 600s
+  // when the 1h fetch is rejected/pending — the reported "10s does nothing / shows
+  // 600s" regression. One resolution per view still holds via the retained tier.
   const retainedMs = debugGraphMinimumDisplayResolutionMs(domain, nowMs);
   const minimumMs = Math.max(0, Number(minimumResolutionSeconds) || 0) * 1000;
   const overrideMs = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds, domain, nowMs) * 1000;
@@ -2313,7 +2427,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
 }
 
 function debugGraphSourceBuckets(domain) {
-  return [...jsDebugGraphRollupBuckets.values(), ...jsDebugGraphRawBuckets.values()]
+  return [...jsDebugGraphBuckets.values()]
     .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
     .sort((left, right) => left.startMs - right.startMs);
 }
@@ -2395,15 +2509,13 @@ function debugGraphDisplayBuckets(nowMs = Date.now(), {minimumResolutionSeconds 
   return [...buckets.values()].sort((a, b) => a.startMs - b.startMs);
 }
 
+// Token/model charts read the SAME unified bucket cache as every other chart.
+// The only token-specific behavior left is the display floor: at least the
+// token sampling cadence (60s), coarsened per range by
+// debugGraphAgentTokenResolution so wide-range bars keep their legacy widths.
 function debugGraphAgentTokenDisplayBuckets(nowMs = Date.now()) {
-  const resolutionSeconds = debugGraphAgentTokenResolution(nowMs);
-  if (!resolutionSeconds || resolutionSeconds !== jsDebugStatsAgentTokenResolutionSeconds || !jsDebugGraphAgentTokenBuckets.size) {
-    return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: jsDebugGraphAgentTokenBucketSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
-  }
-  const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
-  return [...jsDebugGraphAgentTokenBuckets.values()]
-    .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
-    .sort((a, b) => a.startMs - b.startMs);
+  const floorSeconds = Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs));
+  return debugGraphDisplayBuckets(nowMs, {minimumResolutionSeconds: floorSeconds, rangeSeconds: jsDebugGraphRangeSeconds});
 }
 
 function debugGraphDomain(nowMs = Date.now(), rangeSeconds = jsDebugGraphRangeSeconds) {
@@ -2577,6 +2689,19 @@ function debugGraphHostMetricBucketHasData(bucket, series) {
   return Number(debugGraphHostMetricBucketItem(bucket, series)?.samples || 0) > 0;
 }
 
+// True when any cached bucket (any range) carries a GPU device sample. Distinguishes a
+// host with no GPU telemetry at all from a window that merely lacks GPU samples, so the
+// unavailable state can explain itself precisely. Only consulted when a visible GPU
+// chart has no series for the current window (not on the hot per-bucket render path).
+function debugGraphAnyGpuDeviceSamplesCached() {
+  for (const bucket of jsDebugGraphBuckets.values()) {
+    for (const item of bucket?.hostMetrics?.gpuDevices?.values?.() || []) {
+      if (Number(item?.samples || 0) > 0) return true;
+    }
+  }
+  return false;
+}
+
 function debugGraphMovingAverageValues(values, sampleCount = jsDebugGraphMovingAverageSamples) {
   const count = Math.max(1, Math.floor(Number(sampleCount) || 1));
   const window = [];
@@ -2622,6 +2747,11 @@ function debugGraphNiceAxisMax(value, unit) {
   if (unit === 'bytesPerSecond') return debugGraphNiceBytesPerSecondAxisMax(value);
   if (unit === 'tokens') return Math.max(1, debugGraphNiceCeil(value));
   if (unit === 'tokensPerMinute') return Math.max(1, debugGraphNiceCeil(value));
+  // Percent charts without a fixed 0-100 axis (e.g. Servers Load, where a single
+  // multi-core service can exceed 100%) still need round tick steps. A 1/2/5
+  // ceil keeps the max and its half-step both round (100->50, 50->25, 20->10)
+  // instead of the raw data max (the 88.3% / 44.1% ticks in the report).
+  if (unit === 'percent') return Math.max(1, debugGraphNiceCeil(value));
   return value;
 }
 
@@ -2813,7 +2943,7 @@ function debugGraphWaitingForServerStats() {
 
 function debugGraphMetaHtml() {
   const items = debugGraphMetaItems();
-  const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadiness.phase === 'loading-initial'
+  const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadinessStateName() === 'loading-initial'
     && jsDebugHistoryReadiness.overlayVisible === true;
   const metaHtml = items.length
     ? items.map(item => `<span class="js-debug-graph-meta-item"${debugGraphExplainAttrs(item.text, item.descKey, {attribute: 'data-js-debug-meta-desc'})}>${esc(item.text)}</span>`).join('<span aria-hidden="true"> | </span>')
@@ -2823,10 +2953,11 @@ function debugGraphMetaHtml() {
 
 function debugGraphHistoryOverlayText(state = jsDebugHistoryReadiness) {
   const range = jsDebugGraphRangeLabel(state.requestedRangeSeconds);
-  if (state.phase === 'loading-initial') return t('debug.graph.history.loadingInitial');
-  if (state.phase === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
-  if (state.phase === 'retrying') return state.error || t('debug.graph.history.retrying', {range});
-  if (state.phase === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
+  const stateName = jsDebugHistoryReadinessStateName(state);
+  if (stateName === 'loading-initial') return t('debug.graph.history.loadingInitial');
+  if (stateName === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
+  if (stateName === 'retrying') return state.error || t('debug.graph.history.retrying', {range});
+  if (stateName === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
   return '';
 }
 
@@ -3435,21 +3566,48 @@ function debugGraphPolylinePoints(values, times, chartMax, domain, hasDataValues
   return debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues).map(segment => segment.join(' ')).join(' ');
 }
 
-function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false) {
+// True when [startMs, endMs) overlaps any genuine no-data range (a real
+// coverage/communication hole), so the line should BREAK there instead of
+// bridging it. Everything not inside such a range is treated as covered — the
+// line stays continuous across it even when the recorded resolution is coarser
+// than the display (linear interpolation between the surrounding real samples).
+function debugGraphTimeInNoDataRange(noDataRanges, startMs, endMs) {
+  if (!Array.isArray(noDataRanges) || !noDataRanges.length) return false;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  return noDataRanges.some(range => Number(range?.startMs) < endMs && Number(range?.endMs) > startMs);
+}
+
+function debugGraphPolylinePointSegments(values, times, chartMax, domain, hasDataValues = null, durations = [], gapThresholdMs = 0, logScale = false, noDataRanges = null, observedValues = null) {
+  // Coverage-aware breaking: when a genuine no-data range list is supplied, an
+  // empty display cell never breaks the line on its own (a covered-but-coarser
+  // span reads as one continuous, linearly interpolated line). The line breaks
+  // only where a real recorded gap lies between two samples. Without a range
+  // list, fall back to the legacy time-threshold behavior.
+  const rangeBreak = Array.isArray(noDataRanges);
   const segments = [];
   let current = [];
   let previousDataEndMs = NaN;
   values.forEach((value, index) => {
-    if (hasDataValues && hasDataValues[index] !== true) {
-      if (gapThresholdMs <= 0 && current.length) {
+    const timeMs = Number(times[index]);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
+    // A HELD (carried-forward, non-observed) value that lands inside a genuine
+    // no-data range is dropped and ends the run, so a held gauge can never leak a
+    // flat line through a real recorded hole. A genuinely OBSERVED sample is always
+    // drawable — coverage never erases a real measurement, it only stops the fill.
+    const observed = !observedValues || observedValues[index] === true;
+    const heldInNoData = rangeBreak && !observed && hasDataValues && hasDataValues[index] === true
+      && debugGraphTimeInNoDataRange(noDataRanges, timeMs, Number.isFinite(timeMs) ? timeMs + durationMs : timeMs + 1);
+    if ((hasDataValues && hasDataValues[index] !== true) || heldInNoData) {
+      if (current.length && (heldInNoData || (!rangeBreak && gapThresholdMs <= 0))) {
         segments.push(current);
         current = [];
       }
       return;
     }
-    const timeMs = Number(times[index]);
-    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(durations[index]) || jsDebugGraphRawBucketMs);
-    if (gapThresholdMs > 0 && current.length && Number.isFinite(previousDataEndMs) && Number.isFinite(timeMs) && timeMs - previousDataEndMs >= gapThresholdMs) {
+    const breakHere = current.length && (rangeBreak
+      ? debugGraphTimeInNoDataRange(noDataRanges, previousDataEndMs, timeMs)
+      : (gapThresholdMs > 0 && Number.isFinite(previousDataEndMs) && Number.isFinite(timeMs) && timeMs - previousDataEndMs >= gapThresholdMs));
+    if (breakHere) {
       segments.push(current);
       current = [];
     }
@@ -3643,26 +3801,30 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
 }
 
 function jsDebugHistoryCoverageFamilyForGroup(group) {
-  if (group?.key === 'activity') return 'agent_status';
-  if (group?.key === 'agentTokens') return 'agent_tokens';
-  if (group?.key === 'modelTokens') return jsDebugGraphModelTokenDimension === 'output' ? 'agent_tokens' : 'cost';
-  if (group?.key === 'cpu') return 'cpu';
-  if (group?.key === 'memory') return 'system_memory';
-  if (group?.key === 'gpuUtil' || group?.key === 'gpuMemory') return 'gpu';
-  return '';
+  const key = String(group?.key || '');
+  if (!key) return '';
+  // modelTokens is the one dimension-dependent chart: the manifest declares
+  // which family backs each dimension instead of an inline family if-chain.
+  if (key === 'modelTokens') {
+    return jsDebugStatsFamilyByModelTokenDimension[jsDebugGraphModelTokenDimension === 'output' ? 'output' : 'default'] || '';
+  }
+  return jsDebugStatsFamilyByChartGroup[key] || '';
 }
 
 function jsDebugHistoryCoverageIntervalsForFamily(family) {
   const stores = jsDebugHistoryReadiness.storeCoverageIntervals || {};
-  const aliases = family === 'cpu' ? ['cpu', 'server', 'raw', 'buckets']
-    : family === 'system_memory' ? ['system_memory', 'memory']
-      : family === 'gpu' ? ['gpu', 'gpu_metrics']
-    : family === 'agent_status' ? ['agent_status', 'status']
-      : family === 'agent_tokens' ? ['agent_tokens', 'tokens']
-        : family === 'cost' ? ['cost', 'cost_atoms', 'usage_atoms'] : [];
-  for (const key of aliases) {
+  const manifestEntry = jsDebugStatsFamilyManifest[family];
+  for (const key of manifestEntry ? [family, ...manifestEntry.legacyAliases] : []) {
     if (Object.prototype.hasOwnProperty.call(stores, key)) return stores[key];
   }
+  // Per-family independence: once the server reports ANY per-store coverage, a
+  // family with no store entry of its own was never recorded (fresh install or
+  // a newly added metric such as system_memory / service_load). Treat it as
+  // fully uncovered so its never-recorded window paints red, instead of
+  // borrowing another family's coverage through the compatibility-global
+  // intervals (cross-family inference). Only a legacy all-empty store map — the
+  // pre-per-store protocol — falls back to the global coverage.
+  if (Object.keys(stores).length > 0) return [];
   return jsDebugHistoryReadiness.coverageIntervals;
 }
 
@@ -3682,11 +3844,28 @@ function debugGraphHistoryCoverageGapRuns(group, domain, alreadyPaintedRanges = 
     gaps.push(...debugGraphComplementTimeRanges(coveredRanges, requested));
   }
   const mergedGaps = debugGraphMergeTimeRanges(gaps, domain);
-  if (!alreadyPaintedRanges.length) return mergedGaps;
-  return debugGraphMergeTimeRanges(
-    mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
-    domain,
-  );
+  const trimmedGaps = !alreadyPaintedRanges.length
+    ? mergedGaps
+    : debugGraphMergeTimeRanges(
+      mergedGaps.flatMap(gap => debugGraphComplementTimeRanges(alreadyPaintedRanges, gap)),
+      domain,
+    );
+  return debugGraphMeaningfulCoverageGaps(trimmedGaps, domain);
+}
+
+// A durable-coverage gap should paint only when it spans at least one rendered
+// bucket at its own age. The 1-2 second sampler micro-breaks at owner/epoch
+// handoffs (server restarts) are sub-bucket at coarse ranges; without this
+// filter each inflated to a 1.5px red hairline and a fully recorded region read
+// as a fake "missing chunk". Genuine holes and never-recorded prefixes stay.
+function debugGraphMeaningfulCoverageGaps(ranges, domain) {
+  const nowMs = Number(domain?.endMs) || Date.now();
+  return (ranges || []).filter(range => {
+    const startMs = Number(range?.startMs);
+    const endMs = Number(range?.endMs);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+    return endMs - startMs >= debugGraphBucketDurationForTime(startMs, nowMs);
+  });
 }
 
 function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRanges = []) {
@@ -3700,9 +3879,28 @@ function debugGraphHistoryCoverageGapRectsHtml(group, domain, alreadyPaintedRang
       index,
       x1,
       Math.max(1.5, x2 - x1),
-      t('debug.noCommunicationData'),
+      t('debug.graph.noDataRecorded'),
     )}</g>`;
   }).join('');
+}
+
+// The union of every genuine no-data range painted for a chart (real coverage
+// holes, client communication gaps, agent-status gaps, and disconnected spans).
+// These are the ONLY places a series line/area may break; everything else is a
+// covered span the line stays continuous across (interpolating a coarser tier).
+function debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries) {
+  const ranges = [];
+  const statusRuns = group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [];
+  ranges.push(...debugGraphHistoryCoverageGapRuns(group, domain, statusRuns));
+  ranges.push(...statusRuns);
+  if (group.noDataOverlay === true) {
+    ranges.push(...debugGraphNoDataRuns(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)));
+  }
+  // A disconnected span is a genuine sampling outage for EVERY series (the gauge
+  // was not observed), so it always breaks the line — not only on charts that
+  // draw the dedicated disconnected overlay.
+  ranges.push(...(Array.isArray(disconnectedRanges) ? disconnectedRanges : debugGraphDisconnectedRanges(overlayBuckets, domain)));
+  return debugGraphMergeTimeRanges(ranges, domain);
 }
 
 function debugGraphAgentStatusNoDataRuns(buckets, domain) {
@@ -3750,6 +3948,10 @@ function debugGraphSeriesPlotValues(series) {
 
 function debugGraphSeriesPlotHasDataValues(series) {
   return Array.isArray(series.plotHasDataValues) ? series.plotHasDataValues : (series.hasDataValues || null);
+}
+
+function debugGraphSeriesPlotObservedValues(series) {
+  return Array.isArray(series.plotObservedValues) ? series.plotObservedValues : (series.observedDataValues || null);
 }
 
 function debugGraphSeriesClassKey(series) {
@@ -3838,14 +4040,20 @@ function debugGraphSeriesTokenAgentAttrs(series) {
   return ` data-js-debug-token-agent="${esc(series.agentTokenKey || '')}" data-js-debug-token-agent-label="${esc(series.label || '')}" data-js-debug-token-pattern="${esc(debugGraphAgentTokenPatternIndex(series))}"`;
 }
 
-function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
-  // CPU is sampled best-effort.  Its absent intervals are facts, not zeroes or
-  // a signal to draw a smooth line between the two surrounding samples.
+function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDataRanges = null) {
+  // The line is one continuous, linearly interpolated stroke across every covered
+  // span — a coarser recorded resolution (e.g. 60s data on a 10s chart) never
+  // shows as a gap. It breaks ONLY at genuine no-data ranges (real coverage or
+  // communication holes) supplied by the chart, which stay honest as red no-data
+  // bands. Without a supplied range list (legacy callers) fall back to the old
+  // time-threshold: client metrics break at their communication-gap threshold,
+  // other series at any gap.
+  const rangeAware = Array.isArray(noDataRanges);
   const cpuSeries = series?.processCpu === true || series?.key === 'cpu' || series?.key === 'systemCpu';
   const heldGaugeSeries = Number(series?.displayHoldMs || 0) > 0;
-  const gapThresholdMs = series?.clientMetric === true
+  const gapThresholdMs = rangeAware ? 0 : (series?.clientMetric === true
     ? debugGraphCommunicationGapThresholdMs([series])
-    : ((cpuSeries || heldGaugeSeries) ? 1 : 0);
+    : ((cpuSeries || heldGaugeSeries) ? 1 : 0));
   return debugGraphPolylinePointSegments(
     debugGraphSeriesPlotValues(series),
     series.times || [],
@@ -3855,6 +4063,8 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
     series.durations || [],
     gapThresholdMs,
     logScale,
+    rangeAware ? noDataRanges : null,
+    rangeAware ? debugGraphSeriesPlotObservedValues(series) : null,
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
@@ -3862,29 +4072,57 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false) {
   }).join('');
 }
 
-function debugGraphAreaPathHtml(series, chartMax, domain) {
+function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
+  const values = debugGraphSeriesPlotValues(series);
   const hasDataValues = debugGraphSeriesPlotHasDataValues(series);
-  const pointIndexes = debugGraphSeriesPlotValues(series)
+  const pointIndexes = values
     .map((_value, index) => index)
     .filter(index => !hasDataValues || hasDataValues[index] === true);
-  const upperPoints = pointIndexes.map(index => debugGraphPointForValue(debugGraphSeriesPlotValues(series)[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
-  if (!upperPoints.length) return '';
+  if (!pointIndexes.length) return '';
   const baseline = jsDebugGraphGeometry.plotBottom;
   const lowerValues = Array.isArray(series.stackBaseValues) ? series.stackBaseValues : null;
-  const lowerPoints = lowerValues
-    ? pointIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
-    : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
-  const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
-  const path = [
-    `M ${firstLower[0]},${firstLower[1]}`,
-    ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
-    ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
-    'Z',
-  ].join(' ');
+  // Split the fill into runs broken ONLY at genuine no-data ranges, so a
+  // covered-but-coarser span fills continuously (matching the line) while a real
+  // recorded hole stays an honest gap under its red no-data band.
+  const observedValues = debugGraphSeriesPlotObservedValues(series);
+  const runs = [];
+  let run = [];
+  let previousEndMs = NaN;
+  for (const index of pointIndexes) {
+    const startMs = debugGraphSeriesTimeMs(series, index);
+    const durationMs = Math.max(jsDebugGraphRawBucketMs, Number(series.durations?.[index]) || jsDebugGraphRawBucketMs);
+    // Drop a HELD (non-observed) point that lands inside a genuine no-data range so
+    // the fill never leaks into a real hole; a real measurement is always kept.
+    const observed = !observedValues || observedValues[index] === true;
+    if (!observed && debugGraphTimeInNoDataRange(noDataRanges, startMs, Number.isFinite(startMs) ? startMs + durationMs : startMs + 1)) {
+      if (run.length) { runs.push(run); run = []; }
+      continue;
+    }
+    if (run.length && debugGraphTimeInNoDataRange(noDataRanges, previousEndMs, startMs)) {
+      runs.push(run);
+      run = [];
+    }
+    run.push(index);
+    previousEndMs = Number.isFinite(startMs) ? startMs + durationMs : NaN;
+  }
+  if (run.length) runs.push(run);
   const stacked = lowerValues ? ` data-js-debug-area-stacked="${esc(series.key)}"` : '';
-  const plotCurrent = debugGraphSeriesPlotValues(series).at(-1);
+  const plotCurrent = values.at(-1);
   const total = Number.isFinite(Number(plotCurrent)) ? ` data-js-debug-area-total="${esc(Number(plotCurrent))}"` : '';
-  return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
+  return runs.map(runIndexes => {
+    const upperPoints = runIndexes.map(index => debugGraphPointForValue(values[index], debugGraphSeriesTimeMs(series, index), chartMax, domain));
+    const lowerPoints = lowerValues
+      ? runIndexes.map(index => debugGraphPointForValue(lowerValues[index], debugGraphSeriesTimeMs(series, index), chartMax, domain))
+      : upperPoints.map(point => [point[0], baseline.toFixed(1)]);
+    const firstLower = lowerPoints[0] || [upperPoints[0][0], baseline.toFixed(1)];
+    const path = [
+      `M ${firstLower[0]},${firstLower[1]}`,
+      ...upperPoints.map(point => `L ${point[0]},${point[1]}`),
+      ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
+      'Z',
+    ].join(' ');
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
+  }).join('');
 }
 
 function debugGraphBarRectsHtml(series, chartMax, domain, logScale = false) {
@@ -4048,8 +4286,12 @@ function debugGraphXAxisHtml(domain) {
     {name: 'end', ms: endMs},
   ];
   const includeDate = debugGraphLocalDateKey(startMs) !== debugGraphLocalDateKey(endMs);
+  // Seconds are noise once the three ticks are more than a minute apart (every real range
+  // from 5m up, and 1h/4h/... where the ticks span many minutes): show HH:MM. Seconds
+  // return only on a tight drag-zoom whose half-span is under a minute.
+  const includeSeconds = !includeDate && ((endMs - startMs) / 2) < 60 * 1000;
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
-    ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate}))}</span>`).join('')}
+    ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate, includeSeconds}))}</span>`).join('')}
   </div>`;
 }
 
@@ -4253,23 +4495,20 @@ function debugGraphHeldProvenanceText(provenance) {
 }
 
 function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now()) {
-  if (domain?.zoomed || Number(domain?.rangeSeconds) > 3600 || !buckets.length) return '';
-  const index = buckets.length - 1;
-  const bucket = buckets[index];
-  const startMs = Number(bucket?.startMs);
-  const durationMs = Math.max(1, Number(bucket?.durationMs) || 0);
-  if (!Number.isFinite(startMs) || nowMs < startMs || nowMs >= startMs + durationMs) return '';
-  const values = (groupSeries || []).flatMap(series => {
-    if (Array.isArray(series?.hasDataValues) && series.hasDataValues[index] !== true) return [];
-    const value = Number(series?.values?.[index]);
-    return Number.isFinite(value) ? [Math.max(0, value)] : [];
-  });
-  if (!values.length) return '';
+  if (domain?.zoomed || Number(domain?.rangeSeconds) > 3600) return '';
+  const domainEnd = Number(domain?.endMs);
+  if (!Number.isFinite(domainEnd) || nowMs > domainEnd + 1000) return '';
+  // The live edge is the cell that contains "now" at this chart's own display
+  // resolution. Mark it on EVERY live chart whether or not a sample has landed
+  // in it yet: sparse charts (agent/model tokens) have no data bucket at the
+  // edge but are still live, so the shared heartbeat must appear there too. The
+  // pulse only ever marks this one ongoing cell, never a gap, and its paint is
+  // driven solely by the shared agent-status opacity clock.
+  const durationMs = Math.max(1, Number(buckets?.at?.(-1)?.durationMs) || debugGraphBucketDurationForTime(nowMs, nowMs));
+  const startMs = Math.floor(nowMs / durationMs) * durationMs;
   const xStart = debugGraphXForTime(startMs, domain);
   const xLimit = debugGraphXForTime(startMs + durationMs, domain);
   const width = Math.max(0.5, xLimit - xStart);
-  // The live bucket owns one fixed geometry for its whole lifetime. Only the shared agent-status
-  // opacity clock changes its paint; no per-frame x/y mutation or independent timing is allowed.
   return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
@@ -4278,6 +4517,9 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
   jsDebugGraphHoverChartData.set(group.key, {buckets, group, groupSeries});
+  // Series lines/areas stay continuous across every covered span and break only
+  // at these genuine no-data ranges (the same holes painted as red no-data bands).
+  const genuineNoDataRanges = debugGraphChartGenuineNoDataRanges(group, domain, overlayBuckets, disconnectedRanges, groupSeries);
   const legendSeries = debugGraphLegendSeriesItems(group, groupSeries);
   const plottedGroupSeries = groupSeries.filter(series => series.movingAverageOnly !== true && series.overlayLineOnly !== true);
   const overlayLineSeries = groupSeries.filter(series => series.overlayLineOnly === true);
@@ -4301,13 +4543,21 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
     ? ''
     : `<span class="js-debug-chart-summary"${debugGraphExplainAttrs(displayedSummary.text, displayedSummary.descKey, {attribute: 'data-js-debug-summary-desc'})} data-js-debug-${esc(displayedSummary.attribute)}="${esc(displayedSummary.value)}">${esc(displayedSummary.text)}</span>`;
   const gpuUnavailable = (group.hostMetric === 'gpuUtil' || group.hostMetric === 'gpuMemory') && !groupSeries.length;
+  // A GPU chart with no device series must explain itself precisely, never the ambiguous
+  // generic "None" (screenshot 010): distinguish a host with NO GPU telemetry at all from
+  // one whose samples exist outside the current window.
+  const gpuUnavailableText = gpuUnavailable
+    ? (debugGraphAnyGpuDeviceSamplesCached()
+      ? debugGraphCostText('debug.graph.gpuNoWindowSamples', 'No GPU samples in this time window')
+      : debugGraphCostText('debug.graph.gpuUnavailableHost', 'GPU telemetry is not available on this host'))
+    : '';
   const agentBillableUnavailable = group.key === 'agentTokens'
     && jsDebugGraphModelTokenDimension !== 'output'
     && !buckets.some(bucket => [...(bucket?.agentTokenRates?.values?.() || [])].some(rate => rate?.billableAvailable === true));
   const chartUnavailable = gpuUnavailable || agentBillableUnavailable;
   const chartUnavailableText = agentBillableUnavailable
     ? debugGraphCostText('debug.graph.agentTokens.billableUnavailable', 'No billable breakdown for this window')
-    : t('finder.dateMode.none');
+    : gpuUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
   const modelDimensionControl = group.key === 'modelTokens'
@@ -4331,15 +4581,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       <div class="js-debug-plot">
         <svg class="js-debug-line-chart" viewBox="0 0 ${esc(jsDebugGraphGeometry.width)} ${esc(jsDebugGraphGeometry.height)}" role="img" aria-label="${esc(groupLabel)}" preserveAspectRatio="none">
           ${group.kind === 'bar' ? debugGraphAgentTokenPatternDefsHtml(plotSeries) : ''}
-          ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain)).join('') : ''}
+          ${group.kind === 'area' ? plotSeries.map(series => debugGraphAreaPathHtml(series, Math.max(axisMax, 1), domain, genuineNoDataRanges)).join('') : ''}
           ${group.kind === 'bar' ? plotSeries.map(series => debugGraphBarRectsHtml({...series, zeroBar: group.zeroBar === true}, Math.max(axisMax, 1), domain, plotScale)).join('') : ''}
           ${debugGraphGridLinesHtml({...group, scale: plotScale}, axisMax)}
           ${plotScale?.mode === 'broken-linear' ? debugGraphAxisBreakHtml(group, axisMax, plotScale) : ''}
           ${group.noDataOverlay === true ? debugGraphNoDataRectsHtml(overlayBuckets, domain, debugGraphCurrentClientSeriesItems(groupSeries)) : ''}
           ${group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRectsHtml(overlayBuckets, domain) : ''}
           ${debugGraphHistoryCoverageGapRectsHtml(group, domain, group.statusNoDataOverlay === true ? debugGraphAgentStatusNoDataRuns(overlayBuckets, domain) : [])}
-          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
-          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale)).join('')}
+          ${group.kind === 'bar' ? '' : (group.kind === 'area' ? lineSeries : plotSeries).map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
+          ${overlayLineSeries.map(series => debugGraphPolylineHtml(series, Math.max(axisMax, 1), domain, plotScale, genuineNoDataRanges)).join('')}
           ${movingAverageSeries.map(series => debugGraphMovingAveragePolylineHtml(series, Math.max(axisMax, 1), domain)).join('')}
           ${debugGraphLivePulseHtml(groupSeries, buckets, domain)}
           ${group.disconnectedOverlay === true ? debugGraphDisconnectedRectsHtml(overlayBuckets, domain, disconnectedRanges) : ''}
@@ -4447,6 +4697,26 @@ function debugGraphCostClass(item) {
   return 'other';
 }
 
+// One description owner for the visible usage columns. The wording states exactly what
+// debugGraphCostClass implements (a mutually exclusive projection: Cached bundles cache
+// READS and WRITES and is separated from Input, so nothing is double-counted), not
+// assumed provider semantics. Rendered via the shared explain-attrs (title + aria) owner.
+function debugGraphCostUsageColumnDescription(key) {
+  const descriptions = {
+    input: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'],
+    cache: ['debug.cost.cached.desc', 'Cumulative prompt-cache token accounting across requests: cache READS (hits/refreshes) and cache WRITES (5m/1h creation) combined. Reused history/tool/system context is counted again on every request, so in long conversations Cached can legitimately dwarf Input. This is billing accounting, not stored cache size or GPU cache occupancy.'],
+    output: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'],
+    other: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'],
+    total: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'],
+  };
+  const entry = descriptions[key];
+  return entry ? debugGraphCostText(entry[0], entry[1]) : '';
+}
+
+function debugGraphCostUsageColumnHeaderAttrs(key, label) {
+  return debugGraphExplainAttrs(label, `debug.cost.${key === 'cache' ? 'cached' : key}.desc`, {attribute: 'data-js-debug-cost-column-desc', desc: debugGraphCostUsageColumnDescription(key)});
+}
+
 function debugGraphCostCompactTotals(summary) {
   const totals = {input: 0, cache: 0, output: 0};
   for (const item of summary.components) {
@@ -4512,7 +4782,7 @@ function debugGraphCostAggregateRows(rows, keyFields) {
 
 function debugGraphCostSummarySignature(buckets) {
   if (!Array.isArray(buckets) || !buckets.length) {
-    return `0:${jsDebugStatsAgentTokenSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
+    return `0:${jsDebugStatsServerSequence}:${jsDebugUsageAtomBackfill.state || ''}:${jsDebugUsageAtomBackfill.sources || 0}:${jsDebugUsageAtomBackfill.missing || 0}`;
   }
   const first = buckets[0] || {};
   const last = buckets[buckets.length - 1] || {};
@@ -4524,7 +4794,7 @@ function debugGraphCostSummarySignature(buckets) {
     Number(last.startMs ?? last.start ?? 0) || 0,
     Number(last.durationMs ?? last.duration ?? 0) || 0,
     Number(last.sequence ?? 0) || 0,
-    jsDebugStatsAgentTokenSequence,
+    jsDebugStatsServerSequence,
     jsDebugUsageAtomBackfill.state || '',
     jsDebugUsageAtomBackfill.sources || 0,
     jsDebugUsageAtomBackfill.missing || 0,
@@ -4688,7 +4958,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}>${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
@@ -4763,6 +5033,24 @@ function debugGraphCostComponentSortHeaderHtml(key, label) {
   return `<th scope="col" aria-sort="${ariaSort}"><button type="button" class="js-debug-cost-sort control-active-hover" data-js-debug-cost-sort="${esc(key)}" data-js-debug-cost-next-sort="${nextDirection}">${esc(label)}</button></th>`;
 }
 
+// Render a usage class with the provider's own conventions (Anthropic's price
+// sheet: Base input, 5m/1h cache write, Cache hits & refreshes, Output) instead
+// of the raw `direction · cache_role`. Anything not covered (other modalities/
+// providers) falls back to the raw joined form so nothing is mislabeled.
+function debugGraphCostUsageClassLabel(direction, cacheRole) {
+  const dir = String(direction || '').trim().toLowerCase();
+  const role = String(cacheRole || '').trim().toLowerCase();
+  if (dir === 'output') return debugGraphCostText('debug.cost.class.output', 'Output');
+  if (dir === 'input' || dir === '') {
+    if (role === 'read') return debugGraphCostText('debug.cost.class.cacheHits', 'Cache hits & refreshes');
+    if (role === 'write_5m') return debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write');
+    if (role === 'write_1h') return debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write');
+    if (role.startsWith('write')) return debugGraphCostText('debug.cost.class.cacheWrite', 'Cache write');
+    if (role === 'none' || role === '') return debugGraphCostText('debug.cost.class.baseInput', 'Base input');
+  }
+  return [direction, cacheRole].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
+}
+
 function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
   const headers = [
@@ -4774,7 +5062,7 @@ function debugGraphCostComponentDetailsHtml(rows) {
     <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
     <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
       const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      const usageClass = [row?.direction, row?.cache_role].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
+      const usageClass = debugGraphCostUsageClassLabel(row?.direction, row?.cache_role);
       const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
       const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
       return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell"><strong>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</strong><small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
@@ -4893,17 +5181,28 @@ function debugGraphCostSourceTreeHtml(rows) {
 }
 
 function debugGraphCostCatalogDetailsHtml(summary) {
+  // One compact catalog-status line replacing the four-row table: every fact
+  // (revision, freshness, priced coverage, unpriced exclusions) stays present
+  // and localized, wraps as meaningful field groups on a narrow pane, and
+  // never stretches four scalars across a wide screen. Unpriced exclusions
+  // keep their warning semantics when nonzero.
   const revision = String(summary.activeCatalogRevision || summary.catalogRevision || '').trim() || '—';
   const freshness = String(summary.freshness || '').trim() || debugGraphCostText('debug.cost.unknown', 'Unknown');
   const exclusions = Math.max(0, Number(summary.unpricedCount) || 0);
   const priced = Math.max(0, Number(summary.pricedCount) || 0);
-  const rows = [
-    [debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision'), revision],
-    [debugGraphCostText('debug.cost.freshness', 'Catalog freshness'), freshness],
-    [debugGraphCostText('debug.cost.coverage', 'Priced coverage'), `${priced}/${priced + exclusions}`],
-    [debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions'), String(exclusions)],
+  const groups = [
+    {label: debugGraphCostText('debug.cost.catalog', 'Catalog'), value: `${debugGraphCostText('debug.cost.rev', 'rev')} ${revision}`},
+    {label: debugGraphCostText('debug.cost.freshnessCompact', 'freshness'), value: freshness.toLowerCase() === freshness ? freshness : freshness.charAt(0).toLowerCase() + freshness.slice(1)},
+    {label: debugGraphCostText('debug.cost.coverageCompact', 'coverage'), value: `${priced}/${priced + exclusions}`},
+    {label: debugGraphCostText('debug.cost.unpricedCompact', 'unpriced'), value: String(exclusions), warning: exclusions > 0},
   ];
-  return `<div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="catalog"><tbody>${rows.map(([label, value]) => `<tr><th scope="row">${esc(label)}</th><td>${esc(value)}</td></tr>`).join('')}</tbody></table></div>`;
+  const accessible = [
+    `${debugGraphCostText('debug.cost.catalogRevision', 'Catalog revision')}: ${revision}`,
+    `${debugGraphCostText('debug.cost.freshness', 'Catalog freshness')}: ${freshness}`,
+    `${debugGraphCostText('debug.cost.coverage', 'Priced coverage')}: ${priced}/${priced + exclusions}`,
+    `${debugGraphCostText('debug.cost.exclusions', 'Unpriced exclusions')}: ${exclusions}`,
+  ].join('; ');
+  return `<p class="js-debug-cost-catalog-line" data-js-debug-cost-catalog aria-label="${esc(accessible)}">${groups.map((group, index) => `<span class="js-debug-cost-catalog-group${group.warning ? ' js-debug-cost-catalog-group--warning' : ''}">${index === 0 ? `${esc(group.label)}: ` : ''}${index > 0 ? `${esc(group.label)} ` : ''}${esc(group.value)}</span>`).join('<span class="js-debug-cost-catalog-separator" aria-hidden="true"> · </span>')}</p>`;
 }
 
 function debugGraphCostBackfillText(summary) {
@@ -4958,18 +5257,33 @@ function debugGraphCostReportHtml(summary, domain) {
   const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const tokens = debugGraphCostTokenTotals(summary);
   const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
+  // Compact report shell: one heading line carrying the range, one totals line
+  // replacing the old Summary heading + nested list, one catalog status line
+  // replacing the four-row catalog table. Exact values stay reachable through
+  // the accessible labels; nothing about estimate/lower-bound semantics changes.
+  const estimateSentence = !hasEstimatedUsage
+    ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage')
+    : (exact
+      ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total})
+      : hasFiniteRange
+        ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total})
+        : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total}));
+  const tokenParts = [
+    `${debugGraphCostText('debug.cost.input', 'Input').toLowerCase()}=${debugGraphTokenNumberText(tokens.input)}`,
+    `${debugGraphCostText('debug.cost.cache', 'Cache').toLowerCase()}=${debugGraphTokenNumberText(tokens.cache)}`,
+    `${debugGraphCostText('debug.cost.output', 'Output').toLowerCase()}=${debugGraphTokenNumberText(tokens.output)}`,
+    ...(Math.max(0, Number(tokens.other) || 0) > 0 ? [`${debugGraphCostText('debug.cost.other', 'Other').toLowerCase()}=${debugGraphTokenNumberText(tokens.other)}`] : []),
+  ];
+  const totalsLine = `${estimateSentence}, ${debugGraphCostText('debug.cost.totalTokens', 'total tokens')}: ${debugGraphTokensText(tokens.total)} (${tokenParts.join(', ')})`;
+  const totalsExact = `${debugGraphCostText('debug.cost.totalTokens', 'total tokens')}: ${Math.max(0, Number(tokens.total) || 0).toLocaleString()}; ${['input', 'cache', 'output', 'other'].map(key => `${key}=${Math.max(0, Number(tokens[key]) || 0).toLocaleString()}`).join('; ')}`;
   return `<article class="js-debug-cost-report" aria-label="${esc(title)}">
     <div class="js-debug-cost-report-title">
-      <h1>${esc(title)}</h1>
+      <h1>${esc(title)}</h1><span class="js-debug-cost-report-range meta-muted">${esc(debugGraphCostRangeText(domain))}</span>
     </div>
     <div class="js-debug-cost-report-body">
-      <p class="meta-muted">${esc(debugGraphCostRangeText(domain))}</p>
-      <p>${esc(!hasEstimatedUsage ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage') : (exact ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total}) : hasFiniteRange ? debugGraphCostText('debug.cost.range', `Estimated API list-price range ${total}`, {amount: total}) : debugGraphCostText('debug.cost.lowerBound', `Known estimated lower bound ${total}`, {amount: total})))}</p>
-      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.total', 'Summary'))}</h2>
-        <ul class="js-debug-cost-report-list"><li><strong>${esc(debugGraphCostText('debug.cost.total', 'Estimated total'))}:</strong> ${esc(total)}</li><li><strong>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}:</strong> ${esc(debugGraphTokensText(tokens.total))}<ul><li>${esc(`${debugGraphCostText('debug.cost.input', 'Input')}: ${debugGraphTokensText(tokens.input)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.cache', 'Cache')}: ${debugGraphTokensText(tokens.cache)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.output', 'Output')}: ${debugGraphTokensText(tokens.output)}`)}</li><li>${esc(`${debugGraphCostText('debug.cost.other', 'Other')}: ${debugGraphTokensText(tokens.other)}`)}</li></ul></li></ul>
-      </section>
+      <p class="js-debug-cost-report-totals" data-js-debug-cost-report-totals aria-label="${esc(`${estimateSentence}; ${totalsExact}`)}">${esc(totalsLine)}</p>
       ${debugGraphCostUnknownUsageHtml(summary)}
-      <section class="js-debug-cost-details-section"><h2>${esc(debugGraphCostText('debug.cost.catalogRevision', 'Pricing catalog'))}</h2>${debugGraphCostCatalogDetailsHtml(summary)}</section>
+      ${debugGraphCostCatalogDetailsHtml(summary)}
       ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
       ${debugGraphCostComponentDetailsHtml(summary.components)}
@@ -5017,7 +5331,7 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
     </div>
     <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-      ${compactRows.map(([label, value, tokenCount]) => `<div><dt>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
+      ${compactRows.map(([label, value, tokenCount]) => `<div><dt${debugGraphCostUsageColumnHeaderAttrs(String(label).toLowerCase(), debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
     </dl>
     <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
   </section>`;
@@ -5083,8 +5397,8 @@ function debugGraphSvgHtml(buckets, seriesItems, chartGroups = debugGraphVisible
         ? [debugGraphChartHtml(group, groupSeriesItems, domain, groupBuckets, overlayBuckets, disconnectedRanges, {tokenAxis})]
         : [];
       // This is deliberately a non-chart sibling: it consumes precisely the Model tokens/min
-      // displayed bucket array, including the compact wide-range history, but adds no axes,
-      // bars, or independent range state.
+      // displayed bucket array from the unified cache, but adds no axes, bars, or
+      // independent range state.
       if (includeCostSummary && group.key === 'modelTokens' && debugGraphChartVisible('costSummary')) {
         items.push(debugGraphCostSummaryHtml(groupBuckets, domain));
       }
@@ -5121,7 +5435,7 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
 
 function debugGraphHtml() {
   const nowMs = Date.now();
-  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" data-js-debug-history-state="${esc(jsDebugHistoryReadiness.phase)}" aria-busy="${jsDebugHistoryReadinessBusy() ? 'true' : 'false'}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
+  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" data-js-debug-history-state="${esc(jsDebugHistoryReadinessStateName())}" aria-busy="${jsDebugHistoryReadinessBusy() ? 'true' : 'false'}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
 }
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
@@ -5129,16 +5443,17 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
   const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
+  // rawBuckets/rollupBuckets survive as derived diagnostics of the ONE bucket Map:
+  // "raw" is the finest (sub-middle-tier) durations, "rollup" everything coarser.
+  const cachedBuckets = [...jsDebugGraphBuckets.values()];
   return {
-    rawBuckets: jsDebugGraphRawBuckets.size,
-    rollupBuckets: jsDebugGraphRollupBuckets.size,
-    middleBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
-    oldBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
-    tierBucketCounts: jsDebugGraphTiers.map(tier => [...jsDebugGraphRawBuckets.values(), ...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === tier.bucketMs).length),
+    rawBuckets: cachedBuckets.filter(bucket => bucket.durationMs < jsDebugGraphMiddleBucketMs).length,
+    rollupBuckets: cachedBuckets.filter(bucket => bucket.durationMs >= jsDebugGraphMiddleBucketMs).length,
+    middleBuckets: cachedBuckets.filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
+    oldBuckets: cachedBuckets.filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
+    tierBucketCounts: jsDebugGraphTiers.map(tier => cachedBuckets.filter(bucket => bucket.durationMs === tier.bucketMs).length),
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
-    agentTokenBuckets: jsDebugGraphAgentTokenBuckets.size,
-    agentTokenResolutionSeconds: jsDebugStatsAgentTokenResolutionSeconds,
-    agentTokenSchemaVersion: jsDebugStatsAgentTokenSchemaVersion,
+    agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
     eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
@@ -5215,8 +5530,95 @@ function pollJsDebugStatsOnInterval() {
   // Passive cadence ticks never need to queue behind an explicit range,
   // activation, or initial request. The next full interval is soon enough and
   // avoids a slow request degenerating into an immediate back-to-back fetch.
+  maybePrefetchJsDebugHistory();
   if (jsDebugStatsPollState.inFlight) return;
   return pollJsDebugStatsSample();
+}
+
+// Fire the full-retention prefetch once shortly after the current range lands, then on a
+// slow cadence. Visibility is enforced by the poll loop itself (it stops when hidden) plus
+// the guard inside prefetchJsDebugHistoryFullRetention, so a hidden panel does zero work.
+function maybePrefetchJsDebugHistory() {
+  if (!jsDebugStatsPollState.firstSampleReceived) return;
+  if (jsDebugHistoryPrefetchState.inFlight) return;
+  const nowMs = performanceNow();
+  const due = !jsDebugHistoryPrefetchState.didInitial
+    || (nowMs - Number(jsDebugHistoryPrefetchState.lastFullPrefetchAtMs || 0)) >= jsDebugHistoryPrefetchIntervalMs;
+  if (!due) return;
+  jsDebugHistoryPrefetchState.didInitial = true;
+  void prefetchJsDebugHistoryFullRetention();
+}
+
+// Silent cache-fill of the whole retention window. Populates ONLY the shared bucket Map
+// (jsDebugGraphBuckets) so a later range switch renders
+// cached content instantly. Deliberately does NOT touch jsDebugHistoryReadiness, the
+// overlay, coverage, or the live cursor: the current view owns loading state, and the
+// normal poll revalidates the switched-to range's fresh tail on top of this cache.
+// Finest-source-wins at render keeps the live 1s/10s tail intact (no replaceCoverage,
+// so no fine buckets are removed).
+async function prefetchJsDebugHistoryFullRetention() {
+  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) return false;
+  if (jsDebugHistoryPrefetchState.inFlight) return false;
+  if (typeof apiFetchJsonQuiet !== 'function') return false;
+  jsDebugHistoryPrefetchState.inFlight = true;
+  const requestGeneration = jsDebugHistoryPrefetchState.generation;
+  try {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const historyStart = Math.max(0, nowSeconds - jsDebugHistoryPrefetchRetentionSeconds);
+    const clientId = jsDebugStatsClientIdForRequest();
+    const payload = await fetchJsDebugStatsJson(
+      jsDebugStatsSampleQuery({clientId, historyStart, historyEnd: 0, historyResolution: 1}),
+      {cache: 'no-store', timeoutMs: jsDebugStatsHistoryTimeoutMs(jsDebugHistoryPrefetchRetentionSeconds)},
+    );
+    // The cache was cleared (range reset / history clear) while this fetch was in flight:
+    // dropping the stale response keeps the rendered history deterministic.
+    if (jsDebugHistoryPrefetchState.generation !== requestGeneration) return false;
+    const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
+    // A malformed/omitted coverage list only aborts THIS silent fill; it never blanks the
+    // visible chart (unlike the readiness path, which must reject malformed coverage).
+    if (!coverage) return false;
+    debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: false});
+    jsDebugHistoryPrefetchState.lastFullPrefetchAtMs = performanceNow();
+    return true;
+  } catch (error) {
+    recordJsDebugStatsDiagnostic('info', `history prefetch skipped: ${jsDebugErrorText(error)}`);
+    return false;
+  } finally {
+    jsDebugHistoryPrefetchState.inFlight = false;
+  }
+}
+
+// THE one owner of the /api/stats-sample request shape. Every runtime fetch, test
+// fixture, and diagnostic probe must build its query through this function or its
+// contract-tested python mirror (tests/browser_helpers/stats_request_shapes.py):
+// the 2026-07-14 host-metrics outage escaped because a diagnosis probe hand-rolled
+// a request that validated the wrong serve path. The shared goldens live in
+// tests/fixtures/stats_request_shapes.json. There are NO token_* params anymore:
+// token rates and cost ride every history record of the one history stream (the
+// server still accepts the legacy params from old clients; this client never
+// sends them).
+function jsDebugStatsSampleQuery(params = {}) {
+  const {
+    since = 0,
+    clientId = '',
+    tokenConsumer = '0',
+    historyStart = 0,
+    historyEnd = 0,
+    historyResolution = 1,
+    historyMaxPoints = jsDebugStatsHistoryMaxPoints,
+    history = true,
+  } = params;
+  const parts = [
+    `since=${encodeURIComponent(String(since))}`,
+    `client_id=${encodeURIComponent(String(clientId))}`,
+    `token_consumer=${encodeURIComponent(String(tokenConsumer))}`,
+    `history_start=${encodeURIComponent(String(historyStart))}`,
+    `history_end=${encodeURIComponent(String(historyEnd))}`,
+    `history_resolution=${encodeURIComponent(String(historyResolution))}`,
+    `history_max_points=${encodeURIComponent(String(historyMaxPoints))}`,
+  ];
+  if (!history) parts.push('history=0');
+  return `/api/stats-sample?${parts.join('&')}`;
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -5266,7 +5668,7 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
   await nextAnimationFrame();
   recordClientPerfCounter('statsHistoryPaint', performanceNow() - paintStartedAt);
   if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
-  const recoveredRetry = jsDebugHistoryReadiness.phase === 'retrying';
+  const recoveredRetry = jsDebugHistoryReadiness.reason === 'retry';
   setJsDebugHistoryReadiness('ready', {
     requestedRangeSeconds,
     requestedStartSeconds,
@@ -5296,8 +5698,6 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   try {
     const clientId = jsDebugStatsClientIdForRequest();
     const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
-    const tokenResolution = debugGraphAgentTokenResolution();
-    syncDebugGraphAgentTokenResolution();
     const domain = debugGraphDomain();
     const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
     const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
@@ -5306,7 +5706,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
-      if (['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) {
+      if (jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) {
         historyRequestSuppressed = true;
       } else {
         const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
@@ -5314,14 +5714,14 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
           && Number(state.targetStartSeconds) === Number(targetStart)
           && Number(state.targetEndSeconds) === Number(targetEnd)
           && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-        if (!currentRequestMatches || state.phase === 'retrying') {
+        if (!currentRequestMatches || state.reason === 'retry') {
           const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
           beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
             targetStartSeconds: targetStart,
             targetEndSeconds: targetEnd,
             requestedEndSeconds: requestWindow.endSeconds,
             requestedResolutionSeconds: coverageResolution,
-            retry: ['error', 'retrying'].includes(state.phase),
+            retry: jsDebugHistoryReadinessErrorLike(state),
           });
         }
         readinessRequest = jsDebugHistoryReadinessSnapshot();
@@ -5333,12 +5733,15 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
       ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
       : 0;
     const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : (historyRequestSuppressed ? 0 : targetStart);
-    const tokenHistory = tokenResolution
-      ? `&token_since=${encodeURIComponent(String(readinessRequest ? 0 : (jsDebugStatsAgentTokenSequence || 0)))}&token_resolution=${encodeURIComponent(String(tokenResolution))}&token_history_start=${encodeURIComponent(String(targetStart))}&token_history_end=0`
-      : '';
-    const historyMode = historyRequestSuppressed ? '&history=0' : '';
-    const requestSince = readinessRequest ? 0 : (jsDebugStatsServerSequence || 0);
-    const payload = await fetchJsDebugStatsJson(`/api/stats-sample?since=${encodeURIComponent(String(requestSince))}&client_id=${encodeURIComponent(clientId)}&token_consumer=${tokenConsumer}&history_start=${encodeURIComponent(String(historyStart))}&history_end=${encodeURIComponent(String(historyEnd))}&history_resolution=${encodeURIComponent(String(historyResolution))}&history_max_points=${encodeURIComponent(String(jsDebugStatsHistoryMaxPoints))}${historyMode}${tokenHistory}`, {
+    const payload = await fetchJsDebugStatsJson(jsDebugStatsSampleQuery({
+      since: readinessRequest ? 0 : (jsDebugStatsServerSequence || 0),
+      clientId,
+      tokenConsumer,
+      historyStart,
+      historyEnd,
+      historyResolution,
+      history: !historyRequestSuppressed,
+    }), {
       cache: 'no-store',
       timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
     });
@@ -5346,7 +5749,8 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const pendingCoverage = normalizedJsDebugHistoryPending(payload?.history);
     if (readinessRequest && pendingCoverage) {
       recordJsDebugStatsDiagnostic('info', `history backfill pending: ${pendingCoverage.reason}`);
-      setJsDebugHistoryReadiness('retrying', {
+      setJsDebugHistoryReadiness('loading', {
+        reason: 'retry',
         error: pendingCoverage.reason,
         nextAutoRetryAtMs: performanceNow() + pendingCoverage.retryAfterMs,
       });
@@ -5496,6 +5900,8 @@ async function clearJsDebugServerHistory() {
   const restartPolling = runtimeIntervalActive('debug-stats');
   stopJsDebugStatsPolling();
   jsDebugStatsPollState.firstSampleReceived = false;
+  jsDebugHistoryPrefetchState.didInitial = false;
+  jsDebugHistoryPrefetchState.lastFullPrefetchAtMs = 0;
   jsDebugStatsServerSequence = 0;
   jsDebugStatsServerUptimeSeconds = null;
   jsDebugStatsServerPid = null;
@@ -6167,7 +6573,13 @@ function yoCostPanelHtml() {
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refresh = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
   const ageLabel = debugGraphCostText('debug.cost.lastRefreshed', `Last refreshed ${age}`, {time: age});
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${charts}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  // The YO!cost chart area carries the ONE shared history loading overlay so a
+  // range/resolution change dims it and centers "Loading…" exactly like
+  // YO!stats. It deliberately is NOT a [data-js-debug-graph] surface (those get
+  // rebuilt with YO!stats content by the graph-refresh loops); the readiness
+  // sync toggles this overlay through its own targeted pass.
+  const chartArea = `<div class="js-yocost-chart-area" data-js-yocost-chart-area data-js-debug-history-state="${esc(jsDebugHistoryReadinessStateName())}">${charts}${debugGraphHistoryOverlayHtml()}</div>`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${chartArea}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {
@@ -6461,8 +6873,28 @@ function refreshDebugCostAgeLabels(nowMs = Date.now()) {
   return true;
 }
 
+function debugGraphSlidingAxisActive() {
+  // Live ranges up to 1h advance continuously with the wall clock so the axis
+  // slides and content drifts left even between (up to 60s) data ticks. Coarser
+  // (>1h), zoomed, and hidden views stay static per the range-scaled cadence contract.
+  return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
+}
+
 function debugGraphLiveTickerNeeded() {
-  return debugCostAgeLabels().length > 0;
+  return debugCostAgeLabels().length > 0 || debugGraphSlidingAxisActive();
+}
+
+function debugGraphSlideLiveViews(nowMs = Date.now()) {
+  // Re-render each visible live graph at most once per slide interval so the
+  // plot region drifts left with wall clock. The per-graph throttle keeps this
+  // to ~1s and never fires within a sub-second window of a fresh render, so
+  // data-tick throttling and mounted controls are undisturbed.
+  for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
+    if (graph.offsetParent === null) continue;
+    const renderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
+    if (Number.isFinite(renderedAt) && nowMs - renderedAt < jsDebugGraphSlideRenderMs) continue;
+    refreshDebugGraphElement(graph, {force: true});
+  }
 }
 
 function stopDebugGraphLiveTicker() {
@@ -6473,14 +6905,25 @@ function stopDebugGraphLiveTicker() {
 
 function debugGraphLiveFrameTick(frameMs = performanceNow()) {
   jsDebugGraphLiveFrame = 0;
+  // A slide render re-arms the ticker; guard against synchronous re-entry so a
+  // synchronous requestAnimationFrame (test harness) or a nested refresh cannot
+  // recurse. Real browsers schedule the next tick on the following frame.
+  if (jsDebugGraphLiveFrameTicking) return;
   if (typeof document === 'undefined' || document.visibilityState === 'hidden') return;
   const ageLabels = debugCostAgeLabels();
-  if (!ageLabels.length) return;
-  if (frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
-    jsDebugGraphLiveFrameLastMs = frameMs;
-    refreshDebugCostAgeLabels(Date.now());
+  const slidingActive = debugGraphSlidingAxisActive();
+  if (!ageLabels.length && !slidingActive) return;
+  jsDebugGraphLiveFrameTicking = true;
+  try {
+    if (ageLabels.length && frameMs - jsDebugGraphLiveFrameLastMs >= 50) {
+      jsDebugGraphLiveFrameLastMs = frameMs;
+      refreshDebugCostAgeLabels(Date.now());
+    }
+    if (slidingActive) debugGraphSlideLiveViews();
+    jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
+  } finally {
+    jsDebugGraphLiveFrameTicking = false;
   }
-  jsDebugGraphLiveFrame = requestAnimationFrame(debugGraphLiveFrameTick);
 }
 
 function syncDebugGraphLiveTicker() {
@@ -6526,7 +6969,7 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
     bindDebugCostSummaryTabButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
-    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
+    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName();
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
     delete graph.dataset.jsDebugGraphRefreshPending;
     if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
@@ -6573,7 +7016,6 @@ function setDebugSubTab(tab) {
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
   if (!jsDebugStatsPanelVisible()) return false;
-  syncDebugGraphAgentTokenResolution();
   const domain = debugGraphDomain();
   const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
   const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
@@ -6581,7 +7023,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
   if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
-  if (!retry && ['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) return false;
+  if (!retry && jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)
@@ -6607,7 +7049,6 @@ function setDebugGraphRange(value, {render = true} = {}) {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(value);
   activeJsDebugGraphRangeSeconds();
   saveJsDebugStatsUiPreferences();
-  syncDebugGraphAgentTokenResolution();
   if (!render) return;
   syncJsDebugStatsDeliveryMode();
   const requestedStartSeconds = Math.max(0, Math.floor(debugGraphDomain().startMs / 1000));
@@ -6646,6 +7087,7 @@ function setDebugGraphResolutionOverride(value) {
   // the swap is instant with no overlay. Only when the change genuinely needs finer/coarser
   // history do we show the shared dimmed loading overlay over the still-visible old data and
   // arm a generation-guarded revert-on-failure.
+  //
   const fetching = requestJsDebugHistoryForCurrentDomain();
   if (!fetching) {
     jsDebugGraphPendingResolutionChange = null;
@@ -7060,6 +7502,7 @@ function bindDebugPanel(panel) {
       if (!jsDebugLogLevels.includes(level)) return;
       if (jsDebugLogsState.levels.has(level)) jsDebugLogsState.levels.delete(level);
       else jsDebugLogsState.levels.add(level);
+      saveJsDebugStatsUiPreferences();
       refreshDebugLogsViews();
       return;
     }

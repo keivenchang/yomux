@@ -204,7 +204,17 @@ SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES = (
 # Exact normalized production clones are rare; each reviewed exception must name why the two
 # surfaces are deliberately separate.  The key is the stable sorted source-file pair plus the
 # normalized block digest emitted by lint_normalized_production_clones().
-NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {}
+NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
+    # ChatStore and LoginRateLimiter both use the standard double-checked lazy-init guard
+    # (self._initialized flag + init lock + re-check) around a user_version WAL migration.
+    # The mechanical prologue (open, WAL-enable, BEGIN IMMEDIATE, read user_version) is
+    # already shared via atomic_file.open_wal_database/enable_wal_with_retry/begin_wal_migration;
+    # what remains is the lazy-init skeleton wrapping two deliberately separate schemas (chat's
+    # multi-step FTS ladder vs the throttle's single bucket table), each raising its own
+    # migration-error type. Collapsing further would couple two unrelated schemas.
+    "yolomux_lib/chat_store.py, yolomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
+    "yolomux_lib/chat_store.py, yolomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
+}
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
 STANDARD_BORDER_RADIUS_TOKENS = {

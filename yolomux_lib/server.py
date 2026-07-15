@@ -2766,6 +2766,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         msg_type = message.get("type")
         if msg_type == "refresh":
             refresh_tmux_session_clients(session)
+            # A refresh carrying a window-switch transaction id gets a structured TEXT-frame
+            # acknowledgement after the refresh is issued, so the browser's post-confirmation
+            # paint barrier can wait for a subsequent refreshed BINARY frame. Normal PTY output
+            # stays on binary frames (opcode 2); legacy refreshes without an id stay silent.
+            txn = message.get("txn")
+            if isinstance(txn, (int, float)) and not isinstance(txn, bool) and txn > 0:
+                ack = json.dumps({"type": "refresh-ack", "txn": int(txn)}, separators=(",", ":")).encode("utf-8")
+                try:
+                    self.connection.sendall(make_ws_frame(ack, opcode=1))
+                except OSError:
+                    pass
         elif msg_type == "input":
             if readonly:
                 return

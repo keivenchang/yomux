@@ -96,6 +96,12 @@ from .common import YOLOMUX_VERSION
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .locales import LANGUAGE_PREFERENCES
+from .login_escalation import EdgeBlockController
+from .login_escalation import default_edge_runner
+from .login_rate_limit import LOGIN_THROTTLE_DATABASE_NAME
+from .login_rate_limit import LOGIN_THROTTLE_OVERRIDE_NAME
+from .login_rate_limit import LoginRateLimiter
+from .login_rate_limit import load_login_rate_policy
 from .locales import message_descriptor
 from .locales import message_fields
 from .locales import normalize_locale
@@ -112,6 +118,7 @@ from .search_indexer import SearchIndexerClient
 from .jobd import JobClient
 from .pricing_catalog import PricingCatalog
 from .pricing_catalog import PricingRefreshCoordinator
+from . import statsd
 from .statsd import StatsClient
 from .statsd import normalized_usage_atom
 from .drop_actions import run_drop_action
@@ -1751,6 +1758,17 @@ class TmuxWebtermApp:
             cursor_secret_path=common.STATE_DIR / "chat-cursor.key",
             retention_days=self.chat_retention_days,
         )
+        # Shared login throttle: one WAL SQLite file under the state dir enforces the
+        # policy across every port pointing here. Admission runs before PBKDF2 in the
+        # auth mixin; policy overrides are validated at load and fall back to defaults.
+        self.login_rate_limiter = LoginRateLimiter(
+            common.STATE_DIR / LOGIN_THROTTLE_DATABASE_NAME,
+            policy=load_login_rate_policy(common.CONFIG_DIR / LOGIN_THROTTLE_OVERRIDE_NAME),
+        )
+        # Optional, OFF-BY-DEFAULT attack-response escalation (defense in depth, not the
+        # core 429). The edge controller only ever spawns a firewall process when an
+        # operator enables it; disabled, block() is a no-op. See login_escalation.py.
+        self.login_edge_controller = EdgeBlockController(runner=default_edge_runner, enabled=False)
         # DOIT.58 Phase 1: per-session/window user+agent activity ledger (heartbeat-coalesced
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
         self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
@@ -2640,7 +2658,7 @@ class TmuxWebtermApp:
         record = self.stats_record_with_sampler_coverage(family, record)
         now = float(record.get("time") or sample.get("time") or time.time())
         merged = self.stats_client.merge_server_records(
-            [record], now=now, compact=False, refresh_rollups=False,
+            [record], now=now, compact=False,
             timeout=0.9 if family == "cpu" else 3.0,
         )
         if not merged.get("ok"):
@@ -2732,21 +2750,30 @@ class TmuxWebtermApp:
         })
         services: dict[str, dict[str, Any]] = {}
         for row in rows:
-            if not isinstance(row, dict) or int(row.get("pid") or 0) <= 0:
+            if not isinstance(row, dict):
                 continue
             key = str(row.get("service") or "").strip()[:128]
+            if not key:
+                continue
+            running = int(row.get("pid") or 0) > 0
             resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
             cpu_percent = resources.get("cpu_percent")
             rss_bytes = resources.get("rss_bytes")
-            item: dict[str, Any] = {"label": key}
-            if isinstance(cpu_percent, (int, float)):
-                cpu = max(0.0, float(cpu_percent))
-                item.update({"cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1})
-            if isinstance(rss_bytes, (int, float)):
+            # Every known service reports each tick so its Servers Load series
+            # always exists and reads honestly: a running service contributes its
+            # real CPU%/RSS, and an idle/not-running spawn-on-demand service an
+            # explicit zero (rather than a missing series that looks like a broken
+            # chart). A service that was never registered simply never appears in
+            # `rows`, so it stays absent.
+            cpu = max(0.0, float(cpu_percent)) if isinstance(cpu_percent, (int, float)) else 0.0
+            item: dict[str, Any] = {
+                "label": key,
+                "cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1,
+            }
+            if running and isinstance(rss_bytes, (int, float)):
                 rss = max(0.0, float(rss_bytes))
                 item.update({"rss_total_bytes": rss, "rss_min_bytes": rss, "rss_max_bytes": rss, "rss_samples": 1})
-            if len(item) > 1:
-                services[key] = item
+            services[key] = item
         self.merge_stats_family_record(
             "service_load",
             {"time": self.stats_metric_scheduled_time(), "host_metrics": {"service_load": services}},
@@ -2985,6 +3012,41 @@ class TmuxWebtermApp:
             "max_points": max(0, history_max_points),
         }
 
+    def check_stats_coverage_integrity(self) -> dict[str, Any] | None:
+        """Read-only durable-coverage self-check that surfaces violations to Logs.
+
+        The system detects a corrupt coverage table itself (the class that once
+        blanked YO!stats) instead of waiting for a blank chart. It runs web-side
+        because the operator log ring is per-process (statsd is a separate
+        process); a violation is emitted at error level, deduped, so it is one
+        Logs line rather than a flood. On-open durable repair still heals the
+        table, so this is a monitoring backstop.
+        """
+        try:
+            store = statsd.StatsStore(statsd.default_database_path(), read_only=True)
+            store.open()
+            try:
+                report = store.coverage_integrity_report()
+            finally:
+                store.close()
+        except Exception:  # noqa: BLE001 - a monitoring check must never break serving
+            return None
+        if not report.get("ok"):
+            offenders = ", ".join(
+                f"{item.get('family')}({item.get('overlaps')})" for item in report.get("families", [])
+            )
+            emit_server_log(
+                "error",
+                "statsd",
+                f"stats coverage integrity violated: {report.get('overlapping_pairs')} overlapping "
+                f"interval pair(s), {report.get('inverted_rows')} inverted row(s)"
+                + (f" [{offenders}]" if offenders else ""),
+                category="coverage",
+                dedupe_key="stats-coverage-integrity",
+                dedupe_seconds=300.0,
+            )
+        return report
+
     def stats_sample_payload(
         self,
         since: int = 0,
@@ -3000,6 +3062,10 @@ class TmuxWebtermApp:
         history_max_points: int = 0,
         include_history: bool = True,
     ) -> dict[str, Any]:
+        # Monitoring backstop: a deduped read-only coverage self-check surfaces a
+        # corrupt durable coverage table to the Logs tab (at most one line / 5 min).
+        if include_history:
+            self.check_stats_coverage_integrity()
         sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
         encode_started = time.perf_counter()
         history = self.stats_client.history(**self.stats_sample_history_query(
@@ -3112,13 +3178,17 @@ class TmuxWebtermApp:
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
         self.pricing_refresh_coordinator.start_periodic()
-        if self.stats_client.ensure_started():
-            self.start_stats_metric_scheduler()
-        else:
+        # Never gate the scheduler on statsd availability: each family loop already
+        # survives per-cycle statsd failures and self-heals when the daemon returns.
+        # Gating here turned one failed ensure_started at acquisition into a PERMANENT
+        # sampling outage (2026-07-15: a stale-revision daemon held the socket at boot
+        # and YO!stats stayed blank until the next owner handoff).
+        if not self.stats_client.ensure_started():
             self.log_event(
-                None, "statsd_sampler_unavailable", "statsd metric scheduler could not start",
+                None, "statsd_sampler_unavailable", "statsd unavailable at sampler start; scheduler will retry per cycle",
                 {"diagnostic": "statsd unavailable"}, message_key="events.message.statsHistory.sampleFailed",
             )
+        self.start_stats_metric_scheduler()
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
@@ -8886,13 +8956,22 @@ class TmuxWebtermApp:
     def runtime_local_services(self) -> dict[str, Any]:
         """Return bounded worker diagnostics without exposing service payloads."""
         indexd = self.search_indexer.runtime_status()
+        # stats-reader retired: history encodes run in-process in this web
+        # server (StatsHistoryReader), so the honest roster is the four spawned
+        # services; in-process encode cost is part of the `web` row.
         statsd = self.stats_client.runtime_status()
-        stats_reader = self.stats_client.reader.runtime_status()
         jobd = self.job_client.runtime_status()
         approvald = self.approval_client.runtime_status()
-        rows = [indexd, statsd, stats_reader, jobd, approvald]
+        rows = [indexd, statsd, jobd, approvald]
         totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
+        now = time.time()
         for row in rows:
+            # Derive per-service uptime once, here, from the started_at each
+            # runtime_status already reports — one owner for the Local-services
+            # table's Uptime cell instead of adding the field to five
+            # per-service status builders.
+            started_at = float(row.get("started_at") or 0.0)
+            row["uptime_seconds"] = max(0.0, now - started_at) if int(row.get("pid") or 0) > 0 and started_at > 0 else None
             if int(row.get("pid") or 0) > 0:
                 totals["processes"] += 1
             resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
@@ -8958,6 +9037,12 @@ class TmuxWebtermApp:
                 **self.chat_service.diagnostics(),
                 "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)),
                 "events": chat_events,
+            },
+            # Privacy-safe login-throttle aggregates: allowed/blocked-by-scope counts,
+            # active rows, locked accounts, decision latency — never raw usernames/IPs.
+            "login_throttle": {
+                **self.login_rate_limiter.diagnostics(),
+                "edge": self.login_edge_controller.diagnostics(),
             },
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
@@ -11050,21 +11135,13 @@ class TmuxWebtermApp:
         if result.returncode != 0:
             diagnostic = (result.stderr or result.stdout or "tmux select-window failed").strip()
             return tmux_command_failure_payload(session, diagnostic, window=window_text), HTTPStatus.INTERNAL_SERVER_ERROR
-        self.switch_attached_tmux_clients(session, target)
+        # select-window is the WHOLE job: it changes the session's current window for every
+        # attached client synchronously (that is what a tmux session is). The retired
+        # per-client `switch-client` fan-out here was a no-op by construction (it listed only
+        # same-session clients, which select-window had already switched), serially delayed
+        # every switch response by up to 1s per stale client, and poked the user's own
+        # hand-attached terminals for nothing.
         return {"session": session, "window": window_text, "ok": True}, HTTPStatus.OK
-
-    def switch_attached_tmux_clients(self, session: str, target: str) -> int:
-        switched = 0
-        for row in tmux_session_client_rows(session):
-            client_name = str(row.get("name") or "").strip()
-            if not client_name:
-                continue
-            result = tmux(["switch-client", "-c", client_name, "-t", target], timeout=1.0)
-            if result.returncode == 0:
-                switched += 1
-                continue
-            logger.debug("tmux switch-client failed for %s -> %s: %s", client_name, target, cmd_error(result, "tmux switch-client failed"))
-        return switched
 
     def stop_auto_approve_worker(self, session: str) -> None:
         approval_client = getattr(self, "approval_client", None)

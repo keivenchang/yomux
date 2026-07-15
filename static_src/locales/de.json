@@ -248,6 +248,7 @@
   "debug.errors": "JS-Fehler",
   "debug.events": "Veranstaltungen",
   "debug.graph.agentStatus.noData": "Keine Agentenstatusprobe",
+  "debug.graph.noDataRecorded": "Keine Daten aufgezeichnet",
   "debug.graph.badConnection": "Schlechte Verbindung: Für {duration} wurden keine Daten erfasst",
   "debug.graph.chart.agentStatus": "Agentenstatus",
   "debug.graph.chart.agentStatus.desc": "Zählt Agent-Fenster nach Status: aktiv, Aufmerksamkeit, Übergang und Leerlauf aus YOLOmux-Zustandsproben.",
@@ -1937,6 +1938,8 @@
   "terminal.window.pid": "(PID={pid})",
   "terminal.window.previous": "vorheriges tmux-Unterfenster",
   "terminal.window.prompt": "Eingabe für tmux-Unterfenster",
+  "terminal.window.switchLoading": "Lade {target} ...",
+  "terminal.window.switchStalled": "Lade {target} weiterhin ...",
   "terminal.window.title": "tmux-Fenster {name}",
   "terminal.window.unnamed": "Fenster {index}",
   "terminal.xtermLoadFailed": "xterm.js konnte nicht aus /static/xterm.js geladen werden. Das Terminal kann nicht verbunden werden.",
@@ -2544,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "Verspätet / verpasst",
   "debug.system.sampler.header.lateMiss.short": "verspätet/verpasst",
   "debug.system.sampler.header.runtime.full": "Letzte Laufzeit",
-  "debug.system.sampler.header.runtime.short": "Laufzeit"
+  "debug.system.sampler.header.runtime.short": "Laufzeit",
+  "login.error.rateLimitedMinutes": "Zu viele Versuche. Bitte warten Sie einige Minuten und versuchen Sie es erneut.",
+  "login.error.rateLimitedHours": "Zu viele Versuche. Bitte warten Sie einige Stunden und versuchen Sie es erneut.",
+  "auth.error.rateLimitedMinutes": "Zu viele Anfragen. Bitte warten Sie einige Minuten und versuchen Sie es erneut.",
+  "auth.error.rateLimitedHours": "Zu viele Anfragen. Bitte warten Sie einige Stunden und versuchen Sie es erneut."
 }

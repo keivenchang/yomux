@@ -8,6 +8,7 @@ const uiDelayMs = Object.freeze({
   serverWatchDebounce: 300,
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
+  tmuxWindowSwitchReveal: 4000,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
   commandPaletteMissingPathRetry: 1001,
@@ -29,6 +30,14 @@ const yolomuxTiming = Object.freeze({
   serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
+  // Bounded UI wait for the post-confirmation refreshed frame before the explicit
+  // `Still loading <target>` Retry/Cancel state (never a silent reveal).
+  tmuxWindowSwitchRevealTimeoutMs: uiDelayMs.tmuxWindowSwitchReveal,
+  // tmux switches instantly and repaints every attached client, so the new window's
+  // bytes are usually ingested behind the mask BEFORE the select POST even resolves.
+  // After confirmation, reveal on the next painted frame — or after this short cap when
+  // the repaint already landed and no further frame is coming. Display cadence (round).
+  tmuxWindowSwitchPaintCapMs: 250,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
@@ -56,6 +65,8 @@ const {
   serverWatchDebounceMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
+  tmuxWindowSwitchRevealTimeoutMs,
+  tmuxWindowSwitchPaintCapMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,

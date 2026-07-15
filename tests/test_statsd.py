@@ -1,6 +1,7 @@
 import gzip
 import json
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -9,8 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.browser_helpers.stats_request_shapes import legacy_reader_history_request
+from tests.browser_helpers.stats_request_shapes import reader_history_request
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
+from yolomux_lib.local_services.registry import LocalServiceRegistry
+from yolomux_lib.local_services.registry import LocalServiceSpec
 
 
 def _statsd_history_latency_budget_seconds(span_seconds: int, *, cpu_count: int | None = None) -> float:
@@ -236,7 +241,7 @@ def _real_schema_history_bucket(start, duration, sequence):
     return bucket
 
 
-def test_stats_store_wal_round_trip_preserves_bucket_and_normalized_rows(tmp_path):
+def test_stats_store_wal_round_trip_preserves_bucket_in_the_single_owner_table(tmp_path):
     path = tmp_path / "stats.sqlite3"
     store = stats_store.StatsStore(path)
     store.upsert_bucket(_bucket())
@@ -246,9 +251,213 @@ def test_stats_store_wal_round_trip_preserves_bucket_and_normalized_rows(tmp_pat
     assert reopened.query_buckets() == [_bucket()]
     diagnostics = reopened.diagnostics()
     assert diagnostics["rows"] == 1
-    assert diagnostics["children"] == {"stats_clients": 1, "stats_processes": 1, "stats_agent_rates": 1, "stats_host_metrics": 5}
+    # ONE durable owner per fact: exactly three tables — buckets, coverage,
+    # schema metadata. The duplicated side tables and rollups are retired.
+    tables = {
+        str(row[0]) for row in reopened._connection().execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    assert tables == {"schema_meta", "stats_buckets", "stats_coverage_intervals"}
+    assert reopened.metadata_value("schema_version") == str(stats_store.STATS_STORE_SCHEMA_VERSION)
     assert reopened._connection().execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     reopened.close()
+
+
+# The exact schema-3 DDL the pre-migration StatsStore.open() executed: the four
+# normalized side tables duplicating bucket_json field groups plus the persisted
+# rollup tier table. Migration fixtures are built from this, never from current
+# code, so the one-time fold/drop in StatsStore.open() is tested against real
+# legacy shapes.
+LEGACY_SCHEMA_3_DDL = """
+CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS stats_buckets (
+  start INTEGER NOT NULL, duration INTEGER NOT NULL, sequence INTEGER NOT NULL,
+  server_sequence INTEGER NOT NULL, bucket_json TEXT NOT NULL,
+  PRIMARY KEY (start, duration)
+);
+CREATE INDEX IF NOT EXISTS stats_buckets_sequence ON stats_buckets(sequence);
+CREATE TABLE IF NOT EXISTS stats_clients (
+  start INTEGER NOT NULL, duration INTEGER NOT NULL, client_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL, values_json TEXT NOT NULL,
+  PRIMARY KEY (start, duration, client_id),
+  FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stats_processes (
+  start INTEGER NOT NULL, duration INTEGER NOT NULL, process_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL, values_json TEXT NOT NULL,
+  PRIMARY KEY (start, duration, process_id),
+  FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stats_agent_rates (
+  start INTEGER NOT NULL, duration INTEGER NOT NULL, rate_key TEXT NOT NULL,
+  values_json TEXT NOT NULL,
+  PRIMARY KEY (start, duration, rate_key),
+  FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stats_host_metrics (
+  start INTEGER NOT NULL, duration INTEGER NOT NULL, metric_key TEXT NOT NULL,
+  values_json TEXT NOT NULL,
+  PRIMARY KEY (start, duration, metric_key),
+  FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS stats_rollups (
+  start INTEGER NOT NULL, duration INTEGER NOT NULL, sequence INTEGER NOT NULL,
+  bucket_json TEXT NOT NULL,
+  PRIMARY KEY (start, duration)
+);
+CREATE INDEX IF NOT EXISTS stats_rollups_duration_start ON stats_rollups(duration, start);
+CREATE TABLE IF NOT EXISTS stats_coverage_intervals (
+  family TEXT NOT NULL, epoch_id TEXT NOT NULL,
+  start INTEGER NOT NULL, end INTEGER NOT NULL,
+  cadence INTEGER NOT NULL, owner_generation INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'sampler',
+  PRIMARY KEY (family, epoch_id, start)
+);
+CREATE INDEX IF NOT EXISTS stats_coverage_family_range
+  ON stats_coverage_intervals(family, start, end);
+"""
+
+
+def _legacy_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _build_legacy_schema_3_database(path):
+    """Write a real schema-3 database: dual-stored buckets, a side-table-only
+    group, rollup rows, coverage, and metadata markers."""
+    connection = sqlite3.connect(path)
+    connection.executescript(LEGACY_SCHEMA_3_DDL)
+    with connection:
+        connection.execute(
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', '3'), ('legacy_import_version', '9')"
+        )
+        # Bucket A: bucket_json already carries every field group (the shape
+        # every live database was verified to hold) and the side tables
+        # duplicate it, exactly as the old _upsert_bucket wrote.
+        complete = _bucket(start=100, duration=1, sequence=1)
+        connection.execute(
+            "INSERT INTO stats_buckets VALUES(?,?,?,?,?)",
+            (100, 1, 1, 1, _legacy_json(complete)),
+        )
+        connection.execute(
+            "INSERT INTO stats_clients VALUES(?,?,?,?,?)",
+            (100, 1, "browser-a", 1, _legacy_json(complete["clients"]["browser-a"])),
+        )
+        connection.execute(
+            "INSERT INTO stats_processes VALUES(?,?,?,?,?)",
+            (100, 1, "port:17071", 1, _legacy_json(complete["servers"]["port:17071"])),
+        )
+        connection.execute(
+            "INSERT INTO stats_agent_rates VALUES(?,?,?,?)",
+            (100, 1, "17071|0|codex", _legacy_json(complete["agent_token_rates"]["17071|0|codex"])),
+        )
+        connection.execute(
+            "INSERT INTO stats_host_metrics VALUES(?,?,?,?)",
+            (100, 1, "cpu_processes", _legacy_json(complete["host_metrics"]["cpu_processes"])),
+        )
+        # Bucket B: side tables hold client/rate facts that bucket_json lost
+        # (the hypothetical partial-write shape) — migration must fold them in.
+        stripped = _bucket(start=200, duration=1, sequence=2)
+        orphan_client = dict(stripped["clients"]["browser-a"])
+        orphan_rate = dict(stripped["agent_token_rates"]["17071|0|codex"])
+        stripped["clients"] = {}
+        stripped["agent_token_rates"] = {}
+        connection.execute(
+            "INSERT INTO stats_buckets VALUES(?,?,?,?,?)",
+            (200, 1, 2, 2, _legacy_json(stripped)),
+        )
+        connection.execute(
+            "INSERT INTO stats_clients VALUES(?,?,?,?,?)",
+            (200, 1, "browser-b", 2, _legacy_json(orphan_client)),
+        )
+        connection.execute(
+            "INSERT INTO stats_agent_rates VALUES(?,?,?,?)",
+            (200, 1, "17071|0|codex", _legacy_json(orphan_rate)),
+        )
+        # Rollup rows are projections of the graduated buckets; migration must
+        # DROP them without folding (folding would double-count the source).
+        rollup = _bucket(start=60, duration=60, sequence=3)
+        connection.execute(
+            "INSERT INTO stats_rollups VALUES(?,?,?,?)",
+            (60, 60, 3, _legacy_json(rollup)),
+        )
+        connection.execute(
+            "INSERT INTO stats_coverage_intervals VALUES('cpu','legacy-epoch',100,201,1,1,'sampler')"
+        )
+    connection.close()
+    return {"orphan_client": orphan_client, "orphan_rate": orphan_rate}
+
+
+def test_stats_store_open_migrates_legacy_side_and_rollup_tables_once(tmp_path):
+    path = tmp_path / "stats.sqlite3"
+    facts = _build_legacy_schema_3_database(path)
+
+    store = stats_store.StatsStore(path)
+    store.open()
+
+    tables = {
+        str(row[0]) for row in store._connection().execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    assert tables == {"schema_meta", "stats_buckets", "stats_coverage_intervals"}
+    assert store.metadata_value("schema_version") == str(stats_store.STATS_STORE_SCHEMA_VERSION)
+    # Unrelated durable markers survive the migration.
+    assert store.metadata_value("legacy_import_version") == "9"
+
+    buckets = store.query_buckets()
+    assert [bucket["start"] for bucket in buckets] == [100, 200]
+    # Dual-stored bucket: unchanged (bucket_json was already complete).
+    assert buckets[0] == _bucket(start=100, duration=1, sequence=1)
+    # Side-table-only groups: folded into the single bucket_json owner.
+    assert buckets[1]["clients"] == {"browser-b": facts["orphan_client"]}
+    assert buckets[1]["agent_token_rates"] == {"17071|0|codex": facts["orphan_rate"]}
+    # Rollup rows are gone (they were derived projections, not source facts).
+    assert store.bucket(60, 60) is None
+    coverage = store.query_coverage(start=100, end=210)
+    assert [(item["start"], item["end"]) for item in coverage["stores"]["cpu"]["intervals"]] == [(100, 201)]
+    store.close()
+
+    # Idempotent: a second open of the migrated database changes nothing.
+    reopened = stats_store.StatsStore(path)
+    assert reopened.query_buckets() == buckets
+    assert reopened.metadata_value("schema_version") == str(stats_store.STATS_STORE_SCHEMA_VERSION)
+    reopened.close()
+
+
+def test_stats_history_reader_serves_a_legacy_database_and_survives_its_migration(tmp_path):
+    """A read-only open cannot migrate: the owner migrates on ITS open, while
+    the reader serves the un-migrated schema unchanged (it reads only the three
+    surviving tables) and keeps serving after the owner migrates under it."""
+    path = tmp_path / "stats.sqlite3"
+    _build_legacy_schema_3_database(path)
+
+    reader = statsd.StatsHistoryReader(path)
+    before = reader.history(start=90, end=220, client_id="browser-a")
+    assert before["ok"] is True
+    assert [record["start"] for record in before["records"]] == [100, 200]
+
+    # The read-only path must not have migrated anything.
+    probe = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    legacy_tables = {
+        str(row[0]) for row in probe.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'stats_%'"
+        ).fetchall()
+    }
+    probe.close()
+    assert {"stats_clients", "stats_rollups"} <= legacy_tables
+
+    # The writer/owner migrates on its open; the reader keeps serving the same
+    # records from the migrated database (one lazy reopen retry absorbs the
+    # schema change).
+    owner = stats_store.StatsStore(path)
+    owner.open()
+    after = reader.history(start=90, end=220, client_id="browser-a")
+    assert after["ok"] is True
+    assert after["records"] == before["records"]
+    owner.close()
+    reader.close()
 
 
 def _coverage_overlap_pairs(intervals):
@@ -331,8 +540,6 @@ def test_stats_store_repairs_preexisting_coverage_overlaps_on_open(tmp_path):
 
 @pytest.mark.parametrize("seed", range(12))
 def test_stats_store_coverage_is_always_disjoint_under_random_owner_churn(tmp_path, seed):
-    import random
-
     rng = random.Random(seed)
     store = stats_store.StatsStore(tmp_path / f"stats-{seed}.sqlite3")
     families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
@@ -418,19 +625,6 @@ def test_usage_atom_backfill_status_is_complete_when_version_marker_matches(tmp_
     status = service._usage_atom_migration_status()
     assert status["state"] == "complete"
     assert status["missing"] == 0
-
-
-def test_stats_store_keeps_rollups_outside_raw_history_rows(tmp_path):
-    store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
-    raw = _bucket(start=100, duration=1, sequence=1)
-    rollup = _bucket(start=60, duration=60, sequence=2)
-    store.upsert_bucket(raw)
-    store.upsert_rollup(rollup)
-
-    assert store.query_buckets() == [raw]
-    assert store.rollup_bucket(60, 60) == rollup
-    assert store.query_rollups(duration=60, start=60, end=120) == [rollup]
-    store.close()
 
 
 def test_statsd_new_owner_negotiates_old_and_current_protocols(tmp_path):
@@ -1416,7 +1610,7 @@ def test_statsd_empty_transcript_roster_does_not_consume_recovery_marker(tmp_pat
     service.store.close()
 
 
-def test_stats_store_rolls_back_bucket_and_child_rows_when_one_child_is_invalid(tmp_path):
+def test_stats_store_rejects_an_oversized_bucket_without_writing_any_row(tmp_path):
     store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
     too_large = _bucket()
     too_large["clients"]["browser-a"]["overflow"] = "x" * (stats_store.STATS_STORE_MAX_JSON_BYTES + 1)
@@ -1425,7 +1619,6 @@ def test_stats_store_rolls_back_bucket_and_child_rows_when_one_child_is_invalid(
         store.upsert_bucket(too_large)
 
     assert store.query_buckets() == []
-    assert store.diagnostics()["children"] == {"stats_clients": 0, "stats_processes": 0, "stats_agent_rates": 0, "stats_host_metrics": 0}
 
 
 def test_stats_store_retain_and_query_after_cursor_bound_growth(tmp_path):
@@ -1509,10 +1702,13 @@ def test_stats_client_runtime_status_exposes_sampler_and_history_diagnostics(mon
         "pid": 123, "sampler_alive": True, "sampler_last_cycle_seconds": 1.25,
         "sampler_late_cycles": 2, "sampler_missed_cycles": 3,
         "sampler_families": {"cpu": {"cadence_seconds": 1.0, "attempts": 4, "successes": 4}},
-        "history_requests": 8, "history_cache_hits": 6,
-        "history_profile": {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2},
     }})
     monkeypatch.setattr(client.registry, "resources", lambda _pid: {"cpu_percent": 1.0})
+    # History encoding merged into the web process: the client's status must
+    # report the IN-PROCESS facade counters, not stale daemon-side numbers.
+    client.history_reader.engine.history_request_count = 8
+    client.history_reader.engine.history_cache_hit_count = 6
+    client.history_reader.engine.last_history_profile = {"assemble_ms": 12.5, "source_records": 4, "returned_records": 2}
 
     status = client.runtime_status()
 
@@ -1695,13 +1891,18 @@ def test_statsd_large_agent_scan_streams_atoms_to_bounded_spool(monkeypatch, tmp
         "path": str(spool), "cursor_start": -1, "cursor_duration": -1, "cursor_event": "",
         "target_state": target_state, "sample_time": 1060, "count": count, "changed": 0,
     }
-    pages = []
+    merges = []
     monkeypatch.setattr(
         service, "merge_server_records",
-        lambda records, **_kwargs: pages.append(sum(len(record["usage_atoms"]) for record in records)) or {"ok": True, "changed": len(records)},
+        lambda records, **_kwargs: merges.append(sum(len(record["usage_atoms"]) for record in records)) or {"ok": True, "changed": len(records)},
     )
+    # A generous budget so one drain processes the whole read batch deterministically.
+    monkeypatch.setattr(statsd, "STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS", 60.0)
     assert service._drain_agent_token_atom_spool() is True
-    assert pages == [statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS]
+    # Each merge is exactly ONE atom (the bounded projection unit that cannot starve the
+    # writer); one drain reads up to a page of rows and loops one-atom merges within budget.
+    assert merges and all(count == 1 for count in merges)
+    assert len(merges) == min(50_000, statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS)
     assert service.agent_token_atom_persistence is not None
     service.agent_token_atom_persistence = None
     service.store.close()
@@ -1751,7 +1952,7 @@ def test_statsd_cpu_write_stays_responsive_during_atom_spool_maintenance(monkeyp
     started = time.monotonic()
     response = client.merge_server_records(
         [{"time": time.time(), "cpu_total_percent": 1, "cpu_count": 1}],
-        compact=False, refresh_rollups=False, timeout=0.9,
+        compact=False, timeout=0.9,
     )
     elapsed = time.monotonic() - started
 
@@ -1762,6 +1963,47 @@ def test_statsd_cpu_write_stays_responsive_during_atom_spool_maintenance(monkeyp
     assert elapsed < 0.9
 
 
+def test_atom_spool_drain_catches_up_a_large_backlog_not_one_per_drain(monkeypatch, tmp_path):
+    """After an offline rebuild the live spool holds a large atom backlog. One atom per
+    DRAIN could not clear it before new atoms accrued, so the cursor never reached the
+    recent atoms and the Cost summary read 0 tokens on recent ranges for the whole catch-up
+    window (2026-07-15). The budget-bounded drain must clear a large backlog in a handful of
+    drains while keeping each MERGE one atom (the responsiveness unit)."""
+    spool = tmp_path / "backlog-atoms.sqlite3"
+    total = 1000
+    with sqlite3.connect(spool) as connection:
+        connection.execute("CREATE TABLE atoms (bucket_start INTEGER NOT NULL, duration INTEGER NOT NULL, event_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket_start, duration, event_key))")
+        for index in range(total):
+            normalized = statsd.normalized_usage_atom(_spool_test_atom(index, 1050.0 + (index % 20)))
+            connection.execute(
+                "INSERT INTO atoms VALUES(?, ?, ?, ?)",
+                (1050 + (index % 20), 1, f"{statsd._agent_token_spool_identity(normalized)}:{index}", json.dumps(normalized)),
+            )
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.agent_token_atom_persistence = {
+        "path": str(spool), "cursor_start": -1, "cursor_duration": -1, "cursor_event": "",
+        "target_state": {}, "sample_time": 1060, "count": total, "changed": 0,
+    }
+    merge_sizes = []
+    original_merge = service.merge_server_records
+    monkeypatch.setattr(service, "merge_server_records", lambda records, **kw: (merge_sizes.append(sum(len(r["usage_atoms"]) for r in records)), original_merge(records, **kw))[1])
+    # Generous budget so each drain processes its whole read page deterministically.
+    monkeypatch.setattr(statsd, "STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS", 60.0)
+    drains = 0
+    while service.agent_token_atom_persistence is not None and drains < 100:
+        service._drain_agent_token_atom_spool()
+        drains += 1
+    assert service.agent_token_atom_persistence is None, "the whole backlog drains"
+    # A handful of drains (ceil(total/page)+empty), NOT ~total drains (the 1-per-drain bug).
+    assert drains <= (total // statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS) + 2
+    assert len(merge_sizes) == total and all(size == 1 for size in merge_sizes), "each merge is one atom"
+    # The backlog produced real cost components (not silently dropped).
+    history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": 1040, "end": 0, "resolution_seconds": 1, "max_points": 200})
+    priced = any((r.get("cost_summary") or {}).get("components") for r in history.get("records") or [])
+    assert priced, "the drained atoms populate cost_summary components"
+    service.store.close()
+
+
 def test_statsd_hot_write_does_not_probe_or_restart_on_contention(monkeypatch, tmp_path):
     client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     requests = []
@@ -1769,7 +2011,7 @@ def test_statsd_hot_write_does_not_probe_or_restart_on_contention(monkeypatch, t
     monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("contention must not trigger health probes or launches"))
 
     response = client.merge_server_records(
-        [{"time": 1000, "cpu_count": 1}], compact=False, refresh_rollups=False, timeout=0.9,
+        [{"time": 1000, "cpu_count": 1}], compact=False, timeout=0.9,
     )
 
     assert response == {"ok": False, "error": "timed out"}
@@ -1810,7 +2052,7 @@ def test_statsd_browser_writes_use_live_socket_without_probe_or_inline_compactio
         or {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION},
     )
     monkeypatch.setattr(client, "ensure_started", lambda: pytest.fail("live browser writes must not health-probe"))
-    monkeypatch.setattr(client.reader, "history", lambda **_query: {"ok": True, "records": []})
+    monkeypatch.setattr(client.history_reader, "history", lambda **_query: {"ok": True, "records": []})
 
     assert client.merge_records([{"time": 1000, "api_count": 1}], client_id="browser-a")["ok"] is True
     assert client.merge_and_history(
@@ -1837,16 +2079,16 @@ def test_statsd_hot_write_replaces_stale_protocol_once(monkeypatch, tmp_path):
     assert starts == [True]
 
 
-def test_statsd_encoded_sample_routes_to_read_only_peer(monkeypatch, tmp_path):
+def test_statsd_encoded_sample_routes_to_in_process_read_only_facade(monkeypatch, tmp_path):
     client = statsd.StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     monkeypatch.setattr(client, "ensure_started", lambda: True)
     monkeypatch.setattr(
         client, "request_with_binary",
-        lambda *_args, **_kwargs: pytest.fail("writer must not encode history responses"),
+        lambda *_args, **_kwargs: pytest.fail("history/sample encoding must not cross the writer socket"),
     )
     calls = []
     monkeypatch.setattr(
-        client.reader, "encoded_sample",
+        client.history_reader, "encoded_sample",
         lambda sample, shared, query: calls.append((sample, shared, query)) or ({"ok": True}, b"{}"),
     )
 
@@ -1937,19 +2179,13 @@ def test_statsd_early_counter_result_detaches_historical_worker_slot(tmp_path):
     service.store.close()
 
 
-def test_statsd_agent_token_recovery_coalesces_rollups_without_inline_refresh(monkeypatch, tmp_path):
-    """Historical token pages queue four tiers, then converge between requests."""
+def test_statsd_agent_token_recovery_persists_pages_without_stalling_history(tmp_path):
+    """Historical token pages persist in bounded turns; requests stay responsive."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     records = [{"time": 1000 + index, "cpu_total_percent": 1, "cpu_count": 1} for index in range(64)]
-    inline_refreshes = []
-    monkeypatch.setattr(
-        service,
-        "_refresh_persisted_rollups",
-        lambda sample_time: inline_refreshes.append(sample_time) or pytest.fail("recovery must not rebuild rollups per record"),
-    )
-    service.agent_token_scan_id = "scan-rollup"
+    service.agent_token_scan_id = "scan-recovery"
     service.agent_token_scan_result = {
-        "scan_id": "scan-rollup", "measurements": [], "atom_records": records,
+        "scan_id": "scan-recovery", "measurements": [], "atom_records": records,
         "seen_keys": [], "sample_time": 1100, "previous_state": {},
     }
 
@@ -1961,17 +2197,13 @@ def test_statsd_agent_token_recovery_coalesces_rollups_without_inline_refresh(mo
     history, _binary = service.handle_with_binary({"action": "history", "start": 0, "end": 0})
     assert history["ok"] is True
     assert time.perf_counter() - started < 0.1
-    assert inline_refreshes == []
-    assert len(service.rollup_pending) == len(statsd.STATS_HISTORY_PERSISTED_ROLLUP_SECONDS)
 
     while service.agent_token_scan_persistence is not None:
         service._drain_agent_token_scan_result()
-    while service.rollup_pending or service.rollup_jobs or service.rollup_backfill is not None:
-        service._rollup_maintenance_step()
 
-    rollups = service.store.query_rollups(duration=60, start=960, end=1080)
-    assert sum(float(bucket["cpu_count"]) for bucket in rollups) == 64
-    assert sum(float(bucket["cpu_total_percent"]) for bucket in rollups) == 64
+    buckets = service.store.query_buckets(start=960, end=1080)
+    assert sum(float(bucket["cpu_count"]) for bucket in buckets) == 64
+    assert sum(float(bucket["cpu_total_percent"]) for bucket in buckets) == 64
     service.store.close()
 
 
@@ -2029,13 +2261,9 @@ def test_statsd_history_contract_distinguishes_empty_complete_and_partial_covera
         assert partial["coverage"]["complete"] is False
         assert (partial["coverage"]["covered_start"], partial["coverage"]["covered_end"]) == (100, 101)
 
-        status, encoded = service.handle_with_binary({
-            "action": "write_encoded_sample",
-            "sample": {"time": 101.0, "pid": 8881},
-            "shared_stats": {"enabled": True},
-            "query": {"start": 100, "end": 101},
-        })
-        assert status == {"ok": True, "encoding": "json", "size": len(encoded)}
+        encoded = service.encoded_sample(
+            {"time": 101.0, "pid": 8881}, {"enabled": True}, {"start": 100, "end": 101},
+        )
         assert json.loads(encoded)["history"]["coverage"]["complete"] is True
     finally:
         service.store.close()
@@ -2061,7 +2289,7 @@ def test_statsd_coverage_preserves_middle_sleep_hole_and_cross_store_epochs(tmp_
                         "cadence_seconds": 1,
                         "owner_generation": 7 if epoch == "before-sleep" else 8,
                     },
-                }], now=sample_time, compact=False, refresh_rollups=False)
+                }], now=sample_time, compact=False)
                 assert result["ok"] is True
 
         history = service.handle({
@@ -2112,7 +2340,7 @@ def test_statsd_raw_coverage_never_merges_adjacent_owner_generations(tmp_path):
                     "cadence_seconds": 1,
                     "owner_generation": generation,
                 },
-            }], now=sample_time, compact=False, refresh_rollups=False)
+            }], now=sample_time, compact=False)
         coverage = service.handle({"action": "history", "start": 100, "end": 102})["coverage"]
         assert [(item["start"], item["end"], item["epoch_id"]) for item in coverage["intervals"]] == [
             (100, 101, "cpu-owner-7"),
@@ -2149,10 +2377,10 @@ def test_stats_coverage_read_only_reader_and_legacy_database_derive_holes(tmp_pa
     writer.connection.commit()
     writer.close()
 
-    reader = statsd.StatsReaderService(tmp_path / "reader.sock", database)
+    reader = statsd.StatsHistoryReader(database)
     try:
-        response, encoded = reader.handle_with_binary({"action": "history", "start": 90, "end": 220})
-        assert encoded == b"" and response["ok"] is True
+        response = reader.history(start=90, end=220)
+        assert response["ok"] is True
         facts = response["coverage"]
         expected = [(100, 110), (200, 210)]
         for family in ("raw", "cpu", "agent_status", "agent_tokens", "cost"):
@@ -2163,7 +2391,7 @@ def test_stats_coverage_read_only_reader_and_legacy_database_derive_holes(tmp_pa
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='stats_coverage_intervals'"
         ).fetchone() is None
     finally:
-        reader.engine.store.close()
+        reader.close()
 
 
 def test_statsd_history_latency_budget_scales_below_linux_baseline_cores():
@@ -2174,9 +2402,15 @@ def test_statsd_history_latency_budget_scales_below_linux_baseline_cores():
 
 
 def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_path):
-    """Dense retained history stays exact, bounded, and responsive."""
+    """Dense retained history stays exact, bounded, and responsive.
+
+    Measured on the production read path: the web process's in-process
+    StatsHistoryReader encoding from a read-only WAL handle while the writer
+    holds the same database open.
+    """
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    start = 1_000_200  # aligned to every retained and persisted rollup tier
+    reader = statsd.StatsHistoryReader(tmp_path / "stats.sqlite3")
+    start = 1_000_200  # aligned to every graduated retention tier
     end = start + (24 * 60 * 60)
     try:
         # The exact production tiers total 2,700 retained slots: 12h/10m,
@@ -2193,18 +2427,13 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
             cursor += span
         assert len(raw) == 2700 and cursor == end
         service.store.replace_buckets(raw)
-        for duration in (60, 300):
-            for bucket_start in range(start, end, duration):
-                service.store.upsert_rollup(_real_schema_history_bucket(bucket_start, duration, sequence))
-                sequence += 1
 
         for span in (3600, 24 * 3600):
             latency_budget = _statsd_history_latency_budget_seconds(span)
-            service._encoded_query_cache.clear()
+            reader.engine._encoded_query_cache.clear()
             requested_start = end - span
             started = time.perf_counter()
-            status, encoded = service.handle_with_binary({
-                "action": "write_encoded_history",
+            status, encoded = reader.encoded_sample({"time": float(end), "pid": 8881}, {"enabled": True}, {
                 "start": requested_start,
                 "end": end,
                 "max_points": 360,
@@ -2212,7 +2441,7 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
                 "token_resolution_seconds": 60,
             })
             elapsed = time.perf_counter() - started
-            payload = json.loads(encoded)
+            payload = json.loads(encoded)["history"]
             token_records = payload["agent_token_history"]["records"]
             token_total = sum(float(record["tokens_per_agent_total"]) for record in token_records)
             agent_total = sum(
@@ -2236,6 +2465,7 @@ def test_statsd_history_contract_enforces_real_schema_1h_and_24h_budgets(tmp_pat
             assert len(gzip.compress(encoded)) <= 768 * 1024
             assert elapsed <= latency_budget
     finally:
+        reader.close()
         service.store.close()
 
 
@@ -2270,7 +2500,9 @@ def test_stats_store_does_not_leave_a_partial_sqlite_transaction(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         with connection:
             connection.execute("INSERT INTO stats_buckets(start,duration,sequence,server_sequence,bucket_json) VALUES(?,?,?,?,?)", (101, 1, 2, 2, "{}"))
-            connection.execute("INSERT INTO stats_clients VALUES(?,?,?,?,?)", (101, 1, "broken", 2, None))
+            # A second raw insert on the same primary key aborts the whole
+            # transaction, so the first insert must roll back with it.
+            connection.execute("INSERT INTO stats_buckets(start,duration,sequence,server_sequence,bucket_json) VALUES(?,?,?,?,?)", (101, 1, 3, 3, "{}"))
     assert [bucket["sequence"] for bucket in store.query_buckets()] == [1]
 
 
@@ -2286,7 +2518,9 @@ def test_stats_store_replace_is_one_rollback_safe_transaction(tmp_path):
     assert [bucket["sequence"] for bucket in store.query_buckets()] == [1]
 
 
-def test_statsd_persists_and_serves_coarse_rollups_for_bounded_range(tmp_path):
+def test_statsd_serves_coarse_bounded_range_by_aggregating_graduated_buckets(tmp_path):
+    """An explicit coarse resolution pick aggregates the graduated raw tiers
+    at serve time — one durable source, no precomputed rollup table."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     now = 10_000
     service.merge_server_records(
@@ -2295,18 +2529,15 @@ def test_statsd_persists_and_serves_coarse_rollups_for_bounded_range(tmp_path):
         compact=False,
     )
 
-    rollup = service.store.rollup_bucket(now, 10)
     history = service.handle({"action": "history", "start": now, "end": now + 10, "resolution_seconds": 10})
 
-    assert rollup is not None
-    assert rollup["cpu_total_percent"] == 10
     assert history["coverage"]["resolution_seconds"] == 10
     assert len(history["records"]) == 1
     assert history["records"][0]["cpu_total_percent"] == 10
     service.store.close()
 
 
-def test_statsd_service_load_preserves_min_avg_max_rollups_and_sleep_gaps(tmp_path):
+def test_statsd_service_load_preserves_min_avg_max_aggregates_and_sleep_gaps(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
 
     def record(sample_time, cpu, rss):
@@ -2326,8 +2557,10 @@ def test_statsd_service_load_preserves_min_avg_max_rollups_and_sleep_gaps(tmp_pa
     for sample_time, cpu, rss in ((100, 10, 1000), (105, 30, 3000), (140, 20, 2000)):
         service.merge_server_records([record(sample_time, cpu, rss)], now=sample_time, compact=False)
 
-    rollup = service.store.rollup_bucket(100, 10)
-    statsd_load = rollup["host_metrics"]["service_load"]["statsd"]
+    # The serve-time aggregation of the graduated raw buckets preserves the
+    # min/avg/max facts the retired precomputed rollup used to carry.
+    history = service.handle({"action": "history", "start": 100, "end": 110, "resolution_seconds": 10})
+    statsd_load = history["records"][0]["host_metrics"]["service_load"]["statsd"]
     coverage = service.store.query_coverage(start=100, end=150)
     service_intervals = [(item["start"], item["end"]) for item in coverage["store_intervals"]["service_load"]]
 
@@ -2340,42 +2573,25 @@ def test_statsd_service_load_preserves_min_avg_max_rollups_and_sleep_gaps(tmp_pa
     service.store.close()
 
 
-def test_statsd_twenty_four_hour_range_uses_bounded_persisted_rollups(tmp_path):
+def test_statsd_twenty_four_hour_range_serves_the_graduated_600s_tier(tmp_path):
+    """The oldest retention band is stored at 600s by the graduated tiers, so a
+    24h bounded read serves those coarse buckets directly — no separate
+    precomputed rollup table exists anymore."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     start = 86_400
     total_cpu = 0.0
     for index in range(144):
         bucket = stats_store.empty_bucket(start + index * 600, 600)
         bucket.update({"sequence": index + 1, "server_sequence": index + 1, "cpu_total_percent": 10.0, "cpu_count": 1.0})
-        service.store.upsert_rollup(bucket)
+        service.store.upsert_bucket(bucket)
         total_cpu += 10.0
-    # Raw coverage remains authoritative, while the range itself reads the
-    # persisted 600-second tier instead of materializing raw samples.
-    service.store.upsert_bucket(stats_store.empty_bucket(start, 1))
-    service.store.upsert_bucket(stats_store.empty_bucket(start + 24 * 60 * 60 - 1, 1))
 
     history = service.handle({"action": "history", "start": start, "end": start + 24 * 60 * 60, "max_points": 200})
 
     assert history["coverage"]["resolution_seconds"] == 600
     assert len(history["records"]) == 144
     assert sum(record["cpu_total_percent"] for record in history["records"]) == total_cpu
-    assert history["coverage"]["source_records"] == 2
-    service.store.close()
-
-
-def test_statsd_rollup_backfill_uses_bounded_coalesced_work(tmp_path):
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    service.store.upsert_bucket(_bucket(start=100, duration=1, sequence=1))
-    service.store.upsert_bucket(_bucket(start=101, duration=1, sequence=2))
-    service.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
-
-    steps = []
-    while service.rollup_backfill is not None or service.rollup_pending or service.rollup_jobs:
-        steps.append(service._rollup_backfill_step())
-
-    assert steps
-    assert all(step["processed"] <= statsd.STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS for step in steps)
-    assert service.store.rollup_bucket(100, 10)["cpu_total_percent"] == 25.0
+    assert history["coverage"]["source_records"] == 144
     service.store.close()
 
 
@@ -2495,7 +2711,7 @@ def test_statsd_browser_retention_compacts_cooperatively_without_losing_totals(t
     service.store.close()
 
 
-def test_statsd_cooperative_retention_expires_raw_and_rollup_rows(tmp_path):
+def test_statsd_cooperative_retention_expires_raw_rows(tmp_path):
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     now = 200000.0
     expired = statsd.stats_store.empty_bucket(int(now - statsd.STATS_HISTORY_RETENTION_SECONDS - 100), 1)
@@ -2504,14 +2720,12 @@ def test_statsd_cooperative_retention_expires_raw_and_rollup_rows(tmp_path):
     retained["sequence"] = 2
     service.store.upsert_bucket(expired)
     service.store.upsert_bucket(retained)
-    service.store.upsert_rollup(expired)
     service._enqueue_retention_compaction(now)
 
     while service.retention_compaction is not None:
         service._retention_maintenance_step()
 
     assert service.store.bucket(expired["start"], 1) is None
-    assert service.store.rollup_bucket(expired["start"], 1) is None
     assert service.store.bucket(retained["start"], 1) is not None
     service.store.close()
 
@@ -2531,7 +2745,7 @@ def test_statsd_retention_converges_while_live_writes_continue(tmp_path):
         sample_now = now + index
         service.merge_server_records(
             [{"time": sample_now, "cpu_total_percent": 1, "cpu_count": 1}],
-            now=sample_now, compact=False, refresh_rollups=False,
+            now=sample_now, compact=False,
         )
         result = service._retention_maintenance_step()
         assert result["processed"] <= 1
@@ -2606,7 +2820,7 @@ def test_statsd_cpu_write_stays_responsive_during_browser_retention_maintenance(
     started = time.monotonic()
     response = client.merge_server_records(
         [{"time": time.time(), "cpu_total_percent": 1, "cpu_count": 1}],
-        compact=False, refresh_rollups=False, timeout=0.9,
+        compact=False, timeout=0.9,
     )
     elapsed = time.monotonic() - started
 
@@ -2616,13 +2830,12 @@ def test_statsd_cpu_write_stays_responsive_during_browser_retention_maintenance(
     assert elapsed < 0.9
 
 
-def test_stats_reader_blocked_history_does_not_delay_cpu_writer(monkeypatch, tmp_path):
+def test_stats_history_blocked_in_process_encode_does_not_delay_cpu_writer(monkeypatch, tmp_path):
+    """A slow web-side history encode must never occupy the writer socket."""
     writer = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    reader = statsd.StatsReaderService(tmp_path / "statsd-reader.sock", tmp_path / "stats.sqlite3")
     writer_thread = threading.Thread(target=writer.run, daemon=True)
-    reader_thread = threading.Thread(target=reader.run, daemon=True)
     writer_thread.start()
-    client = statsd.StatsClient(writer.socket_path, writer.store.path, reader.socket_path)
+    client = statsd.StatsClient(writer.socket_path, writer.store.path)
     deadline = time.monotonic() + 2.0
     while not client.healthy() and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -2636,24 +2849,18 @@ def test_stats_reader_blocked_history_does_not_delay_cpu_writer(monkeypatch, tmp
 
     history_started = threading.Event()
     release_history = threading.Event()
-    original_history = reader.engine._encoded_history
+    original_history = client.history_reader.engine._encoded_history
 
     def blocked_history(request):
         history_started.set()
         assert release_history.wait(3.0) is True
         return original_history(request)
 
-    monkeypatch.setattr(reader.engine, "_encoded_history", blocked_history)
-    reader_thread.start()
-    deadline = time.monotonic() + 2.0
-    while not client.reader.registry.healthy() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert client.reader.registry.healthy() is True
+    monkeypatch.setattr(client.history_reader.engine, "_encoded_history", blocked_history)
     history_result = {}
 
     def load_history():
-        metadata, encoded = client.encoded_history(start=int(now) - 1, end=int(now) + 30)
-        history_result.update({"metadata": metadata, "encoded": encoded})
+        history_result.update(client.history(start=int(now) - 1, end=int(now) + 30))
 
     history_thread = threading.Thread(target=load_history, daemon=True)
     history_thread.start()
@@ -2668,17 +2875,16 @@ def test_stats_reader_blocked_history_does_not_delay_cpu_writer(monkeypatch, tmp
     history_thread.join(timeout=3.0)
 
     client.request({"action": "shutdown"})
-    reader_thread.join(timeout=2.0)
     writer_thread.join(timeout=2.0)
+    client.history_reader.close()
     assert cpu["ok"] is True
     assert elapsed < 0.9
     assert history_thread.is_alive() is False
-    assert reader_thread.is_alive() is False
-    payload = json.loads(history_result["encoded"])
-    assert sum(float(record.get("cpu_count") or 0) for record in payload["records"]) == 21
+    assert history_result["ok"] is True
+    assert sum(float(record.get("cpu_count") or 0) for record in history_result["records"]) == 21
 
 
-def test_stats_reader_is_read_only_and_rejects_writer_actions(tmp_path):
+def test_stats_history_reader_is_read_only_and_never_writes_during_encode(monkeypatch, tmp_path):
     database = tmp_path / "stats.sqlite3"
     writer = statsd.stats_store.StatsStore(database)
     writer.upsert_bucket(_bucket(start=100, sequence=1))
@@ -2692,17 +2898,119 @@ def test_stats_reader_is_read_only_and_rejects_writer_actions(tmp_path):
         reader_store.upsert_bucket(_bucket(start=101, sequence=2))
     reader_store.close()
 
-    service = statsd.StatsReaderService(tmp_path / "reader.sock", database, idle_seconds=1.0)
-    rejected, _binary = service.handle_with_binary({"action": "merge_server_records", "records": []})
-    assert rejected == {"ok": False, "error": "stats reader rejects action: merge_server_records"}
-    status, _binary = service.handle_with_binary({"action": "status"})
-    assert status["ok"] is True
-    assert status["version"] == statsd.STATSD_PROTOCOL_VERSION
-    assert status["cache"]["sequence"] == 1
-    assert status["queues"] == {"interactive": 0, "normal": 0, "maintenance": 0}
-    service.engine.store.close()
-    service.last_client_at = time.monotonic() - 2.0
-    assert service._idle_shutdown_ready() is True
+    # The in-process facade's encode path must be a pure read: no upsert,
+    # replace, compaction, or retention write may run behind history/sample
+    # encoding (the old encoded_history_from_buckets replace path is retired).
+    reader = statsd.StatsHistoryReader(database)
+    for method in ("upsert_bucket", "replace_buckets", "retain_after", "record_sample_coverage", "replace_metadata_value"):
+        if hasattr(reader.engine.store, method):
+            monkeypatch.setattr(
+                reader.engine.store, method,
+                lambda *args, _method=method, **kwargs: pytest.fail(f"read-only encode called store.{_method}"),
+            )
+    history = reader.history(start=90, end=220, client_id="browser-a")
+    assert history["ok"] is True and history["records"]
+    response, encoded = reader.encoded_sample({"time": 101.0}, {"enabled": True}, {"start": 90, "end": 220})
+    assert response["ok"] is True and json.loads(encoded)["history"]["records"]
+    assert reader.engine.store.read_only is True
+    reader.close()
+
+
+def test_stats_history_reader_survives_wal_read_only_open_quirk(tmp_path):
+    """Read-only opens must work with a live writer, with no writer, and must
+    degrade to a clean retryable error while the database does not exist yet."""
+    database = tmp_path / "stats.sqlite3"
+    reader = statsd.StatsHistoryReader(database)
+    missing = reader.history()
+    assert missing["ok"] is False and missing["error"]
+
+    # The statsd owner appears (live writer holding a WAL connection): the SAME
+    # facade instance recovers lazily on its next request without a restart.
+    writer = statsd.PersistentStatsService(tmp_path / "statsd.sock", database)
+    try:
+        writer.store.upsert_bucket(_bucket(start=100, sequence=1))
+        with_live_writer = reader.history(client_id="browser-a")
+        assert with_live_writer["ok"] is True
+        assert len(with_live_writer["records"]) == 1
+        # New commits are visible through the held read-only connection.
+        writer.store.upsert_bucket(_bucket(start=101, sequence=2))
+        assert len(reader.history(client_id="browser-a")["records"]) == 2
+    finally:
+        writer.store.close()
+
+    # No writer running at all (clean shutdown checkpointed the WAL).
+    without_writer = reader.history(client_id="browser-a")
+    assert without_writer["ok"] is True and len(without_writer["records"]) == 2
+    reader.close()
+
+
+def test_stats_history_reader_concurrent_encodes_match_sequential_while_writer_appends(tmp_path):
+    """N request threads encode a fixed snapshot range while the owner keeps
+    writing: no OperationalError and no torn payloads (byte-equal results)."""
+    database = tmp_path / "stats.sqlite3"
+    writer = statsd.PersistentStatsService(tmp_path / "statsd.sock", database)
+    reader = statsd.StatsHistoryReader(database)
+    base = 1_000_000
+    try:
+        for index in range(60):
+            bucket = _bucket(start=base + index, sequence=index + 1)
+            writer.store.upsert_bucket(bucket)
+        fixed_query = {"start": base, "end": base + 60, "client_id": "browser-a", "max_points": 120}
+
+        def frozen_view(payload):
+            # The writer keeps appending OUTSIDE the fixed range, so global
+            # cursors (latest_sequence, available_end) legitimately advance;
+            # the returned records and their in-range coverage must not tear.
+            return json.dumps({"sequence": payload["sequence"], "records": payload["records"]}, sort_keys=True)
+
+        sequential = frozen_view(reader.history(**fixed_query))
+
+        stop_writes = threading.Event()
+        write_failures = []
+
+        def keep_writing():
+            # The real owner writes from its own listener thread; SQLite pins
+            # a connection to its creating thread, so this thread owns one.
+            thread_store = stats_store.StatsStore(database)
+            sequence = 10_000
+            try:
+                while not stop_writes.is_set():
+                    thread_store.upsert_bucket(_bucket(start=base + 3600 + sequence, sequence=sequence))
+                    sequence += 1
+            except sqlite3.Error as exc:  # pragma: no cover - failure evidence
+                write_failures.append(str(exc))
+            finally:
+                thread_store.close()
+
+        results: dict[int, list[str]] = {index: [] for index in range(4)}
+        errors = []
+
+        def encode_loop(worker: int):
+            for _ in range(25):
+                payload = reader.history(**fixed_query)
+                if not payload.get("ok"):
+                    errors.append(payload.get("error"))
+                    return
+                results[worker].append(frozen_view(payload))
+
+        writer_thread = threading.Thread(target=keep_writing, daemon=True)
+        writer_thread.start()
+        workers = [threading.Thread(target=encode_loop, args=(index,), daemon=True) for index in range(4)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=30.0)
+        stop_writes.set()
+        writer_thread.join(timeout=5.0)
+
+        assert errors == []
+        assert write_failures == []
+        for worker, payloads in results.items():
+            assert len(payloads) == 25, f"worker {worker} did not finish"
+            assert all(payload == sequential for payload in payloads), f"worker {worker} saw a torn/mutated payload for a fixed range"
+    finally:
+        reader.close()
+        writer.store.close()
 
 
 def test_statsd_merge_server_records_owns_global_process_and_host_deltas(tmp_path):
@@ -2727,18 +3035,18 @@ def test_statsd_merge_server_records_owns_global_process_and_host_deltas(tmp_pat
     service.store.close()
 
 
-def test_statsd_returns_preencoded_bounded_history_bytes(tmp_path):
+def test_statsd_writer_socket_no_longer_serves_encoded_history_actions(tmp_path):
+    """The binary side-channel is retired: encoding is in-process only."""
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     service.store.upsert_bucket(_bucket())
 
-    response = service.handle({"action": "write_encoded_history", "client_id": "browser-a"})
+    for action in ("write_encoded_history", "write_encoded_sample", "replace_and_write_encoded_history"):
+        response = service.handle({"action": action, "client_id": "browser-a"})
+        assert response == {"ok": False, "error": f"unknown stats action: {action}"}
+    service.store.close()
 
-    assert response["ok"] is True
-    assert response["encoding"] == "json"
-    assert response["size"] == len(response["bytes"].encode("utf-8"))
 
-
-def test_statsd_rpc_returns_preencoded_history_as_binary_without_metadata_copy(tmp_path):
+def test_statsd_client_encodes_sample_in_process_without_a_reader_socket(tmp_path):
     socket_path = tmp_path / "statsd.sock"
     database_path = tmp_path / "stats.sqlite3"
     service = statsd.PersistentStatsService(socket_path, database_path, idle_seconds=10.0)
@@ -2750,14 +3058,18 @@ def test_statsd_rpc_returns_preencoded_history_as_binary_without_metadata_copy(t
         time.sleep(0.01)
     assert client.request({"action": "upsert_bucket", "bucket": _bucket()})["ok"] is True
 
-    response, encoded = client.encoded_history(client_id="browser-a")
+    response, encoded = client.encoded_sample({"time": 1000.0, "pid": 8881}, {"enabled": True}, query={"client_id": "browser-a"})
 
     assert response == {"ok": True, "encoding": "json", "size": len(encoded)}
-    assert json.loads(encoded)["records"][0]["sequence"] == 1
+    payload = json.loads(encoded)
+    assert payload["history"]["records"][0]["sequence"] == 1
     assert "bytes" not in response
-    client.reader.request({"action": "shutdown"})
+    # The merged architecture runs exactly one stats process (the writer):
+    # no reader socket may exist or be spawned by the read path.
+    assert not list(tmp_path.glob("*reader*.sock"))
     assert client.request({"action": "shutdown"}) == {"ok": True}
     worker.join(timeout=2.0)
+    client.history_reader.close()
 
 
 def test_statsd_history_wire_shape_for_mixed_bucket(tmp_path):
@@ -2895,3 +3207,307 @@ def test_statsd_legacy_import_rolls_back_without_marking_on_invalid_bucket(tmp_p
     assert service.store.query_buckets() == []
     assert service.store.metadata_value(statsd.STATSD_LEGACY_IMPORT_MARKER) is None
     service.store.close()
+
+
+def _assert_coverage_clean(store):
+    report = store.coverage_integrity_report()
+    assert report["ok"], report
+    for family, intervals in store.query_coverage(start=0, end=0)["store_intervals"].items():
+        assert len(intervals) <= stats_store.STATS_COVERAGE_MAX_INTERVALS, (family, len(intervals))
+        ordered = sorted(intervals, key=lambda item: (int(item["start"]), int(item["end"])))
+        assert all(int(item["end"]) > int(item["start"]) for item in ordered), (family, ordered)
+        assert all(int(a["end"]) <= int(b["start"]) for a, b in zip(ordered, ordered[1:])), (family, ordered)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_coverage_survives_owner_churn_crashes_and_concurrent_reads(tmp_path, seed):
+    """Lifecycle chaos against a real store: interleaved owner handoffs, a
+    crash+reopen (injected overlap healed by the on-open repair), and concurrent
+    read-only readers — the disjointness invariant holds after EVERY event."""
+    path = tmp_path / f"chaos-{seed}.sqlite3"
+    rng = random.Random(seed)
+    families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
+    store = stats_store.StatsStore(path)
+    now = 100_000
+    generation = 0
+    for event in range(24):
+        kind = rng.choice(["handoff", "extend", "crash"])
+        if kind == "handoff":
+            generation += 1
+            now = max(100_000, now - rng.randint(0, 15))  # a restart backfills before the prior end
+            epoch = f"owner-{generation}:{rng.randint(0, 999)}"
+            for family in families:
+                store.record_sample_coverage(family=family, sample_time=now, cadence=rng.choice([1, 10, 60]), epoch_id=epoch, owner_generation=generation)
+            now += rng.randint(10, 120)
+        elif kind == "extend":
+            for family in families:
+                store.record_sample_coverage(family=family, sample_time=now, cadence=10, epoch_id=f"owner-{max(1, generation)}:x", owner_generation=max(1, generation))
+            now += 30
+        elif kind == "crash":
+            connection = store._connection()
+            with connection:
+                connection.execute(
+                    "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
+                    " VALUES('cpu',?,?,?,10,?,'sampler')",
+                    (f"crash-{event}", now - 50, now + 50, max(1, generation)),
+                )
+            store.close()
+            store = stats_store.StatsStore(path)  # reopen runs the durable repair
+        # A read after every event proves the invariant holds mid-lifecycle
+        # (interleaved reads and writes), which is the concurrent-reader contract.
+        _assert_coverage_clean(store)
+    store.close()
+    reopened = stats_store.StatsStore(path)
+    assert reopened.coverage_integrity_report()["ok"]
+    reopened.close()
+
+
+def test_coverage_soak_every_range_window_serves_disjoint(tmp_path):
+    """Soak: after heavy churn, pulling coverage at every range window always
+    serves disjoint, sorted, non-inverted, bounded intervals — no malformed
+    response at any range × resolution."""
+    path = tmp_path / "soak.sqlite3"
+    rng = random.Random(99)
+    families = ["cpu", "agent_status", "agent_tokens", "cost", "gpu", "system_memory"]
+    store = stats_store.StatsStore(path)
+    now = 1_000_000
+    generation = 0
+    for _ in range(40):
+        generation += 1
+        now = max(1_000_000, now - rng.randint(0, 15))
+        epoch = f"owner-{generation}:{rng.randint(0, 999)}"
+        cadence = rng.choice([1, 10, 60])
+        for _ in range(rng.randint(1, 6)):
+            for family in families:
+                store.record_sample_coverage(family=family, sample_time=now, cadence=cadence, epoch_id=epoch, owner_generation=generation)
+            now += rng.randint(1, cadence * 3)
+        if rng.random() < 0.3:
+            now += rng.randint(30, 600)
+    end = now + 100
+    for span in (300, 900, 1800, 3600, 4 * 3600, 8 * 3600, 16 * 3600, 24 * 3600):
+        coverage = store.query_coverage(start=max(0, end - span), end=end)
+        for lists in list(coverage["store_intervals"].values()) + [coverage["intervals"]]:
+            ordered = sorted(lists, key=lambda item: (int(item["start"]), int(item["end"])))
+            assert ordered == list(lists), "served intervals must be pre-sorted"
+            assert all(int(item["end"]) > int(item["start"]) for item in lists), "non-inverted"
+            assert all(int(a["end"]) <= int(b["start"]) for a, b in zip(ordered, ordered[1:])), "disjoint"
+            assert len(lists) <= stats_store.STATS_COVERAGE_MAX_INTERVALS, "bounded"
+    store.close()
+
+
+def _seed_graduated_host_and_token_store(service, now: int) -> None:
+    """Graduated history like the real retention: coarse old tiers through fine
+    recent ones, every bucket carrying all three host families plus token rates
+    and cost detail."""
+    sequence = 0
+    for span_start, span_end, step in (
+        (now - 24 * 3600, now - 12 * 3600, 600),
+        (now - 12 * 3600, now - 8 * 3600, 300),
+        (now - 8 * 3600, now - 4 * 3600, 120),
+        (now - 4 * 3600, now - 1800, 60),
+        (now - 1800, now, 10),
+    ):
+        for start in range(span_start, span_end, step):
+            sequence += 1
+            bucket = stats_store.empty_bucket(start, step)
+            bucket.update({
+                "sequence": sequence, "server_sequence": sequence,
+                "cpu_total_percent": 20.0, "cpu_count": 1.0,
+                "tokens_per_agent_total": 120.0, "agent_token_samples": 1.0,
+            })
+            bucket["agent_token_rates"] = {"s|0|codex": {"label": "s:0", "total": 120.0, "samples": 1.0, "tokens": 120.0, "seconds": 60.0, "source": "transcript", "model_rates": {}}}
+            bucket["cost_summary"] = {"components": [{
+                "event_id": f"seed-{sequence}", "provider": "openai", "model": "gpt-5.6",
+                "direction": "output", "modality": "text", "cache_role": "none", "unit": "tokens",
+                "quantity": 30, "count": 1, "priced": True, "telemetry_complete": True,
+            }]}
+            bucket["host_metrics"] = {
+                "system_memory_used_total_bytes": 48e9,
+                "system_memory_capacity_total_bytes": 64e9,
+                "system_memory_count": 1.0,
+                "service_load": {"web:8881": {"label": "web", "cpu_total_percent": 12.0, "cpu_samples": 1.0, "rss_total_bytes": 2e8, "rss_samples": 1.0}},
+                "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_total_percent": 0.0, "memory_used_total_bytes": 2.9e9, "memory_capacity_total_bytes": 51.5e9, "samples": 1.0}},
+            }
+            service.store.upsert_bucket(bucket)
+
+
+def test_host_metrics_survive_history_at_every_range_with_the_real_client_request_shape(tmp_path):
+    """Regression for the blank Server Load / System memory / GPU charts at >= 4h ranges
+    (screenshots 012/013, 2026-07-14): the retired compact-token-stream slimming once gated
+    host_metrics, silently stripping every host family from wide-range history. Host metrics
+    have no other delivery path, so they ride every history record. Since the single-stream
+    cutover (2026-07) the token-slimming contract INVERTED for current clients: token detail
+    (scalars, rates, cost summary) ALSO rides every record at every range — the client sends
+    no token params and there is no separate token payload. This test uses the REAL request
+    shape per range from the ONE contract-tested mirror (never hand-rolled — a hand-rolled
+    probe is how the original bug escaped diagnosis)."""
+    now = int(time.time() // 600 * 600)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        _seed_graduated_host_and_token_store(service, now)
+        for range_seconds in (1800, 3600, 4 * 3600, 8 * 3600, 24 * 3600):
+            request = reader_history_request(range_seconds, now)
+            assert not request.get("token_resolution_seconds"), "current clients never send token params"
+            history = service._encoded_history(request)
+            records = history.get("records", [])
+            assert records, f"range {range_seconds}s returned no records"
+            assert "agent_token_history" not in history, f"range {range_seconds}s served the legacy token side-stream without being asked"
+            with_memory = sum(1 for record in records if (record.get("host_metrics") or {}).get("system_memory_count", 0) > 0)
+            with_service = sum(1 for record in records if (record.get("host_metrics") or {}).get("service_load"))
+            with_gpu = sum(1 for record in records if (record.get("host_metrics") or {}).get("gpu_devices"))
+            with_tokens = sum(1 for record in records if (record.get("tokens_per_agent_total") or 0) > 0 and record.get("agent_token_rates"))
+            with_cost = sum(1 for record in records if (record.get("cost_summary") or {}).get("components"))
+            floor = int(len(records) * 0.9)  # the live edge bucket may be partial
+            assert with_memory >= floor, f"range {range_seconds}s: memory in {with_memory}/{len(records)}"
+            assert with_service >= floor, f"range {range_seconds}s: service_load in {with_service}/{len(records)}"
+            assert with_gpu >= floor, f"range {range_seconds}s: gpu in {with_gpu}/{len(records)}"
+            assert with_tokens >= floor, f"range {range_seconds}s: token detail in {with_tokens}/{len(records)} (must ride every record now)"
+            assert with_cost >= floor, f"range {range_seconds}s: cost summary in {with_cost}/{len(records)} (must ride every record now)"
+
+        # LEGACY COMPAT (never-hard-gate; retire with the server path): an OLD client
+        # still sending token_resolution > 0 keeps the pre-cutover wire — slimmed main
+        # records plus the separate agent_token_history payload.
+        legacy = service._encoded_history(legacy_reader_history_request(24 * 3600, now))
+        assert legacy["agent_token_history"]["records"], "legacy clients lost the compact token stream"
+        assert all("agent_token_rates" not in record and "cost_summary" not in record for record in legacy["records"]), "legacy main records must stay slimmed"
+        assert all("host_metrics" in record for record in legacy["records"]), "legacy records must keep host metrics"
+    finally:
+        service.store.close()
+
+
+def test_token_detail_12_to_24h_band_serves_at_the_600s_tier_like_the_legacy_stream(tmp_path):
+    """DOCUMENTED TRADEOFF of the single-stream cutover: token bars in the 12-24h band
+    render at the 600s retention tier. This is NOT a regression — the legacy compact
+    token stream's 300s request was only a floor (`effective_resolution =
+    max(requested, retained)`), and the durable tiers retain only 600s buckets past
+    12h, so the old stream really served 600s there too. This test proves BOTH: the
+    unified records carry token detail at 600s in that band, and the still-served
+    legacy stream yields the same 600s records (nothing finer was lost)."""
+    now = int(time.time() // 600 * 600)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        _seed_graduated_host_and_token_store(service, now)
+        history = service._encoded_history(reader_history_request(24 * 3600, now))
+        old_band = [record for record in history["records"] if now - int(record["start"]) > 12 * 3600]
+        assert old_band, "the 24h response covers the 12-24h band"
+        assert {int(record["duration"]) for record in old_band} == {600}, "12-24h unified records serve at the 600s tier"
+        assert all(record.get("agent_token_rates") and (record.get("cost_summary") or {}).get("components") for record in old_band), \
+            "12-24h unified records must still carry token rates and cost detail"
+        # The 8-12h band retains 300s buckets, and the single stream serves them at
+        # the retained tier — as fine as anything the legacy stream ever returned.
+        mid_band = [record for record in history["records"] if 8 * 3600 < now - int(record["start"]) <= 12 * 3600]
+        assert mid_band and max(int(record["duration"]) for record in mid_band) <= 600
+
+        legacy = service._encoded_history(legacy_reader_history_request(24 * 3600, now))
+        legacy_old_band = [record for record in legacy["agent_token_history"]["records"] if now - int(record["start"]) > 12 * 3600]
+        assert legacy_old_band, "the legacy stream covers the 12-24h band"
+        assert {int(record["duration"]) for record in legacy_old_band} == {600}, \
+            "the legacy compact stream serves the same 600s tier there — its 300s request was a floor, not a guarantee"
+    finally:
+        service.store.close()
+
+
+def test_agent_token_rates_fold_beyond_24_agents_into_one_other_row_preserving_totals(tmp_path):
+    """BOUND: a record carrying more than 24 agents folds the smallest into one
+    aggregate `other` row so the 24h single-stream payload stays within budget.
+    Totals (scalars, billable dimensions, model rates) are preserved exactly."""
+    now = int(time.time() // 600 * 600)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        agent_count = 30
+        bucket = stats_store.empty_bucket(now - 600, 60)
+        bucket.update({"sequence": 1, "server_sequence": 1, "cpu_total_percent": 20.0, "cpu_count": 1.0, "tokens_per_agent_total": 465.0, "agent_token_samples": 1.0})
+        bucket["agent_token_rates"] = {
+            f"s|{index}|codex": {"label": f"s:{index}", "total": float(index + 1), "samples": 1.0, "tokens": float(index + 1), "seconds": 60.0, "source": "transcript",
+                                 "model_rates": {"gpt-5.6": {"label": "gpt-5.6", "total": float(index + 1), "samples": 1.0, "tokens": float(index + 1), "seconds": 60.0}}}
+            for index in range(agent_count)
+        }
+        service.store.upsert_bucket(bucket)
+        history = service._encoded_history(reader_history_request(1800, now))
+        record = next(record for record in history["records"] if record.get("agent_token_rates"))
+        rates = record["agent_token_rates"]
+        assert len(rates) == statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS, f"got {len(rates)} rows"
+        other = rates[-1]
+        assert other["key"] == "other" and other["source"] == "fold"
+        folded_count = agent_count - (statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS - 1)
+        assert other["label"] == f"other ({folded_count} agents)"
+        assert sum(row["total"] for row in rates) == sum(range(1, agent_count + 1))
+        assert sum(row["tokens"] for row in rates) == sum(range(1, agent_count + 1))
+        assert sum((row["model_rates"].get("gpt-5.6") or {}).get("total", 0) for row in rates) == sum(range(1, agent_count + 1))
+        # The kept rows are the LARGEST agents; the fold row aggregates the smallest.
+        kept_keys = {row["key"] for row in rates if row["key"] != "other"}
+        assert kept_keys == {f"s|{index}|codex" for index in range(agent_count - (statsd.STATS_AGENT_TOKEN_RATES_MAX_AGENTS - 1), agent_count)}
+    finally:
+        service.store.close()
+
+
+def test_ping_carries_the_code_revision_stamp(tmp_path):
+    """Same-protocol stale daemons repeatedly survived restarts while serving old code
+    (2026-07-14/15 incidents). The ping now carries a content-hash stamp of the stats
+    modules so the registry can retire-and-respawn a drifted daemon."""
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        response, _binary = service.handle_with_binary({"action": "ping", "protocol_version": statsd.STATSD_PROTOCOL_VERSION}) if hasattr(service, "handle_with_binary") else (service.handle({"action": "ping", "protocol_version": statsd.STATSD_PROTOCOL_VERSION}), b"")
+        assert response["ok"] is True
+        assert response["code_revision"] == statsd.STATSD_CODE_REVISION
+        assert len(statsd.STATSD_CODE_REVISION) == 12
+    finally:
+        service.store.close()
+
+
+def test_registry_health_rejects_code_revision_drift(tmp_path, monkeypatch):
+    """A daemon reporting a different (or missing) code revision is unhealthy, which
+    drives the registry's retire-and-respawn path. Missing counts as drift: an old
+    daemon that predates the stamp must also be replaced. Respawn is idempotent, so
+    this self-heals and can never hang a request (the never-hard-gate rule)."""
+    spec = LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", statsd.STATSD_PROTOCOL_VERSION, code_revision="currentrev12")
+    registry = LocalServiceRegistry(tmp_path, spec, socket_path=tmp_path / "statsd.sock")
+
+    responses = {}
+
+    def fake_request(action, timeout=0.2):
+        return dict(responses)
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123, "code_revision": "currentrev12"}
+    assert registry.healthy() is True
+
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123, "code_revision": "staleoldrev0"}
+    assert registry.healthy() is False
+
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123}
+    assert registry.healthy() is False, "a daemon that predates the stamp is drift too"
+
+    unstamped = LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", statsd.STATSD_PROTOCOL_VERSION)
+    plain = LocalServiceRegistry(tmp_path, unstamped, socket_path=tmp_path / "jobd.sock")
+    monkeypatch.setattr(plain, "_request", fake_request)
+    responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123}
+    assert plain.healthy() is True, "services that have not opted in keep the old contract"
+
+
+def test_retire_fires_on_same_protocol_code_revision_drift(tmp_path, monkeypatch):
+    """Live-QA regression (2026-07-15): healthy() rejected a same-protocol stale-revision
+    daemon, but _retire_incompatible_service only retired on PROTOCOL drift — the stale
+    daemon kept the socket, the fresh spawn could not bind, and ensure_started failed
+    forever. Drifted revision must drive the same shutdown as a protocol bump."""
+    spec = LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", statsd.STATSD_PROTOCOL_VERSION, code_revision="currentrev12")
+    registry = LocalServiceRegistry(tmp_path, spec, socket_path=tmp_path / "statsd.sock")
+
+    actions = []
+    ping = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 4242, "code_revision": "staleoldrev0"}
+
+    def fake_request(action, payload=None, timeout=0.2):
+        actions.append(action)
+        return dict(ping) if action == "ping" else {"ok": True}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr("yolomux_lib.local_services.registry.pid_is_alive", lambda pid: "shutdown" not in actions)
+
+    registry._retire_incompatible_service()
+    assert "shutdown" in actions, "same-protocol revision drift must retire the daemon"
+
+    actions.clear()
+    ping["code_revision"] = "currentrev12"
+    registry._retire_incompatible_service()
+    assert "shutdown" not in actions, "a matching daemon must never be shut down"

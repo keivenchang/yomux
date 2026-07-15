@@ -90,11 +90,22 @@
   background: color-mix(in srgb, var(--pane-tab-text) 55%, transparent);
   cursor: grab;
 }
+/* Esc sits alone in the top-left corner of the keybar, like a real keyboard, level with
+   the primary row. Ctrl/Shift keep their own column directly below it, unchanged. */
+.mobile-terminal-keybar > .mobile-terminal-key--escape {
+  grid-column: 1;
+  grid-row: 1;
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  align-self: start;
+  justify-self: start;
+}
 .mobile-terminal-key-side {
   grid-column: 1;
   grid-row: 2;
   display: grid;
-  grid-template-rows: repeat(3, 36px);
+  grid-template-rows: repeat(2, 36px);
   align-self: end;
   align-content: start;
   gap: var(--space-1);
@@ -156,6 +167,7 @@
   display: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more > .mobile-terminal-key--escape,
 .mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad,
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-bottom {
@@ -603,6 +615,23 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .terminal-connection-pending > .xterm {
   opacity: 0.52;
+}
+/* A pending tmux sub-window switch must never show the previous window's frame: an opaque
+   full-container backdrop (inheriting the shared terminal container background set by
+   applyTerminalContainerTheme) sits above the xterm layers while xterm stays mounted and keeps
+   ingesting output behind it. The connection-state badge stays on its higher badge layer. */
+.terminal-connection-switching::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  background: inherit;
+}
+/* Sibling low-layer overlays (file-link underlines, attention highlight) belong to the masked
+   previous frame; they must not leak above the opaque switch backdrop. */
+.terminal-connection-switching .terminal-file-link-underlines,
+.terminal-connection-switching .terminal-attention-question-overlay {
+  visibility: hidden;
 }
 .terminal-connection-state {
   position: absolute;

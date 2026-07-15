@@ -9,17 +9,18 @@ import json
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Iterator
 
 from .atomic_file import atomic_write_text
+from .atomic_file import begin_wal_migration
 from .atomic_file import file_lock
+from .atomic_file import open_wal_database
+from .atomic_file import open_wal_session
 from .common import STATE_DIR
 
 
@@ -196,39 +197,12 @@ class ChatStore:
         return self._fts_mode
 
     def _raw_connection(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
-        connection = sqlite3.connect(
-            self.path,
-            timeout=CHAT_BUSY_TIMEOUT_MS / 1000,
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
-        connection.execute(f"PRAGMA busy_timeout = {CHAT_BUSY_TIMEOUT_MS}")
+        connection = open_wal_database(self.path, CHAT_BUSY_TIMEOUT_MS, row_factory=sqlite3.Row)
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        self._initialize()
-        connection = self._raw_connection()
-        try:
-            yield connection
-        finally:
-            connection.close()
-
-    @staticmethod
-    def _enable_wal(connection: sqlite3.Connection) -> None:
-        for attempt in range(6):
-            try:
-                connection.execute("PRAGMA journal_mode = WAL")
-                return
-            except sqlite3.OperationalError as error:
-                if "locked" not in str(error).lower() and "busy" not in str(error).lower():
-                    raise
-                if attempt == 5:
-                    raise
-                time.sleep(0.02 * (attempt + 1))
+    def _connection(self) -> Any:
+        return open_wal_session(self._initialize, self._raw_connection)
 
     def _initialize(self) -> None:
         if self._initialized:
@@ -239,10 +213,7 @@ class ChatStore:
             connection: sqlite3.Connection | None = None
             try:
                 connection = self._raw_connection()
-                self._enable_wal(connection)
-                connection.execute("PRAGMA synchronous = NORMAL")
-                connection.execute("BEGIN IMMEDIATE")
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                version = begin_wal_migration(connection)
                 if version > CHAT_SCHEMA_VERSION:
                     raise ChatStoreMigrationError(
                         f"YO!chat database schema {version} is newer than supported schema {CHAT_SCHEMA_VERSION}"

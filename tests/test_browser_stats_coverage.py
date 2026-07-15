@@ -4,6 +4,7 @@ import json
 import time
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
+from tests.test_stats_golden_pipeline import _seed_real_pipeline
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
 
@@ -26,7 +27,7 @@ def _morning_after_protocol_history(tmp_path):
             "action": "ping",
             "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
         })
-        assert protocol["version"] == statsd.STATSD_PROTOCOL_VERSION == 21
+        assert protocol["version"] == statsd.STATSD_PROTOCOL_VERSION == 22
         for segment_start, segment_end, bucket_seconds in (
             (retained_start, sleep_start, 600),
             (wake_time, now, 60),
@@ -113,13 +114,14 @@ def _morning_after_protocol_history(tmp_path):
                     }],
                     "now": sample_time,
                     "compact": False,
-                    "refresh_rollups": False,
                 })
                 assert marker["ok"] is True
                 assert marker["version"] == statsd.STATSD_PROTOCOL_VERSION
 
         histories = {}
         for range_seconds in (3600, 4 * 3600, 24 * 3600):
+            # The current client sends NO token_* params: token detail rides
+            # every history record of the one history stream.
             history = service.handle({
                 "action": "history",
                 "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
@@ -128,9 +130,6 @@ def _morning_after_protocol_history(tmp_path):
                 "resolution_seconds": 1,
                 "max_points": 6000,
                 "client_id": "morning-after-browser",
-                "token_resolution_seconds": 60,
-                "token_history_start": now - range_seconds,
-                "token_history_end": 0,
             })
             assert history["ok"] is True
             assert history["coverage"]["complete"] is (range_seconds == 3600)
@@ -159,11 +158,22 @@ def _install_morning_after_fetch(browser, fixture):
           const url = new URL(String(input), 'https://localhost');
           if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
           const requestedStart = Number(url.searchParams.get('history_start'));
+          const since = Number(url.searchParams.get('since')) || 0;
           const requestedSpan = Math.max(1, Number(fixture.now) - requestedStart);
           const key = Object.keys(fixture.histories).sort(
             (left, right) => Math.abs(Number(left) - requestedSpan) - Math.abs(Number(right) - requestedSpan)
           )[0];
           window.__morningAfterFetchCounts[key] = Number(window.__morningAfterFetchCounts[key] || 0) + 1;
+          window.__morningAfterLastSince = since;
+          const base = fixture.histories[key];
+          // Honor the reader cursor exactly as the real reader does: a nonzero `since` is a
+          // cursor delta that returns ONLY records newer than the cursor, never a full
+          // re-snapshot. This is what makes a wrong cursor-delta refinement request visibly
+          // sparse instead of silently full — the prior stub ignored `since` and was
+          // false-green (a poisoned since=N refinement looked as complete as a since=0 one).
+          const history = since > 0
+            ? {...base, records: (Array.isArray(base.records) ? base.records : []).filter(record => Number(record.sequence) > since)}
+            : base;
           return jsonResponse({
             ok: true,
             time: Number(fixture.now),
@@ -172,7 +182,7 @@ def _install_morning_after_fetch(browser, fixture):
             cpu_percent: 25,
             system_cpu_percent: 40,
             rss_bytes: 64 * 1024 * 1024,
-            history: fixture.histories[key],
+            history,
           });
         };
         """,
@@ -245,7 +255,7 @@ def _run_morning_after_range(browser, range_seconds):
               rawBuckets: summary.rawBuckets,
               rollupBuckets: summary.rollupBuckets,
               displayBuckets: summary.displayBuckets,
-              agentTokenBuckets: summary.agentTokenBuckets,
+              tokenDetailBuckets: debugGraphAgentTokenDisplayBuckets(Date.now()).filter(bucket => Number(bucket.agentTokenSamples || 0) > 0).length,
               rangeSeconds: summary.rangeSeconds,
               resolutionSeconds: summary.resolutionSeconds,
             },
@@ -280,7 +290,9 @@ def test_morning_after_sleep_gap_protocol_history_is_honest_and_reload_idempoten
         assert result["retryButtons"] == 0 and result["errorText"] is False, result
         assert result["degradedMessages"] == [], result
         assert result["summary"]["displayBuckets"] > 0, result
-        assert result["summary"]["agentTokenBuckets"] > 0, result
+        # Token detail rides the same records (no separate token stream), so the
+        # unified token display buckets must carry samples at every range.
+        assert result["summary"]["tokenDetailBuckets"] > 0, result
         assert result["stores"]["status"] == result["stores"]["tokens"] == result["stores"]["cost"], result
         assert result["gaps"]["status"] == result["gaps"]["tokens"] == result["gaps"]["cost"], result
 
@@ -293,7 +305,19 @@ def test_morning_after_sleep_gap_protocol_history_is_honest_and_reload_idempoten
     assert results[24 * 3600]["gaps"]["status"] == expected_overnight_gap, results[24 * 3600]
     assert results[24 * 3600]["overlays"] == {"status": 1, "tokens": 1, "cost": 1}, results[24 * 3600]
 
-    before_reload = json.loads(json.dumps(results[24 * 3600], sort_keys=True))
+    def _honest_history(result):
+        # The reload-idempotency contract is about the HONEST rendered history (coverage
+        # gaps, no-data overlays, per-store spans, resolution, displayed buckets), not the
+        # transient live-tail sample counts: a real SSE sample can land in one run's brief
+        # settle window and not another's, so rawBuckets/rollupBuckets are wall-clock noise.
+        stable = json.loads(json.dumps(result, sort_keys=True))
+        summary = stable.get("summary")
+        if isinstance(summary, dict):
+            summary.pop("rawBuckets", None)
+            summary.pop("rollupBuckets", None)
+        return stable
+
+    before_reload = _honest_history(results[24 * 3600])
     browser.refresh()
     wait_for_live_runtime_bundle(browser, expected_url=browser.current_url)
     WebDriverWait(browser, 5).until(
@@ -304,4 +328,352 @@ def test_morning_after_sleep_gap_protocol_history_is_honest_and_reload_idempoten
     _install_morning_after_fetch(browser, fixture)
     after_reload = _run_morning_after_range(browser, 24 * 3600)
     assert after_reload.get("scriptError") is None, after_reload
-    assert after_reload == before_reload
+    assert _honest_history(after_reload) == before_reload
+
+
+def _mixed_resolution_history(tmp_path):
+    """Continuous 1h history: older half at 60s, recent half at 10s (no gap)."""
+    now = int(time.time() // 60 * 60)
+    database = tmp_path / "mixres" / "stats.sqlite3"
+    service = statsd.PersistentStatsService(tmp_path / "mixres" / "statsd.sock", database)
+    sequence = 0
+    try:
+        for segment_start, segment_end, bucket_seconds in ((now - 3600, now - 1800, 60), (now - 1800, now, 10)):
+            for bucket_start in range(segment_start, segment_end, bucket_seconds):
+                sequence += 1
+                duration = min(bucket_seconds, segment_end - bucket_start)
+                bucket = stats_store.empty_bucket(bucket_start, duration)
+                bucket.update({"sequence": sequence, "server_sequence": sequence, "cpu_total_percent": 25.0, "cpu_count": 1.0, "system_cpu_total_percent": 40.0, "system_cpu_count": 1.0})
+                service.store.upsert_bucket(bucket)
+        for family, cadence in (("cpu", 3600),):
+            service.handle({"action": "merge_server_records", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "records": [{"time": now - 3600, "_stats_coverage": {"family": family, "cadence_seconds": cadence, "epoch_id": f"e:{family}", "owner_generation": 1}}], "now": now - 3600, "compact": False})
+        history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": now - 3600, "end": 0, "resolution_seconds": 1, "max_points": 6000, "client_id": "mixres"})
+        assert history["ok"] is True
+    finally:
+        service.store.close()
+    return {"now": now, "history": history}
+
+
+def test_explicit_fine_resolution_coarsens_until_the_whole_range_is_covered(browser, tmp_path):
+    """A 10s override on a range whose older span is only 60s must render the FULL
+    range at one coarsened resolution (60s), never a finer half-empty chart."""
+    fixture = _mixed_resolution_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    browser.execute_script(
+        """
+        const fx = arguments[0]; stopJsDebugStatsPolling(); Date.now = () => Number(fx.now) * 1000;
+        const of = window.fetch; window.fetch = (i, o = {}) => { const u = new URL(String(i), 'https://localhost');
+          if (u.pathname !== '/api/stats-sample') return of(i, o);
+          return jsonResponse({ok: true, time: Number(fx.now), pid: 1, uptime_seconds: 10, cpu_percent: 25, rss_bytes: 1e8, history: fx.history}); };
+        """,
+        fixture,
+    )
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); resetJsDebugHistoryReadiness();
+          setDebugGraphRange(3600, {render: false});
+          setDebugGraphResolutionOverride(10);
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(3);
+          const domain = debugGraphDomain();
+          const coverageResSec = jsDebugHistoryCoverageResolutionForRange(Math.floor(domain.startMs / 1000), Math.ceil(domain.endMs / 1000));
+          const displayResSec = debugGraphDisplayResolutionMs(domain, 0) / 1000;
+          const buckets = debugGraphDisplayBuckets();
+          const startsAgoMin = buckets.length ? Math.round((domain.endMs - Math.min(...buckets.map(b => b.startMs))) / 60000) : 0;
+          done({coverageResSec, displayResSec, bucketCount: buckets.length, startsAgoMin});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    # Coverage for the whole range is 60s; the 10s override must coarsen to 60s.
+    assert out["coverageResSec"] == 60, out
+    assert out["displayResSec"] >= out["coverageResSec"], out
+    assert out["displayResSec"] == 60, out
+    # Full range rendered (buckets reach back ~60 min), not a half-empty chart.
+    assert out["startsAgoMin"] >= 55, out
+    assert out["bucketCount"] >= 50, out
+
+def test_switching_from_wide_range_does_not_coarsen_short_range_to_stale_resolution(browser, tmp_path):
+    """Regression for '10s@1h shows 600s': after a wide (24h) view establishes a
+    coarse coverage tail, switching to 1h with a 10s override must render at the
+    1h retained tier (not the stale wide-range 600s)."""
+    fixture = _morning_after_protocol_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    _install_morning_after_fetch(browser, fixture)
+    # Establish the wide-range coverage first (its old tail is 600s).
+    _run_morning_after_range(browser, 24 * 3600)
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          setDebugGraphRange(3600, {render: false});
+          setDebugGraphResolutionOverride(10);
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(3);
+          const domain = debugGraphDomain();
+          done({displayResSec: debugGraphDisplayResolutionMs(domain, 0) / 1000});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    # The 1h retained tier is <= 60s; it must NOT be the stale 600s wide-range value.
+    assert out["displayResSec"] <= 60, out
+    assert out["displayResSec"] != 600, out
+
+
+def test_wide_to_narrow_refines_with_since_zero_and_prefetch_cannot_repoison(browser, tmp_path):
+    """The full reported sequence WITHOUT reload: 16h -> 30m AUTO -> explicit 60s. The first
+    post-switch request must be a since=0 snapshot (not a cursor delta), the view must settle
+    to the fine tier, and a later full-retention prefetch must not drag it back to 600s."""
+    fixture = _morning_after_protocol_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    _install_morning_after_fetch(browser, fixture)
+    # Establish the coarse wide coverage (24h tail is 600s) and advance the live cursor.
+    _run_morning_after_range(browser, 16 * 3600)
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          // No clear/reset between ranges: switch straight from the wide view.
+          window.__morningAfterLastSince = -1;
+          setDebugGraphRange(30 * 60, {render: false});
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(3);
+          const sinceAfterSwitch = Number(window.__morningAfterLastSince);
+          setDebugGraphResolutionOverride(60);
+          await pollJsDebugStatsSample({forceGraphRefresh: true});
+          await window.__yolomuxTestHelpers.settle(2);
+          const beforePrefetch = debugGraphDisplayResolutionMs(debugGraphDomain(), 0) / 1000;
+          // Force the full-retention prefetch to run now; it must not re-coarsen the view.
+          await prefetchJsDebugHistoryFullRetention();
+          await window.__yolomuxTestHelpers.settle(2);
+          done({
+            sinceAfterSwitch,
+            rangeSeconds: jsDebugGraphRangeSeconds,
+            beforePrefetch,
+            afterPrefetch: debugGraphDisplayResolutionMs(debugGraphDomain(), 0) / 1000,
+          });
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["sinceAfterSwitch"] == 0, out  # a full since=0 refinement, not a poisoned cursor delta
+    assert out["rangeSeconds"] == 30 * 60, out  # the range stays 30m
+    assert out["beforePrefetch"] != 600 and out["beforePrefetch"] <= 60, out
+    assert out["afterPrefetch"] != 600 and out["afterPrefetch"] <= 60, out  # prefetch cannot re-poison
+
+
+def test_full_retention_prefetch_fills_cache_so_wide_range_renders_stale_without_touching_readiness(browser, tmp_path):
+    """The background full-retention prefetch must silently populate the shared bucket
+    cache so switching to a wide (24h) range renders cached content INSTANTLY (no blank),
+    while NOT disturbing the current view's readiness/overlay state machine."""
+    fixture = _morning_after_protocol_history(tmp_path)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof prefetchJsDebugHistoryFullRetention === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    _install_morning_after_fetch(browser, fixture)
+    # Establish a short (1h) current view; only ~1h of buckets exist in the cache.
+    _run_morning_after_range(browser, 3600)
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const startsAgoMin = () => {
+            const domain = debugGraphDomain();
+            const buckets = debugGraphDisplayBuckets();
+            return buckets.length ? Math.round((domain.endMs - Math.min(...buckets.map(b => b.startMs))) / 60000) : 0;
+          };
+          // maybePrefetch is a no-op before the first sample lands; after a 1h poll it is armed.
+          jsDebugStatsPollState.firstSampleReceived = true;
+          // Before prefetch: switching to 24h (no poll) shows only the ~1h cached tail.
+          setDebugGraphRange(24 * 3600, {render: false});
+          const wideBeforeMin = startsAgoMin();
+          setDebugGraphRange(3600, {render: false});
+          const readinessBefore = jsDebugHistoryReadinessSnapshot();
+          const countBefore = Number(window.__morningAfterFetchCounts['86400'] || 0);
+          // Silent full-retention cache-fill.
+          const ok = await prefetchJsDebugHistoryFullRetention();
+          await window.__yolomuxTestHelpers.settle(2);
+          const readinessAfter = jsDebugHistoryReadinessSnapshot();
+          const countAfter = Number(window.__morningAfterFetchCounts['86400'] || 0);
+          // After prefetch: switching to 24h (still no poll) now renders the full ~24h from cache.
+          setDebugGraphRange(24 * 3600, {render: false});
+          const wideAfterMin = startsAgoMin();
+          done({
+            ok,
+            wideBeforeMin,
+            wideAfterMin,
+            phaseBefore: readinessBefore.phase,
+            phaseAfter: readinessAfter.phase,
+            overlayBefore: readinessBefore.overlayVisible === true,
+            overlayAfter: readinessAfter.overlayVisible === true,
+            generationBefore: readinessBefore.generation,
+            generationAfter: readinessAfter.generation,
+            prefetchRequests: countAfter - countBefore,
+          });
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["ok"] is True, out
+    # The prefetch issued exactly one full-retention (24h span) request.
+    assert out["prefetchRequests"] == 1, out
+    # Cache-fill effect: before, the 24h view only reached back ~1h; after, ~full retention.
+    assert out["wideBeforeMin"] <= 120, out
+    assert out["wideAfterMin"] >= 20 * 60, out
+    # Silent: the current view's readiness phase, overlay, and generation are untouched.
+    assert out["phaseAfter"] == out["phaseBefore"], out
+    assert out["overlayAfter"] == out["overlayBefore"], out
+    assert out["generationAfter"] == out["generationBefore"], out
+
+
+def test_host_charts_render_data_at_four_hour_view_in_real_browser(browser, tmp_path):
+    """Screenshot-010 regression: at the 4h view, Server Load and System memory must draw
+    their series (never an axes-only shell) and GPU charts must either draw device data or
+    name a precise reason — never the ambiguous generic `None`."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script(
+        "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+    ))
+    out = browser.execute_script(
+        """
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        const nowSec = Math.floor(Date.now() / 1000 / 120) * 120;
+        const records = [];
+        for (let t = nowSec - (4 * 3600); t <= nowSec; t += 120) {
+          records.push({
+            start: t, duration: 120, sequence: records.length + 1,
+            cpu_total_percent: 20 * 120, cpu_count: 120, system_cpu_total_percent: 30 * 120, system_cpu_count: 120,
+            host_metrics: {
+              system_memory_used_total_bytes: 48e9 * 2, system_memory_capacity_total_bytes: 64e9 * 2, system_memory_count: 2,
+              service_load: {
+                'web:8881': {label: 'web', cpu_total_percent: 12 * 12, cpu_samples: 12, rss_total_bytes: 2e8, rss_samples: 12},
+                statsd: {label: 'statsd', cpu_total_percent: 0, cpu_samples: 12, rss_total_bytes: 1e8, rss_samples: 12},
+              },
+              gpu_devices: {'gpu:0': {label: 'GPU 0 (Apple M4 Pro)', util_total_percent: 0, memory_used_total_bytes: 2.9e9 * 12, memory_capacity_total_bytes: 51.5e9 * 12, samples: 12}},
+            },
+          });
+        }
+        for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) setDebugGraphChartVisible(key, true);
+        setDebugGraphRange(4 * 3600, {render: false});
+        debugGraphApplyServerHistory({sequence: records.length, records});
+        renderDebugPanels({force: true});
+        const graph = document.querySelector('[data-js-debug-graph]');
+        const chart = key => graph.querySelector(`[data-js-debug-chart="${key}"]`);
+        const visibleLine = (key, series) => {
+          const node = chart(key)?.querySelector(`[data-js-debug-series="${series}"]`);
+          if (!node) return 0;
+          const box = node.getBoundingClientRect();
+          return box.width;
+        };
+        return {
+          memoryLineWidth: visibleLine('memory', 'systemMemory'),
+          serversLoadWebWidth: visibleLine('serversLoad', 'serviceLoad:web:8881'),
+          serversLoadIdleWidth: visibleLine('serversLoad', 'serviceLoad:statsd'),
+          gpuUtilUnavailable: Boolean(chart('gpuUtil')?.querySelector('[data-js-debug-gpu-unavailable]')),
+          gpuMemoryLine: Boolean(chart('gpuMemory')?.querySelector('[data-js-debug-series="gpu:gpuMemory:gpu:0"], [data-js-debug-area-series="gpu:gpuMemory:gpu:0"]')),
+          gpuNoneText: (chart('gpuUtil')?.textContent || '').includes('None') || (chart('gpuMemory')?.textContent || '').includes('None'),
+        };
+        """
+    )
+    # Server Load and System memory draw REAL geometry across the pane, not empty axes.
+    assert out["memoryLineWidth"] > 100, out
+    assert out["serversLoadWebWidth"] > 100, out
+    assert out["serversLoadIdleWidth"] > 100, out  # a zero-CPU service is still a drawn line
+    # GPU has data: charts render (not the unavailable state) and never say generic None.
+    assert out["gpuUtilUnavailable"] is False, out
+    assert out["gpuMemoryLine"] is True, out
+    assert out["gpuNoneText"] is False, out
+
+
+def test_yostats_boot_smoke_fresh_open_renders_every_family_at_15m_4h_24h(browser, tmp_path):
+    """Phase-0c boot smoke (the screenshot-012 scenario): a FRESH YO!stats open against a
+    REAL seeded store must render every family with real drawn geometry at the default
+    range, then across 4h and 24h switches through the real poll + stale-while-revalidate
+    path — never an axes-only shell. History payloads come from the real statsd writer
+    store encoded by the web's in-process StatsHistoryReader via the contract-tested
+    request shapes (the golden-pipeline seeder, which also asserts the retired
+    stats-reader process/socket never reappears)."""
+    now = int(time.time() // 600 * 600)
+    histories = _seed_real_pipeline(tmp_path, now)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script(
+        "return typeof pollJsDebugStatsSample === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+    ))
+    browser.execute_script(
+        """
+        const fixture = arguments[0];
+        stopJsDebugStatsPolling();
+        clearJsDebugGraphData();
+        resetJsDebugHistoryReadiness();
+        Date.now = () => Number(fixture.now) * 1000;
+        const originalFetch = window.fetch;
+        window.fetch = (input, options = {}) => {
+          const url = new URL(String(input), 'https://localhost');
+          if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
+          const requestedStart = Number(url.searchParams.get('history_start'));
+          const requestedSpan = Math.max(1, Number(fixture.now) - requestedStart);
+          const key = Object.keys(fixture.histories).sort(
+            (left, right) => Math.abs(Number(left) - requestedSpan) - Math.abs(Number(right) - requestedSpan)
+          )[0];
+          return jsonResponse({ok: true, time: Number(fixture.now), pid: 1, uptime_seconds: 600,
+            cpu_percent: 20, system_cpu_percent: 30, rss_bytes: 1e8, history: fixture.histories[key]});
+        };
+        for (const key of ['serversLoad', 'memory', 'gpuUtil', 'gpuMemory']) setDebugGraphChartVisible(key, true);
+        """,
+        {"now": now, "histories": histories},
+    )
+    out = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const results = {};
+          for (const rangeSeconds of [900, 4 * 3600, 24 * 3600]) {
+            setDebugGraphRange(rangeSeconds, {render: false});
+            await pollJsDebugStatsSample({forceGraphRefresh: true});
+            await window.__yolomuxTestHelpers.settle(3);
+            renderDebugPanels({force: true});
+            await window.__yolomuxTestHelpers.settle(2);
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const lineWidth = key => {
+              const node = graph?.querySelector(`[data-js-debug-series="${key}"]`);
+              if (!node) return 0;
+              const svg = node.closest('svg');
+              const svgWidth = svg ? svg.getBoundingClientRect().width : 0;
+              // Span ratio (%) of the line across its own chart plot: pane-size independent.
+              return svgWidth > 0 ? Math.round((node.getBoundingClientRect().width / svgWidth) * 100) : 0;
+            };
+            results[rangeSeconds] = {
+              phase: jsDebugHistoryReadinessSnapshot().phase,
+              emptyShell: Boolean(graph?.className.includes('js-debug-graph--empty')),
+              systemCpu: lineWidth('systemCpu'),
+              systemMemory: lineWidth('systemMemory'),
+              serversLoadWeb: lineWidth('serviceLoad:web:8881'),
+              gpuMemory: lineWidth('gpu:gpuMemory:gpu:0'),
+              gpuUnavailable: Boolean(graph?.querySelector('[data-js-debug-gpu-unavailable]')),
+              statusBars: graph?.querySelectorAll('[data-js-debug-bar-series="workingAgents"], [data-js-debug-bar-series="idleAgents"]').length || 0,
+            };
+          }
+          done(results);
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    for range_seconds in ("900", "14400", "86400"):
+        cell = out[range_seconds]
+        assert cell["phase"] == "ready", (range_seconds, cell)
+        assert cell["emptyShell"] is False, (range_seconds, cell)
+        # Real drawn geometry, not a token presence check: each family's line spans most
+        # of its own chart plot (percent of the chart svg width, pane-size independent).
+        assert cell["systemCpu"] > 60, (range_seconds, cell)
+        assert cell["systemMemory"] > 60, (range_seconds, cell)
+        assert cell["serversLoadWeb"] > 60, (range_seconds, cell)
+        assert cell["gpuMemory"] > 60, (range_seconds, cell)
+        assert cell["gpuUnavailable"] is False, (range_seconds, cell)
+        assert cell["statusBars"] > 0, (range_seconds, cell)

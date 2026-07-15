@@ -272,6 +272,7 @@
   "debug.errors": "أخطاء JS",
   "debug.events": "الأحداث",
   "debug.graph.agentStatus.noData": "لا توجد عينة لحالة الوكيل",
+  "debug.graph.noDataRecorded": "لا توجد بيانات مسجلة",
   "debug.graph.badConnection": "اتصال سيئ: لم يتم جمع أي بيانات لـ {duration}",
   "debug.graph.chart.agentStatus": "حالة الوكيل",
   "debug.graph.chart.agentStatus.desc": "يعد نوافذ الوكلاء حسب الحالة: يعمل، يحتاج انتباها، في انتقال، أو خامل من عينات حالة YOLOmux.",
@@ -2105,6 +2106,8 @@
   "terminal.window.pid": "(معرّف العملية={pid})",
   "terminal.window.previous": "نافذة tmux الفرعية السابقة",
   "terminal.window.prompt": "موجّه نافذة tmux الفرعية",
+  "terminal.window.switchLoading": "جارٍ تحميل {target}...",
+  "terminal.window.switchStalled": "لا يزال يتم تحميل {target}...",
   "terminal.window.title": "نافذة tmux {name}",
   "terminal.window.unnamed": "النافذة {index}",
   "terminal.xtermLoadFailed": "فشل تحميل xterm.js من /static/xterm.js. تعذّر إرفاق الطرفية.",
@@ -2728,5 +2731,9 @@
   "debug.system.sampler.header.lateMiss.full": "متأخرا / غاب",
   "debug.system.sampler.header.lateMiss.short": "متأخر/ملكة جمال",
   "debug.system.sampler.header.runtime.full": "وقت التشغيل الأخير",
-  "debug.system.sampler.header.runtime.short": "وقت التشغيل"
+  "debug.system.sampler.header.runtime.short": "وقت التشغيل",
+  "login.error.rateLimitedMinutes": "محاولات كثيرة جدًا. يرجى الانتظار بضع دقائق والمحاولة مرة أخرى.",
+  "login.error.rateLimitedHours": "محاولات كثيرة جدًا. يرجى الانتظار بضع ساعات والمحاولة مرة أخرى.",
+  "auth.error.rateLimitedMinutes": "طلبات كثيرة جدًا. يرجى الانتظار بضع دقائق والمحاولة مرة أخرى.",
+  "auth.error.rateLimitedHours": "طلبات كثيرة جدًا. يرجى الانتظار بضع ساعات والمحاولة مرة أخرى."
 }

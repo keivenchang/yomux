@@ -133,8 +133,8 @@ def test_live_runtime_raw_html_builder_has_no_external_callers():
 def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     source = (REPO_ROOT / "tests" / "browser_helpers" / "browser_layout.py").read_text(encoding="utf-8")
 
-    assert source.count("page.write_text(") == 2  # one static helper plus the distinct full-bundle loader
-    assert source.count("browser.get(page.as_uri())") == 1
+    assert source.count("page.write_text(") == 1  # the single serve_repo_fixture_page write owner
+    assert source.count("serve_repo_fixture_page(") == 3  # one definition plus the two fixture loaders
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
@@ -1148,7 +1148,10 @@ def test_debug_graph_thirty_minute_resolution_ignores_covered_coarse_boundary(br
     assert metrics == {
         "resolution": 30,
         "bucketDurations": [30_000],
-        "options": [0, 10, 30, 60, 120],
+        # Resolution universe simplified to AUTO + 1/10/60/300; at 30m the 1s
+        # and 300s choices are filtered (too fine for the budget / covered
+        # coarse boundary), leaving AUTO(0)/10/60.
+        "options": [0, 10, 60],
         "selected": "0",
     }, metrics
 
@@ -1867,14 +1870,15 @@ def test_debug_graph_initial_history_overlay_uses_shared_animated_ellipsis(brows
 @pytest.mark.boot
 def test_language_switch_relocalizes_open_help_and_stats(browser, tmp_path):
     selected_path = "/home/test/project/state.txt"
-    source_bundle = tmp_path / "yolomux-source.js"
-    source_bundle.write_text(build_asset("yolomux.js"), encoding="utf-8")
+    # Serve the custom bundle over the same http origin as the fixture page; Chrome 150
+    # blocks an http page from loading a file:// subresource.
+    source_bundle = serve_repo_fixture_page("yolomux-source.js", build_asset("yolomux.js"))
     load_live_runtime_boot_fixture(
         browser,
         tmp_path,
         "?debug=1&sessions=files,1,debug",
         sessions=["1"],
-        runtime_script_uri=source_bundle.as_uri(),
+        runtime_script_uri=fixture_page_url(source_bundle),
         file_explorer_open_intent="1",
         fs_entries={
             "/home/test": [{"name": "project", "path": "/home/test/project", "kind": "dir"}],
@@ -3809,7 +3813,7 @@ def test_debug_graph_cost_summary_is_compact_after_model_tokens_and_uses_its_dis
             usageRowAria: popover?.querySelector('[data-js-debug-cost-table="model"] tbody tr')?.getAttribute('aria-label') || '',
             usageMetricTexts: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child .js-debug-cost-table-metric') || [])].map(node => node.textContent.trim()),
             usageMetricRects: [...(popover?.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr:first-child > *') || [])].map(node => { const rect = node.getBoundingClientRect(); return {left: Math.round(rect.left), right: Math.round(rect.right)}; }),
-            totalHeaderInside: (() => { const rect = popover?.querySelector('[data-js-debug-cost-table="model"] thead th:last-child')?.getBoundingClientRect(); return Boolean(rect && popoverRect && rect.right <= popoverRect.right && rect.left >= popoverRect.left); })(),
+            totalHeaderInside: (() => { const th = popover?.querySelector('[data-js-debug-cost-table="model"] thead th:last-child'); const wrap = th?.closest('.js-debug-cost-table-wrap'); if (!th || !wrap || !popoverRect) return false; const rect = th.getBoundingClientRect(); const wrapRect = wrap.getBoundingClientRect(); const containsScroll = getComputedStyle(wrap).overflowX === 'auto'; const wrapInside = wrapRect.right <= popoverRect.right + 1 && wrapRect.left >= popoverRect.left - 1; const totalRendered = rect.width > 0 && rect.right <= wrap.scrollLeft + wrapRect.left + wrap.scrollWidth + 1; return Boolean(containsScroll && wrapInside && totalRendered); })(),
             sourceLinkCount: popover?.querySelectorAll('[data-js-debug-cost-transcript-path]').length || 0,
             outerOverflow: popover ? getComputedStyle(popover).overflowY : '',
             bodyOverflow: reportBody ? getComputedStyle(reportBody).overflowY : '',
@@ -4338,6 +4342,8 @@ def test_debug_graph_chart_toggles_persist_preferences(browser, tmp_path):
             "modelTokenDimension": "output",
             "hiddenCharts": ["costSummary", "gpuMemory", "gpuUtil", "serversLoad"],
         "visibleCharts": ["cpu", "memory"],
+        # Logs level filter now persists; default is warning+error.
+        "logLevels": ["error", "warning"],
     }, metrics
 
     browser.refresh()
@@ -4478,7 +4484,10 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
               calculationCellCounts: [...(calculationTable?.tBodies[0]?.rows || [])].map(row => row.cells.length),
               compactTablesContained: [modelTable, calculationTable].every(table => {
                 const wrap = table?.closest('.js-debug-cost-table-wrap');
-                return Boolean(wrap && (width > 360 || wrap.scrollWidth <= wrap.clientWidth + 1));
+                // New contract: the compact tables never reflow into stacked
+                // cards; when too narrow they scroll horizontally inside their
+                // own contained overflow-x wrap (the pane never scrolls).
+                return Boolean(wrap && getComputedStyle(wrap).overflowX === 'auto');
               }),
               visibleUnpricedRowCount: visibleUnpricedRows.length,
               visibleUnpricedText: visibleUnpricedRows.map(row => row.textContent.trim()),
@@ -4529,6 +4538,89 @@ def test_debug_cost_and_system_shared_shell_rejects_vertical_character_wrap_at_a
     assert metrics["source"]["path"] == metrics["transcript"], metrics
     assert metrics["source"]["middleParts"] == 2, metrics
     assert all(item["sourceCells"][0] > min(item["sourceCells"][1:]) for item in metrics["layouts"] if item["width"] >= 720), metrics
+
+
+def test_yocost_tables_are_plain_ruled_aligned_and_source_is_single_line(browser, tmp_path):
+    """Plain ruled tables: both-axis gridlines, By Agent/Model Usages columns aligned,
+    and source-attribution rows single-line with a middle-truncated path."""
+    browser.set_window_size(1400, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(
+        lambda d: d.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const lp = '/Users/keivenc/.claude/projects/-Users-keivenc-Documents-bin-yolomux-dev8881/d03f4c97-ab37-4e61-a4d2-403d9507e4fc.jsonl';
+          const mk = (i) => ({start: now - ((5 - i) * 60), duration: 60, sequence: i + 1, tokens_per_agent_total: 100 + i, agent_token_samples: 1,
+            agent_token_rates: [{key: 'a|0|codex', label: 'a:0:codex', total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-terra': {total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60}}}],
+            cost_summary: {total_micro_usd: 20000, known_micro_usd: 20000, priced_count: 6, complete: true, unpriced_count: 0,
+              components: [{key: 'input', direction: 'input', quantity: 10, unit: 'tokens', micro_usd: 2000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://a'}],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: 'high', token_quantity: 30, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000}, {provider: 'anthropic', model: 'claude-opus-4-8', effort: '', token_quantity: 40, input_tokens: 20, cache_tokens: 10, output_tokens: 10, input_micro_usd: 4000, cache_micro_usd: 3000, output_micro_usd: 3000, other_micro_usd: 0, micro_usd: 10000}],
+              sources: [{tmux_key: 'x', agent_kind: 'codex', source: lp, transcript: lp, model: 'gpt-5.6-terra', token_quantity: 30000000, input_tokens: 10, cache_tokens: 10, output_tokens: 10, input_micro_usd: 2000, cache_micro_usd: 3000, output_micro_usd: 5000, other_micro_usd: 0, micro_usd: 10000, lower_micro_usd: 10000, upper_micro_usd: 10000}],
+              catalog_revision: 't', freshness: 'verified'}});
+          debugGraphApplyServerHistory({sequence: 6, records: Array.from({length: 6}, (_u, i) => mk(i))});
+          setDebugGraphChartVisible('modelTokens', true); setDebugGraphChartVisible('costSummary', true); setDebugGraphRange(6 * 60); renderDebugPanels({force: true});
+          document.querySelector('[data-js-debug-graph]')?.querySelector('[data-js-debug-summary-group="costSummary"] [data-js-debug-cost-details]')?.click();
+          await window.__yolomuxTestWaitFor(
+            () => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('.js-debug-cost-report'),
+            {timeoutMs: 3000, intervalMs: 20, description: 'yocost'},
+          );
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const panel = document.getElementById(panelDomId(yocostItemId));
+          const headerX = sel => { const t = panel.querySelector(sel); return t ? [...t.querySelectorAll('thead th')].map(h => Math.round(h.getBoundingClientRect().left)) : null; };
+          const cell = panel.querySelector('[data-js-debug-cost-table="agent"] tbody td');
+          const cs = cell ? getComputedStyle(cell) : null;
+          const src = panel.querySelector('[data-js-debug-cost-table="source"]');
+          const srcRow = src?.querySelector('tbody tr');
+          const srcLink = src?.querySelector('.js-debug-cost-transcript-link');
+          const agentTable = panel.querySelector('[data-js-debug-cost-table="agent"]');
+          const agentWrap = agentTable?.closest('.js-debug-cost-table-wrap');
+          const titleRow = panel.querySelector('.js-debug-cost-report-title');
+          const titleH1 = titleRow?.querySelector('h1');
+          const rangeSpan = titleRow?.querySelector('.js-debug-cost-report-range');
+          const totalsLine = panel.querySelector('[data-js-debug-cost-report-totals]');
+          const catalogLine = panel.querySelector('[data-js-debug-cost-catalog]');
+          done({
+            agentCols: headerX('[data-js-debug-cost-table="agent"]'),
+            modelCols: headerX('[data-js-debug-cost-table="model"]'),
+            borderBottom: cs?.borderBottomWidth, borderRight: cs?.borderInlineEndWidth,
+            sourceRowHeight: srcRow ? Math.round(srcRow.getBoundingClientRect().height) : null,
+            sourceMiddleParts: srcLink ? srcLink.querySelectorAll('[data-middle-truncate-part]').length : 0,
+            sourceHasTitle: Boolean(srcLink?.title),
+            agentTableWidth: agentTable ? Math.round(agentTable.getBoundingClientRect().width) : null,
+            agentWrapWidth: agentWrap ? Math.round(agentWrap.getBoundingClientRect().width) : null,
+            titleOneLine: Boolean(titleH1 && rangeSpan) && Math.abs(titleH1.getBoundingClientRect().top - rangeSpan.getBoundingClientRect().top) < titleH1.getBoundingClientRect().height,
+            totalsLineText: totalsLine ? totalsLine.textContent : null,
+            catalogLineText: catalogLine ? catalogLine.textContent : null,
+            catalogTableRetired: !panel.querySelector('[data-js-debug-cost-table="catalog"]'),
+            summaryListRetired: !panel.querySelector('.js-debug-cost-report-list'),
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert not metrics.get("error"), metrics
+    # Each usage table keeps its matching six columns; the retired cross-table
+    # stretched template no longer forces the two tables to share one full width.
+    assert metrics["agentCols"] and len(metrics["agentCols"]) == len(metrics["modelCols"]) == 6, metrics
+    # Plain ruled table: gridlines on BOTH axes.
+    assert metrics["borderBottom"] == "1px" and metrics["borderRight"] == "1px", metrics
+    # Source path stays a single-line row and middle-truncates with a full-path title.
+    assert metrics["sourceRowHeight"] is not None and metrics["sourceRowHeight"] <= 48, metrics
+    assert metrics["sourceMiddleParts"] == 2 and metrics["sourceHasTitle"] is True, metrics
+    # Compact report contract: content-sized tables (short content stays narrower than
+    # the wide container), one heading+range line, one totals line, one catalog line.
+    assert metrics["agentTableWidth"] and metrics["agentWrapWidth"], metrics
+    assert metrics["agentTableWidth"] < metrics["agentWrapWidth"] - 40, metrics  # content-sized, not stretched
+    assert metrics["titleOneLine"] is True, metrics
+    assert metrics["totalsLineText"] and "total tokens" in metrics["totalsLineText"] and "input=" in metrics["totalsLineText"], metrics
+    assert metrics["catalogLineText"] and "rev" in metrics["catalogLineText"] and "coverage" in metrics["catalogLineText"], metrics
+    assert metrics["catalogTableRetired"] is True and metrics["summaryListRetired"] is True, metrics
 
 
 def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_squishing(browser, tmp_path):
@@ -4584,14 +4676,14 @@ def test_yocost_by_agent_cards_scroll_horizontally_at_extreme_narrow_instead_of_
         """
     )
     narrow = {item["width"]: item for item in metrics["layouts"]}
-    # Extreme-narrow: contained horizontal scroll, never a squish, never a pane scrollbar.
-    assert narrow[260]["overflowX"] == "auto", metrics
-    assert narrow[260]["scrolls"] is True, metrics
-    assert narrow[260]["squishes"] is False, metrics
-    assert narrow[260]["paneScrolls"] is False, metrics
-    # Normal-narrow still reflows to cards with no horizontal scroll.
-    assert narrow[360]["scrolls"] is False, metrics
-    assert narrow[360]["squishes"] is False, metrics
+    # No card reflow at any narrow width: the full ruled table stays intact and
+    # its section scrolls horizontally (contained), never squishing or reflowing,
+    # and the pane itself never gains a horizontal scrollbar.
+    for width in (260, 360):
+        assert narrow[width]["overflowX"] == "auto", metrics
+        assert narrow[width]["scrolls"] is True, metrics
+        assert narrow[width]["squishes"] is False, metrics
+        assert narrow[width]["paneScrolls"] is False, metrics
 
 
 def test_debug_token_hover_reports_real_bucket_span_samples_and_gaps(browser, tmp_path):
@@ -5104,6 +5196,10 @@ def test_debug_logs_tab_merges_levels_filters_and_stays_readable_narrowly(browse
           view.style.width = '240px';
           view.style.height = '260px';
           const list = view.querySelector('[data-js-debug-log-list]');
+          // Info and Debug are hidden by default (warning+error); enable them so
+          // the merge of all four server+client levels is exercised.
+          view.querySelector('[data-js-debug-log-level="info"]')?.click();
+          view.querySelector('[data-js-debug-log-level="debug"]')?.click();
           const initial = [...view.querySelectorAll('[data-js-debug-log-entry]')];
           const themeColors = ['dark', 'light'].map(theme => {
             document.body.classList.toggle('theme-light', theme === 'light');
@@ -5192,7 +5288,9 @@ def test_debug_agent_status_bars_touch_and_sampler_gap_has_overlay(browser, tmp_
     assert len(metrics["outages"]) == 2 and all(item["width"] > 0 for item in metrics["outages"]), metrics
     assert all("sample" in item["title"].lower() for item in metrics["outages"]), metrics
     assert metrics["transitionBoundary"] > metrics["working"][-1]["x"], metrics
-    assert metrics["cpuSegments"] == 2 and metrics["cpuHasStatusOverlay"] is False, metrics
+    # A covered-but-unsampled CPU span now interpolates into ONE continuous line (no
+    # recorded coverage gap), and CPU never reuses the Agent-status sampler overlay.
+    assert metrics["cpuSegments"] == 1 and metrics["cpuHasStatusOverlay"] is False, metrics
 
 def test_debug_graph_chart_close_uses_one_completed_click(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
@@ -5549,11 +5647,15 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert drag_metrics["rangeSeconds"] > 300, drag_metrics
 
 
-def test_debug_graph_short_range_refetches_token_rates_after_compact_token_history(browser, tmp_path):
+def test_debug_graph_token_rates_render_inline_from_the_single_history_stream(browser, tmp_path):
+    """ONE history stream: a range change fetches ordinary history WITHOUT any
+    legacy token_* params, and the token chart renders the inline
+    agent_token_rates that ride the returned records (the retired compact
+    token side-stream no longer exists on the client)."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "return typeof setDebugGraphRange === 'function' && typeof debugGraphApplyServerAgentTokenHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
+            "return typeof setDebugGraphRange === 'function' && typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"
         )
     )
     metrics = browser.execute_async_script(
@@ -5569,19 +5671,6 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
           jsDebugStatsPollState.pendingForceGraphRefresh = false;
           const nowSeconds = Math.floor(Date.now() / 1000);
           jsDebugGraphRangeSeconds = 8 * 60 * 60;
-          jsDebugStatsAgentTokenResolutionSeconds = 120;
-          debugGraphApplyServerAgentTokenHistory({
-            sequence: 9,
-            resolution_seconds: 120,
-            records: [{
-              start: nowSeconds - (60 * 60),
-              duration: 120,
-              sequence: 9,
-              tokens_per_agent_total: 100,
-              agent_token_samples: 1,
-              agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}],
-            }],
-          });
           setJsDebugHistoryReadiness('ready', {
             loadedStartSeconds: nowSeconds - (8 * 60 * 60),
             loadedEndSeconds: nowSeconds,
@@ -5598,7 +5687,6 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
             return Promise.resolve(new Response(JSON.stringify({history: {
               sequence: 50,
               latest_sequence: 50,
-              agent_token_schema_version: 2,
               records: [{
                 start: nowSeconds - 60,
                 duration: 60,
@@ -5620,7 +5708,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
             setDebugGraphRange(2 * 60 * 60);
             await window.__yolomuxTestWaitFor(
               () => requests.length >= 1 && !jsDebugStatsPollState.inFlight,
-              {timeoutMs: 3000, intervalMs: 20, description: 'short-range token history refetch'},
+              {timeoutMs: 3000, intervalMs: 20, description: 'short-range history refetch'},
             );
             renderDebugPanels({force: true});
             const chart = document.querySelector('[data-js-debug-chart="agentTokens"]');
@@ -5629,8 +5717,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
               requestCount: requests.length,
               since: url.searchParams.get('since'),
               historyStart: Number(url.searchParams.get('history_start')),
-              tokenResolution: url.searchParams.get('token_resolution'),
-              separateTokenCount: jsDebugGraphAgentTokenBuckets.size,
+              legacyTokenParams: requests.flatMap(request => [...new URL(request).searchParams.keys()].filter(key => key.startsWith('token_') && key !== 'token_consumer')),
               legendLabels: [...(chart?.querySelectorAll('[data-js-debug-legend] span') || [])].map(node => node.textContent),
               barCount: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:8002|1|codex"]').length || 0,
             };
@@ -5645,8 +5732,7 @@ def test_debug_graph_short_range_refetches_token_rates_after_compact_token_histo
     assert metrics["requestCount"] >= 1, metrics
     assert metrics["since"] == "0", metrics
     assert metrics["historyStart"] > 0, metrics
-    assert metrics["tokenResolution"] is None, metrics
-    assert metrics["separateTokenCount"] == 0, metrics
+    assert metrics["legacyTokenParams"] == [], metrics
     assert "8002:1:codex" in metrics["legendLabels"], metrics
     assert metrics["barCount"] == 1, metrics
 
@@ -5713,7 +5799,12 @@ def test_debug_graph_store_coverage_paints_token_gap_without_shading_cpu(browser
     assert 70 < metrics["tokenRects"][0]["width"] < 90, metrics
 
 
-def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_history_fetch(browser, tmp_path):
+def test_debug_graph_inline_tokens_cover_the_full_domain_across_widening_range_changes(browser, tmp_path):
+    """Widening 4h -> 8h -> 16h sends plain history requests (no legacy token_*
+    params) and the token chart keeps BOTH edges of the domain rendered from
+    the inline token detail of each response — the regression the retired
+    compact token stream once guarded (newer token bars must not blank while
+    an older segment loads) now holds through the single unified cache."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -5744,46 +5835,27 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
           const requests = [];
           const waitForRequests = expectedCount => window.__yolomuxTestWaitFor(
             () => requests.length >= expectedCount && !jsDebugStatsPollState.inFlight,
-            {timeoutMs: 3000, intervalMs: 20, description: `compact-token history request ${expectedCount}`},
+            {timeoutMs: 3000, intervalMs: 20, description: `inline-token history request ${expectedCount}`},
           );
           window.fetch = (input, options = {}) => {
             const url = new URL(String(input), location.href);
             if (url.pathname !== '/api/stats-sample') return originalFetch(input, options);
             requests.push(url);
-            const tokenStart = Number(url.searchParams.get('token_history_start'));
+            const requestedStart = Number(url.searchParams.get('history_start'));
             const normalEnd = Number(url.searchParams.get('history_end'));
-            const tokenResolution = Number(url.searchParams.get('token_resolution'));
+            // Inline token detail rides the ordinary records at both domain edges.
             return Promise.resolve(new Response(JSON.stringify({history: {
               sequence: 50,
               latest_sequence: 50,
-              agent_token_schema_version: 2,
-              records: [{
-                start: tokenStart,
-                duration: 5,
-                sequence: 50,
-                active_agent_total: 1,
-                agent_activity_samples: 1,
-              }],
+              records: [
+                {start: requestedStart, duration: 600, sequence: 40, active_agent_total: 1, agent_activity_samples: 1, tokens_per_agent_total: 100, agent_token_samples: 1, agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}]},
+                {start: nowSeconds - 600, duration: 600, sequence: 50, tokens_per_agent_total: 200, agent_token_samples: 1, agent_token_rates: [{key: 'recent|0|codex', label: 'recent:0:codex', total: 200, samples: 1, tokens: 200, seconds: 60}]},
+              ],
               coverage: {
-                mode: 'older', requested_start: tokenStart, requested_end: normalEnd,
-                covered_start: tokenStart, covered_end: normalEnd,
-                resolution_seconds: 5, complete: true, has_more_older: false, next_older_end: 0,
-                intervals: [{start: tokenStart, end: normalEnd, resolution_seconds: 5}],
-              },
-              agent_token_history: {
-                sequence: 50,
-                latest_sequence: 50,
-                resolution_seconds: tokenResolution,
-                snapshot: true,
-                coverage: {
-                  mode: 'live', requested_start: tokenStart, requested_end: 0,
-                  covered_start: tokenStart, covered_end: nowSeconds,
-                  resolution_seconds: 120, complete: true, has_more_older: false, next_older_end: 0,
-                },
-                records: [
-                  {start: tokenStart, duration: tokenResolution, sequence: 40, tokens_per_agent_total: 100, agent_token_samples: 1, agent_token_rates: [{key: 'old|0|codex', label: 'old:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60}]},
-                  {start: nowSeconds - tokenResolution, duration: tokenResolution, sequence: 50, tokens_per_agent_total: 200, agent_token_samples: 1, agent_token_rates: [{key: 'recent|0|codex', label: 'recent:0:codex', total: 200, samples: 1, tokens: 200, seconds: 60}]},
-                ],
+                mode: 'older', requested_start: requestedStart, requested_end: normalEnd,
+                covered_start: requestedStart, covered_end: normalEnd,
+                resolution_seconds: 600, complete: true, has_more_older: false, next_older_end: 0,
+                intervals: [{start: requestedStart, end: normalEnd, resolution_seconds: 600}],
               },
             }}), {status: 200, headers: {'Content-Type': 'application/json'}}));
           };
@@ -5799,12 +5871,9 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
             return {
               requestCount: requests.length,
               requests: requests.map(request => ({
-                normalHistoryEnd: Number(request.searchParams.get('history_end')),
-                tokenHistoryStart: Number(request.searchParams.get('token_history_start')),
-                tokenHistoryEnd: request.searchParams.get('token_history_end'),
-                tokenResolution: Number(request.searchParams.get('token_resolution')),
+                historyStart: Number(request.searchParams.get('history_start')),
+                legacyTokenParams: [...request.searchParams.keys()].filter(key => key.startsWith('token_') && key !== 'token_consumer'),
               })),
-              tokenStarts: [...jsDebugGraphAgentTokenBuckets.values()].map(bucket => Math.floor(bucket.startMs / 1000)).sort((left, right) => left - right),
               oldBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:old|0|codex"]').length || 0,
               recentBars: chart?.querySelectorAll('[data-js-debug-bar-series="agentToken:recent|0|codex"]').length || 0,
             };
@@ -5817,13 +5886,9 @@ def test_debug_graph_compact_tokens_cover_the_full_domain_during_an_older_histor
     )
     assert "error" not in metrics, metrics
     assert metrics["requestCount"] >= 3, metrics
-    assert [request["tokenResolution"] for request in metrics["requests"][:3]] == [120, 120, 300], metrics
-    assert all(request["normalHistoryEnd"] > request["tokenHistoryStart"] for request in metrics["requests"][:3]), metrics
-    assert all(request["tokenHistoryEnd"] == "0" for request in metrics["requests"][:3]), metrics
-    assert metrics["requests"][0]["tokenHistoryStart"] > metrics["requests"][1]["tokenHistoryStart"] > metrics["requests"][2]["tokenHistoryStart"], metrics
-    assert len(metrics["tokenStarts"]) == 2, metrics
-    assert metrics["tokenStarts"][1] - metrics["tokenStarts"][0] > 3 * 60 * 60, metrics
-    assert metrics["oldBars"] == 1 and metrics["recentBars"] == 1, metrics
+    assert all(request["legacyTokenParams"] == [] for request in metrics["requests"]), metrics
+    assert metrics["requests"][0]["historyStart"] > metrics["requests"][1]["historyStart"] > metrics["requests"][2]["historyStart"], metrics
+    assert metrics["oldBars"] >= 1 and metrics["recentBars"] >= 1, metrics
 
 
 def test_debug_graph_server_restart_refetches_complete_history_without_waiting_for_the_poll_interval(browser, tmp_path):
@@ -6069,8 +6134,8 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
               finalBusy: finalGraph?.getAttribute('aria-busy'),
               finalPhase: finalGraph?.dataset.jsDebugHistoryState,
               finalOverlayHidden: finalGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
-              durableCpuStarts: [...jsDebugGraphRawBuckets.values()]
-                .filter(bucket => Number(bucket.systemCpuCount) > 0)
+              durableCpuStarts: [...jsDebugGraphBuckets.values()]
+                .filter(bucket => Number(bucket.durationMs) < 10000 && Number(bucket.systemCpuCount) > 0)
                 .map(bucket => Math.floor(Number(bucket.startMs) / 1000))
                 .sort((left, right) => left - right),
             };
@@ -9808,7 +9873,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
             <div id="smart-key-grabber" class="mobile-terminal-key-grabber" aria-hidden="true"></div>
-            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button></div>
+            <button id="smart-key-esc" class="mobile-terminal-key mobile-terminal-key--escape">Esc</button>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button></div>
             <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button id="smart-key-backspace" class="mobile-terminal-key">⌫</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">⌘C</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-bottom" class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom"><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
@@ -9849,10 +9915,10 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const moreRow = document.getElementById('smart-key-more-row');
         const side = document.getElementById('smart-key-side');
         const sideButtons = [...side.querySelectorAll('.mobile-terminal-key')];
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), esc: box(document.getElementById('smart-key-esc')), escLabel: document.getElementById('smart-key-esc').textContent, grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, shellVisibility: getComputedStyle(shell).visibility, sideDisplay: getComputedStyle(side).display, sideVisibility: getComputedStyle(side).visibility, bottomDisplay: getComputedStyle(bottom).display, bottomVisibility: getComputedStyle(bottom).visibility, dpadDisplay: getComputedStyle(dpad).display, dpadVisibility: getComputedStyle(dpad).visibility};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, shellVisibility: getComputedStyle(shell).visibility, sideDisplay: getComputedStyle(side).display, sideVisibility: getComputedStyle(side).visibility, escVisibility: getComputedStyle(document.getElementById('smart-key-esc')).visibility, bottomDisplay: getComputedStyle(bottom).display, bottomVisibility: getComputedStyle(bottom).visibility, dpadDisplay: getComputedStyle(dpad).display, dpadVisibility: getComputedStyle(dpad).visibility};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
           paneDisplay: getComputedStyle(pane).display,
@@ -9871,7 +9937,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, grabber: normal.grabber, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, esc: normal.esc, escLabel: normal.escLabel, grabber: normal.grabber, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
           hasClose: Boolean(document.querySelector('.mobile-terminal-key-close, [data-terminal-mobile-close]')),
           hasDrag: Boolean(document.querySelector('.mobile-terminal-key-drag, [data-terminal-mobile-drag]')),
@@ -9890,7 +9956,15 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["overflowX"] == "visible", metrics
     assert metrics["primaryColumns"].startswith("repeat(3,") or len(metrics["primaryColumns"].split()) == 3, metrics
     assert metrics["primaryLabels"] == ["Tab", "^B", "⌫"], metrics
-    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], metrics
+    assert metrics["escLabel"] == "Esc", metrics
+    assert metrics["sideLabels"] == ["Ctrl", "Shift"], metrics
+    # Esc sits alone in the top-left corner: left edge of the left column, level with (at or
+    # above) the primary row's top, and directly above the Ctrl/Shift column.
+    assert abs(metrics["esc"]["left"] - metrics["sideKeys"][0]["left"]) <= 0.5, metrics
+    assert metrics["esc"]["left"] <= metrics["shell"]["left"] + 0.5, metrics
+    assert metrics["esc"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
+    assert metrics["esc"]["bottom"] <= metrics["sideKeys"][0]["top"] + 0.5, metrics
+    assert metrics["esc"]["right"] <= metrics["dpad"]["left"], metrics
     assert metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], metrics
     assert metrics["copy"]["width"] == metrics["paste"]["width"] and metrics["copy"]["height"] == metrics["paste"]["height"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
@@ -9901,7 +9975,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == metrics["normal"]["bottomDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
     assert metrics["overflow"]["rowDisplay"] == "grid", metrics
     assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == metrics["overflow"]["bottomDisplay"] == "grid" and metrics["overflow"]["dpadDisplay"] == "grid", metrics
-    assert metrics["overflow"]["shellVisibility"] == metrics["overflow"]["sideVisibility"] == metrics["overflow"]["bottomVisibility"] == metrics["overflow"]["dpadVisibility"] == "hidden", metrics
+    assert metrics["overflow"]["shellVisibility"] == metrics["overflow"]["sideVisibility"] == metrics["overflow"]["escVisibility"] == metrics["overflow"]["bottomVisibility"] == metrics["overflow"]["dpadVisibility"] == "hidden", metrics
     assert metrics["overflow"]["bar"] == metrics["normal"]["bar"], metrics
     assert abs(metrics["overflow"]["more"]["left"] - metrics["normal"]["more"]["left"]) <= 0.5 and abs(metrics["overflow"]["more"]["top"] - metrics["normal"]["more"]["top"]) <= 0.5, metrics
     assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
@@ -9910,7 +9984,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
     assert metrics["launcherColor"] == metrics["inactiveTabColor"] and metrics["launcherBackground"] == metrics["inactiveTabBackground"], metrics
-    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(2)), metrics
+    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(len(metrics["sideKeys"]) - 1)), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["sideKeys"]), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["bottomKeys"]), metrics
     assert all(key["right"] <= metrics["dpad"]["left"] for key in metrics["sideKeys"]), metrics
@@ -9945,10 +10019,12 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           probe.remove();
           return value;
         };
-        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent), launcherColor: getComputedStyle(launcher).color, launcherBackground: getComputedStyle(launcher).backgroundColor, inactiveTabColor: paint('color', '--pane-tab-text'), inactiveTabBackground: paint('backgroundColor', '--panel2')};
+        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), esc: box(document.getElementById('smart-key-esc')), escLabel: document.getElementById('smart-key-esc').textContent, sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent), launcherColor: getComputedStyle(launcher).color, launcherBackground: getComputedStyle(launcher).backgroundColor, inactiveTabColor: paint('color', '--pane-tab-text'), inactiveTabBackground: paint('backgroundColor', '--panel2')};
         """
     )
-    assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], light_metrics
+    assert light_metrics["escLabel"] == "Esc", light_metrics
+    assert light_metrics["sideLabels"] == ["Ctrl", "Shift"], light_metrics
+    assert light_metrics["esc"]["left"] <= light_metrics["primary"]["left"] + 0.5 and light_metrics["esc"]["top"] <= light_metrics["primary"]["top"] + 0.5, light_metrics
     assert light_metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], light_metrics
     assert light_metrics["launcherColor"] == light_metrics["inactiveTabColor"] and light_metrics["launcherBackground"] == light_metrics["inactiveTabBackground"], light_metrics
     assert light_metrics["backspace"]["left"] >= light_metrics["primary"]["left"] and light_metrics["backspace"]["right"] <= light_metrics["primary"]["right"], light_metrics
@@ -12839,6 +12915,369 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
     assert metrics["windowAck"]["dimmed"] is True, metrics
     assert metrics["windowCleared"] is True, metrics
     assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
+
+
+TMUX_WINDOW_SWITCH_FIXTURE_PANES = [
+    {"target": "1:0.0", "window": "0", "pane": "0", "window_active": False, "active": True, "process_label": "codex", "command": "codex", "current_path": "/repo/codex"},
+    {"target": "1:1.0", "window": "1", "pane": "0", "window_active": True, "active": True, "process_label": "claude", "command": "claude", "current_path": "/repo/claude"},
+    {"target": "1:2.0", "window": "2", "pane": "0", "window_active": False, "active": True, "process_label": "bash", "command": "bash", "current_path": "/repo/shell"},
+]
+
+TMUX_WINDOW_SWITCH_TEST_PRELUDE = """
+    const signalWindow = (index, active, label, path) => ({
+      session: '1',
+      window_index: String(index),
+      window_name: label,
+      active,
+      panes: [{target: `1:${index}.0`, pane_id: `1:${index}.0`, pane_index: '0', window_index: String(index), active: true, current_path: path, current_command: label}],
+    });
+    const signalsPayload = activeIndex => ({ok: true, windows: [
+      signalWindow(0, activeIndex === 0, 'codex', '/repo/codex'),
+      signalWindow(1, activeIndex === 1, 'claude', '/repo/claude'),
+      signalWindow(2, activeIndex === 2, 'bash', '/repo/shell'),
+    ]});
+    const socketFor = () => terminals.get('1')?.socket;
+    const sentFrames = socket => (socket?.sent || []).map(frame => { try { return JSON.parse(frame); } catch (_) { return null; } }).filter(Boolean);
+    const refreshFrames = socket => sentFrames(socket).filter(frame => frame.type === 'refresh' && frame.txn !== undefined);
+    const binaryFrame = text => new TextEncoder().encode(text).buffer;
+    const maskNode = () => document.querySelector('#term-1 [data-terminal-connection-state="switching"], #term-1 [data-terminal-connection-state="switch-stalled"]');
+    const maskMetrics = () => {
+      const container = document.getElementById('term-1');
+      const node = maskNode();
+      if (!container || !node) return null;
+      const rect = container.getBoundingClientRect();
+      const backdrop = getComputedStyle(container, '::before');
+      return {
+        state: node.dataset.terminalConnectionState,
+        text: node.textContent,
+        backdropWidth: Number.parseFloat(backdrop.width) || 0,
+        backdropHeight: Number.parseFloat(backdrop.height) || 0,
+        backdropBackground: backdrop.backgroundColor,
+        backdropZ: backdrop.zIndex,
+        containerWidth: rect.width,
+        containerHeight: rect.height,
+        switchingClass: container.classList.contains('terminal-connection-switching'),
+      };
+    };
+    const activeWindowButtons = () => Array.from(document.querySelectorAll('[data-tmux-window-bar="1"] [data-window-index]'))
+      .filter(button => button.classList.contains('active'))
+      .map(button => button.dataset.windowIndex);
+    const installWindowBar = () => {
+      document.querySelectorAll('[data-tmux-window-bar="1"]').forEach(node => node.remove());
+      document.body.insertAdjacentHTML('beforeend', tmuxWindowBarHtml('1', transcriptMetadataState.payload.sessions['1']));
+    };
+"""
+
+
+def assert_opaque_switch_mask(mask, label_fragment=None):
+    assert mask is not None, "expected the tmux window switch mask to be present"
+    assert mask["switchingClass"] is True, mask
+    assert mask["backdropWidth"] >= mask["containerWidth"] - 1, mask
+    assert mask["backdropHeight"] >= mask["containerHeight"] - 1, mask
+    assert mask["backdropBackground"].startswith("rgb("), mask  # fully opaque, no alpha channel
+    if label_fragment is not None:
+        assert label_fragment in mask["text"], mask
+
+
+def test_tmux_window_switch_masks_old_window_output_until_confirmed_target_paint(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": TMUX_WINDOW_SWITCH_FIXTURE_PANES}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tmuxWindow === 'function' && document.querySelector('#term-1 .xterm')"
+            " && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"
+            " && transcriptMetadataState.payload.sessions?.['1']?.panes?.length >= 3"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalApiFetchJson = apiFetchJson;
+          try {
+        """
+        + TMUX_WINDOW_SWITCH_TEST_PRELUDE
+        + """
+            installWindowBar();
+            const socket = socketFor();
+            const item = terminals.get('1');
+            let releasePost = null;
+            const signalReleases = [];
+            apiFetchJson = (url, options) => {
+              const text = String(url);
+              if (text.startsWith('/api/tmux-window?')) return new Promise(resolve => { releasePost = resolve; });
+              if (text.startsWith('/api/tmux-signals')) return new Promise(resolve => { signalReleases.push(resolve); });
+              return originalApiFetchJson(url, options);
+            };
+
+            tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterClick = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+            };
+
+            // Old-window PTY frames (a blank redraw plus recognizable 1:claude output) arrive while
+            // the POST is held. They must keep flowing into xterm but must not lift the mask —
+            // this pre-confirmation race is the ONLY thing the mask exists to cover.
+            socket.onmessage({data: binaryFrame('\\u001b[2J\\u001b[H')});
+            socket.onmessage({data: binaryFrame('CLAUDE-OLD-WINDOW-OUTPUT')});
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterOldOutput = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+              xtermGotOldBytes: (item.term.writes || []).some(text => text.includes('CLAUDE-OLD-WINDOW-OUTPUT')),
+            };
+
+            // Release the POST: select-window returned, so tmux HAS switched and its repaint is the
+            // next thing on the wire. The signal readback is deliberately NEVER answered — it is
+            // button-state truth only and must not gate the reveal (native tmux feels instant).
+            const revealStartedAt = performance.now();
+            releasePost({ok: true});
+            socket.onmessage({data: binaryFrame('CODEX-WINDOW-0-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'instant reveal after POST success + painted repaint frame'});
+            const revealMs = performance.now() - revealStartedAt;
+            const container = document.getElementById('term-1');
+            const refreshTxnFrames = refreshFrames(socket);
+            return {
+              afterClick, afterOldOutput,
+              afterReveal: {
+                revealMs,
+                unansweredSignalRequests: signalReleases.length,
+                refreshTxnFrames: refreshTxnFrames.length,
+                maskGone: !maskNode(),
+                switchingClass: container.classList.contains('terminal-connection-switching'),
+                pendingClass: container.classList.contains('terminal-connection-pending'),
+                xtermGotTargetBytes: (item.term.writes || []).some(text => text.includes('CODEX-WINDOW-0-READY')),
+                xtermOpacity: getComputedStyle(container.querySelector('.xterm')).opacity,
+                activeButtons: activeWindowButtons(),
+              },
+            };
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert_opaque_switch_mask(metrics["afterClick"]["mask"], "0:codex")
+    assert metrics["afterClick"]["mask"]["state"] == "switching", metrics["afterClick"]
+    assert metrics["afterClick"]["activeButtons"] == ["0"], metrics["afterClick"]
+    assert_opaque_switch_mask(metrics["afterOldOutput"]["mask"], "0:codex")
+    assert metrics["afterOldOutput"]["activeButtons"] == ["0"], metrics["afterOldOutput"]
+    assert metrics["afterOldOutput"]["xtermGotOldBytes"] is True, metrics["afterOldOutput"]
+    # The reveal must feel like native tmux: POST success + painted repaint frame, with the
+    # signals readback UNANSWERED and no refresh/ack ceremony — well under half a second.
+    assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterReveal"]["revealMs"] < 500, metrics["afterReveal"]
+    assert metrics["afterReveal"]["unansweredSignalRequests"] >= 1, metrics["afterReveal"]
+    assert metrics["afterReveal"]["refreshTxnFrames"] == 0, metrics["afterReveal"]
+    assert metrics["afterReveal"]["switchingClass"] is False, metrics["afterReveal"]
+    assert metrics["afterReveal"]["pendingClass"] is False, metrics["afterReveal"]
+    assert metrics["afterReveal"]["xtermGotTargetBytes"] is True, metrics["afterReveal"]
+    assert float(metrics["afterReveal"]["xtermOpacity"]) == 1.0, metrics["afterReveal"]
+    assert metrics["afterReveal"]["activeButtons"] == ["0"], metrics["afterReveal"]
+
+
+def test_tmux_window_switch_stalls_only_when_the_select_post_hangs_with_retry_and_cancel(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": TMUX_WINDOW_SWITCH_FIXTURE_PANES}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tmuxWindow === 'function' && document.querySelector('#term-1 .xterm')"
+            " && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"
+            " && transcriptMetadataState.payload.sessions?.['1']?.panes?.length >= 3"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalApiFetchJson = apiFetchJson;
+          try {
+        """
+        + TMUX_WINDOW_SWITCH_TEST_PRELUDE
+        + """
+            installWindowBar();
+            let signalAnswer = () => signalsPayload(1); // authoritative window stays 1
+            let releasePost = null;
+            apiFetchJson = (url, options) => {
+              const text = String(url);
+              if (text.startsWith('/api/tmux-window?')) return new Promise(resolve => { releasePost = resolve; });
+              if (text.startsWith('/api/tmux-signals')) return Promise.resolve(signalAnswer());
+              return originalApiFetchJson(url, options);
+            };
+
+            // A HANGING select POST is the only stall: no confirmation ever arrives, so the mask
+            // degrades to the explicit stalled state instead of revealing unconfirmed content.
+            tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
+            await window.__yolomuxTestWaitFor(
+              () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
+              {timeoutMs: 7000, intervalMs: 25, description: 'a hung select POST becomes an explicit stalled state'}
+            );
+            const stalled = {
+              mask: maskMetrics(),
+              retry: Boolean(maskNode()?.querySelector('[data-terminal-connection-retry]')),
+              cancel: Boolean(maskNode()?.querySelector('[data-terminal-connection-cancel]')),
+              activeButtons: activeWindowButtons(),
+            };
+
+            // Retry reveals through the normal confirm+paint path (the user explicitly asked;
+            // the terminal then honestly shows whatever tmux actually shows).
+            maskNode().querySelector('[data-terminal-connection-retry]').click();
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 10, description: 'retry reveals through the paint path'});
+            const afterRetry = {maskGone: !maskNode()};
+            const stalePost = releasePost;
+            if (stalePost) stalePost({ok: true}); // the hung POST resolving late must be inert
+
+            // A second hung switch can be cancelled back to the authoritative window.
+            releasePost = null;
+            tmuxWindow('1', {windowIndex: 2}, 'tmux sub-window 2:bash');
+            await window.__yolomuxTestWaitFor(
+              () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
+              {timeoutMs: 7000, intervalMs: 25, description: 'second hung switch stalls'}
+            );
+            maskNode().querySelector('[data-terminal-connection-cancel]').click();
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 3000, intervalMs: 10, description: 'cancel clears the mask'});
+            await window.__yolomuxTestWaitFor(() => activeWindowButtons().join(',') === '1', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative window'});
+            return {
+              stalled, afterRetry,
+              afterCancel: {maskGone: !maskNode(), activeButtons: activeWindowButtons()},
+            };
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert_opaque_switch_mask(metrics["stalled"]["mask"], "0:codex")
+    assert metrics["stalled"]["mask"]["state"] == "switch-stalled", metrics["stalled"]
+    assert metrics["stalled"]["retry"] is True, metrics["stalled"]
+    assert metrics["stalled"]["cancel"] is True, metrics["stalled"]
+    assert metrics["stalled"]["activeButtons"] == ["0"], metrics["stalled"]
+    assert metrics["afterRetry"]["maskGone"] is True, metrics["afterRetry"]
+    assert metrics["afterCancel"]["maskGone"] is True, metrics["afterCancel"]
+    assert metrics["afterCancel"]["activeButtons"] == ["1"], metrics["afterCancel"]
+
+
+def test_tmux_window_switch_rapid_and_relative_switches_reveal_only_newest_sequence(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1&layout=slot1&tabs=slot1:1",
+        sessions=["1"],
+        transcript_sessions={"1": {"panes": TMUX_WINDOW_SWITCH_FIXTURE_PANES}},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof tmuxWindow === 'function' && document.querySelector('#term-1 .xterm')"
+            " && terminals.get('1')?.socket?.readyState === WebSocket.OPEN"
+            " && transcriptMetadataState.payload.sessions?.['1']?.panes?.length >= 3"
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const originalApiFetchJson = apiFetchJson;
+          try {
+        """
+        + TMUX_WINDOW_SWITCH_TEST_PRELUDE
+        + """
+            installWindowBar();
+            const socket = socketFor();
+            const item = terminals.get('1');
+            const postReleases = [];
+            const signalReleases = [];
+            apiFetchJson = (url, options) => {
+              const text = String(url);
+              if (text.startsWith('/api/tmux-window?')) return new Promise(resolve => { postReleases.push(resolve); });
+              if (text.startsWith('/api/tmux-signals')) return new Promise(resolve => { signalReleases.push(resolve); });
+              return originalApiFetchJson(url, options);
+            };
+
+            // Rapid 0 -> 2 -> 1: only the newest transaction may reveal.
+            tmuxWindow('1', {windowIndex: 0}, 'tmux sub-window 0:codex');
+            tmuxWindow('1', {windowIndex: 2}, 'tmux sub-window 2:bash');
+            tmuxWindow('1', {windowIndex: 1}, 'tmux sub-window 1:claude');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const afterClicks = {mask: maskMetrics(), activeButtons: activeWindowButtons()};
+
+            // Old transactions completing must not confirm, reveal, or roll back the newest.
+            postReleases[0]({ok: true});
+            postReleases[1]({ok: true});
+            await new Promise(resolve => setTimeout(resolve, 60));
+            const afterStalePosts = {
+              mask: maskMetrics(),
+              activeButtons: activeWindowButtons(),
+              staleReadbacks: signalReleases.length,
+            };
+
+            // The newest POST success confirms; the painted repaint frame reveals immediately —
+            // signal readbacks stay unanswered and no refresh/ack ceremony exists.
+            const revealStartedAt = performance.now();
+            postReleases[2]({ok: true});
+            socket.onmessage({data: binaryFrame('CLAUDE-WINDOW-1-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'newest transaction reveals instantly'});
+            const afterReveal = {
+              maskGone: !maskNode(),
+              revealMs: performance.now() - revealStartedAt,
+              activeButtons: activeWindowButtons(),
+              refreshTxnFrames: refreshFrames(socket).length,
+            };
+
+            // Relative next/previous: the keystroke send IS the confirmation (native Ctrl-B N feel);
+            // the repaint frame reveals with no readback answered.
+            const relativeStartedAt = performance.now();
+            tmuxWindow('1', 'n', 'next tmux sub-window');
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const relative = {mask: maskMetrics(), inputFrame: sentFrames(socket).some(frame => frame.type === 'input' && frame.data === '\\u0002n')};
+            socket.onmessage({data: binaryFrame('BASH-WINDOW-2-READY')});
+            await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 2000, intervalMs: 5, description: 'relative switch reveals instantly after the repaint frame'});
+            const relativeRevealMs = performance.now() - relativeStartedAt;
+            // Button truth reconciles through the readback once signals answer. Earlier
+            // transactions' unanswered readbacks queue ahead: answer every request with the
+            // authoritative window until the newest readback lands and reconciles.
+            await window.__yolomuxTestWaitFor(() => {
+              while (signalReleases.length) signalReleases.shift()(signalsPayload(2));
+              return activeWindowButtons().join(',') === '2';
+            }, {timeoutMs: 4000, intervalMs: 25, description: 'buttons reconcile to the signalled window'});
+            return {
+              afterClicks, afterStalePosts, afterReveal, relative,
+              afterRelativeReveal: {maskGone: !maskNode(), relativeRevealMs, activeButtons: activeWindowButtons()},
+            };
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+          }
+        })().then(done).catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert_opaque_switch_mask(metrics["afterClicks"]["mask"], "1:claude")
+    assert metrics["afterClicks"]["activeButtons"] == ["1"], metrics["afterClicks"]
+    assert_opaque_switch_mask(metrics["afterStalePosts"]["mask"], "1:claude")
+    assert metrics["afterStalePosts"]["activeButtons"] == ["1"], metrics["afterStalePosts"]
+    assert metrics["afterStalePosts"]["staleReadbacks"] == 0, metrics["afterStalePosts"]
+    assert metrics["afterReveal"]["maskGone"] is True, metrics["afterReveal"]
+    assert metrics["afterReveal"]["revealMs"] < 500, metrics["afterReveal"]
+    assert metrics["afterReveal"]["refreshTxnFrames"] == 0, metrics["afterReveal"]
+    assert metrics["afterReveal"]["activeButtons"] == ["1"], metrics["afterReveal"]
+    assert_opaque_switch_mask(metrics["relative"]["mask"], "next tmux sub-window")
+    assert metrics["relative"]["inputFrame"] is True, metrics["relative"]
+    assert metrics["afterRelativeReveal"]["maskGone"] is True, metrics["afterRelativeReveal"]
+    assert metrics["afterRelativeReveal"]["relativeRevealMs"] < 500, metrics["afterRelativeReveal"]
+    assert metrics["afterRelativeReveal"]["activeButtons"] == ["2"], metrics["afterRelativeReveal"]
 
 
 def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp_path):
@@ -18945,7 +19384,7 @@ def test_light_editor_image_backdrop_is_light(browser, tmp_path):
 
 def codemirror_search_panel_fixture_html():
     css = app_css()
-    bundle_uri = (REPO_ROOT / "static" / "codemirror.js").as_uri()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
     return f"""
     <!doctype html>
     <html>
@@ -19224,3 +19663,157 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
     for pid, ring in rings.items():
         assert ring.lower() == ui_pin("paneRingAttention"), f"{pid}: needs-attention pane must keep the red ring, got {ring}"
+
+
+def test_yocost_shows_shared_loading_overlay_on_range_resolution_change(browser, tmp_path):
+    """YO!cost's chart area carries the shared history loading overlay so a
+    range/resolution change dims it and shows Loading, like YO!stats."""
+    browser.set_window_size(1280, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const mk = (i) => ({start: now - ((5 - i) * 60), duration: 60, sequence: i + 1, tokens_per_agent_total: 100 + i, agent_token_samples: 1,
+            agent_token_rates: [{key: 'a|0|codex', label: 'a:0:codex', total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60, source: 'transcript', model_rates: {'gpt-5.6-terra': {total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60}}}],
+            cost_summary: {total_micro_usd: 10000, known_micro_usd: 10000, priced_count: 1, complete: true, unpriced_count: 0,
+              components: [{key: 'output', direction: 'output', quantity: 10, unit: 'tokens', micro_usd: 10000, provider: 'openai', model: 'gpt-5.6-terra', source_url: 'https://a'}],
+              models: [{provider: 'openai', model: 'gpt-5.6-terra', effort: '', token_quantity: 10, input_tokens: 0, cache_tokens: 0, output_tokens: 10, input_micro_usd: 0, cache_micro_usd: 0, output_micro_usd: 10000, other_micro_usd: 0, micro_usd: 10000}],
+              sources: [], catalog_revision: 't', freshness: 'verified'}});
+          debugGraphApplyServerHistory({sequence: 6, records: Array.from({length: 6}, (_u, i) => mk(i))});
+          setDebugGraphChartVisible('costSummary', true); setDebugGraphRange(6 * 60); renderDebugPanels({force: true});
+          document.querySelector('[data-js-debug-graph]')?.querySelector('[data-js-debug-summary-group="costSummary"] [data-js-debug-cost-details]')?.click();
+          await window.__yolomuxTestWaitFor(() => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('.js-yocost-chart-area'), {timeoutMs: 3000, intervalMs: 20, description: 'yocost'});
+          const panel = document.getElementById(panelDomId(yocostItemId));
+          const area = panel.querySelector('[data-js-yocost-chart-area]');
+          // Baseline: ready -> overlay hidden on the YO!cost surface.
+          jsDebugHistoryReadiness.overlayVisible = false; jsDebugHistoryReadiness.phase = 'ready';
+          syncJsDebugHistoryReadinessSurfaces();
+          const overlayBefore = area?.querySelector('[data-js-debug-history-overlay]');
+          const shownBefore = overlayBefore ? overlayBefore.hidden !== true : null;
+          // A range/resolution fetch: loading state + sync -> overlay shown here too.
+          jsDebugHistoryReadiness.overlayVisible = true; jsDebugHistoryReadiness.phase = 'loading-initial';
+          syncJsDebugHistoryReadinessSurfaces();
+          const overlayAfter = area?.querySelector('[data-js-debug-history-overlay]');
+          done({
+            hasChartArea: Boolean(area),
+            overlayPresent: Boolean(overlayBefore),
+            shownBefore,
+            shownAfter: overlayAfter ? overlayAfter.hidden !== true : null,
+          });
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["hasChartArea"] is True and out["overlayPresent"] is True, out
+    assert out["shownBefore"] is False, out
+    assert out["shownAfter"] is True, out
+
+
+def test_servers_load_draws_every_service_across_the_full_range(browser, tmp_path):
+    """Servers Load renders one line per service spanning the whole range."""
+    browser.set_window_size(1280, 800)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const svc = (cpu, lbl) => ({cpu_total_percent: cpu, cpu_samples: 1, cpu_min_percent: cpu, cpu_max_percent: cpu, rss_total_bytes: 1e7, rss_samples: 1, rss_min_bytes: 1e7, rss_max_bytes: 1e7, label: lbl});
+          // 60 one-minute records across the full hour, each carrying service_load.
+          const records = Array.from({length: 60}, (_u, i) => ({
+            start: now - ((59 - i) * 60), duration: 60, sequence: i + 1,
+            host_metrics: {service_load: {statsd: svc(3, 'statsd'), indexd: svc(0.2, 'indexd'), jobd: svc(1.8, 'jobd')}},
+          }));
+          debugGraphApplyServerHistory({sequence: 60, records});
+          setDebugGraphChartVisible('serversLoad', true); setDebugGraphRange(3600); renderDebugPanels({force: true});
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const chart = document.querySelector('[data-js-debug-graph] [data-js-debug-chart="serversLoad"]');
+          const buckets = debugGraphDisplayBuckets();
+          const withSvc = buckets.filter(b => b?.hostMetrics?.serviceLoad && b.hostMetrics.serviceLoad.size > 0);
+          const domain = debugGraphDomain();
+          const firstAgoMin = withSvc.length ? Math.round((domain.endMs - Math.min(...withSvc.map(b => b.startMs))) / 60000) : 0;
+          const lines = chart ? chart.querySelectorAll('path[stroke], polyline, path.js-debug-graph-line').length : -1;
+          done({chartPresent: Boolean(chart), lines, bucketsWithService: withSvc.length, firstAgoMin});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    assert out["chartPresent"] is True, out
+    # One drawn line per service (>=3), spanning back across most of the hour.
+    assert out["lines"] >= 3, out
+    assert out["bucketsWithService"] >= 30 and out["firstAgoMin"] >= 45, out
+
+
+def test_yostats_metric_descriptions_are_native_title_tooltips_not_custom_boxes(browser, tmp_path):
+    """Metric/chart descriptions use native title tooltips (anchored to their
+    element, auto-dismissed) — never a custom large box floating over a plot."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof renderDebugPanels === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          setDebugGraphChartVisible('cpu', true); renderDebugPanels({force: true});
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const graph = document.querySelector('[data-js-debug-graph]');
+          const described = [...graph.querySelectorAll('[data-js-debug-meta-desc], [data-js-debug-chart-desc]')];
+          const withTitle = described.filter(node => (node.getAttribute('title') || '').length > 0);
+          // No custom description popover/box element renders inside the graph.
+          const customBoxes = graph.querySelectorAll('.js-debug-explain-popover, [data-js-debug-explain-popover], .js-debug-desc-box').length;
+          done({describedCount: described.length, withTitleCount: withTitle.length, customBoxes});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    # Every described element exposes a native title tooltip; none renders a custom box.
+    assert out["describedCount"] >= 1, out
+    assert out["withTitleCount"] == out["describedCount"], out
+    assert out["customBoxes"] == 0, out
+
+
+def test_cost_calculation_usage_class_uses_anthropic_conventions(browser, tmp_path):
+    """The Cost calculation Usage class uses provider conventions (Base input,
+    5m/1h cache write, Cache hits & refreshes, Output) — not raw direction·role."""
+    browser.set_window_size(1400, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda d: d.execute_script("return typeof debugGraphApplyServerHistory === 'function' && document.querySelector('[data-js-debug-graph]') !== null;"))
+    out = browser.execute_async_script(
+        r"""
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          stopJsDebugStatsPolling(); clearJsDebugGraphData(); jsDebugStatsPollState.firstSampleReceived = true;
+          const now = Math.floor(Date.now() / 60000) * 60;
+          const comp = (cache_role, direction) => ({key: `${direction}-${cache_role}`, direction, cache_role, modality: 'text', quantity: 10, unit: 'tokens', micro_usd: 1000, provider: 'anthropic', model: 'claude-sonnet-4-6', source_url: 'https://a'});
+          const mk = (i) => ({start: now - ((5 - i) * 60), duration: 60, sequence: i + 1, tokens_per_agent_total: 100 + i, agent_token_samples: 1,
+            agent_token_rates: [{key: 'a|0|claude', label: 'a:0:claude', total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60, source: 'transcript', model_rates: {'claude-sonnet-4-6': {total: 100 + i, samples: 1, tokens: 100 + i, seconds: 60}}}],
+            cost_summary: {total_micro_usd: 5000, known_micro_usd: 5000, priced_count: 5, complete: true, unpriced_count: 0,
+              components: [comp('none', 'input'), comp('read', 'input'), comp('write_5m', 'input'), comp('write_1h', 'input'), comp('none', 'output')],
+              models: [{provider: 'anthropic', model: 'claude-sonnet-4-6', effort: '', token_quantity: 50, input_tokens: 30, cache_tokens: 20, output_tokens: 10, input_micro_usd: 3000, cache_micro_usd: 1000, output_micro_usd: 1000, other_micro_usd: 0, micro_usd: 5000}],
+              sources: [], catalog_revision: 't', freshness: 'verified'}});
+          debugGraphApplyServerHistory({sequence: 6, records: Array.from({length: 6}, (_u, i) => mk(i))});
+          setDebugGraphChartVisible('modelTokens', true); setDebugGraphChartVisible('costSummary', true); setDebugGraphRange(6 * 60); renderDebugPanels({force: true});
+          document.querySelector('[data-js-debug-graph]')?.querySelector('[data-js-debug-summary-group="costSummary"] [data-js-debug-cost-details]')?.click();
+          await window.__yolomuxTestWaitFor(() => activePaneItems().includes(yocostItemId) && document.getElementById(panelDomId(yocostItemId))?.querySelector('[data-js-debug-cost-table="calculation"]'), {timeoutMs: 3000, intervalMs: 20, description: 'yocost calc'});
+          await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const panel = document.getElementById(panelDomId(yocostItemId));
+          const table = panel.querySelector('[data-js-debug-cost-table="calculation"]');
+          const usageClasses = [...table.querySelectorAll('tbody tr td[data-label="Usage class"] strong')].map(n => n.textContent.trim());
+          done({usageClasses});
+        })().catch(error => done({scriptError: String(error?.stack || error)}));
+        """
+    )
+    assert out.get("scriptError") is None, out
+    labels = set(out["usageClasses"])
+    assert "Base input" in labels, out
+    assert "Cache hits & refreshes" in labels, out
+    assert "5m cache write" in labels, out
+    assert "1h cache write" in labels, out
+    assert "Output" in labels, out
+    # No raw direction·role form leaks through.
+    assert not any(" · " in label and ("write_" in label or label.startswith("input")) for label in out["usageClasses"]), out

@@ -839,7 +839,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\\x7f'/.test(source), 'touch terminal key definitions retain one Backspace definition that sends DEL');
-    assert.ok(/terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['tab', 'tmux-prefix', 'backspace', 'more'\]\)[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['escape', 'ctrl', 'shift'\]\)[\s\S]*terminalMobileAccessoryBottomActions = Object\.freeze\(\['interrupt', 'alt', 'cmd'\]\)/.test(source), 'the smart-key side column is Esc/Ctrl/Shift while direct Ctrl-C, Alt, and Cmd share the primary bottom row');
+    assert.ok(/terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['tab', 'tmux-prefix', 'backspace', 'more'\]\)[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['ctrl', 'shift'\]\)[\s\S]*terminalMobileAccessoryBottomActions = Object\.freeze\(\['interrupt', 'alt', 'cmd'\]\)/.test(source), 'Esc is the top-left corner key, the smart-key side column is Ctrl/Shift, and direct Ctrl-C, Alt, and Cmd share the primary bottom row');
     assert.ok(/const terminalMobileAccessoryMoreKeyDefs[\s\S]*action: 'command-p'[\s\S]*action: 'home'[\s\S]*action: 'ctrl-r'/.test(source) && /const terminalMobileAccessoryMoreActions = Object\.freeze\(\['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'\]\);/.test(source) && !/const terminalMobileAccessoryMoreKeyDefs[\s\S]{0,500}action: 'command-v'/.test(source), 'the tmux shard keeps C-c exclusively in the primary bottom row while overflow retains Cmd-P/navigation and the D-pad retains Paste');
     assert.ok(/function terminalDataWithMobileAccessoryModifiers[\s\S]*terminalMobileAccessoryModifierActive\(state\)[\s\S]*terminalMobileAccessoryClearModifiers\(state, \{session\}\)[\s\S]*terminalMobileAccessoryShiftText\(value\)[\s\S]*terminalMobileAccessoryControlText\(value\)/.test(source) && /function toggleTerminalMobileAccessoryModifier[\s\S]*terminalMobileAccessoryModifierDoubleTapMs[\s\S]*state\[lockedKey\] = true/.test(source), 'Ctrl/Alt/Shift/Cmd latches share terminal input handling, and double-tap locks modifiers through the shared lock path');
     assert.ok(/function terminalMobileAccessoryButtonHtml[\s\S]*definition\.action !== 'copy'[\s\S]*function sendTerminalMobileAccessoryInput[\s\S]*action === 'copy'[\s\S]*copyTerminalSelection\(session, term, \{\}, container\)[\s\S]*action === 'tmux-scroll-up' \|\| action === 'tmux-scroll-down'[\s\S]*queueTmuxScroll\(item, signedLines\)[\s\S]*queueLocalTerminalScroll\(term, signedLines\)[\s\S]*handleTerminalData\(session, data, \{mobileAccessory: true\}\)/.test(source), 'Copy reuses the existing selection clipboard path; direct scroll controls use the wheel-owned tmux protocol with a local read-only fallback; ordinary smart keys keep using terminal transport and modifier mapping');
@@ -934,7 +934,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'the palette opens for its terminal');
     const openKeyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
     assert.ok(/mobile-terminal-key-launcher--open[\s\S]*aria-expanded="true"[\s\S]*>×<\/button>/.test(openKeyboardHtml), 'initial HTML renders the launcher as the close button while open');
-    assert.ok(/mobile-terminal-key-grabber[\s\S]*mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="escape"[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"[\s\S]*mobile-terminal-keyrow-bottom[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"/.test(openKeyboardHtml) && !/mobile-terminal-keyrow--more[\s\S]*data-terminal-mobile-key="interrupt"/.test(openKeyboardHtml), 'rendered mobile keyboard puts direct Ctrl-C, Alt, and Cmd in its bottom row, not overflow, beneath the Esc/Ctrl/Shift side column');
+    assert.ok(/mobile-terminal-key-grabber[\s\S]*data-terminal-mobile-key="escape"[\s\S]*mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*mobile-terminal-keyrow-shell[\s\S]*data-terminal-mobile-key="tab"[\s\S]*data-terminal-mobile-key="tmux-prefix"[\s\S]*data-terminal-mobile-key="backspace"[\s\S]*mobile-terminal-keyrow-bottom[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"/.test(openKeyboardHtml) && !/mobile-terminal-keyrow--more[\s\S]*data-terminal-mobile-key="interrupt"/.test(openKeyboardHtml), 'rendered mobile keyboard puts Esc alone before the Ctrl/Shift side column and direct Ctrl-C, Alt, and Cmd in its bottom row, not overflow');
     assert.equal(api.dismissTerminalMobileAccessoriesForTest(), true, 'one shared outside-action dismissal closes the open terminal palette');
     assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'outside interaction closes the palette');
     api.toggleTerminalMobileAccessoryStateForTest('1', 'open');
@@ -948,9 +948,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-terminal-mobile-key="escape"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="tab"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="interrupt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="alt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="shift"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="cmd"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only mutating smart keys and modifiers remain disabled');
     const readOnlyDesktopApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'viewer');
     assert.equal(readOnlyDesktopApi.terminalMobileAccessoryHtmlForTest('1'), '', 'desktop-pointer read-only terminals do not render the touch launcher');
-    assert.ok(source.includes("const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);") && source.includes("const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift']);") && source.includes("const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);") && source.includes("'shift-tab', 'ctrl-d'") && !source.includes("'shift-tab', 'interrupt', 'ctrl-d'"), 'the touch palette keeps Esc/Ctrl/Shift in its side column and direct Ctrl-C/Alt/Cmd in its normal-width bottom row');
+    assert.ok(source.includes("const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && source.includes("const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift']);") && source.includes("const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);") && source.includes("'shift-tab', 'ctrl-d'") && !source.includes("'shift-tab', 'interrupt', 'ctrl-d'"), 'the touch palette puts Esc in the corner, keeps Ctrl/Shift in its side column, and direct Ctrl-C/Alt/Cmd in its normal-width bottom row');
     assert.ok(/function installTerminalMobileAccessoryDismissal\(\)[\s\S]*pointerdown[\s\S]*data-terminal-mobile-keybar[\s\S]*data-terminal-mobile-toggle[\s\S]*dismissTerminalMobileAccessories\(\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessoryDismissal\(\)[\s\S]*keydown[\s\S]*dismissTerminalMobileAccessory\(session\)/.test(source), 'the shared palette closes on outside app interaction and physical terminal input, while its own launcher and keys remain usable');
-    assert.ok(/\.mobile-terminal-key-side\s*\{[\s\S]*grid-row:\s*2[\s\S]*grid-template-rows:\s*repeat\(3, 36px\)[\s\S]*align-self:\s*end[\s\S]*\.mobile-terminal-keyrow-bottom\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*grid-template-columns:\s*repeat\(3, 36px\)[\s\S]*justify-content:\s*start[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)/.test(css), 'the touch key palette bottom-aligns its three-key side column with a normal-width Ctrl-C/Alt/Cmd row and retains the five-column D-pad');
+    assert.ok(/\.mobile-terminal-keybar\s*>\s*\.mobile-terminal-key--escape\s*\{[\s\S]*grid-column:\s*1[\s\S]*grid-row:\s*1[\s\S]*align-self:\s*start[\s\S]*\.mobile-terminal-key-side\s*\{[\s\S]*grid-row:\s*2[\s\S]*grid-template-rows:\s*repeat\(2, 36px\)[\s\S]*align-self:\s*end[\s\S]*\.mobile-terminal-keyrow-bottom\s*\{[\s\S]*grid-column:\s*1 \/ -1[\s\S]*grid-template-columns:\s*repeat\(3, 36px\)[\s\S]*justify-content:\s*start[\s\S]*\.mobile-terminal-key-dpad\s*\{[\s\S]*grid-template-columns: repeat\(5, 36px\)/.test(css), 'the touch key palette pins Esc to the top-left corner, bottom-aligns its Ctrl/Shift side column with a normal-width Ctrl-C/Alt/Cmd row, and retains the five-column D-pad');
     assert.ok(/\.mobile-terminal-key-launcher\s*\{[\s\S]*color:\s*var\(--pane-tab-text\)[\s\S]*background:\s*var\(--panel2\)[\s\S]*\.mobile-terminal-keybar\s*\{[\s\S]*padding:\s*calc\([\s\S]*\.mobile-terminal-key-grabber\s*\{[\s\S]*cursor:\s*grab/.test(css), 'the non-selectable touch palette reserves a visible grabber and tints its launcher from the shared inactive-tab paint tokens');
   });
 
@@ -3223,6 +3223,74 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.transcriptInfoForTest('meta-preview').selected_pane.current_path, '/tmp/shell', 'relative window navigation updates the selected pane path from tmux signals');
   });
 
+  await testAsync('tmux window switch reveals on select success plus painted frame; stale sequences and control frames are inert', async () => {
+    const api = loadYolomux('', ['meta-preview']);
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    api.setTranscriptInfoForTest('meta-preview', {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    });
+    const frames = [];
+    const writes = [];
+    let writeCallback = null;
+    const term = {focus() {}, write(data, callback) { writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data)); writeCallback = callback || null; }};
+    const socket = {readyState: WebSocket.OPEN, send(message) { frames.push(JSON.parse(message)); }};
+    api.registerTerminalForTest('meta-preview', term, socket);
+    let releasePost = null;
+    api.setFetchForTest(url => {
+      if (String(url).startsWith('/api/tmux-window')) return new Promise(resolve => { releasePost = resolve; });
+      if (String(url).startsWith('/api/tmux-signals')) return new Promise(() => {}); // NEVER answered: readback must not gate the reveal
+      return Promise.resolve(jsonResponse({}));
+    });
+    const binaryFrame = text => new TextEncoder().encode(text).buffer;
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
+    let record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'requested', 'a direct switch begins a requested loading transaction in the shared navigation record');
+    assert.equal(record.switchLoading?.sequence, record.sequence, 'the loading transaction shares the one navigation sequence');
+    assert.ok(String(record.switchLoading?.targetLabel || '').includes('1:claude'), 'the loading transaction names the exact index:name target');
+
+    // Pre-confirmation is the ONLY window the mask must cover: old-window frames keep flowing
+    // into xterm but cannot advance or clear the transaction.
+    api.processTerminalSocketFrameForTest('meta-preview', binaryFrame('OLD-WINDOW-BYTES'));
+    record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'requested', 'old-window PTY frames cannot advance or clear a requested switch transaction');
+    assert.ok(writes.some(text => text.includes('OLD-WINDOW-BYTES')), 'hidden PTY bytes keep flowing into xterm behind the mask');
+
+    // POST success IS the confirmation (select-window is synchronous): no readback, no refresh
+    // request, no acknowledgement ceremony sits between tmux switching and the reveal.
+    releasePost(jsonResponse({ok: true}));
+    for (let i = 0; i < 8; i += 1) await flushAsyncWork();
+    record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'confirmed', 'select success confirms the transaction with the signals readback UNANSWERED');
+    assert.equal(frames.filter(frame => frame.type === 'refresh' && frame.txn !== undefined).length, 0, 'no transaction refresh request is sent — the ceremony is gone');
+
+    // A structured control text frame from a newer backend is consumed, never written to xterm.
+    api.processTerminalSocketFrameForTest('meta-preview', JSON.stringify({type: 'refresh-ack', txn: 999}));
+    assert.equal(writes.some(text => text.includes('refresh-ack')), false, 'control text frames are never written to xterm');
+
+    // The next painted binary frame reveals.
+    writeCallback = null;
+    api.processTerminalSocketFrameForTest('meta-preview', binaryFrame('NEW-WINDOW-BYTES'));
+    assert.equal(typeof writeCallback, 'function', 'the revealing binary frame uses the xterm write-completion callback');
+    writeCallback();
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading, null, 'the painted transaction clears the shared loading record');
+    assert.ok(writes.some(text => text.includes('NEW-WINDOW-BYTES')), 'the revealing frame was consumed by xterm');
+
+    assert.ok(/function processTerminalSocketFrame\(session, item, data\)[\s\S]*consumeTerminalControlMessage\(session, data\)[\s\S]*data instanceof ArrayBuffer/.test(source), 'control text frames are consumed before binary PTY routing in one frame-processing owner');
+    assert.ok(/function clearTerminalConnectionState\(session, options = \{\}\)[\s\S]{0,600}terminalConnectionMaskStates/.test(source), 'generic socket open/output clears cannot lift a sequenced switching mask');
+    assert.ok(/beginTmuxWindowSwitchPaintBarrier\(session, \{sequence\}\)/.test(source), 'both switch paths confirm through the one paint-barrier owner');
+    assert.ok(/tmuxWindowSwitchPaintCapMs/.test(source), 'the already-repainted case reveals after the named shared paint cap');
+    assert.equal((source.match(/const tmuxWindowNavigationRecords = new Map\(\)/g) || []).length, 1, 'switch loading state lives in the one shared navigation record map');
+    for (const retired of ['tmuxWindowSwitchLoadings', 'terminalSwitchStates', 'tmuxWindowLoadingControllers', 'armTmuxWindowSwitchAckFallback', 'sendTmuxWindowSwitchRefresh', "'refresh-acknowledged'"]) {
+      assert.equal(source.includes(retired), false, `${retired} cannot return: the reveal has no parallel state source and no ack ceremony`);
+    }
+  });
+
   test('attention notifications use shared routing and policy', () => {
     loadYolomux();
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
@@ -4192,7 +4260,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/\.js-debug-graph-view\s*\{[\s\S]*display:\s*flex[\s\S]*overflow:\s*auto/.test(debugPaneCss) && /\.js-debug-chart-shell\s*\{[\s\S]*flex:\s*1 0 auto/.test(debugPaneCss) && /\.js-debug-chart-shell > \.js-debug-chart-grid\s*\{[\s\S]*grid-auto-rows:\s*minmax\(var\(--js-debug-chart-min-height\), 1fr\)[\s\S]*height:\s*100%/.test(debugPaneCss) && /\.js-debug-chart-shell > \.js-debug-chart-grid > \.js-debug-chart\s*\{[\s\S]*max-height:\s*var\(--js-debug-chart-max-height\)/.test(debugPaneCss), 'YO!stats grows chart cards into tall panes within shared minimum and maximum height bounds, while short panes scroll whole cards');
     assert.ok(/\.js-debug-hover-tooltip\s*\{[\s\S]*position:\s*absolute/.test(debugPaneCss) && debugPaneSource.includes('data-js-debug-hover-tooltip') && debugPaneSource.includes('debugGraphSetHoverTooltip'), 'YO!stats chart hover shows a contained, chart-owned max-and-time tooltip beside the cursor');
     assert.ok(debugPaneSource.includes("data.group.key === 'activity'") && debugPaneSource.includes("item.key !== 'idleAgents'") && debugPaneSource.includes('debugGraphHoverValueAtTime'), 'YO!stats hover reads the plotted value at the cursor and excludes idle agents from the Agent-status total');
-    assert.ok(debugPaneSource.includes('function syncDebugGraphAgentTokenResolution()') && debugPaneSource.includes('if (resolutionSeconds === 0) resetJsDebugHistoryReadiness()'), 'YO!stats reloads token-inclusive normal history when returning from compact token history to a short range');
+    // ONE history stream: the compact token side-stream machinery stays deleted; token
+    // charts read the unified cache with debugGraphAgentTokenResolution as a display floor.
+    for (const retired of ['jsDebugGraphAgentTokenBuckets', 'jsDebugStatsAgentTokenSequence', 'jsDebugStatsAgentTokenResolutionSeconds', 'jsDebugStatsAgentTokenSchemaVersion', 'debugGraphApplyServerAgentTokenHistory', 'resetDebugGraphAgentTokenHistory', 'syncDebugGraphAgentTokenResolution', 'token_resolution', 'token_since', 'token_history_start', 'token_history_end']) {
+      assert.equal(debugPaneSource.includes(retired), false, `YO!stats retired compact-token-stream symbol ${retired} stays deleted`);
+    }
+    assert.ok(/function debugGraphAgentTokenDisplayBuckets\([\s\S]{0,400}debugGraphAgentTokenResolution\(nowMs\)[\s\S]{0,200}debugGraphDisplayBuckets\(/.test(debugPaneSource), 'YO!stats token charts read the unified bucket cache with the per-range display floor');
     assert.equal(debugPaneSource.includes('${debugGraphLegendHtml(legendItems)}'), false, 'YO!stats does not append a redundant all-series legend after the chart grid');
     const debugGraphLegendSource = debugPaneSource.slice(debugPaneSource.indexOf('function debugGraphLegendHtml'), debugPaneSource.indexOf('function debugGraphAxisHtml'));
     assert.equal(debugGraphLegendSource.includes('debugGraphValueText'), false, 'YO!stats chart legends show labels only, without current values');
@@ -4804,31 +4877,30 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
-  test('YO!stats uses server-aggregated token points for wide time ranges', () => {
+  test('YO!stats renders wide-range token bars from the unified history stream at the coarse display floor', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Date.now();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(86400);
+    // ONE history stream: wide-range token detail arrives INLINE on ordinary
+    // history records (no agent_token_history side payload exists anymore).
     api.debugGraphApplyServerHistoryForTest({
       sequence: 40,
-      records: [{start: Math.floor(now / 1000), duration: 1, sequence: 40, cpu_total_percent: 1, cpu_count: 1}],
-      agent_token_history: {
-        sequence: 40,
-        resolution_seconds: 300,
-        snapshot: true,
-        records: Array.from({length: 12}, (_item, index) => ({
-          start: Math.floor((now - (60 * 60 * 1000) + index * 300000) / 1000 / 300) * 300,
-          duration: 300,
-          sequence: 29 + index,
-          agent_token_samples: 1,
-          agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
-        })),
-      },
+      records: Array.from({length: 12}, (_item, index) => ({
+        start: Math.floor((now - (60 * 60 * 1000) + index * 300000) / 1000 / 300) * 300,
+        duration: 300,
+        sequence: 29 + index,
+        cpu_total_percent: 1,
+        cpu_count: 1,
+        agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 10, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
+      })),
     });
     const summary = api.debugGraphBucketSummaryForTest(now);
-    assert.equal(summary.agentTokenResolutionSeconds, 300, '24-hour token history retains the server-selected five-minute resolution');
-    assert.equal(summary.agentTokenBuckets, 12, 'wide token history stores only server-aggregated points');
-    assert.equal(api.debugGraphAgentTokenDisplayBucketsForTest(now).length, 12, 'Agent tokens/min chart reads the downsampled server point series');
+    assert.equal(summary.agentTokenDisplayFloorSeconds, 300, 'the 24-hour token charts keep the legacy five-minute display floor');
+    const displayBuckets = api.debugGraphAgentTokenDisplayBucketsForTest(now);
+    assert.ok(displayBuckets.length >= 6, `Agent tokens/min chart reads the unified bucket cache (got ${displayBuckets.length} buckets)`);
+    assert.ok(displayBuckets.every(bucket => bucket.durationMs >= 300000), 'wide-range token buckets never render finer than the display floor');
     assert.ok(/data-js-debug-displayed-token-sum="1200"[^>]*>\(1\.2k, Σ displayed\)<\/span>/.test(api.debugPanelHtmlForTest()), 'displayed token sum adds all retained token deltas and uses the shared compact formatter');
   });
 
@@ -4837,53 +4909,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const now = Date.now();
     api.clearJsDebugEventsForTest();
     api.setDebugGraphRangeForTest(4 * 60 * 60);
+    // Token detail arrives inline on the ordinary two-minute history record.
     api.debugGraphApplyServerHistoryForTest({
       sequence: 41,
       records: [{
-        start: Math.floor(now / 1000),
-        duration: 1,
+        start: Math.floor((now - 120000) / 1000 / 120) * 120,
+        duration: 120,
         sequence: 41,
         cpu_total_percent: 1,
         cpu_count: 1,
+        agent_token_samples: 1,
+        agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
       }],
-      agent_token_history: {
-        sequence: 41,
-        resolution_seconds: 120,
-        snapshot: true,
-        records: [{
-          start: Math.floor((now - 120000) / 1000 / 120) * 120,
-          duration: 120,
-          sequence: 41,
-          agent_token_samples: 1,
-          agent_token_rates: [{key: '1|0|codex', label: '1:0:codex', total: 100, samples: 1, tokens: 100, seconds: 60, source: 'transcript'}],
-        }],
-      },
     });
     const html = api.debugPanelHtmlForTest();
     assert.ok(/data-js-debug-axis-max="agentTokens"[^>]*>100</.test(html), '100 tokens over one sampled minute stays 100 tokens/min after the server stores it in a two-minute history bucket');
-  });
-
-  test('YO!stats clears incompatible token history when the server schema changes', () => {
-    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
-    const now = Date.now();
-    api.clearJsDebugEventsForTest();
-    api.debugGraphApplyServerHistoryForTest({
-      sequence: 42,
-      agent_token_schema_version: 1,
-      records: [{
-        start: Math.floor(now / 1000),
-        duration: 1,
-        sequence: 42,
-        agent_token_samples: 1,
-        agent_token_rates: [{key: 'stale|0|codex', label: 'stale:0:codex', total: 500, samples: 1, tokens: 500, seconds: 60, source: 'transcript'}],
-      }],
-    });
-    assert.ok(api.debugPanelHtmlForTest().includes('stale:0:codex'), 'the initial token schema renders its token series');
-
-    api.debugGraphApplyServerHistoryForTest({sequence: 43, agent_token_schema_version: 2, records: []});
-
-    assert.equal(api.debugGraphBucketSummaryForTest(now).agentTokenSchemaVersion, 2, 'the client tracks the replacement token schema');
-    assert.equal(api.debugPanelHtmlForTest().includes('stale:0:codex'), false, 'a schema change removes stale token bars and legend entries');
   });
 
   test('YO!stats split charts render deterministic Y-axis max labels with units', () => {
@@ -5530,7 +5570,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     );
   });
 
-  test('YO!stats CPU keeps genuine sampling gaps while preserving zero-valued samples', () => {
+  test('YO!stats CPU draws one continuous line across a covered span and breaks only at a real coverage gap', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000 / 5) * 5;
     api.clearJsDebugEventsForTest();
@@ -5538,14 +5578,20 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
       {start: now - 50, duration: 5, sequence: 1, system_cpu_total_percent: 0, system_cpu_count: 1},
       {start: now - 45, duration: 5, sequence: 2, system_cpu_total_percent: 20, system_cpu_count: 1},
-      // 40s..25s are genuinely unsampled: do not carry the 20% value forward.
+      // 40s..25s carry no sample: with no recorded coverage gap the line
+      // interpolates across the span (the user always sees a continuous line).
       {start: now - 25, duration: 5, sequence: 3, system_cpu_total_percent: 40, system_cpu_count: 1},
     ]});
-    const cpu = api.debugPanelHtmlForTest().match(/<section[^>]*data-js-debug-chart="cpu"[\s\S]*?<\/section>/)?.[0] || '';
-    assert.equal((cpu.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a true CPU sampling gap splits the line instead of interpolating it');
-    assert.equal(cpu.includes('data-js-debug-agent-status-no-data-range='), false, 'CPU gaps never reuse the Agent-status red sampler overlay');
+    const cpuHtml = () => api.debugPanelHtmlForTest().match(/<section[^>]*data-js-debug-chart="cpu"[\s\S]*?<\/section>/)?.[0] || '';
+    assert.equal((cpuHtml().match(/data-js-debug-series="systemCpu"/g) || []).length, 1, 'a covered-but-unsampled span interpolates into one continuous line');
     const systemCpu = api.debugGraphSeriesDataForTest(now * 1000).find(series => series.key === 'systemCpu');
     assert.ok(systemCpu.hasDataValues.includes(true) && systemCpu.values.includes(0), 'a sampled zero remains data, distinct from an unsampled gap');
+    // A genuinely recorded coverage hole over 40s..25s is honest: the line breaks
+    // there and a red no-data band paints, never the Agent-status sampler overlay.
+    api.setJsDebugHistoryCoverageForTest('cpu', [[now - 55, now - 40], [now - 25, now - 20]], [[now - 55, now - 20]]);
+    const cpu = cpuHtml();
+    assert.equal((cpu.match(/data-js-debug-series="systemCpu"/g) || []).length, 2, 'a real coverage gap splits the CPU line honestly');
+    assert.equal(cpu.includes('data-js-debug-agent-status-no-data-range='), false, 'CPU gaps never reuse the Agent-status red sampler overlay');
   });
 
   test('YO!stats Cost summary is a compact non-chart card that opens YO!cost', () => {
@@ -5675,13 +5721,61 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(pricingSourcesSection.includes('javascript:alert'), false, 'unsafe component source URLs are filtered from the consolidated pricing sources list');
     const costSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
     assert.ok(costSource.includes('data-js-debug-cost-refresh') && costSource.includes("/api/pricing-catalog/refresh") && costSource.includes("/api/pricing-catalog', {cache: 'no-store'}") && costSource.includes('readOnlyMode ? \'\'') && costSource.includes('} catch (error) {\n    jsDebugPricingRefreshState.inFlight = false;'), 'the card exposes the server-owned Refresh control only to writable/admin sessions, polls its bounded status, clears a failed request state, and never crawls from the browser');
-    assert.ok(reportHtml.includes('Catalog revision') && reportHtml.includes('>9<') && reportHtml.includes('Catalog freshness') && reportHtml.includes('seed-only') && reportHtml.includes('Priced coverage') && reportHtml.includes('>4/4<') && reportHtml.includes('data-js-debug-cost-table="calculation"') && reportHtml.includes('23.5k tokens') && reportHtml.includes('2026-07-01T00:00:00Z') && reportHtml.includes('Unpriced exclusions') && reportHtml.includes('Estimated API list-price range $0.2560 – $0.3300') && reportHtml.includes('href="https://platform.openai.com/pricing"') && reportHtml.includes('>openai · gpt-5.6-terra<') && reportHtml.includes('data-js-debug-cost-table="source"') && reportHtml.includes('data-js-debug-cost-table="catalog"'), 'the report discloses active catalog state, safe pricing links, by-agent arithmetic, and source attribution in shared tables');
+    // Catalog facts collapsed to one compact status line (rev / freshness / coverage /
+    // unpriced); every fact stays present and the full localized names ride the line's
+    // accessible label. The four-row catalog table is retired.
+    const catalogLine = reportHtml.match(/<p class="js-debug-cost-catalog-line"[^>]*data-js-debug-cost-catalog[^>]*>[\s\S]*?<\/p>/)?.[0] || '';
+    assert.ok(catalogLine.includes('rev 9') && catalogLine.includes('seed-only') && catalogLine.includes('4/4') && catalogLine.includes('unpriced 0'), `the compact catalog line keeps revision, freshness, coverage, and unpriced facts (got: ${catalogLine.slice(0, 200)})`);
+    assert.ok(catalogLine.includes('Catalog revision') && catalogLine.includes('Priced coverage') && catalogLine.includes('Unpriced exclusions'), 'the full localized fact names stay reachable through the accessible label');
+    assert.equal(reportHtml.includes('data-js-debug-cost-table="catalog"'), false, 'the four-row catalog table is retired');
+    assert.ok(reportHtml.includes('data-js-debug-cost-table="calculation"') && reportHtml.includes('23.5k tokens') && reportHtml.includes('2026-07-01T00:00:00Z') && reportHtml.includes('Estimated API list-price range $0.2560 – $0.3300') && reportHtml.includes('href="https://platform.openai.com/pricing"') && reportHtml.includes('>openai · gpt-5.6-terra<') && reportHtml.includes('data-js-debug-cost-table="source"'), 'the report discloses safe pricing links, by-agent arithmetic, and source attribution in shared tables');
     const tmuxSection = reportHtml.slice(reportHtml.indexOf('By Agent'), reportHtml.indexOf('Model Usages'));
     assert.equal((tmuxSection.match(/>s:build</g) || []).length, 1, 'parent and subagent costs under one tmux window render as one combined tmux row');
     assert.ok(tmuxSection.includes('data-js-debug-cost-table="agent"') && tmuxSection.includes('23.5k tokens') && tmuxSection.includes('125k tokens') && tmuxSection.includes('3.7k tokens') && tmuxSection.includes('$0.2560 – $0.3300') && tmuxSection.includes('Grand total'), 'agent row and grand total pair class counts/costs and equal parent plus subagent once');
     assert.ok((reportHtml.match(/data-js-debug-cost-table=/g) || []).length >= 5, 'the Cost report renders every section in a shared table shell without former list/tree caps');
 
     assert.ok(costSource.includes("debugGraphCostRangeUsdText(summary)") && costSource.includes("debug.cost.range") && costSource.includes("'est. —, Σ displayed'"), 'an interval with no priceable component is distinctly unestimated while incomplete priced ranges render as low-high estimates');
+  });
+
+  test('YO!cost report is compact: one heading+range line, one totals line, explained columns, content-sized tables', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const summary = {
+      totalMicroUsd: 2130000, knownMicroUsd: 2130000, lowerMicroUsd: 2130000, upperMicroUsd: 2130000,
+      pricedCount: 3, unpricedCount: 0, complete: true, catalogRevision: 7, freshness: 'seed-only',
+      components: [
+        {provider: 'openai', model: 'gpt-x', direction: 'input', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 9_800_000, micro_usd: 1000000, priced: true},
+        {provider: 'openai', model: 'gpt-x', direction: 'input', modality: 'text', cache_role: 'read', unit: 'tokens', quantity: 1_900_000, micro_usd: 130000, priced: true},
+        {provider: 'openai', model: 'gpt-x', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 400_000, micro_usd: 1000000, priced: true},
+      ],
+      models: [{provider: 'openai', model: 'gpt-x', token_quantity: 12_100_000, input_tokens: 9_800_000, input_micro_usd: 1000000, micro_usd: 2130000}],
+      sources: [], agents: [],
+    };
+    const reportHtml = api.debugGraphCostReportHtmlForTest(summary, {startMs: now - 3600000, endMs: now});
+    // One heading line: the range rides inside the title row; the old full-width range paragraph is gone.
+    const titleRow = reportHtml.match(/<div class="js-debug-cost-report-title">[\s\S]*?<\/div>/)?.[0] || '';
+    assert.ok(titleRow.includes('<h1>') && titleRow.includes('js-debug-cost-report-range'), 'the date range renders beside the report title in one heading row');
+    assert.equal(reportHtml.includes('<p class="meta-muted">'), false, 'the separate full-width range paragraph is retired');
+    // One compact totals line replacing the Summary heading + nested list; exact values stay accessible.
+    const totalsLine = reportHtml.match(/<p class="js-debug-cost-report-totals"[^>]*>([\s\S]*?)<\/p>/);
+    assert.ok(totalsLine, 'the report renders the single compact totals line');
+    assert.ok(/total tokens: .*\(input=.*cache=.*output=.*\)/.test(totalsLine[1]), `totals line carries the token breakdown (got: ${totalsLine[1].slice(0, 140)})`);
+    assert.equal(/other=/.test(totalsLine[1]), false, 'other= is omitted from the compact line when it is zero');
+    assert.match(reportHtml, /data-js-debug-cost-report-totals aria-label="[^"]*9,800,000[^"]*"/, 'exact token counts remain reachable through the accessible label');
+    assert.equal(reportHtml.includes('js-debug-cost-report-list'), false, 'the old Summary bullets/nested list are retired');
+    // Unchanged visible column labels, each explained through the one description owner (title + aria).
+    const modelTable = reportHtml.slice(reportHtml.indexOf('Model Usages'));
+    for (const [label, phrase] of [['Input', 'Newly processed prompt/context tokens'], ['Cached', 'cache READS (hits/refreshes) and cache WRITES'], ['Output', 'Model-generated tokens'], ['Other', 'fits none of Input / Cached / Output'], ['Total', 'counted in exactly one column']]) {
+      assert.ok(modelTable.includes(`</i>${label}</th>`) || modelTable.includes(`>${label}</th>`), `the visible ${label} column label is unchanged`);
+      assert.ok(modelTable.includes(phrase), `${label} column help explains: ${phrase}`);
+    }
+    assert.ok((modelTable.match(/data-js-debug-cost-column-desc="[^"]+"[^>]*>/g) || []).length >= 5 || (modelTable.match(/data-js-debug-cost-column-desc/g) || []).length >= 5, 'all five columns route through the shared explained-header owner');
+    // Cached explanation names the implemented projection (read + write, non-double-counted).
+    assert.ok(reportHtml.includes('not stored cache size or GPU cache occupancy'), 'Cached help distinguishes billing accounting from stored/KV cache size');
+    // Content-sized tables: the shared sizing parent drops the full-width stretch for usage tables.
+    const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+    assert.match(css, /\.js-debug-cost-usage-table-section \.js-debug-cost-table \{\n  inline-size: max-content;\n  max-inline-size: 100%;\n  min-inline-size: auto;/, 'usage tables are content-sized through one shared sizing parent');
+    assert.equal(/data-js-debug-cost-table="agent"\][\s\S]{0,200}table-layout: fixed/.test(css), false, 'the stretched fixed shared percent template is retired');
   });
 
   test('YO!stats 24-hour displayed cost range reconciles unknown components exactly once', () => {
@@ -5876,18 +5970,44 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
     const html = api.debugLogsInnerHtmlForTest();
     assert.ok(html.includes('used lsof fallback') && html.includes('client exploded'), 'Logs merges server warnings and client errors');
-    for (const level of ['info', 'warning', 'debug', 'error']) {
-      assert.ok(html.includes(`data-level="${level}"`), `Logs renders the ${level} level row`);
-      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="true"`), `Logs exposes an active ${level} filter`);
+    // Fresh state defaults to warning+error visible; the chatty info/debug levels
+    // are hidden but one click away (DOIT.logs-hide-info-by-default).
+    for (const level of ['warning', 'error']) {
+      assert.ok(html.includes(`data-level="${level}"`), `Logs renders the ${level} level row by default`);
+      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="true"`), `Logs exposes an active ${level} filter by default`);
     }
+    for (const level of ['info', 'debug']) {
+      assert.equal(html.includes(`data-level="${level}"`), false, `Logs hides the ${level} level row by default`);
+      assert.ok(html.includes(`data-js-debug-log-level="${level}" aria-pressed="false"`), `Logs leaves the ${level} filter off by default`);
+    }
+    assert.equal(html.includes('>ready<') || html.includes('ready</'), false, 'the default view hides the info "ready" message');
     assert.ok(/data-js-debug-subtab="graph"[\s\S]*data-js-debug-subtab="events"[\s\S]*data-js-debug-subtab="system"[\s\S]*data-js-debug-subtab="logs"/.test(api.debugPanelHtmlForTest()), 'Logs is the fourth YO!stats sub-tab after System');
+    // Enabling Info is one toggle away and surfaces the recorded info rows; the
+    // recording buffer is unchanged (display-only filter).
+    api.setJsDebugLogLevelsForTest(['warning', 'error', 'info']);
+    const withInfo = api.debugLogsInnerHtmlForTest();
+    assert.ok(withInfo.includes('data-level="info"') && withInfo.includes('ready'), 'enabling Info surfaces the recorded info rows');
     api.setJsDebugLogLevelsForTest(['warning']);
     const warningOnly = api.debugLogsInnerHtmlForTest();
     assert.ok(warningOnly.includes('used lsof fallback'), 'warning filter retains warnings');
     assert.equal(warningOnly.includes('ready'), false, 'warning filter hides info');
     assert.equal(warningOnly.includes('client exploded'), false, 'warning filter hides client errors');
     assert.match(api.debugLogsTextForClipboardForTest(), /WARNING.*sessions\/process-discovery.*used lsof fallback/, 'Logs copy text includes level, source, category, and message');
-    assert.ok(/const jsDebugLogsState = \{[\s\S]*payload: \[\][\s\S]*levels: new Set\(jsDebugLogLevels\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Logs uses one bounded server/client viewer state owner');
+    // A chosen level selection persists across a browser reload; a stored
+    // selection is honored over the warning+error default.
+    const savedLevels = api.storageValueForTest('yolomux.stats.ui_preferences.v1');
+    assert.match(savedLevels, /"logLevels":\["warning"\]/, 'the chosen level selection is persisted to browser preferences');
+    const reloaded = loadYolomux('?debug=1&sessions=debug', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      localStorage: {'yolomux.stats.ui_preferences.v1': savedLevels},
+    });
+    reloaded.setJsDebugLogsPayloadForTest([
+      {id: 1, timestamp: 100, level: 'info', source: 'server', category: 'boot', message: 'ready'},
+      {id: 2, timestamp: 101, level: 'warning', source: 'sessions', category: 'process-discovery', message: 'used lsof fallback'},
+    ]);
+    const reloadedHtml = reloaded.debugLogsInnerHtmlForTest();
+    assert.ok(reloadedHtml.includes('used lsof fallback'), 'a persisted warning-only selection is honored after reload');
+    assert.equal(reloadedHtml.includes('ready'), false, 'the persisted selection keeps info hidden after reload');
+    assert.ok(/const jsDebugLogsState = \{[\s\S]*payload: \[\][\s\S]*levels: new Set\(jsDebugLogDefaultLevels\)/.test(fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8')), 'Logs uses one bounded server/client viewer state owner defaulting to warning+error');
   });
 
   test('YO!stats hover guides sync across charts and drag-select zooms with reset', () => {
@@ -6245,7 +6365,125 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.jsDebugHistoryCoverageNeedsRefreshForTest(100, 200, 60), true, 'a user-selected coarse response does not block a later finer request');
   });
 
-  test('YO!stats finer replacement preserves coarse bucket portions outside unaligned coverage', () => {
+  test('YO!stats wide coarse coverage does not satisfy a narrow finer domain (range cache poisoning)', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000);
+    const wideStart = now - 16 * 60 * 60;
+    const narrowStart = now - 20 * 60;  // safely inside the 1s retained tier
+    // A 16h fetch stamps its whole coverage with the server's whole-query MAX(duration)=600s,
+    // including the recent portion that actually retains 1s data.
+    api.resetJsDebugHistoryReadinessForTest();
+    api.setJsDebugHistoryReadinessForTest('loading-initial', {targetStartSeconds: wideStart, targetEndSeconds: now});
+    api.applyJsDebugHistoryCoverageForTest({
+      mode: 'live', requestedStart: wideStart, requestedEnd: 0, coveredStart: wideStart, coveredEnd: now,
+      resolutionSeconds: 600, sourceResolutionSeconds: 600, complete: true, hasMoreOlder: false, nextOlderEnd: 0,
+    });
+    // The recent domain needs 1s; the coarse wide interval must NOT satisfy it.
+    const narrowTier = api.jsDebugHistoryCoverageResolutionSecondsForTest(narrowStart, 1);
+    assert.equal(narrowTier, 1, 'a recent domain requires one-second retained data');
+    assert.equal(
+      api.jsDebugHistoryCoverageNeedsRefreshForTest(narrowStart, now, narrowTier), true,
+      'a wide 600s response must not falsely satisfy the finer recent domain (would leave the view stuck at 600s)',
+    );
+    // But a genuinely-old domain (16h) still accepts the coarse retained tier — no infinite retry.
+    const wideTier = api.jsDebugHistoryCoverageResolutionSecondsForTest(wideStart, 1);
+    assert.equal(
+      api.jsDebugHistoryCoverageNeedsRefreshForTest(wideStart, now, wideTier), false,
+      'the 16h domain accepts the 600s retained tier it actually needs',
+    );
+  });
+
+  test('YO!stats honest outage: refinement never smears a coarse aggregate back across the gap for any family', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
+    const nowSec = now / 1000;
+    api.setDebugGraphRangeForTest(30 * 60, {render: false});
+    const domainStartSec = nowSec - 30 * 60;
+    const outageEndSec = nowSec - 15 * 60; // outage covers [now-30m, now-15m]; fine data only after it.
+    // Fine data (low values) only in the recent suffix, carrying every family.
+    const fine = [];
+    for (let t = outageEndSec; t < nowSec; t += 30) {
+      fine.push({
+        start: t, duration: 1, sequence: fine.length + 1,
+        cpu_total_percent: 20, cpu_count: 1, system_cpu_total_percent: 25, system_cpu_count: 1,
+        active_agent_total: 1,
+        agent_token_rates: {'s1:0': {tokens: 100, seconds: 1, samples: 1, total: 100, model_rates: {'gpt-5': {tokens: 100, seconds: 1, samples: 1, total: 100}}}},
+        host_metrics: {
+          system_memory_used_total_bytes: 200, system_memory_capacity_total_bytes: 1000, system_memory_count: 1,
+          service_load: {'web:8881': {label: 'web', cpu_total_percent: 15, cpu_samples: 1, rss_total_bytes: 2e8, rss_samples: 1}},
+          gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 30, memory_used_total_bytes: 5e9, memory_capacity_total_bytes: 5e10, samples: 1}},
+        },
+        cost_summary: {total_micro_usd: 5, components: [{provider: 'openai', model: 'gpt-5', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 100, micro_usd: 5}]},
+      });
+    }
+    // A coarse 600s wide bucket STRADDLING the recovery boundary with DISTINCTLY HIGH
+    // aggregates. Retained, it both collapses the whole view to 600s and smears its high
+    // values backward across the gap.
+    const coarse = {
+      start: outageEndSec - 300, duration: 600, sequence: 9999,
+      cpu_total_percent: 90 * 600, cpu_count: 600, system_cpu_total_percent: 95 * 600, system_cpu_count: 600,
+      active_agent_total: 600,
+      agent_token_rates: {'s1:0': {tokens: 6000, seconds: 600, samples: 600, total: 6000, model_rates: {'gpt-5': {tokens: 6000, seconds: 600, samples: 600, total: 6000}}}},
+      host_metrics: {
+        system_memory_used_total_bytes: 900 * 600, system_memory_capacity_total_bytes: 1000 * 600, system_memory_count: 600,
+        service_load: {'web:8881': {label: 'web', cpu_total_percent: 92 * 600, cpu_samples: 600, rss_total_bytes: 2e8, rss_samples: 600}},
+        gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 95 * 600, memory_used_total_bytes: 5e9, memory_capacity_total_bytes: 5e10, samples: 600}},
+      },
+      cost_summary: {total_micro_usd: 3000, components: [{provider: 'openai', model: 'gpt-5', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 60000, micro_usd: 3000}]},
+    };
+    api.debugGraphApplyServerHistoryForTest({sequence: 10000, records: [coarse, ...fine]});
+    // The authoritative fine refinement over the covered suffix removes the straddling
+    // coarse bucket (checkbox 5), so its high aggregate can no longer claim the outage nor
+    // hold the whole view at the coarse tier.
+    api.debugGraphRemoveCoarserServerBucketsForTest(outageEndSec, nowSec, 1);
+    // High coarse value / low fine value per family; after refinement no family may render
+    // near its coarse aggregate anywhere in the domain (no backward smear), and the fine
+    // tier is restored (many slots, not the ~3 the 600s bucket collapsed it to).
+    // Coarse aggregate -> ceiling (between the fine value and the high coarse value) per
+    // measurable family. Agent status, Agent tokens, and Model tokens ride the SAME per-bucket
+    // record, so removing the straddling bucket de-smears them together; Cost is checked below.
+    const expectations = {
+      'cpu': 45,               // fine 20, coarse 90
+      'systemCpu': 45,         // fine 25, coarse 95
+      'systemMemory': 500,     // fine 200 used-bytes, coarse 900
+      'serviceLoad:web:8881': 45, // fine 15, coarse 92 (Server Load)
+      'gpu:gpuUtil:gpu:0': 55,    // fine 30, coarse 95
+    };
+    const series = new Map(api.debugGraphSeriesDataForTest(now).map(s => [s.key, s]));
+    for (const [key, ceiling] of Object.entries(expectations)) {
+      const s = series.get(key);
+      assert.ok(s, `family ${key} has a series`);
+      const values = s.values.filter(value => Number.isFinite(value));
+      assert.ok(values.length >= 10, `${key}: the fine tier is restored (${values.length} slots, not the ~3 the coarse bucket forced)`);
+      assert.ok(Math.max(...values) <= ceiling, `${key}: the coarse aggregate never smears into the view (max ${Math.max(...values)} <= ${ceiling})`);
+    }
+    // Cost rides the same buckets: after refinement the display cost reflects only the fine
+    // records, never the coarse bucket's inflated 3000 micro-USD aggregate.
+    const costTotal = api.debugGraphCostSummaryForTest(api.debugGraphDisplayBucketsForTest(now)).totalMicroUsd;
+    assert.ok(costTotal > 0 && costTotal < 3000, `Cost reflects only the fine records, not the coarse smear (got ${costTotal})`);
+  });
+
+  test('YO!stats short-range domain keeps legitimately-coarse family data (cost/token cadence) with a 1s tail', () => {
+    // Regression guard (2026-07-15): a range/resolution change must NEVER drop a family's
+    // own coarser cadence just because it is coarser than the domain's finest retention
+    // tier. Tokens sample at 10s and Cost aggregates coarser than the 1s CPU tail; both must
+    // survive at a 5m range, or the Cost summary reads 0 tokens while the token charts show
+    // data (the reported "pricing broken" symptom).
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
+    const nowSec = now / 1000;
+    api.setDebugGraphRangeForTest(5 * 60, {render: false});
+    api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
+      {start: nowSec - 120, duration: 10, sequence: 1, active_agent_total: 1,
+        agent_token_rates: {'s1:0': {tokens: 1000, seconds: 10, samples: 1, total: 1000, model_rates: {'gpt-5': {tokens: 1000, seconds: 10, samples: 1, total: 1000}}}},
+        cost_summary: {total_micro_usd: 50, components: [{provider: 'openai', model: 'gpt-5', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 1000, micro_usd: 50}]}},
+      {start: nowSec - 5, duration: 1, sequence: 2, cpu_total_percent: 20, cpu_count: 1},
+    ]});
+    const cost = api.debugGraphCostSummaryForTest(api.debugGraphDisplayBucketsForTest(now)).totalMicroUsd;
+    assert.equal(cost, 50, `a 1s CPU tail must not evict the coarser (10s) token/cost bucket at a 5m range (got ${cost})`);
+  });
+
+  test('YO!stats finer replacement removes every intersecting coarser aggregate', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const start = Math.floor(Date.now() / 1000 / 10) * 10 - 20;
     api.clearJsDebugEventsForTest();
@@ -6253,8 +6491,62 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {start, duration: 10, sequence: 4, api_count: 10},
       {start: start + 10, duration: 10, sequence: 5, api_count: 10},
     ]});
-    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start + 5, start + 15, 1), 0, 'unaligned refinement does not delete partially covered coarse buckets');
-    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start, start + 10, 1), 1, 'aligned refinement removes the one fully replaced coarse bucket');
+    // Corrected honesty contract: an unaligned finer replacement must remove BOTH coarse
+    // buckets it straddles, not preserve a partial aggregate that would smear across the
+    // domain (the former behavior was the cache-poisoning path).
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start + 5, start + 15, 1), 2, 'an unaligned refinement removes both intersecting coarse buckets');
+    api.debugGraphApplyServerHistoryForTest({sequence: 5, records: [
+      {start, duration: 10, sequence: 4, api_count: 10},
+      {start: start + 10, duration: 10, sequence: 5, api_count: 10},
+    ]});
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start, start + 10, 1), 1, 'an aligned refinement removes the one replaced coarse bucket and leaves the non-intersecting one');
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start - 100, start - 90, 1), 0, 'a refinement disjoint from every coarse bucket removes nothing');
+  });
+
+  await testAsync('YO!stats refines a wide-to-narrow switch with a since=0 snapshot, not a cursor delta', async () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const requests = [];
+    await flushAsyncWork();
+    api.stopJsDebugStatsPollingForTest();
+    api.resetJsDebugHistoryReadinessForTest();
+    const nowSec = Math.floor(Date.now() / 1000);
+    api.setFetchForTest((url) => {
+      requests.push(String(url));
+      const parsed = new URL(String(url), 'http://localhost');
+      const historyStart = Number(parsed.searchParams.get('history_start')) || 0;
+      // A wide (>=4h) request returns coarse 600s coverage across its whole span — the
+      // server whole-query MAX(duration) scalar; a narrow request returns fine 1s data.
+      const wide = historyStart > 0 && historyStart <= nowSec - (4 * 60 * 60);
+      const sourceRes = wide ? 600 : 1;
+      return Promise.resolve(jsonResponse({history: {
+        sequence: wide ? 500 : 900,
+        records: [{start: nowSec - 60, duration: sourceRes, sequence: wide ? 500 : 900, api_count: 1}],
+        coverage: statsHistoryCoverageForRequest(String(url), {resolution_seconds: sourceRes, source_resolution_seconds: sourceRes}),
+      }}));
+    });
+    // Load the wide 16h range: applies coarse 600s coverage and advances the live cursor.
+    api.setDebugGraphRangeForTest(16 * 60 * 60);
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    const wideCount = requests.length;
+    // Switch to 30m: the coarse cache must NOT be reused through a cursor delta.
+    api.setDebugGraphRangeForTest(30 * 60);
+    for (let index = 0; index < 5; index += 1) await flushAsyncWork();
+    const refineUrl = requests[wideCount];
+    assert.ok(refineUrl, 'switching to the finer range issues a refinement request');
+    assert.equal(
+      new URL(refineUrl, 'http://localhost').searchParams.get('since'), '0',
+      'the first post-switch request is a full since=0 snapshot bounded to the domain, not a cursor delta',
+    );
+    // No retry loop: once the fine snapshot satisfies the domain, further passive polls
+    // resume the cursor-delta live tail instead of re-issuing since=0 refinements forever.
+    const settledCount = requests.length;
+    await api.pollJsDebugStatsSampleForTest();
+    for (let index = 0; index < 3; index += 1) await flushAsyncWork();
+    const followUps = requests.slice(settledCount);
+    assert.ok(followUps.length <= 1, `the settled domain does not spin a refetch loop (${followUps.length} follow-up requests)`);
+    for (const url of followUps) {
+      assert.notEqual(new URL(url, 'http://localhost').searchParams.get('since'), '0', 'a satisfied domain resumes cursor-delta polling, not another since=0 refinement');
+    }
   });
 
   await testAsync('YO!stats ignores an obsolete history response after the requested domain changes', async () => {
@@ -6663,13 +6955,120 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.debugGraphHistoryCoverageGapRunsForTest({key: 'modelTokens'}, domain)), [{startMs: 100_000, endMs: 500_000}], 'cost-backed model dimensions expose empty cost coverage across the answered range');
   });
 
+  test('YO!stats red no-data box spans never-recorded prefixes and drops owner-churn micro-gaps', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const domain = {startMs: now - (24 * 60 * 60 * 1000), endMs: now};
+    const startS = Math.floor(domain.startMs / 1000);
+    const endS = Math.floor(domain.endMs / 1000);
+    const firstS = startS + (3 * 60 * 60); // CPU's first-ever durable sample, 3h into the range.
+    const midS = Math.floor((firstS + endS) / 2);
+    // CPU recorded continuously from its first sample to now, broken only by the
+    // 1-2s sampler micro-break at an owner/epoch handoff (server restart).
+    const cpuIntervals = [
+      {startSeconds: firstS, endSeconds: midS, resolutionSeconds: 1, sourceResolutionSeconds: 0},
+      {startSeconds: midS + 2, endSeconds: endS, resolutionSeconds: 1, sourceResolutionSeconds: 0},
+    ];
+    const requested = [{startSeconds: startS, endSeconds: endS, resolutionSeconds: 1, sourceResolutionSeconds: 0}];
+    api.setJsDebugHistoryReadinessForTest('ready', {
+      coverageIntervals: cpuIntervals,
+      requestCoverageIntervals: requested,
+      // system_memory has no store key at all: it was never recorded.
+      storeCoverageIntervals: {cpu: cpuIntervals, raw: cpuIntervals},
+    });
+    const cpuGaps = api.debugGraphHistoryCoverageGapRunsForTest({key: 'cpu'}, domain);
+    assert.equal(cpuGaps.length, 1, 'CPU renders one full-span red box (the never-recorded prefix), not per-restart hairlines');
+    assert.ok(cpuGaps[0].startMs <= domain.startMs + 1000 && Math.abs(cpuGaps[0].endMs - (firstS * 1000)) <= 2000, 'the CPU red box spans the pre-first-sample window');
+    const memoryGaps = api.debugGraphHistoryCoverageGapRunsForTest({key: 'memory'}, domain);
+    assert.equal(memoryGaps.length, 1, 'a never-recorded family paints a red box instead of borrowing CPU coverage');
+    assert.ok(memoryGaps[0].startMs <= domain.startMs + 1000 && memoryGaps[0].endMs >= domain.endMs - 1000, 'the never-recorded memory red box spans the whole selected range');
+    assert.ok(api.debugGraphHistoryCoverageGapRectsHtmlForTest({key: 'memory'}, domain).includes('js-debug-history-no-data-range'), 'the never-recorded box uses the shared durable no-data overlay');
+  });
+
+  test('YO!stats percent charts round the Y-axis to nice steps', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    // Servers Load is percent without a fixed 0-100 axis, so its max must round
+    // (100 -> mid 50, 50 -> mid 25) instead of the raw data max (88.3 / 44.1).
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent'}, 88.3), 100);
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent'}, 44.1), 50);
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent'}, 12), 20);
+    // A fixed-max percent chart (CPU) keeps its 0-100 axis.
+    assert.equal(api.debugGraphChartAxisMaxForTest({unit: 'percent', fixedMax: 100}, 40), 100);
+  });
+
+  test('YO!stats live-edge pulse marks every live chart including sparse/no-data edges', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.now();
+    const liveDomain = {startMs: now - (5 * 60 * 1000), endMs: now, rangeSeconds: 300, zoomed: false};
+    // A sparse chart (e.g. Model tokens/min) has no data bucket at the live edge;
+    // the pulse must still mark the ongoing cell so every live chart looks live.
+    assert.ok(api.debugGraphLivePulseHtmlForTest([], [], liveDomain, now).includes('data-js-debug-live-pulse'), 'the live pulse renders on a live chart with no edge data');
+    assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, rangeSeconds: 2 * 60 * 60}, now), '', 'the pulse is suppressed on coarse (>1h) ranges');
+    assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, zoomed: true}, now), '', 'the pulse is suppressed on a zoomed view');
+  });
+
+  test('YO!stats x-axis omits seconds except on a sub-minute zoom', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.UTC(2026, 6, 15, 8, 14, 15);
+    const tickText = html => [...html.matchAll(/data-js-debug-x-tick="[^"]+"[^>]*>([^<]+)</g)].map(m => m[1]);
+    // 1h range: ticks are 30 minutes apart, so HH:MM (no seconds).
+    for (const rangeSeconds of [60 * 60, 4 * 3600, 5 * 60]) {
+      const labels = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - rangeSeconds * 1000, endMs: now}));
+      assert.ok(labels.length >= 3, `${rangeSeconds}s axis renders ticks`);
+      assert.ok(labels.every(label => !/\d{1,2}:\d{2}:\d{2}/.test(label)), `${rangeSeconds}s x-axis labels omit seconds: ${labels.join(', ')}`);
+    }
+    // A tight sub-minute drag-zoom keeps seconds (the half-span is under a minute).
+    const zoomLabels = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - 40 * 1000, endMs: now}));
+    assert.ok(zoomLabels.some(label => /\d{1,2}:\d{2}:\d{2}/.test(label)), `a sub-minute zoom keeps seconds: ${zoomLabels.join(', ')}`);
+  });
+
+  test('YO!stats slides only short live ranges with the wall clock', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    api.clearDebugGraphZoomForTest();
+    api.setDebugGraphRangeForTest(5 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 5m live view slides with the wall clock');
+    api.setDebugGraphRangeForTest(30 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 30m live view still slides');
+    api.setDebugGraphRangeForTest(60 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), true, 'a 1h live view slides (extended from 30m) even though data ticks every 60s');
+    api.setDebugGraphRangeForTest(2 * 60 * 60);
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'ranges above 1h stay static (range-scaled cadence)');
+    api.setDebugGraphRangeForTest(5 * 60);
+    api.setDebugGraphZoomDomainForTest(Date.now() - 60000, Date.now());
+    assert.equal(api.debugGraphSlidingAxisActiveForTest(), false, 'a zoomed view stays static regardless of range');
+  });
+
   test('YO!stats rejects only malformed interval coverage, while an empty list remains valid', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const envelope = {mode: 'live', requested_start: 100, requested_end: 500, covered_start: 100, covered_end: 500, resolution_seconds: 1};
     assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: envelope}), null, 'a compatibility envelope without the required interval list is malformed');
-    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: [{start: 100, end: 90, resolution_seconds: 1}]}}), null, 'a reversed interval is malformed');
-    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: Array.from({length: 257}, (_item, index) => ({start: index, end: index + 1, resolution_seconds: 1}))}}), null, 'an unbounded interval list is malformed');
+    assert.equal(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: [{start: 100, end: 90, resolution_seconds: 1}]}}), null, 'a reversed interval in the required top-level list is a structural contract violation');
+    // The interval-count bound degrades by capping to the most recent entries
+    // rather than rejecting the whole response (per-family resilience contract).
+    const overLimit = api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: Array.from({length: 300}, (_item, index) => ({start: index, end: index + 1, resolution_seconds: 1}))}});
+    assert.ok(overLimit, 'an over-length interval list degrades to capped coverage instead of rejecting');
+    assert.ok(overLimit.intervals.length <= 256, 'the over-length interval list is capped to the bound, not rejected');
     assert.deepStrictEqual(canonical(api.normalizedJsDebugHistoryCoverageForTest({coverage: {...envelope, intervals: []}}).intervals), [], 'an explicit empty interval list is valid coverage');
+  });
+
+  test('YO!stats coverage drops only a malformed family and keeps the others', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const envelope = {mode: 'live', requested_start: 100, requested_end: 500, covered_start: 100, covered_end: 500, resolution_seconds: 1};
+    const good = [{start: 100, end: 200, resolution_seconds: 1}];
+    const coverage = api.normalizedJsDebugHistoryCoverageForTest({coverage: {
+      ...envelope,
+      intervals: good,
+      store_intervals: {
+        cpu: good,
+        // A structurally-unusable family (not an array) must drop ONLY itself.
+        agent_tokens: 'corrupt',
+        gpu: good,
+      },
+    }});
+    assert.ok(coverage, 'a single malformed family never nulls the whole multi-family response');
+    assert.ok(coverage.storeIntervals.cpu && coverage.storeIntervals.cpu.length === 1, 'healthy families still render');
+    assert.ok(coverage.storeIntervals.gpu && coverage.storeIntervals.gpu.length === 1, 'other healthy families still render');
+    assert.equal(coverage.storeIntervals.agent_tokens, undefined, 'the malformed family is dropped, not rendered');
   });
 
   await testAsync('YO!stats widening the range queues an older-history fetch behind an in-flight poll', async () => {

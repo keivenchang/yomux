@@ -15,24 +15,19 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .. import stats_families
 
-STATS_STORE_SCHEMA_VERSION = 3
+
+STATS_STORE_SCHEMA_VERSION = 4
 STATS_STORE_MAX_JSON_BYTES = 256 * 1024
 STATS_STORE_MAX_ROWS_PER_QUERY = 20_000
 STATS_COST_SUMMARY_MAX_COMPONENTS = 4096
 STATS_COST_SUMMARY_MAX_BYTES = 160 * 1024
 STATS_COVERAGE_MAX_INTERVALS = 128
-STATS_COVERAGE_FAMILIES = ("raw", "cpu", "service_load", "agent_status", "agent_tokens", "cost", "gpu", "system_memory")
-STATS_COVERAGE_LEGACY_CADENCE = {
-    "raw": 1,
-    "cpu": 1,
-    "service_load": 10,
-    "agent_status": 10,
-    "agent_tokens": 60,
-    "cost": 60,
-    "gpu": 10,
-    "system_memory": 60,
-}
+# Family facts (names, cadences, storage fields) have ONE owner: the frozen
+# manifest in yolomux_lib/stats_families.py. This module only derives.
+STATS_COVERAGE_FAMILIES = stats_families.STATS_COVERAGE_FAMILY_NAMES
+STATS_COVERAGE_LEGACY_CADENCE = stats_families.STATS_COVERAGE_LEGACY_CADENCE
 
 BROWSER_FIELDS = (
     "api_count",
@@ -44,36 +39,13 @@ BROWSER_FIELDS = (
     "disconnected_ms",
 )
 PROCESS_FIELDS = ("cpu_total_percent", "cpu_count")
-SERVER_FIELDS = (
-    "cpu_total_percent",
-    "cpu_count",
-    "system_cpu_total_percent",
-    "system_cpu_count",
-    "ask_agent_total",
-    "run_agent_total",
-    "transition_agent_total",
-    "idle_agent_total",
-    "active_agent_total",
-    "inactive_agent_total",
-    "agent_activity_samples",
-    "tokens_per_agent_total",
-    "agent_token_samples",
-)
+SERVER_FIELDS = stats_families.SERVER_BUCKET_FIELDS
 
 
 def empty_host_metrics() -> dict[str, Any]:
     return {
-        "cpu_label": "",
-        "system_memory_label": "",
-        "system_memory_used_total_bytes": 0.0,
-        "system_memory_capacity_total_bytes": 0.0,
-        "system_memory_count": 0.0,
-        "cpu_processes": {},
-        "memory_processes": {},
-        "gpu_util_processes": {},
-        "gpu_memory_processes": {},
-        "gpu_devices": {},
-        "service_load": {},
+        name: "" if kind == "label" else 0.0 if kind == "sum" else {}
+        for name, kind in stats_families.HOST_METRIC_FIELDS
     }
 
 
@@ -129,8 +101,15 @@ def _finite(value: Any) -> float:
     return number if math.isfinite(number) and number >= 0.0 else 0.0
 
 
-def normalize_bucket(value: Any) -> dict[str, Any]:
-    """Return one bounded, JSON-safe bucket without trusting persisted input."""
+def normalize_bucket(value: Any, *, owned: bool = False) -> dict[str, Any]:
+    """Return one bounded, JSON-safe bucket without trusting persisted input.
+
+    ``owned=True`` marks a bucket the caller exclusively owns (for example one
+    freshly decoded with ``json.loads``): its nested mappings are adopted by
+    reference instead of deep-copied.  The hot read paths decode thousands of
+    dense bucket rows per range request, and deep-copying every nested map
+    dominated that latency while protecting nothing.
+    """
     raw = value if isinstance(value, dict) else {}
     result = empty_bucket(int(_finite(raw.get("start"))), max(1, int(_finite(raw.get("duration")))))
     result["sequence"] = int(_finite(raw.get("sequence")))
@@ -140,8 +119,13 @@ def normalize_bucket(value: Any) -> dict[str, Any]:
     for mapping_field in ("agent_token_rates", "cost_summary", "host_metrics", "clients", "servers"):
         candidate = raw.get(mapping_field)
         if isinstance(candidate, dict):
-            result[mapping_field] = copy.deepcopy(candidate)
+            result[mapping_field] = candidate if owned else copy.deepcopy(candidate)
     return result
+
+
+def _decode_bucket_row(encoded: Any) -> dict[str, Any]:
+    """One owner of the bucket_json -> normalized bucket read decode."""
+    return normalize_bucket(json.loads(str(encoded)), owned=True)
 
 
 def merge_bucket(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -165,10 +149,14 @@ def merge_bucket(target: dict[str, Any], source: dict[str, Any]) -> None:
 class StatsStore:
     """SQLite WAL database owned by exactly one ``statsd`` process.
 
-    Bucket rows retain the legacy response shape in JSON for compatibility, and
-    normalized child tables give bounded relational identities for clients,
-    processes, agent rates, and host metrics.  All rows for one bucket revision
-    are committed or rolled back together.
+    Schema 4 stores exactly three tables: ``stats_buckets`` (each fact stored
+    once, in ``bucket_json``), ``stats_coverage_intervals``, and
+    ``schema_meta``.  A read-only peer (the web's in-process
+    ``StatsHistoryReader``) never migrates: it reads only those three tables,
+    which exist under both the current and the legacy schema, so it serves a
+    not-yet-migrated database unchanged and picks up the owner's migration
+    transparently (a mid-migration schema change surfaces as one retried
+    ``sqlite3.OperationalError`` on its lazy connection).
     """
 
     def __init__(self, path: Path, *, read_only: bool = False):
@@ -178,7 +166,15 @@ class StatsStore:
 
     def open(self) -> None:
         if self.read_only:
-            self.connection = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=2.0)
+            # Read-only WAL peers (the web's in-process StatsHistoryReader)
+            # serve HTTP request threads, so the shared connection must not be
+            # pinned to its creating thread; every caller serializes use behind
+            # its own lock. The open itself can raise OperationalError when the
+            # database file does not exist yet (fresh state dir before the
+            # statsd owner created it) — callers open lazily and retry.
+            self.connection = sqlite3.connect(
+                f"file:{self.path}?mode=ro", uri=True, timeout=2.0, check_same_thread=False,
+            )
             self.connection.execute("PRAGMA query_only=ON")
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,36 +191,6 @@ class StatsStore:
               PRIMARY KEY (start, duration)
             );
             CREATE INDEX IF NOT EXISTS stats_buckets_sequence ON stats_buckets(sequence);
-            CREATE TABLE IF NOT EXISTS stats_clients (
-              start INTEGER NOT NULL, duration INTEGER NOT NULL, client_id TEXT NOT NULL,
-              sequence INTEGER NOT NULL, values_json TEXT NOT NULL,
-              PRIMARY KEY (start, duration, client_id),
-              FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS stats_processes (
-              start INTEGER NOT NULL, duration INTEGER NOT NULL, process_id TEXT NOT NULL,
-              sequence INTEGER NOT NULL, values_json TEXT NOT NULL,
-              PRIMARY KEY (start, duration, process_id),
-              FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS stats_agent_rates (
-              start INTEGER NOT NULL, duration INTEGER NOT NULL, rate_key TEXT NOT NULL,
-              values_json TEXT NOT NULL,
-              PRIMARY KEY (start, duration, rate_key),
-              FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS stats_host_metrics (
-              start INTEGER NOT NULL, duration INTEGER NOT NULL, metric_key TEXT NOT NULL,
-              values_json TEXT NOT NULL,
-              PRIMARY KEY (start, duration, metric_key),
-              FOREIGN KEY (start, duration) REFERENCES stats_buckets(start, duration) ON DELETE CASCADE
-            );
-            CREATE TABLE IF NOT EXISTS stats_rollups (
-              start INTEGER NOT NULL, duration INTEGER NOT NULL, sequence INTEGER NOT NULL,
-              bucket_json TEXT NOT NULL,
-              PRIMARY KEY (start, duration)
-            );
-            CREATE INDEX IF NOT EXISTS stats_rollups_duration_start ON stats_rollups(duration, start);
             CREATE TABLE IF NOT EXISTS stats_coverage_intervals (
               family TEXT NOT NULL, epoch_id TEXT NOT NULL,
               start INTEGER NOT NULL, end INTEGER NOT NULL,
@@ -236,6 +202,7 @@ class StatsStore:
               ON stats_coverage_intervals(family, start, end);
             """
         )
+        self._migrate_retired_tables(connection)
         connection.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (str(STATS_STORE_SCHEMA_VERSION),),
@@ -245,44 +212,155 @@ class StatsStore:
         self.connection = connection
 
     @staticmethod
+    def _migrate_retired_tables(connection: sqlite3.Connection) -> int:
+        """One-time in-place migration to the single-owner schema (version 4).
+
+        MEASURED RATIONALE (2026-07 code audit + live database inspection):
+        every write path was a full-bucket read-modify-write — the merge paths
+        load the whole bucket through ``bucket()`` (``bucket_json``), mutate it
+        in memory, and rewrite ``bucket_json`` through ``_upsert_bucket``.  No
+        path ever updated a side table without rewriting ``bucket_json``, and
+        no read path ever read the side tables back, so the four normalized
+        side tables (``stats_clients``/``stats_processes``/``stats_agent_rates``
+        /``stats_host_metrics``) were pure write-amplified duplication.
+        ``bucket_json`` is therefore the ONE storage owner.  ``stats_rollups``
+        was empty on live systems (its serve branch always fell back to the
+        graduated ``stats_buckets`` tiers) and its rows are pure projections of
+        those buckets, so folding them back would double-count: rollups are
+        dropped, while any side-table group missing from its ``bucket_json``
+        (none observed live) is folded in before the tables are dropped.
+        Idempotent: a second open finds no retired tables and does nothing.
+        Returns the number of bucket rows repaired from side-table facts.
+        """
+        existing = {
+            str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        folded = 0
+        for table, field, key_column in (
+            ("stats_clients", "clients", "client_id"),
+            ("stats_processes", "servers", "process_id"),
+            ("stats_agent_rates", "agent_token_rates", "rate_key"),
+            ("stats_host_metrics", "host_metrics", "metric_key"),
+        ):
+            if table not in existing:
+                continue
+            for start, duration in connection.execute(
+                f"SELECT DISTINCT start,duration FROM {table}"
+            ).fetchall():
+                row = connection.execute(
+                    "SELECT bucket_json FROM stats_buckets WHERE start=? AND duration=?",
+                    (start, duration),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    bucket = json.loads(str(row[0]))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not isinstance(bucket, dict) or bucket.get(field):
+                    continue
+                values = {}
+                for key, values_json in connection.execute(
+                    f"SELECT {key_column},values_json FROM {table} WHERE start=? AND duration=?",
+                    (start, duration),
+                ).fetchall():
+                    try:
+                        decoded = json.loads(str(values_json))
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if isinstance(decoded, dict):
+                        values[str(key)] = decoded
+                if not values:
+                    continue
+                bucket[field] = values
+                try:
+                    encoded = StatsStore._encode(normalize_bucket(bucket))
+                except ValueError:
+                    continue
+                connection.execute(
+                    "UPDATE stats_buckets SET bucket_json=? WHERE start=? AND duration=?",
+                    (encoded, start, duration),
+                )
+                folded += 1
+            connection.execute(f"DROP TABLE {table}")
+        if "stats_rollups" in existing:
+            connection.execute("DROP TABLE stats_rollups")
+        return folded
+
+    @staticmethod
+    def _coverage_overlap_pairs(connection: sqlite3.Connection) -> int:
+        """One owner of the coverage-overlap definition (a self-join count).
+
+        Shared by the durable-repair gate and the integrity self-check so the
+        meaning of "overlap" lives in exactly one place.
+        """
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM stats_coverage_intervals a "
+            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
+            "AND a.end > b.start AND b.end > a.start"
+        ).fetchone()[0])
+
+    @staticmethod
+    def _clip_disjoint_intervals(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """One owner of the seam rule: clip a start-sorted list to disjoint.
+
+        Where two consecutive intervals overlap the later owner is
+        authoritative, so the earlier interval's ``end`` is clipped to the
+        later interval's ``start`` and any interval that collapses to
+        zero/negative width is dropped.  Mutates and returns the surviving
+        dicts, each keeping its carry-through keys (``epoch_id``, ``rowid`` …),
+        so both the serve path and the durable repair share this rule.
+        """
+        disjoint: list[dict[str, Any]] = []
+        for item in items:
+            if disjoint and int(disjoint[-1]["end"]) > int(item["start"]):
+                disjoint[-1]["end"] = int(item["start"])
+            if disjoint and int(disjoint[-1]["end"]) <= int(disjoint[-1]["start"]):
+                disjoint.pop()
+            if int(item["end"]) <= int(item["start"]):
+                continue
+            disjoint.append(item)
+        return disjoint
+
+    @staticmethod
     def _repair_coverage_overlaps(connection: sqlite3.Connection) -> int:
         """Clip any pre-existing cross-epoch overlaps durably (idempotent).
 
         Databases written before write-time handoff clipping can hold boundary
         overlaps from statsd restarts.  Detection is a cheap self-join; when it
         finds none this is a no-op, so it is safe to run on every open.  Repair
-        mirrors the serve-time rule: the later owner is authoritative, so the
-        earlier interval's ``end`` is clipped to the later interval's ``start``
-        and zero-width rows are removed.
+        applies the shared serve-time seam rule (``_clip_disjoint_intervals``)
+        to each family's rows and writes back only the differences.
         """
 
-        overlaps = connection.execute(
-            "SELECT COUNT(*) FROM stats_coverage_intervals a "
-            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
-            "AND a.end > b.start AND b.end > a.start"
-        ).fetchone()
-        if not overlaps or int(overlaps[0]) == 0:
+        if StatsStore._coverage_overlap_pairs(connection) == 0:
             return 0
         repaired = 0
         families = [row[0] for row in connection.execute(
             "SELECT DISTINCT family FROM stats_coverage_intervals"
         ).fetchall()]
         for family in families:
-            rows = connection.execute(
-                "SELECT rowid,start,end FROM stats_coverage_intervals WHERE family=? ORDER BY start,end",
-                (family,),
-            ).fetchall()
-            prev_rowid = prev_start = prev_end = None
-            for rowid, start, end in rows:
-                if prev_rowid is not None and prev_end > int(start):
-                    clipped = int(start)
-                    if clipped <= int(prev_start):
-                        connection.execute("DELETE FROM stats_coverage_intervals WHERE rowid=?", (prev_rowid,))
-                    else:
-                        connection.execute("UPDATE stats_coverage_intervals SET end=? WHERE rowid=?", (clipped, prev_rowid))
+            rows = [
+                {"rowid": row[0], "start": int(row[1]), "end": int(row[2])}
+                for row in connection.execute(
+                    "SELECT rowid,start,end FROM stats_coverage_intervals WHERE family=? ORDER BY start,end",
+                    (family,),
+                ).fetchall()
+            ]
+            survivors = {
+                item["rowid"]: item
+                for item in StatsStore._clip_disjoint_intervals([dict(row) for row in rows])
+            }
+            for row in rows:
+                survivor = survivors.get(row["rowid"])
+                if survivor is None:
+                    connection.execute("DELETE FROM stats_coverage_intervals WHERE rowid=?", (row["rowid"],))
                     repaired += 1
-                prev_rowid, prev_start, prev_end = rowid, int(start), int(end)
-        connection.execute("DELETE FROM stats_coverage_intervals WHERE end<=start")
+                elif int(survivor["end"]) != row["end"]:
+                    connection.execute("UPDATE stats_coverage_intervals SET end=? WHERE rowid=?", (int(survivor["end"]), row["rowid"]))
+                    repaired += 1
         return repaired
 
     def close(self) -> None:
@@ -304,32 +382,16 @@ class StatsStore:
         return encoded
 
     def _upsert_bucket(self, connection: sqlite3.Connection, bucket: dict[str, Any]) -> None:
+        # ``bucket_json`` is the single storage owner: every field group
+        # (clients, servers, agent_token_rates, host_metrics, cost_summary)
+        # is stored exactly once, here.  See ``_migrate_retired_tables`` for
+        # the measured rationale that retired the duplicated side tables.
         normalized = normalize_bucket(bucket)
-        start, duration = normalized["start"], normalized["duration"]
-        encoded_bucket = self._encode(normalized)
-        clients = normalized.get("clients") if isinstance(normalized.get("clients"), dict) else {}
-        processes = normalized.get("servers") if isinstance(normalized.get("servers"), dict) else {}
-        rates = normalized.get("agent_token_rates") if isinstance(normalized.get("agent_token_rates"), dict) else {}
-        host_metrics = normalized.get("host_metrics") if isinstance(normalized.get("host_metrics"), dict) else {}
         connection.execute(
             "INSERT INTO stats_buckets(start,duration,sequence,server_sequence,bucket_json) VALUES(?,?,?,?,?) "
             "ON CONFLICT(start,duration) DO UPDATE SET sequence=excluded.sequence,server_sequence=excluded.server_sequence,bucket_json=excluded.bucket_json",
-            (start, duration, normalized["sequence"], normalized["server_sequence"], encoded_bucket),
+            (normalized["start"], normalized["duration"], normalized["sequence"], normalized["server_sequence"], self._encode(normalized)),
         )
-        for table in ("stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics"):
-            connection.execute(f"DELETE FROM {table} WHERE start=? AND duration=?", (start, duration))
-        for client_id, values in clients.items():
-            if isinstance(values, dict):
-                connection.execute("INSERT INTO stats_clients VALUES(?,?,?,?,?)", (start, duration, str(client_id), int(_finite(values.get("sequence"))), self._encode(values)))
-        for process_id, values in processes.items():
-            if isinstance(values, dict):
-                connection.execute("INSERT INTO stats_processes VALUES(?,?,?,?,?)", (start, duration, str(process_id), int(_finite(values.get("sequence"))), self._encode(values)))
-        for rate_key, values in rates.items():
-            if isinstance(values, dict):
-                connection.execute("INSERT INTO stats_agent_rates VALUES(?,?,?,?)", (start, duration, str(rate_key), self._encode(values)))
-        for metric_key, values in host_metrics.items():
-            if isinstance(values, dict) and (metric_key != "service_load" or values):
-                connection.execute("INSERT INTO stats_host_metrics VALUES(?,?,?,?)", (start, duration, str(metric_key), self._encode(values)))
 
     def upsert_bucket(self, bucket: dict[str, Any]) -> None:
         connection = self._connection()
@@ -427,46 +489,14 @@ class StatsStore:
             "SELECT bucket_json FROM stats_buckets WHERE start=? AND duration=?",
             (int(start), int(duration)),
         ).fetchone()
-        return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
-
-    def rollup_bucket(self, start: int, duration: int) -> dict[str, Any] | None:
-        row = self._connection().execute(
-            "SELECT bucket_json FROM stats_rollups WHERE start=? AND duration=?",
-            (int(start), int(duration)),
-        ).fetchone()
-        return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
-
-    def upsert_rollup(self, bucket: dict[str, Any]) -> None:
-        normalized = normalize_bucket(bucket)
-        connection = self._connection()
-        with connection:
-            connection.execute(
-                "INSERT INTO stats_rollups(start,duration,sequence,bucket_json) VALUES(?,?,?,?) "
-                "ON CONFLICT(start,duration) DO UPDATE SET sequence=excluded.sequence,bucket_json=excluded.bucket_json",
-                (normalized["start"], normalized["duration"], normalized["sequence"], self._encode(normalized)),
-            )
-
-    def query_rollups(self, *, duration: int, start: int = 0, end: int = 0) -> list[dict[str, Any]]:
-        clauses = ["duration = ?"]
-        values: list[Any] = [max(1, int(duration))]
-        if start:
-            clauses.append("start + duration > ?")
-            values.append(max(0, int(start)))
-        if end:
-            clauses.append("start < ?")
-            values.append(max(0, int(end)))
-        rows = self._connection().execute(
-            f"SELECT bucket_json FROM stats_rollups WHERE {' AND '.join(clauses)} ORDER BY start",
-            values,
-        ).fetchall()
-        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+        return _decode_bucket_row(row[0]) if row is not None else None
 
     def replace_buckets(self, buckets: list[dict[str, Any]], *, preserve_coverage: bool = False) -> None:
         """Atomically replace the durable history after compaction/import."""
         connection = self._connection()
         normalized = [normalize_bucket(bucket) for bucket in buckets]
         with connection:
-            tables = ["stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics", "stats_buckets"]
+            tables = ["stats_buckets"]
             if not preserve_coverage:
                 tables.append("stats_coverage_intervals")
             for table in tables:
@@ -479,7 +509,7 @@ class StatsStore:
         connection = self._connection()
         normalized = [normalize_bucket(bucket) for bucket in buckets]
         with connection:
-            for table in ("stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics", "stats_buckets", "stats_coverage_intervals"):
+            for table in ("stats_buckets", "stats_coverage_intervals"):
                 connection.execute(f"DELETE FROM {table}")
             for bucket in normalized:
                 self._upsert_bucket(connection, bucket)
@@ -520,7 +550,7 @@ class StatsStore:
         rows = self._connection().execute(
             f"SELECT bucket_json FROM stats_buckets WHERE {' AND '.join(clauses)} ORDER BY start,duration LIMIT ?", values
         ).fetchall()
-        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+        return [_decode_bucket_row(row[0]) for row in rows]
 
     def all_buckets(self) -> list[dict[str, Any]]:
         """Return every retained bucket for single-writer maintenance.
@@ -533,7 +563,7 @@ class StatsStore:
         rows = self._connection().execute(
             "SELECT bucket_json FROM stats_buckets ORDER BY start,duration"
         ).fetchall()
-        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+        return [_decode_bucket_row(row[0]) for row in rows]
 
     def maintenance_buckets_after(
         self, *, after_start: int = -1, after_duration: int = -1, limit: int = 1
@@ -549,7 +579,7 @@ class StatsStore:
             "ORDER BY start,duration LIMIT ?",
             (int(after_start), int(after_start), int(after_duration), max(1, min(int(limit), STATS_STORE_MAX_ROWS_PER_QUERY))),
         ).fetchall()
-        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
+        return [_decode_bucket_row(row[0]) for row in rows]
 
     def retention_candidate(
         self, *, now: float, retention_seconds: int, tiers: tuple[tuple[int, int], ...]
@@ -567,7 +597,7 @@ class StatsStore:
             f"SELECT bucket_json FROM stats_buckets WHERE {' OR '.join(clauses)} ORDER BY start,duration LIMIT 1",
             values,
         ).fetchone()
-        return normalize_bucket(json.loads(str(row[0]))) if row is not None else None
+        return _decode_bucket_row(row[0]) if row is not None else None
 
     def replace_compacted_bucket(
         self, source_start: int, source_duration: int, replacement: dict[str, Any] | None
@@ -582,39 +612,6 @@ class StatsStore:
             )
             if replacement is not None:
                 self._upsert_bucket(connection, replacement)
-
-    def oldest_rollup_before(self, cutoff_time: float) -> tuple[int, int] | None:
-        row = self._connection().execute(
-            "SELECT start,duration FROM stats_rollups WHERE start + duration < ? ORDER BY start,duration LIMIT 1",
-            (float(cutoff_time),),
-        ).fetchone()
-        return (int(row[0]), int(row[1])) if row is not None else None
-
-    def delete_rollup(self, start: int, duration: int) -> None:
-        connection = self._connection()
-        with connection:
-            connection.execute(
-                "DELETE FROM stats_rollups WHERE start=? AND duration=?", (int(start), int(duration))
-            )
-
-    def rollup_source_page(
-        self,
-        *,
-        start: int,
-        end: int,
-        after_start: int = -1,
-        after_duration: int = -1,
-        limit: int = 1,
-    ) -> list[dict[str, Any]]:
-        """Return one ordered raw-bucket page for a persisted rollup window."""
-        rows = self._connection().execute(
-            "SELECT bucket_json FROM stats_buckets "
-            "WHERE start >= ? AND start < ? "
-            "AND (start > ? OR (start = ? AND duration > ?)) "
-            "ORDER BY start,duration LIMIT ?",
-            (int(start), int(end), int(after_start), int(after_start), int(after_duration), max(1, min(int(limit), STATS_STORE_MAX_ROWS_PER_QUERY))),
-        ).fetchall()
-        return [normalize_bucket(json.loads(str(row[0]))) for row in rows]
 
     def latest_sequence(self) -> int:
         row = self._connection().execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()
@@ -666,15 +663,7 @@ class StatsStore:
                 merged[-1]["end"] = max(int(merged[-1]["end"]), int(item["end"]))
                 continue
             merged.append(item)
-        disjoint: list[dict[str, Any]] = []
-        for item in merged:
-            if disjoint and int(disjoint[-1]["end"]) > int(item["start"]):
-                disjoint[-1]["end"] = int(item["start"])
-            if disjoint and int(disjoint[-1]["end"]) <= int(disjoint[-1]["start"]):
-                disjoint.pop()
-            if int(item["end"]) <= int(item["start"]):
-                continue
-            disjoint.append(item)
+        disjoint = StatsStore._clip_disjoint_intervals(merged)
         truncated = len(disjoint) > STATS_COVERAGE_MAX_INTERVALS
         return (disjoint[-STATS_COVERAGE_MAX_INTERVALS:] if truncated else disjoint), truncated
 
@@ -816,9 +805,10 @@ class StatsStore:
                 "covered_end": int(intervals[-1]["end"]) if intervals else 0,
                 "complete": bool(intervals and cursor >= requested_end),
             }
-        # Server/raw records and their rollup projections share the same
-        # sampler epoch authority; aliases make that cross-store contract
-        # explicit without duplicating interval rows in SQLite.
+        # "server" and "rollups" are legacy wire aliases of the raw store:
+        # every read serves from the graduated buckets (the persisted rollup
+        # table is retired), so the aliases share the raw sampler epochs
+        # without duplicating interval rows in SQLite.
         stores["server"] = copy.deepcopy(stores["raw"])
         stores["rollups"] = copy.deepcopy(stores["raw"])
         raw = stores["raw"]
@@ -866,11 +856,7 @@ class StatsStore:
         """
 
         connection = self._connection()
-        overlaps = int(connection.execute(
-            "SELECT COUNT(*) FROM stats_coverage_intervals a "
-            "JOIN stats_coverage_intervals b ON a.family=b.family AND a.rowid<b.rowid "
-            "AND a.end > b.start AND b.end > a.start"
-        ).fetchone()[0])
+        overlaps = self._coverage_overlap_pairs(connection)
         inverted = int(connection.execute(
             "SELECT COUNT(*) FROM stats_coverage_intervals WHERE end <= start"
         ).fetchone()[0])
@@ -900,16 +886,11 @@ class StatsStore:
         connection = self._connection()
         rows = int(connection.execute("SELECT COUNT(*) FROM stats_buckets").fetchone()[0])
         sequence = int(connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM stats_buckets").fetchone()[0])
-        children = {
-            table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("stats_clients", "stats_processes", "stats_agent_rates", "stats_host_metrics")
-        }
         wal_path = self.path.with_name(f"{self.path.name}-wal")
         return {
             "schema_version": STATS_STORE_SCHEMA_VERSION,
             "rows": rows,
             "sequence": sequence,
-            "children": children,
             "database_bytes": self.path.stat().st_size if self.path.exists() else 0,
             "wal_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
         }

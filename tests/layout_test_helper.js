@@ -832,6 +832,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     TextEncoder,
     TextDecoder,
     Uint8Array,
+    // Host ArrayBuffer so binary terminal-socket frames built by tests pass the bundle's
+    // `data instanceof ArrayBuffer` routing (Uint8Array/TextEncoder above are host classes too).
+    ArrayBuffer,
   };
   context.globalThis = context;
   context.__openedWindows = [];
@@ -1229,11 +1232,21 @@ globalThis.__layoutTestApi = {
   yocostItemId,
   debugPanelHtmlForTest: debugPanelHtml,
   jsDebugGraphChartGroupsForTest() { return jsDebugGraphChartGroups.map(group => ({...group})); },
+  jsDebugStatsFamilyManifestForTest() {
+    return Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest).map(([family, entry]) => [family, {
+      ...entry,
+      legacyAliases: [...entry.legacyAliases],
+      chartGroups: [...entry.chartGroups],
+      series: [...entry.series],
+    }]));
+  },
+  jsDebugHistoryCoverageFamilyForGroupForTest: jsDebugHistoryCoverageFamilyForGroup,
   jsDebugGraphDescriptionKeyByLabelKeyForTest() { return {...jsDebugGraphDescriptionKeyByLabelKey}; },
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,
   debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
   debugGraphAvailableResolutionChoicesForTest: nowMs => debugGraphAvailableResolutionChoices(debugGraphDomain(nowMs), nowMs),
+  jsDebugGraphRangeOptionsForTest: () => jsDebugGraphRangeOptions.map(option => ({...option})),
   debugGraphResolutionOverrideForTest() { return jsDebugGraphResolutionOverrideSeconds; },
   debugGraphEventRecordsForTest() {
     return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
@@ -1257,9 +1270,20 @@ globalThis.__layoutTestApi = {
   debugGraphTokenAxisDescriptorForTest: nowMs => debugGraphTokenAxisDescriptor(debugGraphAgentTokenDisplayBuckets(nowMs)),
   debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
   debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
+  debugGraphPolylineSegmentCountForTest(values, times, hasDataValues, durations, noDataRanges) {
+    return debugGraphPolylinePointSegments(values, times, 100, {startMs: Math.min(...times) - 1000, endMs: Math.max(...times) + 1000}, hasDataValues, durations || [], 0, false, noDataRanges || null).length;
+  },
+  setJsDebugHistoryCoverageForTest(family, intervals, requestedIntervals) {
+    jsDebugHistoryReadiness.storeCoverageIntervals = jsDebugHistoryReadiness.storeCoverageIntervals || {};
+    jsDebugHistoryReadiness.storeCoverageIntervals[family] = (intervals || []).map(interval => ({startSeconds: interval[0], endSeconds: interval[1], resolutionSeconds: interval[2] || 1}));
+    jsDebugHistoryReadiness.requestCoverageIntervals = (requestedIntervals || []).map(interval => ({startSeconds: interval[0], endSeconds: interval[1], resolutionSeconds: interval[2] || 1}));
+  },
   debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
   debugGraphHistoryCoverageGapRunsForTest: debugGraphHistoryCoverageGapRuns,
   debugGraphHistoryCoverageGapRectsHtmlForTest: debugGraphHistoryCoverageGapRectsHtml,
+  debugGraphLivePulseHtmlForTest: debugGraphLivePulseHtml,
+  debugGraphSlidingAxisActiveForTest: () => debugGraphSlidingAxisActive(),
+  debugGraphChartAxisMaxForTest: debugGraphChartAxisMax,
   debugGraphHeldProvenanceTextForTest: debugGraphHeldProvenanceText,
   debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
   debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
@@ -1310,6 +1334,8 @@ globalThis.__layoutTestApi = {
   jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
   debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
   resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
+  clearJsDebugGraphDataForTest: clearJsDebugGraphData,
+  setDateNowForTest(nowMs) { Date.now = () => Number(nowMs); },
   retryJsDebugHistoryForTest: retryJsDebugHistory,
   initializeJsDebugStatsBeforeStreamsForTest: initializeJsDebugStatsBeforeStreams,
   pollJsDebugStatsOnIntervalForTest: pollJsDebugStatsOnInterval,
@@ -1329,6 +1355,17 @@ globalThis.__layoutTestApi = {
     };
   },
   pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
+  jsDebugStatsSampleQueryForTest: jsDebugStatsSampleQuery,
+  prefetchJsDebugHistoryFullRetentionForTest: prefetchJsDebugHistoryFullRetention,
+  maybePrefetchJsDebugHistoryForTest: maybePrefetchJsDebugHistory,
+  jsDebugHistoryPrefetchStateForTest() {
+    return {
+      inFlight: jsDebugHistoryPrefetchState.inFlight,
+      didInitial: jsDebugHistoryPrefetchState.didInitial,
+      lastFullPrefetchAtMs: jsDebugHistoryPrefetchState.lastFullPrefetchAtMs,
+    };
+  },
+  setJsDebugStatsFirstSampleReceivedForTest(value) { jsDebugStatsPollState.firstSampleReceived = Boolean(value); },
   pollJsDebugClientHealthForTest: pollJsDebugClientHealth,
   jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
   recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,
@@ -1347,7 +1384,9 @@ globalThis.__layoutTestApi = {
     jsDebugLogsState.clearedAt = 0;
   },
   setJsDebugLogLevelsForTest(levels) {
+    loadJsDebugStatsUiPreferences();
     jsDebugLogsState.levels = new Set((levels || []).filter(level => jsDebugLogLevels.includes(level)));
+    saveJsDebugStatsUiPreferences();
   },
   setDebugGraphRangeForTest: setDebugGraphRange,
   setDebugGraphResolutionOverrideForTest: setDebugGraphResolutionOverride,
@@ -1487,6 +1526,7 @@ globalThis.__layoutTestApi = {
   chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
   setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
   debugGraphTimeLabelForTest: debugGraphTimeLabel,
+  debugGraphXAxisHtmlForTest: debugGraphXAxisHtml,
   debugGraphExactTimeLabelForTest: debugGraphExactTimeLabel,
   chatEmojiSearchTextForTest: chatEmojiSearchText,
   chatRecentEmojiForTest: chatRecentEmoji,
@@ -1712,8 +1752,16 @@ globalThis.__layoutTestApi = {
       activeIndexOverride: record.activeIndexOverride,
       sequence: record.sequence,
       directTargetGuard: record.directTargetGuard ? {...record.directTargetGuard} : null,
+      switchLoading: record.switchLoading ? {...record.switchLoading} : null,
     } : null;
   },
+  processTerminalSocketFrameForTest(session, data) {
+    const item = terminals.get(session);
+    return processTerminalSocketFrame(session, item, data);
+  },
+  stallTmuxWindowSwitchLoadingForTest: stallTmuxWindowSwitchLoading,
+  retryTmuxWindowSwitchLoadingForTest: retryTmuxWindowSwitchLoading,
+  cancelTmuxWindowSwitchLoadingForTest: cancelTmuxWindowSwitchLoading,
   expireTmuxWindowDirectTargetGuardForTest(session) {
     const record = tmuxWindowNavigationRecord(session);
     if (record?.directTargetGuard) record.directTargetGuard.guardUntilMs = 0;

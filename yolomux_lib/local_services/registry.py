@@ -39,6 +39,30 @@ LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 
 
+def parse_ps_cpu_seconds(text: str) -> float | None:
+    """Parse a ps cumulative CPU time ([[dd-]hh:]mm:ss[.ff]) into seconds."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    days = 0
+    if "-" in raw:
+        day_part, _, raw = raw.partition("-")
+        try:
+            days = int(day_part)
+        except ValueError:
+            return None
+    try:
+        parts = [float(part) for part in raw.split(":")]
+    except ValueError:
+        return None
+    if not parts:
+        return None
+    seconds = 0.0
+    for part in parts:
+        seconds = seconds * 60.0 + part
+    return seconds + days * 86400.0
+
+
 @dataclass(frozen=True)
 class LocalServiceSpec:
     name: str
@@ -47,6 +71,12 @@ class LocalServiceSpec:
     protocol_version: int
     idle_seconds: float = LOCAL_SERVICE_IDLE_SECONDS
     extra_args: tuple[str, ...] = ()
+    # Optional code-revision stamp: when set, a daemon whose ping reports a DIFFERENT
+    # (or missing) revision is unhealthy and gets retired + respawned from current code.
+    # This closes the same-protocol stale-daemon class (repeated 2026-07-14/15 incidents:
+    # daemons surviving restarts while serving old code); a protocol bump already forces
+    # respawn, but most code changes do not bump the protocol.
+    code_revision: str = ""
 
 
 class LocalServiceRegistry:
@@ -117,11 +147,16 @@ class LocalServiceRegistry:
             pass
 
     def _retire_incompatible_service(self) -> None:
-        """Stop the service currently bound to our socket after a protocol bump."""
+        """Stop the service currently bound to our socket after a protocol bump or
+        code-revision drift. Same-protocol drift matters: without it the stale daemon
+        keeps the socket, the fresh spawn cannot bind, and ensure_started fails forever."""
         response = self._request("ping", timeout=0.15)
         service_pid = int(response.get("pid") or 0)
         service_version = int(response.get("version") or 0)
-        if not response.get("ok") or not service_pid or service_version == self.spec.protocol_version:
+        compatible = service_version == self.spec.protocol_version and (
+            not self.spec.code_revision or str(response.get("code_revision") or "") == self.spec.code_revision
+        )
+        if not response.get("ok") or not service_pid or compatible:
             return
         record = self._read_record()
         record_pid = int(record.get("pid") or 0)
@@ -164,6 +199,10 @@ class LocalServiceRegistry:
             and int(response.get("version") or 0) == self.spec.protocol_version
             and int(response.get("pid") or 0) > 0
         )
+        if healthy and self.spec.code_revision:
+            # Self-heal on code drift: an old daemon that omits the stamp counts as a
+            # mismatch too (respawning is idempotent and safe; never a hang).
+            healthy = str(response.get("code_revision") or "") == self.spec.code_revision
         if healthy:
             self.note_rpc_success()
         else:
@@ -288,22 +327,56 @@ class LocalServiceRegistry:
         }
 
     def resources(self, pid: int) -> dict[str, float | int | None]:
-        """Return best-effort worker CPU/RSS without starting a subprocess."""
+        """Return best-effort worker CPU/RSS without restarting the subprocess.
+
+        Linux reads /proc directly; macOS/BSD have no /proc, so an existing pid's
+        cumulative CPU time and RSS come from a bounded `ps` read (not a worker
+        restart). Without this branch every service reported `—` CPU/Memory and
+        the Servers Load chart was empty on macOS.
+        """
         if pid <= 0:
             return {"cpu_percent": None, "rss_bytes": None}
-        if platform.system() != "Linux":
+        reading = self._read_process_cpu_seconds_and_rss(pid)
+        if reading is None:
             return {"cpu_percent": None, "rss_bytes": None}
-        try:
-            stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
-            statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
-            cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
-            rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-        except (IndexError, OSError, ValueError):
-            return {"cpu_percent": None, "rss_bytes": None}
+        cpu_seconds, rss_bytes = reading
         now = self.clock()
         previous = self._last_resource_sample
         self._last_resource_sample = (now, cpu_seconds)
         cpu_percent: float | None = None
-        if previous is not None and now > previous[0]:
+        if previous is not None and now > previous[0] and cpu_seconds >= previous[1]:
             cpu_percent = round(max(0.0, (cpu_seconds - previous[1]) / (now - previous[0]) * 100.0), 3)
         return {"cpu_percent": cpu_percent, "rss_bytes": rss_bytes}
+
+    def _read_process_cpu_seconds_and_rss(self, pid: int) -> tuple[float, int] | None:
+        """Return (cumulative CPU seconds, RSS bytes) for an existing pid."""
+        if platform.system() == "Linux":
+            try:
+                stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
+                statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
+                cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
+                rss_bytes = int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+            except (IndexError, OSError, ValueError):
+                return None
+            return (cpu_seconds, rss_bytes)
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "rss=,time=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return None
+        fields = str(getattr(completed, "stdout", "") or "").split()
+        if len(fields) < 2:
+            return None
+        try:
+            rss_bytes = int(fields[0]) * 1024
+        except ValueError:
+            return None
+        cpu_seconds = parse_ps_cpu_seconds(fields[1])
+        if cpu_seconds is None:
+            return None
+        return (cpu_seconds, rss_bytes)

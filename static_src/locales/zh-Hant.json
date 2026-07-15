@@ -248,6 +248,7 @@
   "debug.errors": "JS 錯誤",
   "debug.events": "事件",
   "debug.graph.agentStatus.noData": "無代理狀態樣本",
+  "debug.graph.noDataRecorded": "未記錄資料",
   "debug.graph.badConnection": "連線不佳：{duration} 內未收集資料",
   "debug.graph.chart.agentStatus": "代理狀態",
   "debug.graph.chart.agentStatus.desc": "依工作、注意、轉換和閒置狀態統計代理視窗，來源為優!統計狀態取樣。",
@@ -1937,6 +1938,8 @@
   "terminal.window.pid": "（程序={pid}）",
   "terminal.window.previous": "上一個 tmux 子視窗",
   "terminal.window.prompt": "tmux 子視窗提示",
+  "terminal.window.switchLoading": "正在載入 {target}...",
+  "terminal.window.switchStalled": "仍在載入 {target}...",
   "terminal.window.title": "tmux 視窗 {name}",
   "terminal.window.unnamed": "視窗 {index}",
   "terminal.xtermLoadFailed": "無法從 /static/xterm.js 載入 xterm.js。終端機無法連線。",
@@ -2544,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "遲到/錯過",
   "debug.system.sampler.header.lateMiss.short": "遲到/錯過",
   "debug.system.sampler.header.runtime.full": "上次運行時間",
-  "debug.system.sampler.header.runtime.short": "運行時"
+  "debug.system.sampler.header.runtime.short": "運行時",
+  "login.error.rateLimitedMinutes": "嘗試次數過多。請稍候幾分鐘後再試。",
+  "login.error.rateLimitedHours": "嘗試次數過多。請稍候幾小時後再試。",
+  "auth.error.rateLimitedMinutes": "請求過多。請稍候幾分鐘後再試。",
+  "auth.error.rateLimitedHours": "請求過多。請稍候幾小時後再試。"
 }

@@ -4669,16 +4669,25 @@ body :is(
   inline-size: max-content;
   min-inline-size: 100%;
   border-collapse: collapse;
+  /* Plain ruled table: an outer frame plus per-cell gridlines on BOTH axes
+     (below) so every cost/system table reads as a normal bordered table. */
+  border: 1px solid var(--line);
   font: var(--ui-font-size-xs)/1.35 var(--mono-font);
 }
 .js-debug-system-table th,
 .js-debug-system-table td {
   padding: var(--space-5) var(--space-7);
   border-block-end: 1px solid var(--line);
+  border-inline-end: 1px solid var(--line);
   text-align: end;
   white-space: nowrap;
   overflow-wrap: normal;
   word-break: normal;
+}
+.js-debug-system-table th:last-child,
+.js-debug-system-table td:last-child {
+  /* The outer frame already draws the right edge. */
+  border-inline-end: 0;
 }
 .js-debug-system-table th:first-child,
 .js-debug-system-table td:first-child {
@@ -4961,6 +4970,9 @@ body :is(
   min-width: 0;
   min-height: 0;
 }
+.js-yocost-chart-area {
+  position: relative;
+}
 .js-debug-history-overlay {
   position: absolute;
   inset: 0;
@@ -5205,13 +5217,29 @@ body :is(
 }
 .js-debug-cost-table-wrap {
   max-inline-size: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
 }
 .js-debug-cost-table {
-  min-inline-size: 100%;
+  /* Fill the container when wide, but never shrink below a readable width — the
+     wrap scrolls horizontally instead of squishing the columns. */
+  inline-size: 100%;
+  min-inline-size: 44rem;
 }
 .js-debug-cost-table th,
 .js-debug-cost-table td {
   padding-inline: var(--space-5);
+}
+/* Content-sized usage tables (By Agent / Model Usages): each table takes only the
+   width its visible content needs, up to the available pane, instead of the retired
+   stretched shared percent template. Columns stay aligned WITHIN each table through
+   the shared cell metrics; the wrap's contained horizontal scroller takes over only
+   when the content's minimum readable (nowrap) width exceeds the pane. One shared
+   sizing parent for both tables. */
+.js-debug-cost-usage-table-section .js-debug-cost-table {
+  inline-size: max-content;
+  max-inline-size: 100%;
+  min-inline-size: auto;
 }
 .js-debug-cost-unpriced-disclosure {
   margin-block-start: var(--space-5);
@@ -5391,17 +5419,46 @@ body :is(
 .js-debug-cost-table[data-js-debug-cost-table="source"] th:last-child,
 .js-debug-cost-table[data-js-debug-cost-table="source"] td:last-child {
   inline-size: auto;
-  white-space: normal;
+  /* Numeric cost is a single token — keep it on one line so a squeezed column
+     can't wrap it and blow the row height up (the row scrolls, never grows). */
+  white-space: nowrap;
   overflow-wrap: normal;
 }
 .js-debug-cost-report-title {
   flex: none;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-8);
+  /* One responsive heading line: `Cost summary details <range>`. The range sits
+     beside the title and the row wraps coherently at genuinely narrow widths
+     instead of consuming a second full-width paragraph. */
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3) var(--space-8);
   padding-bottom: var(--space-5);
   border-bottom: 1px solid var(--line);
+}
+.js-debug-cost-report-range {
+  min-width: 0;
+  font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+/* Compact catalog status line: field groups wrap as units on a narrow pane and
+   never stretch four scalar facts to opposite edges of a wide screen. */
+.js-debug-cost-catalog-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2) 0;
+  margin: 0 0 var(--space-7);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.5 var(--mono-font);
+}
+.js-debug-cost-catalog-group {
+  white-space: nowrap;
+}
+.js-debug-cost-catalog-group--warning {
+  color: var(--bad);
+}
+.js-debug-cost-catalog-separator {
+  white-space: pre;
 }
 .js-debug-cost-report h1 {
   min-width: 0;
@@ -5462,101 +5519,10 @@ body :is(
     order: 1;
   }
 }
-@container (max-width: 40rem) {
-  .js-debug-cost-usage-table-section .js-debug-cost-table-wrap,
-  .js-debug-cost-details-section .js-debug-cost-component-table {
-    overflow-x: visible;
-  }
-  .js-debug-cost-usage-table-section .js-debug-cost-table,
-  .js-debug-cost-component-table,
-  .js-debug-cost-usage-table-section thead,
-  .js-debug-cost-usage-table-section tbody,
-  .js-debug-cost-usage-table-section tfoot,
-  .js-debug-cost-component-table thead,
-  .js-debug-cost-component-table tbody {
-    display: block;
-    inline-size: 100%;
-    min-inline-size: 0;
-  }
-  .js-debug-cost-usage-table-section thead {
-    position: absolute;
-    inline-size: 1px;
-    block-size: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-  }
-  .js-debug-cost-usage-table-section tbody,
-  .js-debug-cost-component-table tbody {
-    display: grid;
-    gap: var(--space-5);
-  }
-  .js-debug-cost-usage-table-section tbody tr,
-  .js-debug-cost-usage-table-section tfoot tr,
-  .js-debug-cost-component-table tbody tr {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    inline-size: 100%;
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-  }
-  .js-debug-cost-usage-table-section tbody th,
-  .js-debug-cost-usage-table-section tfoot th {
-    grid-column: 1 / -1;
-    max-inline-size: none;
-  }
-  .js-debug-cost-usage-table-section th,
-  .js-debug-cost-usage-table-section td,
-  .js-debug-cost-component-table td {
-    inline-size: auto;
-    padding: var(--space-4);
-    border-block-end: 0;
-  }
-  .js-debug-cost-usage-table-section td,
-  .js-debug-cost-component-table td {
-    display: grid;
-    gap: var(--space-2);
-    min-inline-size: 0;
-    text-align: start;
-  }
-  .js-debug-cost-usage-table-section td::before,
-  .js-debug-cost-component-table td::before {
-    content: attr(data-label);
-    color: var(--muted);
-    font: 600 var(--ui-font-size-2xs)/1.2 var(--ui-font);
-  }
-  .js-debug-cost-component-table thead tr {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-3);
-    margin-block-end: var(--space-5);
-  }
-  .js-debug-cost-component-table thead th {
-    display: block;
-    inline-size: auto;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--line);
-    border-radius: var(--radius-sm);
-  }
-}
-/* Extreme-narrow last resort. Precedence stays reflow-first: full table on wide, then
-   two-column labeled cards at <=40rem. Below the width where those cards can no longer
-   hold both columns without collision, keep the By-Agent/By-model usage cards at a
-   readable minimum width and let the section scroll horizontally instead of squishing or
-   overlapping text — readable-with-scroll beats unreadable-but-fits. The scroll is the
-   fallback, not the default, so it never triggers at normal-narrow widths (360px still
-   reflows with no scrollbar). Overflow is contained to this section (overflow-x: auto,
-   not the visible the 40rem block sets) so the whole pane never gains a scrollbar, and it
-   is scoped to the usage cards — the compact model/calculation tables stay contained at
-   every width. */
-@container (max-width: 17rem) {
-  .js-debug-cost-agent-usages .js-debug-cost-table-wrap {
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-  }
-  .js-debug-cost-agent-usages .js-debug-cost-table {
-    min-inline-size: 18rem;
-  }
-}
+/* No card reflow: at every width the cost tables stay full ruled tables and the
+   section scrolls horizontally when too narrow (readable-with-scroll beats the
+   stacked-card reflow). Horizontal scroll is owned by the table wraps
+   (overflow-x: auto) together with the table's readable pixel min-width. */
 .js-debug-range-slider:disabled {
   cursor: not-allowed;
   filter: grayscale(1);
@@ -5585,34 +5551,6 @@ body :is(
   color: var(--text);
   font: 700 var(--ui-font-size-sm)/1.3 var(--ui-font);
   border-bottom: 1px solid var(--line);
-}
-.js-debug-cost-report-list {
-  display: grid;
-  gap: var(--space-4);
-  margin: 0;
-  padding-inline-start: var(--space-10);
-  line-height: 1.45;
-}
-.js-debug-cost-report-list ul {
-  display: grid;
-  gap: var(--space-2);
-  margin: var(--space-3) 0 0;
-  padding-inline-start: var(--space-10);
-  color: var(--muted);
-  font-family: var(--mono-font);
-  font-size: var(--ui-font-size-xs);
-}
-.js-debug-cost-report-list li {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.js-debug-cost-report-list li::marker {
-  color: var(--muted);
-}
-.js-debug-cost-report-list span {
-  color: var(--text);
-  font-family: var(--ui-font);
-  font-weight: 600;
 }
 .js-debug-cost-pricing-links {
   margin-inline-start: var(--space-4);
@@ -5821,6 +5759,9 @@ body.theme-light .js-debug-live-pulse.heartbeat-pulse {
 .js-debug-no-data-range {
   fill: rgb(var(--js-debug-bad-connection-rgb) / 0.12);
   pointer-events: none;
+}
+.js-debug-history-no-data-range {
+  fill: rgb(var(--js-debug-bad-connection-rgb) / 0.18);
 }
 .js-debug-graph--hovering .js-debug-hover-line {
   opacity: 1;
@@ -9543,11 +9484,22 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   background: color-mix(in srgb, var(--pane-tab-text) 55%, transparent);
   cursor: grab;
 }
+/* Esc sits alone in the top-left corner of the keybar, like a real keyboard, level with
+   the primary row. Ctrl/Shift keep their own column directly below it, unchanged. */
+.mobile-terminal-keybar > .mobile-terminal-key--escape {
+  grid-column: 1;
+  grid-row: 1;
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  align-self: start;
+  justify-self: start;
+}
 .mobile-terminal-key-side {
   grid-column: 1;
   grid-row: 2;
   display: grid;
-  grid-template-rows: repeat(3, 36px);
+  grid-template-rows: repeat(2, 36px);
   align-self: end;
   align-content: start;
   gap: var(--space-1);
@@ -9609,6 +9561,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   display: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more > .mobile-terminal-key--escape,
 .mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad,
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-bottom {
@@ -10056,6 +10009,23 @@ body.bad-connection .terminal .xterm .xterm-cursor::after {
 }
 .terminal-connection-pending > .xterm {
   opacity: 0.52;
+}
+/* A pending tmux sub-window switch must never show the previous window's frame: an opaque
+   full-container backdrop (inheriting the shared terminal container background set by
+   applyTerminalContainerTheme) sits above the xterm layers while xterm stays mounted and keeps
+   ingesting output behind it. The connection-state badge stays on its higher badge layer. */
+.terminal-connection-switching::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-terminal-overlay-low);
+  background: inherit;
+}
+/* Sibling low-layer overlays (file-link underlines, attention highlight) belong to the masked
+   previous frame; they must not leak above the opaque switch backdrop. */
+.terminal-connection-switching .terminal-file-link-underlines,
+.terminal-connection-switching .terminal-attention-question-overlay {
+  visibility: hidden;
 }
 .terminal-connection-state {
   position: absolute;

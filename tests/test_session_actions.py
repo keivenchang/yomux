@@ -159,13 +159,16 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch):
     assert calls == [["kill-session", "-t", "1:"]]
 
 
-def test_tmux_select_window_calls_direct_target(monkeypatch):
+def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeypatch):
+    """select-window IS the whole job: it switches every client attached to the session
+    synchronously. The retired per-client `switch-client` fan-out was a no-op by
+    construction, serially delayed every switch response, and poked the user's own
+    hand-attached terminals (audible bell reports) — it must never return."""
     app = make_app(["1"])
     calls = []
     monkeypatch.setattr(app_module, "tmux_session_client_rows", lambda session: [
         {"name": "/dev/pts/1", "session": session, "width": 100, "flags": "attached,UTF-8"},
         {"name": "client-browser", "session": session, "width": 80, "flags": "attached,ignore-size,UTF-8"},
-        {"name": "", "session": session, "width": 120, "flags": "attached,UTF-8"},
     ])
 
     def fake_tmux(args, timeout=5.0):
@@ -181,36 +184,22 @@ def test_tmux_select_window_calls_direct_target(monkeypatch):
     assert payload == {"session": "1", "window": "3", "ok": True}
     assert invalid_status == HTTPStatus.BAD_REQUEST
     assert "window" in invalid_payload["error"]
-    assert calls == [
-        ["select-window", "-t", "1:3"],
-        ["switch-client", "-c", "/dev/pts/1", "-t", "1:3"],
-        ["switch-client", "-c", "client-browser", "-t", "1:3"],
-    ]
+    assert calls == [["select-window", "-t", "1:3"]]
+    assert not any(args and args[0] == "switch-client" for args in calls)
 
 
-def test_tmux_select_window_keeps_click_success_when_client_switch_fails(monkeypatch):
+def test_tmux_select_window_failure_surfaces_diagnostic(monkeypatch):
     app = make_app(["1"])
-    calls = []
-    monkeypatch.setattr(app_module, "tmux_session_client_rows", lambda session: [
-        {"name": "/dev/pts/1", "session": session, "width": 100, "flags": "attached,UTF-8"},
-    ])
 
     def fake_tmux(args, timeout=5.0):
-        calls.append(args)
-        if args[0] == "switch-client":
-            return FakeTmuxResult(returncode=1, stderr="client vanished")
-        return FakeTmuxResult()
+        return FakeTmuxResult(returncode=1, stderr="no such window")
 
     monkeypatch.setattr(app_module, "tmux", fake_tmux)
 
-    payload, status = app.tmux_select_window("1", "2")
+    payload, status = app.tmux_select_window("1", "9")
 
-    assert status == HTTPStatus.OK
-    assert payload == {"session": "1", "window": "2", "ok": True}
-    assert calls == [
-        ["select-window", "-t", "1:2"],
-        ["switch-client", "-c", "/dev/pts/1", "-t", "1:2"],
-    ]
+    assert status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert "no such window" in str(payload)
 
 
 def test_list_tmux_panes_captures_window_name(monkeypatch):

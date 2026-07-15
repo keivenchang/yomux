@@ -248,6 +248,7 @@
   "debug.errors": "JSエラー",
   "debug.events": "イベント",
   "debug.graph.agentStatus.noData": "エージェント状態のサンプルなし",
+  "debug.graph.noDataRecorded": "記録されたデータがありません",
   "debug.graph.badConnection": "接続不良: {duration} のデータが収集されません",
   "debug.graph.chart.agentStatus": "エージェントのステータス",
   "debug.graph.chart.agentStatus.desc": "YOLOmux の状態サンプルから、エージェントウィンドウを作業中、注意、遷移、アイドル別に数えます。",
@@ -1937,6 +1938,8 @@
   "terminal.window.pid": "(PID={pid})",
   "terminal.window.previous": "前の tmux サブウィンドウ",
   "terminal.window.prompt": "tmux サブウィンドウプロンプト",
+  "terminal.window.switchLoading": "{target} を読み込み中...",
+  "terminal.window.switchStalled": "{target} をまだ読み込み中...",
   "terminal.window.title": "tmux ウィンドウ {name}",
   "terminal.window.unnamed": "ウィンドウ {index}",
   "terminal.xtermLoadFailed": "/static/xterm.js から xterm.js を読み込めませんでした。ターミナルを接続できません。",
@@ -2544,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "遅刻・欠席",
   "debug.system.sampler.header.lateMiss.short": "遅刻/欠席",
   "debug.system.sampler.header.runtime.full": "最終ランタイム",
-  "debug.system.sampler.header.runtime.short": "ランタイム"
+  "debug.system.sampler.header.runtime.short": "ランタイム",
+  "login.error.rateLimitedMinutes": "試行回数が多すぎます。数分待ってからもう一度お試しください。",
+  "login.error.rateLimitedHours": "試行回数が多すぎます。数時間待ってからもう一度お試しください。",
+  "auth.error.rateLimitedMinutes": "リクエストが多すぎます。数分待ってからもう一度お試しください。",
+  "auth.error.rateLimitedHours": "リクエストが多すぎます。数時間待ってからもう一度お試しください。"
 }

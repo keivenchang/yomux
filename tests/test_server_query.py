@@ -1077,6 +1077,8 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
 
+    # request-shape-exempt: deliberately NON-standard params to exercise the route parser
+    # itself (legacy `tokens=1`, missing history params); this is not a client-shape probe.
     handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
@@ -1774,6 +1776,44 @@ def test_handle_ws_payload_refreshes_tmux_session_even_when_readonly(monkeypatch
     Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "refresh", "reason": "blank-screen"}).encode(), readonly=True)
 
     assert refreshes == ["6"]
+
+
+def test_handle_ws_payload_refresh_with_transaction_id_acks_as_text_frame(monkeypatch):
+    refreshes = []
+    sent_frames = []
+    process = SimpleNamespace(pid=123)
+    handler = SimpleNamespace(
+        server=SimpleNamespace(app=SimpleNamespace(tmux_scroll=lambda *_args: None)),
+        connection=SimpleNamespace(sendall=lambda data: sent_frames.append(data)),
+    )
+    monkeypatch.setattr(server_module, "refresh_tmux_session_clients", lambda session: refreshes.append(session) or True)
+
+    # Legacy refresh without an id keeps the silent behavior (no control frame back).
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "refresh", "reason": "blank-screen"}).encode(), readonly=False)
+    assert refreshes == ["6"]
+    assert sent_frames == []
+
+    # A refresh carrying the switch transaction id is acknowledged with a structured TEXT frame
+    # (opcode 1) after issuing the refresh, while PTY output stays on binary frames.
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "refresh", "reason": "tmux-window-switch", "txn": 7}).encode(), readonly=False)
+    assert refreshes == ["6", "6"]
+    assert len(sent_frames) == 1
+    frame = sent_frames[0]
+    assert frame[0] & 0x0F == 1, "refresh acknowledgement must be a websocket text frame"
+    payload_length = frame[1] & 0x7F
+    assert payload_length < 126
+    message = json.loads(frame[2:2 + payload_length].decode("utf-8"))
+    assert message == {"type": "refresh-ack", "txn": 7}
+
+    # Readonly bridges may also refresh; the acknowledgement still flows back.
+    Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "refresh", "txn": 9}).encode(), readonly=True)
+    assert len(sent_frames) == 2
+    assert json.loads(sent_frames[1][2:].decode("utf-8"))["txn"] == 9
+
+    # Malformed ids never crash the bridge and never emit a bogus acknowledgement.
+    for bad_txn in (0, -3, "seven", None, True):
+        Handler.handle_ws_payload(handler, "6", 10, 11, process, json.dumps({"type": "refresh", "txn": bad_txn}).encode(), readonly=False)
+    assert len(sent_frames) == 2
 
 
 def test_handle_ws_payload_resize_sets_pty_and_signals_for_admin_only(monkeypatch):

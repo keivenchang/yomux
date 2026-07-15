@@ -32,7 +32,7 @@ Open `https://localhost:9998/`. The first launch shows a setup page — see [Fir
 
 ## Runtime architecture
 
-YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one `statsd` writer, one read-only `stats-reader`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `stats-reader`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one `statsd` writer, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. YO!stats history reads do not need a service at all: each web process encodes history and sample responses in-process from a read-only WAL connection to the same durable database (`statsd` remains the sole writer). A normal stats + Quick Open session has three Python processes (`yolomux.py`, `statsd`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
 
 ```mermaid
 flowchart TB
@@ -59,7 +59,6 @@ flowchart TB
   subgraph services["Shared local services per YOLOMUX_STATE_DIR"]
     direction TB
     statsd["statsd writer\nSTATE_DIR/services/statsd.sock\nsole SQLite mutator\npartial merges + maintenance"]
-    statsreader["stats-reader\nSTATE_DIR/services/stats-reader.sock\nread-only WAL peer\nhistory aggregation + encoding"]
     indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
     jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\n60s idle when queue empty"]
     execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
@@ -97,12 +96,11 @@ flowchart TB
   app --> caches
   app <--> control
   app <--> statsd
-  app <--> statsreader
   app <--> indexd
   app <--> jobd
   app <--> approvald
   statsd --> statsdb
-  statsreader -. read-only .-> statsdb
+  app -. read-only WAL .-> statsdb
   indexd --> indexdb
   app --> locks
   app --> caches_state
@@ -125,7 +123,7 @@ flowchart TB
   class events,native,signals,owner,caches worker
   class bridge request
   class attach,tmuxctl,tmuxd,pane,fs child
-  class control,statsd,statsreader,indexd,jobd,execs,approvald local
+  class control,statsd,indexd,jobd,execs,approvald local
   class statsdb,indexdb,locks,caches_state database
 ```
 
@@ -176,7 +174,6 @@ flowchart TB
   end
   subgraph svc["Shared service PIDs"]
     statsd2["statsd writer\nservices/statsd.sock\npartial merges + maintenance"]
-    statsreader2["stats-reader\nservices/stats-reader.sock\nread-only history + encoding"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
     approvald2["approvald\nservices/approvald.sock\nexits when no targets"]
@@ -194,8 +191,6 @@ flowchart TB
   app2 --> records
   app1 --> statsd2
   app2 --> statsd2
-  app1 --> statsreader2
-  app2 --> statsreader2
   app1 --> indexer
   app2 --> indexer
   app1 --> jobd2
@@ -203,7 +198,8 @@ flowchart TB
   app1 --> approvald2
   app2 --> approvald2
   statsd2 --> statsdb
-  statsreader2 -. read-only .-> statsdb
+  app1 -. read-only WAL .-> statsdb
+  app2 -. read-only WAL .-> statsdb
   indexer --> indexes
   app1 <--> caches
   app2 <--> caches
@@ -215,7 +211,7 @@ flowchart TB
   class app1,app2 process
   class sock1,sock2 socket
   class ownerlock,ownerjson,records,statsdb,indexes,caches durable
-  class statsd2,statsreader2,indexer,jobd2,approvald2 localChild
+  class statsd2,indexer,jobd2,approvald2 localChild
 ```
 
 | Communication path | Used for | Transport |
@@ -226,7 +222,7 @@ flowchart TB
 | Server ↔ server | Owner refresh requests, status, runtime profiling, release/takeover | Local Unix-domain socket; versioned length-framed JSON with legacy newline compatibility, mode `0600` |
 | Server ↔ server election | One owner for expensive cross-process work | `flock` plus atomic JSON generation records under the state directory |
 | Elected server → `statsd` | Independently scheduled YO!stats CPU/status/GPU/memory/token partial records and bounded maintenance | Local Unix RPC; the elected server collects each family asynchronously and `statsd` is the sole SQLite WAL writer for `STATE_DIR/stats-history.sqlite3` |
-| Server → `stats-reader` | Retained-history queries, aggregation, and pre-encoded responses | Local Unix RPC to an independent SQLite `mode=ro`/`query_only` WAL reader, so a long range query cannot occupy the writer listener or suppress a CPU deadline |
+| Server → stats history (in-process) | Retained-history queries, aggregation, and pre-encoded responses | No RPC: each web process encodes directly from its own SQLite `mode=ro`/`query_only` WAL connection to `STATE_DIR/stats-history.sqlite3`, so a long range query cannot occupy the writer listener or suppress a CPU deadline |
 | Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
 | Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` and indexed-repository discovery | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues. The web process consumes the last completed repository snapshot and never recursively walks configured index roots. |
 | Server ↔ `approvald` | YO auto-approval start/status/stop/pending-prompt checks | Local Unix RPC; `approvald` owns target locks and target-keyed `AutoApproveWorker` threads |
@@ -237,11 +233,11 @@ flowchart TB
 
 | Flow | Concrete mechanism |
 | --- | --- |
-| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener—`:8880` in the local macOS launch agent, or the port passed to `yolomux.py` (the setup example uses `:9998`). |
+| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener—`:7770` in the standard Linux launch, `:8880` in the standard macOS launch, or the port passed to `yolomux.py` (the setup example uses `:9998`). |
 | Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. `YOLOMUX_TMUX_SOCKET` adds `tmux -S <socket>` when a non-default tmux socket is required. |
 | Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
 | Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
-| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Service sockets are `$YOLOMUX_STATE_DIR/services/statsd.sock`, `$YOLOMUX_STATE_DIR/services/stats-reader.sock`, `$YOLOMUX_STATE_DIR/search_index/indexer.sock`, `$YOLOMUX_STATE_DIR/services/jobd.sock`, and `$YOLOMUX_STATE_DIR/services/approvald.sock`; `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include stats writes/maintenance, read-only history/encoding, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. |
+| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Service sockets are `$YOLOMUX_STATE_DIR/services/statsd.sock`, `$YOLOMUX_STATE_DIR/search_index/indexer.sock`, `$YOLOMUX_STATE_DIR/services/jobd.sock`, and `$YOLOMUX_STATE_DIR/services/approvald.sock`; `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include stats writes/maintenance, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. History/sample encoding is not an RPC action: it runs in-process in each web server from a read-only WAL connection. |
 | Markdown → visual preview | Browser-local rendering; there is no SVG server or preview port. A changed Markdown content generation replaces its derived DOM, reruns Mermaid to a sanitized SVG/blob image, recreates inline media nodes, and rejects any late render from an older generation. |
 
 The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while the elected process coordinates shared refresh demand and service leases. A configured preferred port has higher election priority than later-started followers, while followers still take over if it dies. Lower-priority processes cannot force the preferred live owner to release its lock. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, incompatible protocol peers are retired, and repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership prevent split writers; idle shutdown only happens after leases and queued work drain.
@@ -288,7 +284,7 @@ When a Tab is a tmux session, that session has its own internal hierarchy — tm
 Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed pane/tab/Finder/Differ behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md); this list is the daily-driver essentials.)
 
 - Click a tab to show it in that pane. Use the `Tabs` menu to activate minimized or inactive tabs.
-- Tab and tmux sub-window navigation acknowledges immediately even when the server is slow: cold tabs show a connecting/unavailable Retry state over the chosen pane, window switches dim the last frame while reconciling, and repeated network failures surface one compact topbar retry indicator instead of making local controls appear frozen.
+- Tab and tmux sub-window navigation acknowledges immediately even when the server is slow: cold tabs show a connecting/unavailable Retry state over the chosen pane, window switches feel as instant as native tmux — a brief opaque `Loading <index:name>…` mask bridges only the click-to-confirmation race and lifts as soon as the switch command succeeds and the repainted screen crosses a paint frame, typically well under half a second (only a genuinely hung switch degrades to an explicit `Still loading…` state with Retry/Cancel instead of flashing the previous window), and repeated network failures surface one compact topbar retry indicator instead of making local controls appear frozen.
 - With a mouse, trackpad, or Pencil, hover a tab for details; right-click, Control-click, or press the keyboard Menu key/Shift-F10 for actions without switching to that tab. On pure-touch screens, long-press a tab for the same bottom action sheet; drag instead to cancel it. Split actions place that tab on the named side and retain a useful `Drop a tab here` peer pane. `Expand pane` temporarily fills the workspace and restores the exact prior layout when used again.
 - Press `?` for the responsive Keyboard Shortcuts and Legends dialog, including the green play, yellow pause, and red stop status glyph meanings.
 - Drag a tab between same-role pane tab bars, drop near a Generic Pane edge to split it, or drop on the outer root edge for a full-span pane. A generic tab moved to the far right creates another Generic Pane, not a Side Pane. No tab can move or swap between Side and Generic roles. Pane roles, edges, splits, and percentages encode into the shareable page URL. Pinned tabs stay in their pane, are never minimized or auto-evicted, and a full pane with no evictable unpinned/clean tab refuses incoming tabs with a visible status message instead of silently exceeding the per-pane tab cap.
@@ -372,6 +368,18 @@ HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-
 | `readonly` | View panes, transcripts, branch metadata, logs, and YOLO status. Terminals are read-only. |
 
 Cookies have a 90-day sliding lifetime and survive server restarts. Cookies are scoped by port, so dev and production servers on the same host do not overwrite each other. Changing a user's password invalidates existing cookies for that user.
+
+### Login rate limiting
+
+Every password path (the browser login form and HTTP Basic auth) is throttled before the password is ever hashed, so brute force, credential stuffing, and password spraying are bounded and cannot burn the server's password-hash CPU. Two independent limits apply together: a per-username limit (5 failed attempts, then escalating waits of 30s, 1m, 2m, 5m, 10m, 30m, up to 1h, reset on a successful login, with a hard lock after 100 consecutive failures) and per-network limits keyed on the client address at several prefix widths (a single address, its /24 or /64 neighborhood, and its /16 or /48 provider block) plus one global emergency limit. When a limit is hit the response is a generic `429 Too Many Requests` that says only "wait a few minutes" or "wait a few hours" — it never reveals which limit fired, whether the username exists, how many attempts remain, or an exact retry time. Correct credentials for an account that is not itself locked always work. The limiter lives in one SQLite file under `YOLOMUX_STATE_DIR`, so the policy holds across every port that shares a state directory and survives restarts.
+
+The client address is the socket peer. YOLOmux deliberately does not trust `X-Forwarded-For`/`Forwarded` headers (any client can forge them). Behind a reverse proxy or an SSH tunnel all clients therefore share the proxy/tunnel address and one network bucket — safe, but intentionally coarser; run YOLOmux with a trusted edge if you need per-client network limits from a real reverse proxy.
+
+Defaults are tuned for a self-hosted server and rarely need changing. To override, create `~/.config/yolomux/login-rate-limit.json` (0600) with any of the policy keys — for example `{"username_initial_allowance": 3, "exact_bucket": {"capacity": 5, "refill_per_minute": 2}}`. Overrides are validated on load; a malformed or incoherent file is ignored and the safe defaults are kept. (Overrides live in their own file rather than `auth.yaml` because the auth-config parser only understands accounts and would drop unknown keys.)
+
+**Recovery.** If a username reaches the hard 100-failure lock, changing that account's password in `auth.yaml` clears it, or delete `YOLOMUX_STATE_DIR/login-throttle.sqlite3` to reset all throttle state (this only clears counters; accounts and cookies are unaffected). If the throttle database is ever unreadable, remote password attempts fail closed with the same generic message while local recovery stays possible; the degraded state is visible in the admin System diagnostics (`login_throttle.healthy`).
+
+**Optional escalation (off by default).** Beyond the generic 429, YOLOmux can serve a harmless "type this phrase" decoy to high-confidence automation and can install expiring firewall DROP rules for volumetric single-address/prefix floods. Both are disabled by default and are defense-in-depth, not the core protection. The firewall integration is opt-in and platform-specific (`pf` on macOS, `nftables` on Linux), builds commands as argument lists (never a shell string), applies a strict per-rule TTL and a rule cap, never blocks a configured trusted address, and only ever reacts to a network/volumetric limit — never to a username lock, so it cannot be tricked into firewalling innocent addresses.
 
 ## Agent permissions & YOLO
 

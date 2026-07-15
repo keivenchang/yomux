@@ -260,6 +260,7 @@
   "debug.errors": "JS-ошибки",
   "debug.events": "События",
   "debug.graph.agentStatus.noData": "Нет образца состояния агента",
+  "debug.graph.noDataRecorded": "Данные не записаны",
   "debug.graph.badConnection": "Плохое соединение: данные для {duration} не собраны.",
   "debug.graph.chart.agentStatus": "Статус агента",
   "debug.graph.chart.agentStatus.desc": "Считает окна агентов по состоянию: работа, внимание, переход и простой на основе выборок YOLOmux.",
@@ -2021,6 +2022,8 @@
   "terminal.window.pid": "(процесс={pid})",
   "terminal.window.previous": "предыдущее подокно tmux",
   "terminal.window.prompt": "запрос подокна tmux",
+  "terminal.window.switchLoading": "Загрузка {target}...",
+  "terminal.window.switchStalled": "Всё ещё загружается {target}...",
   "terminal.window.title": "окно tmux {name}",
   "terminal.window.unnamed": "окно {index}",
   "terminal.xtermLoadFailed": "Не удалось загрузить xterm.js из /static/xterm.js. Терминал не может подключиться.",
@@ -2636,5 +2639,9 @@
   "debug.system.sampler.header.lateMiss.full": "Опоздал/пропустил",
   "debug.system.sampler.header.lateMiss.short": "опоздать/пропустить",
   "debug.system.sampler.header.runtime.full": "Последнее время выполнения",
-  "debug.system.sampler.header.runtime.short": "время выполнения"
+  "debug.system.sampler.header.runtime.short": "время выполнения",
+  "login.error.rateLimitedMinutes": "Слишком много попыток. Подождите несколько минут и повторите попытку.",
+  "login.error.rateLimitedHours": "Слишком много попыток. Подождите несколько часов и повторите попытку.",
+  "auth.error.rateLimitedMinutes": "Слишком много запросов. Подождите несколько минут и повторите попытку.",
+  "auth.error.rateLimitedHours": "Слишком много запросов. Подождите несколько часов и повторите попытку."
 }

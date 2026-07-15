@@ -27,6 +27,7 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
+from yolomux_lib import server_logs
 from yolomux_lib.local_services import stats_store
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
@@ -166,15 +167,69 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     try:
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
-        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {"service": "stats-reader", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()
     finally:
         webapp.control_server.stop()
 
-    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "stats-reader", "jobd", "approvald"]
+    # stats-reader retired: history encodes run in-process in the web server,
+    # so the honest roster is exactly the four spawned local services.
+    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "approvald"]
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
+
+
+def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        now = time.time()
+        # A running service reports a started_at; an idle one has no pid.
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "started_at": now - 42.0, "resources": {"cpu_percent": 1.0, "rss_bytes": 2048}})
+        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "started_at": 0.0, "resources": {}})
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+        services = webapp.runtime_local_services()["services"]
+    finally:
+        webapp.control_server.stop()
+
+    by_name = {row["service"]: row for row in services}
+    # The Local-services table's Uptime cell reads service.uptime_seconds; a
+    # running service must expose it (was absent -> the cell showed an em dash).
+    assert by_name["indexd"]["uptime_seconds"] is not None
+    assert 41.0 <= by_name["indexd"]["uptime_seconds"] <= 60.0
+    assert by_name["statsd"]["uptime_seconds"] is None
+
+
+def test_record_service_load_records_every_known_service_including_idle(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "resources": {"cpu_percent": 12.0, "rss_bytes": 2048}})
+        # A running service whose first-sample CPU delta is not yet known.
+        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 4322, "resources": {"cpu_percent": None, "rss_bytes": 4096}})
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {"time": 100.0, "pid": 999, "cpu_percent": 5.0, "rss_bytes": 8192})
+        monkeypatch.setattr(webapp, "stats_metric_scheduled_time", lambda: 100.0)
+        captured = {}
+        monkeypatch.setattr(webapp, "merge_stats_family_record", lambda family, record, sample: captured.update(family=family, record=record))
+        webapp.record_stats_service_load_sample()
+    finally:
+        webapp.control_server.stop()
+
+    assert captured["family"] == "service_load"
+    services = captured["record"]["host_metrics"]["service_load"]
+    # Every known service — running or idle — plus the web process is present so
+    # the Servers Load chart shows all series instead of only web. stats-reader
+    # is retired (merged into the web process), so it is no longer a known series.
+    assert set(services) == {"indexd", "statsd", "jobd", "approvald", "web"}
+    # Idle spawn-on-demand services read as an honest zero with no RSS series.
+    assert services["jobd"]["cpu_total_percent"] == 0.0 and "rss_total_bytes" not in services["jobd"]
+    # A running service contributes real CPU%/RSS.
+    assert services["indexd"]["cpu_total_percent"] == 12.0 and services["indexd"]["rss_total_bytes"] == 2048.0
+    # First-sample-unknown CPU still yields a present series (0) with real RSS.
+    assert services["statsd"]["cpu_total_percent"] == 0.0 and services["statsd"]["rss_total_bytes"] == 4096.0
+    # The web process is always recorded from the primary sample.
+    assert services["web"]["cpu_total_percent"] == 5.0 and services["web"]["rss_total_bytes"] == 8192.0
 
 
 def test_session_http_guards_use_shared_decorator():
@@ -489,7 +544,6 @@ def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatc
         payload, status = webapp.record_stats_history_payload({"records": records})
         incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
     finally:
-        webapp.stats_client.reader.request({"action": "shutdown"})
         webapp.stats_client.request({"action": "shutdown"})
         webapp.control_server.stop()
 
@@ -1500,9 +1554,6 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
         monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
             "service": "statsd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
         })
-        monkeypatch.setattr(webapp.stats_client.reader, "runtime_status", lambda: {
-            "service": "stats-reader", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
-        })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
             "service": "jobd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
         })
@@ -1538,6 +1589,11 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
     assert set(payload["chat"]["events"]) == {"chat_messages_changed", "chat_typing_changed"}
     assert set(payload["chat"]["store"]) >= {"database_bytes", "message_rows", "typing_leases", "prune_runs"}
     assert "body" not in payload["chat"] and "query" not in payload["chat"] and "browser" not in payload["chat"]
+    # Login throttle aggregates are present and privacy-safe (counts/latency only).
+    throttle = payload["login_throttle"]
+    assert set(throttle) >= {"allowed", "blocked", "blocked_total", "active_rows", "locked_usernames", "decision_ms_avg", "healthy", "schema_version"}
+    assert isinstance(throttle["blocked"], dict)
+    assert "row_key" not in throttle and "username" not in throttle and "ip" not in throttle
 
 
 def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(monkeypatch):
@@ -12996,7 +13052,6 @@ def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(mon
     assert no_files["error"] == "no files supplied"
     assert no_files["user_message"]["key"] == "upload.error.noFiles"
 
-
 def test_ensure_xterm_runtime_assets_downloads_static_fallback_without_npm(monkeypatch, tmp_path):
     downloads = []
     real_run = app_module.subprocess.run
@@ -13278,3 +13333,30 @@ def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(
     assert webapp.job_client.submissions[0][2]["priority"] == "maintenance"
     assert webapp.indexed_repo_roots_snapshot() == [str(tmp_path / "repo")]
     assert len(webapp.job_client.submissions) == 1
+
+
+def test_stats_coverage_integrity_self_check_surfaces_violation_to_logs(monkeypatch, tmp_path):
+    database = tmp_path / "stats.sqlite3"
+    store = stats_store.StatsStore(database)
+    connection = store._connection()
+    with connection:
+        for epoch_id, start, end in (("o1", 1000, 1300), ("o2", 1290, 1600)):
+            connection.execute(
+                "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
+                " VALUES('cpu',?,?,?,10,1,'sampler')",
+                (epoch_id, start, end),
+            )
+    store.close()
+    # Point the read-only check at the corrupt fixture DB (no repair on read-only open).
+    monkeypatch.setattr(statsd, "default_database_path", lambda: database)
+    server_logs.SERVER_LOGS.clear()
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    report = webapp.check_stats_coverage_integrity()
+    assert report is not None and report["ok"] is False and report["overlapping_pairs"] == 1, report
+    coverage_errors = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage" and entry["level"] == "error"]
+    assert coverage_errors, server_logs.server_logs_payload()
+    assert "coverage integrity violated" in coverage_errors[0]["message"]
+    # Deduped: a second immediate check must not emit a second line.
+    webapp.check_stats_coverage_integrity()
+    coverage_errors_after = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage"]
+    assert len(coverage_errors_after) == 1, coverage_errors_after

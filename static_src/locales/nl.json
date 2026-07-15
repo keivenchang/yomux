@@ -248,6 +248,7 @@
   "debug.errors": "JS fouten",
   "debug.events": "Evenementen",
   "debug.graph.agentStatus.noData": "Geen agentstatusmeting",
+  "debug.graph.noDataRecorded": "Geen gegevens vastgelegd",
   "debug.graph.badConnection": "Slechte verbinding: geen gegevens verzameld voor {duration}",
   "debug.graph.chart.agentStatus": "Agentstatus",
   "debug.graph.chart.agentStatus.desc": "Telt agentvensters per status: werkend, aandacht, overgang en inactief uit YOLOmux-statussamples.",
@@ -1937,6 +1938,8 @@
   "terminal.window.pid": "(proces-id={pid})",
   "terminal.window.previous": "vorige tmux sub-venster",
   "terminal.window.prompt": "tmux sub-venster prompt",
+  "terminal.window.switchLoading": "{target} laden...",
+  "terminal.window.switchStalled": "{target} wordt nog geladen...",
   "terminal.window.title": "tmux-venster {name}",
   "terminal.window.unnamed": "venster {index}",
   "terminal.xtermLoadFailed": "xterm.js niet kunnen laden vanuit /static/xterm.js. Terminal kan niet worden aangesloten.",
@@ -2544,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "Te laat / gemist",
   "debug.system.sampler.header.lateMiss.short": "laat/miss",
   "debug.system.sampler.header.runtime.full": "Laatste looptijd",
-  "debug.system.sampler.header.runtime.short": "looptijd"
+  "debug.system.sampler.header.runtime.short": "looptijd",
+  "login.error.rateLimitedMinutes": "Te veel pogingen. Wacht een paar minuten en probeer het opnieuw.",
+  "login.error.rateLimitedHours": "Te veel pogingen. Wacht een paar uur en probeer het opnieuw.",
+  "auth.error.rateLimitedMinutes": "Te veel verzoeken. Wacht een paar minuten en probeer het opnieuw.",
+  "auth.error.rateLimitedHours": "Te veel verzoeken. Wacht een paar uur en probeer het opnieuw."
 }
