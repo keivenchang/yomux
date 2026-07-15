@@ -9484,11 +9484,22 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   background: color-mix(in srgb, var(--pane-tab-text) 55%, transparent);
   cursor: grab;
 }
+/* Esc sits alone in the top-left corner of the keybar, like a real keyboard, level with
+   the primary row. Ctrl/Shift keep their own column directly below it, unchanged. */
+.mobile-terminal-keybar > .mobile-terminal-key--escape {
+  grid-column: 1;
+  grid-row: 1;
+  width: 36px;
+  min-width: 36px;
+  padding: 0;
+  align-self: start;
+  justify-self: start;
+}
 .mobile-terminal-key-side {
   grid-column: 1;
   grid-row: 2;
   display: grid;
-  grid-template-rows: repeat(3, 36px);
+  grid-template-rows: repeat(2, 36px);
   align-self: end;
   align-content: start;
   gap: var(--space-1);
@@ -9550,6 +9561,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   display: none;
 }
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
+.mobile-terminal-keybar--more > .mobile-terminal-key--escape,
 .mobile-terminal-keybar--more .mobile-terminal-key-side,
 .mobile-terminal-keybar--more .mobile-terminal-key-dpad,
 .mobile-terminal-keybar--more .mobile-terminal-keyrow-bottom {

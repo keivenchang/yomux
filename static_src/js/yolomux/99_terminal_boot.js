@@ -231,7 +231,10 @@ const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-const terminalMobileAccessorySideActions = Object.freeze(['escape', 'ctrl', 'shift']);
+// Esc renders alone in the top-left corner (see terminalMobileAccessoryHtml); Ctrl/Shift
+// keep the left side column directly below it.
+const terminalMobileAccessoryCornerAction = 'escape';
+const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift']);
 const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
@@ -523,6 +526,7 @@ function terminalMobileAccessoryHtml(session) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
   const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  const cornerKey = key(terminalMobileAccessoryCornerAction);
   const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
   const bottomKeys = terminalMobileAccessoryBottomActions.map(key).join('');
   // The overflow button remains the rightmost control in both palette states. Keeping the return
@@ -532,6 +536,7 @@ function terminalMobileAccessoryHtml(session) {
   return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
       <div class="mobile-terminal-key-grabber" aria-hidden="true"></div>
+      ${cornerKey}
       <div class="mobile-terminal-key-side">
         ${sideKeys}
       </div>

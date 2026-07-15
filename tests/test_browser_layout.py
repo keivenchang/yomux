@@ -9873,7 +9873,8 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         <button id="smart-key-launcher" class="mobile-terminal-key-launcher">⌨</button>
           <div id="smart-keys" class="mobile-terminal-keybar" role="toolbar" hidden>
             <div id="smart-key-grabber" class="mobile-terminal-key-grabber" aria-hidden="true"></div>
-            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-esc" class="mobile-terminal-key">Esc</button><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button></div>
+            <button id="smart-key-esc" class="mobile-terminal-key mobile-terminal-key--escape">Esc</button>
+            <div id="smart-key-side" class="mobile-terminal-key-side"><button id="smart-key-ctrl" class="mobile-terminal-key active">Ctrl</button><button id="smart-key-shift" class="mobile-terminal-key">Shift</button></div>
             <div id="smart-key-shell" class="mobile-terminal-keyrow-shell"><div id="smart-key-row" class="mobile-terminal-keyrow mobile-terminal-keyrow--primary"><button class="mobile-terminal-key">Tab</button><button class="mobile-terminal-key">^B</button><button id="smart-key-backspace" class="mobile-terminal-key">⌫</button></div><button id="smart-key-more" class="mobile-terminal-key mobile-terminal-key--more">⋯</button></div>
             <div id="smart-key-dpad" class="mobile-terminal-key-dpad"><button id="copy" class="mobile-terminal-key mobile-terminal-key--copy">⌘C</button><button id="up" class="mobile-terminal-key mobile-terminal-key--arrow-up">↑</button><button id="pg-up" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-up">Pg↑</button><button id="left" class="mobile-terminal-key mobile-terminal-key--arrow-left">←</button><button class="mobile-terminal-key mobile-terminal-key--enter">↵</button><button id="right" class="mobile-terminal-key mobile-terminal-key--arrow-right">→</button><button id="paste" class="mobile-terminal-key mobile-terminal-key--command-v">⌘V</button><button id="down" class="mobile-terminal-key mobile-terminal-key--arrow-down">↓</button><button id="pg-down" class="mobile-terminal-key mobile-terminal-key--tmux-scroll-down">Pg↓</button></div>
             <div id="smart-key-bottom" class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom"><button id="smart-key-interrupt" class="mobile-terminal-key mobile-terminal-key--interrupt">^C</button><button id="smart-key-alt" class="mobile-terminal-key">Alt</button><button id="smart-key-cmd" class="mobile-terminal-key">Cmd</button></div>
@@ -9914,10 +9915,10 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
         const moreRow = document.getElementById('smart-key-more-row');
         const side = document.getElementById('smart-key-side');
         const sideButtons = [...side.querySelectorAll('.mobile-terminal-key')];
-        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
+        const normal = {bar: box(bar), key: box(key), more: box(document.getElementById('smart-key-more')), shell: box(shell), side: box(side), esc: box(document.getElementById('smart-key-esc')), escLabel: document.getElementById('smart-key-esc').textContent, grabber: box(document.getElementById('smart-key-grabber')), bottom: box(bottom), bottomLabels: [...bottom.querySelectorAll('.mobile-terminal-key')].map(node => node.textContent), bottomKeys: [...bottom.querySelectorAll('.mobile-terminal-key')].map(box), sideLabels: sideButtons.map(node => node.textContent), sideKeys: sideButtons.map(box), ctrl: box(document.getElementById('smart-key-ctrl')), interrupt: box(document.getElementById('smart-key-interrupt')), shellDisplay: getComputedStyle(shell).display, sideDisplay: getComputedStyle(side).display, bottomDisplay: getComputedStyle(bottom).display, dpadDisplay: getComputedStyle(dpad).display, copy: box(document.getElementById('copy')), paste: box(document.getElementById('paste')), pgUp: box(document.getElementById('pg-up')), pgDown: box(document.getElementById('pg-down')), up: box(document.getElementById('up')), left: box(document.getElementById('left')), right: box(document.getElementById('right')), down: box(document.getElementById('down')), dpad: box(dpad)};
         bar.classList.add('mobile-terminal-keybar--more');
         moreRow.hidden = false;
-        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, shellVisibility: getComputedStyle(shell).visibility, sideDisplay: getComputedStyle(side).display, sideVisibility: getComputedStyle(side).visibility, bottomDisplay: getComputedStyle(bottom).display, bottomVisibility: getComputedStyle(bottom).visibility, dpadDisplay: getComputedStyle(dpad).display, dpadVisibility: getComputedStyle(dpad).visibility};
+        const overflow = {bar: box(bar), row: box(moreRow), more: box(document.getElementById('smart-key-more-return')), hasInterrupt: Boolean(moreRow.querySelector('.mobile-terminal-key--interrupt')), rowDisplay: getComputedStyle(moreRow).display, shellDisplay: getComputedStyle(shell).display, shellVisibility: getComputedStyle(shell).visibility, sideDisplay: getComputedStyle(side).display, sideVisibility: getComputedStyle(side).visibility, escVisibility: getComputedStyle(document.getElementById('smart-key-esc')).visibility, bottomDisplay: getComputedStyle(bottom).display, bottomVisibility: getComputedStyle(bottom).visibility, dpadDisplay: getComputedStyle(dpad).display, dpadVisibility: getComputedStyle(dpad).visibility};
         return {
           pane: box(pane), terminal: box(terminal), bar: normal.bar, key: normal.key, launcher: box(document.getElementById('smart-key-launcher')),
           paneDisplay: getComputedStyle(pane).display,
@@ -9936,7 +9937,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           shell: normal.shell,
           movedInsetEnd: bar.style.insetBlockEnd,
           initiallyHidden: hidden,
-              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, grabber: normal.grabber, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
+              side: normal.side, sideLabels: normal.sideLabels, sideKeys: normal.sideKeys, esc: normal.esc, escLabel: normal.escLabel, grabber: normal.grabber, bottom: normal.bottom, bottomLabels: normal.bottomLabels, bottomKeys: normal.bottomKeys, ctrl: normal.ctrl, interrupt: normal.interrupt, up: normal.up, left: normal.left, right: normal.right, down: normal.down, dpad: normal.dpad,
               copy: normal.copy, paste: normal.paste, pgUp: normal.pgUp, pgDown: normal.pgDown,
           hasClose: Boolean(document.querySelector('.mobile-terminal-key-close, [data-terminal-mobile-close]')),
           hasDrag: Boolean(document.querySelector('.mobile-terminal-key-drag, [data-terminal-mobile-drag]')),
@@ -9955,7 +9956,15 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["overflowX"] == "visible", metrics
     assert metrics["primaryColumns"].startswith("repeat(3,") or len(metrics["primaryColumns"].split()) == 3, metrics
     assert metrics["primaryLabels"] == ["Tab", "^B", "⌫"], metrics
-    assert metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], metrics
+    assert metrics["escLabel"] == "Esc", metrics
+    assert metrics["sideLabels"] == ["Ctrl", "Shift"], metrics
+    # Esc sits alone in the top-left corner: left edge of the left column, level with (at or
+    # above) the primary row's top, and directly above the Ctrl/Shift column.
+    assert abs(metrics["esc"]["left"] - metrics["sideKeys"][0]["left"]) <= 0.5, metrics
+    assert metrics["esc"]["left"] <= metrics["shell"]["left"] + 0.5, metrics
+    assert metrics["esc"]["top"] <= metrics["shell"]["top"] + 0.5, metrics
+    assert metrics["esc"]["bottom"] <= metrics["sideKeys"][0]["top"] + 0.5, metrics
+    assert metrics["esc"]["right"] <= metrics["dpad"]["left"], metrics
     assert metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], metrics
     assert metrics["copy"]["width"] == metrics["paste"]["width"] and metrics["copy"]["height"] == metrics["paste"]["height"], metrics
     assert metrics["more"]["right"] <= metrics["shell"]["right"] + 0.5, metrics
@@ -9966,7 +9975,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["normal"]["shellDisplay"] == metrics["normal"]["sideDisplay"] == metrics["normal"]["bottomDisplay"] == "grid" and metrics["normal"]["dpadDisplay"] == "grid", metrics
     assert metrics["overflow"]["rowDisplay"] == "grid", metrics
     assert metrics["overflow"]["shellDisplay"] == metrics["overflow"]["sideDisplay"] == metrics["overflow"]["bottomDisplay"] == "grid" and metrics["overflow"]["dpadDisplay"] == "grid", metrics
-    assert metrics["overflow"]["shellVisibility"] == metrics["overflow"]["sideVisibility"] == metrics["overflow"]["bottomVisibility"] == metrics["overflow"]["dpadVisibility"] == "hidden", metrics
+    assert metrics["overflow"]["shellVisibility"] == metrics["overflow"]["sideVisibility"] == metrics["overflow"]["escVisibility"] == metrics["overflow"]["bottomVisibility"] == metrics["overflow"]["dpadVisibility"] == "hidden", metrics
     assert metrics["overflow"]["bar"] == metrics["normal"]["bar"], metrics
     assert abs(metrics["overflow"]["more"]["left"] - metrics["normal"]["more"]["left"]) <= 0.5 and abs(metrics["overflow"]["more"]["top"] - metrics["normal"]["more"]["top"]) <= 0.5, metrics
     assert metrics["overflow"]["bar"]["height"] <= metrics["pane"]["height"], metrics
@@ -9975,7 +9984,7 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
     assert metrics["activeBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert metrics["interruptColor"] != "rgb(0, 0, 0)", metrics
     assert metrics["launcherColor"] == metrics["inactiveTabColor"] and metrics["launcherBackground"] == metrics["inactiveTabBackground"], metrics
-    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(2)), metrics
+    assert all(metrics["sideKeys"][index]["bottom"] <= metrics["sideKeys"][index + 1]["top"] for index in range(len(metrics["sideKeys"]) - 1)), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["sideKeys"]), metrics
     assert all(key["top"] >= metrics["bar"]["top"] and key["bottom"] <= metrics["bar"]["bottom"] for key in metrics["bottomKeys"]), metrics
     assert all(key["right"] <= metrics["dpad"]["left"] for key in metrics["sideKeys"]), metrics
@@ -10010,10 +10019,12 @@ def test_touch_terminal_smart_key_accessory_is_a_movable_palette_with_large_targ
           probe.remove();
           return value;
         };
-        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent), launcherColor: getComputedStyle(launcher).color, launcherBackground: getComputedStyle(launcher).backgroundColor, inactiveTabColor: paint('color', '--pane-tab-text'), inactiveTabBackground: paint('backgroundColor', '--panel2')};
+        return {bar: box(document.getElementById('smart-keys')), side: box(side), bottom: box(bottom), primary: box(primary), backspace: box(backspace), esc: box(document.getElementById('smart-key-esc')), escLabel: document.getElementById('smart-key-esc').textContent, sideLabels: [...side.querySelectorAll('button')].map(node => node.textContent), bottomLabels: [...bottom.querySelectorAll('button')].map(node => node.textContent), launcherColor: getComputedStyle(launcher).color, launcherBackground: getComputedStyle(launcher).backgroundColor, inactiveTabColor: paint('color', '--pane-tab-text'), inactiveTabBackground: paint('backgroundColor', '--panel2')};
         """
     )
-    assert light_metrics["sideLabels"] == ["Esc", "Ctrl", "Shift"], light_metrics
+    assert light_metrics["escLabel"] == "Esc", light_metrics
+    assert light_metrics["sideLabels"] == ["Ctrl", "Shift"], light_metrics
+    assert light_metrics["esc"]["left"] <= light_metrics["primary"]["left"] + 0.5 and light_metrics["esc"]["top"] <= light_metrics["primary"]["top"] + 0.5, light_metrics
     assert light_metrics["bottomLabels"] == ["^C", "Alt", "Cmd"], light_metrics
     assert light_metrics["launcherColor"] == light_metrics["inactiveTabColor"] and light_metrics["launcherBackground"] == light_metrics["inactiveTabBackground"], light_metrics
     assert light_metrics["backspace"]["left"] >= light_metrics["primary"]["left"] and light_metrics["backspace"]["right"] <= light_metrics["primary"]["right"], light_metrics
