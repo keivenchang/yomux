@@ -289,10 +289,11 @@ async function runYostatsPerformanceSuite() {
       assert.ok(noDataCount >= 2, `${key} keeps every missing segment around the known disconnect and graduated tier boundaries (got ${noDataCount})`);
     }
     const sampleText = measuredMs.map(value => value.toFixed(1)).join(', ');
-    // NOTE: exact-resolution mode (DOIT.1 cutover, dark-launched) renders every exact
-    // bucket up to the 600-point matrix budget instead of decimating to 120, which pushes
-    // this ~30% higher; raise this ceiling to ~500ms when exact mode becomes the default.
-    assert.ok(medianMs < 300, `24-hour graph HTML median took ${medianMs.toFixed(1)}ms; samples=[${sampleText}]ms`);
+    // Exact-resolution mode (DOIT.1 cutover, default) renders every exact bucket up to the
+    // 600-point matrix budget instead of decimating to a 120-point display cap, so a full
+    // 24h mixed render costs ~30% more — bounded well under half a second for a one-time
+    // range/resolution change. Kept as a real ceiling, not loosened away.
+    assert.ok(medianMs < 500, `24-hour graph HTML median took ${medianMs.toFixed(1)}ms; samples=[${sampleText}]ms`);
   });
 
   test('CONTRACT: the client request-shape owner reproduces every shared golden byte-for-byte', () => {

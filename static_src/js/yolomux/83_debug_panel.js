@@ -994,16 +994,12 @@ function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolution
   return cursor <= startSeconds;
 }
 
-// DOIT.1 cutover, DARK-LAUNCHED: when true the browser requests the exact preset
-// resolution (server returns exactly that, honest no-data past each tier) instead of
-// coarsening/stitching client-side. The full path is implemented and tested on both
-// sides; default false so live charts + the never-regress render tests stay unchanged.
-// Flipping to default-on is one line — it surfaced 5 legacy-behavior render tests
-// (raw/rollup aggregation, coarsen-to-coverage, wider-range coarse paint) that assert
-// the coarsen-stitch contract exact mode inverts; those need updating to the exact
-// contract (or pinning to the legacy path) before the default flips. Set
-// window.__yolomuxExactStats = true to preview exact on a live chart now.
-let jsDebugGraphExactResolutionEnabled = (typeof globalThis !== 'undefined' && globalThis.__yolomuxExactStats === true);
+// DOIT.1 cutover: the browser requests the exact preset resolution (server returns
+// exactly that, honest no-data past each tier) instead of coarsening/stitching
+// client-side. Now the DEFAULT. Set window.__yolomuxExactStats = false to fall back
+// to the legacy coarsen-and-stitch path (a few render tests pin themselves to it to
+// keep guarding that fallback).
+let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && globalThis.__yolomuxExactStats === false);
 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO

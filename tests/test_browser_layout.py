@@ -953,6 +953,7 @@ def test_debug_graph_header_controls_and_time_axis_stay_inside_their_rows(browse
 
 def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_script("if (typeof setDebugGraphExactResolutionEnabled === 'function') setDebugGraphExactResolutionEnabled(false);")  # legacy coarsen-stitch path (exact is default)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1051,6 +1052,7 @@ def test_debug_graph_sparse_client_samples_aggregate_and_zero_meets_baseline(bro
 
 def test_debug_graph_raw_rollup_overlap_uses_finest_values_at_one_uniform_resolution(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_script("if (typeof setDebugGraphExactResolutionEnabled === 'function') setDebugGraphExactResolutionEnabled(false);")  # legacy coarsen-stitch path (exact is default)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -1106,6 +1108,7 @@ def test_debug_graph_raw_rollup_overlap_uses_finest_values_at_one_uniform_resolu
 
 def test_debug_graph_thirty_minute_resolution_ignores_covered_coarse_boundary(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_script("if (typeof setDebugGraphExactResolutionEnabled === 'function') setDebugGraphExactResolutionEnabled(false);")  # legacy coarsen-stitch path (exact is default)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -3321,6 +3324,7 @@ def test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediate
 
 def test_debug_graph_agent_status_uses_stacked_bounded_resolution_bars(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_script("if (typeof setDebugGraphExactResolutionEnabled === 'function') setDebugGraphExactResolutionEnabled(false);")  # legacy coarsen-stitch path (exact is default)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -6073,6 +6077,7 @@ def test_debug_graph_server_restart_refetches_complete_history_without_waiting_f
 
 def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    browser.execute_script("if (typeof setDebugGraphExactResolutionEnabled === 'function') setDebugGraphExactResolutionEnabled(false);")  # legacy coarsen-stitch path (exact is default)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
