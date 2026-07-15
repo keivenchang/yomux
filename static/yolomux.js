@@ -41649,14 +41649,22 @@ const jsDebugGraphGeometry = (() => {
     hoverBottom: plotTop + plotHeight,
   });
 })();
-const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading-initial', 'loading-older', 'retrying', 'ready', 'error']);
-const jsDebugHistoryLoadingPhases = new Set(['loading-initial', 'loading-older', 'retrying']);
+// The readiness machine has FOUR phases; `reason` qualifies the one loading phase
+// ('initial' | 'older' | 'retry', '' otherwise). The DOM/data-attribute contract and
+// the test snapshot still emit the historical composite names (loading-initial /
+// loading-older / retrying) derived from phase+reason via
+// jsDebugHistoryReadinessStateName, so CSS hooks, specs, and tests keep one stable
+// state vocabulary while the machine itself carries fewer states.
+const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading', 'ready', 'error']);
+const jsDebugHistoryReadinessReasonByLegacyPhase = Object.freeze({'loading-initial': 'initial', 'loading-older': 'older', 'retrying': 'retry'});
+const jsDebugHistoryLegacyPhaseByReason = Object.freeze({initial: 'loading-initial', older: 'loading-older', retry: 'retrying'});
 const jsDebugHistoryOlderOverlayDelayMs = 120;
 const jsDebugHistoryRetryInitialDelayMs = 10_000;
 const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
 const jsDebugHistoryCoverageIntervalLimit = 256;
 const jsDebugHistoryReadiness = {
   phase: 'idle',
+  reason: '',
   requestedRangeSeconds: jsDebugGraphDefaultRangeSeconds,
   targetStartSeconds: 0,
   targetEndSeconds: 0,
@@ -41973,9 +41981,16 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
   'var(--link-soft)',
   'var(--accent-gold)',
 ]);
-const jsDebugGraphRawBuckets = new Map();
-const jsDebugGraphRollupBuckets = new Map();
+// THE one client display cache: every retained bucket of every tier lives here,
+// keyed `${startMs}:${durationMs}`. Tier membership is the key's durationMs (the
+// jsDebugGraphTiers graduated-compaction owner rewrites keys as buckets age); the
+// former raw/rollup Map split was only bookkeeping over the same keyspace.
+const jsDebugGraphBuckets = new Map();
 const jsDebugGraphEventRecords = new Map();
+// NOT display cache: upload staging for client-observed metrics awaiting POST
+// /api/stats-history (snake_case wire records; drained by flushJsDebugStatsHistory,
+// re-queued on failure). Its lifecycle is pending-until-acknowledged, so it cannot
+// merge into the display Map above without losing upload dedupe on flush/clear.
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
@@ -42164,13 +42179,28 @@ function jsDebugGraphRangeLabel(seconds = jsDebugGraphRangeSeconds, nowMs = Date
 }
 
 function jsDebugHistoryReadinessBusy(state = jsDebugHistoryReadiness) {
-  return jsDebugHistoryLoadingPhases.has(String(state?.phase || ''));
+  return String(state?.phase || '') === 'loading';
+}
+
+// Error-like states share retry backoff semantics: an explicit error, or a loading
+// pass that exists to retry one (reason is '' outside the loading phase).
+function jsDebugHistoryReadinessErrorLike(state = jsDebugHistoryReadiness) {
+  return state?.phase === 'error' || state?.reason === 'retry';
+}
+
+// The composite state name the DOM contract, snapshot, and diagnostics emit:
+// loading + reason folds back to the historical loading-initial / loading-older /
+// retrying strings; every other phase passes through unchanged.
+function jsDebugHistoryReadinessStateName(state = jsDebugHistoryReadiness) {
+  if (state?.phase !== 'loading') return String(state?.phase || 'idle');
+  return jsDebugHistoryLegacyPhaseByReason[state.reason] || 'loading-initial';
 }
 
 function jsDebugHistoryReadinessSnapshot() {
   const state = jsDebugHistoryReadiness;
   return {
-    phase: state.phase,
+    phase: jsDebugHistoryReadinessStateName(state),
+    reason: state.reason,
     requestedRangeSeconds: state.requestedRangeSeconds,
     targetStartSeconds: state.targetStartSeconds,
     targetEndSeconds: state.targetEndSeconds,
@@ -42199,7 +42229,7 @@ function jsDebugHistoryRetryDelayMs(attemptCount = jsDebugHistoryReadiness.attem
 }
 
 function jsDebugHistoryAutoRetryDue(state = jsDebugHistoryReadiness, nowMs = performanceNow()) {
-  return !['error', 'retrying'].includes(state.phase) || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
+  return !jsDebugHistoryReadinessErrorLike(state) || Number(state.nextAutoRetryAtMs || 0) <= Number(nowMs || 0);
 }
 
 function clearJsDebugHistoryOverlayTimer() {
@@ -42215,7 +42245,7 @@ function syncJsDebugHistoryReadinessSurfaces() {
   const content = debugGraphHistoryOverlayContentHtml(state);
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     graph.setAttribute('aria-busy', busy ? 'true' : 'false');
-    graph.dataset.jsDebugHistoryState = state.phase;
+    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName(state);
     let overlay = graph.querySelector('[data-js-debug-history-overlay]');
     if (!overlay && (busy || state.phase === 'error')) {
       refreshDebugGraphElement(graph, {force: true});
@@ -42230,7 +42260,7 @@ function syncJsDebugHistoryReadinessSurfaces() {
   // shared overlay directly so range/resolution changes show "Loading…" there too.
   for (const area of document.querySelectorAll('[data-js-yocost-chart-area]')) {
     area.setAttribute('aria-busy', busy ? 'true' : 'false');
-    area.dataset.jsDebugHistoryState = state.phase;
+    area.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName(state);
     const overlay = area.querySelector('[data-js-debug-history-overlay]');
     if (!overlay) continue;
     overlay.hidden = state.overlayVisible !== true;
@@ -42239,10 +42269,17 @@ function syncJsDebugHistoryReadinessSurfaces() {
 }
 
 function setJsDebugHistoryReadiness(phase, updates = {}) {
-  const nextPhase = String(phase || 'idle');
+  // Legacy composite names (loading-initial / loading-older / retrying) remain valid
+  // inputs — tests and older callers use them — and normalize to loading + reason.
+  const requestedPhase = String(phase || 'idle');
+  const legacyReason = jsDebugHistoryReadinessReasonByLegacyPhase[requestedPhase];
+  const nextPhase = legacyReason ? 'loading' : requestedPhase;
   if (!jsDebugHistoryReadinessPhases.includes(nextPhase)) throw new Error(`unknown YO!stats history state: ${nextPhase}`);
+  const nextReason = nextPhase === 'loading'
+    ? (legacyReason || (jsDebugHistoryLegacyPhaseByReason[String(updates.reason)] ? String(updates.reason) : 'initial'))
+    : '';
   const state = jsDebugHistoryReadiness;
-  const previousPhase = state.phase;
+  const previousStateName = jsDebugHistoryReadinessStateName(state);
   const wasBusy = jsDebugHistoryReadinessBusy(state);
   const previousStartedAt = Number(state.loadingStartedAtMs) || 0;
   clearJsDebugHistoryOverlayTimer();
@@ -42250,19 +42287,23 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
     if (Object.prototype.hasOwnProperty.call(updates, field)) state[field] = updates[field];
   }
   state.phase = nextPhase;
+  state.reason = nextReason;
   const busy = jsDebugHistoryReadinessBusy(state);
-  state.overlayVisible = nextPhase === 'loading-initial' || nextPhase === 'retrying' || nextPhase === 'error';
-  if (nextPhase === 'loading-older' && typeof setTimeout === 'function') {
+  // Older/refined loads keep the current chart and delay the overlay by 120ms to
+  // avoid a flash; initial/retry loads and errors surface the overlay immediately.
+  const olderLoad = nextPhase === 'loading' && nextReason === 'older';
+  state.overlayVisible = (nextPhase === 'loading' && !olderLoad) || nextPhase === 'error';
+  if (olderLoad && typeof setTimeout === 'function') {
     const generation = state.generation;
     state.overlayTimer = setTimeout(() => {
       state.overlayTimer = null;
-      if (state.phase !== 'loading-older' || state.generation !== generation) return;
+      if (state.phase !== 'loading' || state.reason !== 'older' || state.generation !== generation) return;
       state.overlayVisible = true;
       syncJsDebugHistoryReadinessSurfaces();
     }, jsDebugHistoryOlderOverlayDelayMs);
   }
   if (wasBusy && !busy) {
-    recordClientPerfCounter('statsHistoryLoading', performanceNow() - previousStartedAt, {state: nextPhase, previousState: previousPhase});
+    recordClientPerfCounter('statsHistoryLoading', performanceNow() - previousStartedAt, {state: jsDebugHistoryReadinessStateName(state), previousState: previousStateName});
     state.loadingStartedAtMs = 0;
   }
   syncJsDebugHistoryReadinessSurfaces();
@@ -42273,8 +42314,8 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
 function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = 1, retry = false} = {}) {
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
-  const phase = retry ? 'retrying' : (Number(state.loadedStartSeconds) > 0 ? 'loading-older' : 'loading-initial');
-  const snapshot = setJsDebugHistoryReadiness(phase, {
+  const snapshot = setJsDebugHistoryReadiness('loading', {
+    reason: retry ? 'retry' : (Number(state.loadedStartSeconds) > 0 ? 'older' : 'initial'),
     requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
@@ -43028,8 +43069,7 @@ function debugGraphBucketForTime(timeMs, nowMs = Date.now()) {
   if (!Number.isFinite(timeMs) || timeMs < retentionCutoff) return null;
   const durationMs = debugGraphBucketDurationForTime(timeMs, nowMs);
   const startMs = Math.floor(timeMs / durationMs) * durationMs;
-  const map = durationMs < jsDebugGraphMiddleBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
-  return debugGraphBucket(map, startMs, durationMs);
+  return debugGraphBucket(jsDebugGraphBuckets, startMs, durationMs);
 }
 
 function debugGraphServerBucketRefForTime(timeMs, nowMs = Date.now()) {
@@ -43378,20 +43418,17 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
 
 function compactJsDebugGraphBuckets(nowMs = Date.now()) {
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
-  for (const buckets of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const [key, bucket] of [...buckets.entries()]) {
-      if (bucket.startMs < retentionCutoff) {
-        buckets.delete(key);
-        continue;
-      }
-      const targetDurationMs = debugGraphBucketDurationForTime(bucket.startMs, nowMs);
-      if (bucket.durationMs >= targetDurationMs) continue;
-      const targetStartMs = Math.floor(bucket.startMs / targetDurationMs) * targetDurationMs;
-      const targetBuckets = targetDurationMs === jsDebugGraphRawBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
-      const target = debugGraphBucket(targetBuckets, targetStartMs, targetDurationMs);
-      debugGraphMergeBucket(target, bucket);
-      buckets.delete(key);
+  for (const [key, bucket] of [...jsDebugGraphBuckets.entries()]) {
+    if (bucket.startMs < retentionCutoff) {
+      jsDebugGraphBuckets.delete(key);
+      continue;
     }
+    const targetDurationMs = debugGraphBucketDurationForTime(bucket.startMs, nowMs);
+    if (bucket.durationMs >= targetDurationMs) continue;
+    const targetStartMs = Math.floor(bucket.startMs / targetDurationMs) * targetDurationMs;
+    const target = debugGraphBucket(jsDebugGraphBuckets, targetStartMs, targetDurationMs);
+    debugGraphMergeBucket(target, bucket);
+    jsDebugGraphBuckets.delete(key);
   }
   const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
   for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
@@ -43571,8 +43608,7 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 }
 
 function clearJsDebugGraphData() {
-  jsDebugGraphRawBuckets.clear();
-  jsDebugGraphRollupBuckets.clear();
+  jsDebugGraphBuckets.clear();
   jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
@@ -43587,8 +43623,7 @@ function debugGraphBucketForServerRecord(record) {
   if (!Number.isFinite(startSeconds) || !Number.isFinite(durationSeconds) || durationSeconds <= 0) return null;
   const durationMs = Math.max(jsDebugGraphRawBucketMs, durationSeconds * 1000);
   const startMs = Math.floor(startSeconds * 1000);
-  const map = durationMs < jsDebugGraphMiddleBucketMs ? jsDebugGraphRawBuckets : jsDebugGraphRollupBuckets;
-  return debugGraphBucket(map, startMs, durationMs);
+  return debugGraphBucket(jsDebugGraphBuckets, startMs, durationMs);
 }
 
 function debugGraphApplyServerRecord(record) {
@@ -43845,15 +43880,13 @@ function debugGraphRemoveCoarserServerBuckets(startSeconds, endSeconds, resoluti
   const resolutionMs = Number(resolutionSeconds) * 1000;
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !Number.isFinite(resolutionMs) || resolutionMs <= 0) return 0;
   let removed = 0;
-  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const [key, bucket] of map.entries()) {
-      const bucketStart = Number(bucket?.startMs);
-      const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
-      const bucketEnd = bucketStart + bucketDuration;
-      if (bucketDuration <= resolutionMs || bucketStart < startMs || bucketEnd > endMs) continue;
-      map.delete(key);
-      removed += 1;
-    }
+  for (const [key, bucket] of jsDebugGraphBuckets.entries()) {
+    const bucketStart = Number(bucket?.startMs);
+    const bucketDuration = Math.max(jsDebugGraphRawBucketMs, Number(bucket?.durationMs) || jsDebugGraphRawBucketMs);
+    const bucketEnd = bucketStart + bucketDuration;
+    if (bucketDuration <= resolutionMs || bucketStart < startMs || bucketEnd > endMs) continue;
+    jsDebugGraphBuckets.delete(key);
+    removed += 1;
   }
   return removed;
 }
@@ -44002,7 +44035,7 @@ function debugGraphDisplayResolutionMs(domain, minimumResolutionSeconds = 0, now
 }
 
 function debugGraphSourceBuckets(domain) {
-  return [...jsDebugGraphRollupBuckets.values(), ...jsDebugGraphRawBuckets.values()]
+  return [...jsDebugGraphBuckets.values()]
     .filter(bucket => debugGraphBucketInRange(bucket, domain.startMs, domain.endMs))
     .sort((left, right) => left.startMs - right.startMs);
 }
@@ -44269,11 +44302,9 @@ function debugGraphHostMetricBucketHasData(bucket, series) {
 // unavailable state can explain itself precisely. Only consulted when a visible GPU
 // chart has no series for the current window (not on the hot per-bucket render path).
 function debugGraphAnyGpuDeviceSamplesCached() {
-  for (const map of [jsDebugGraphRawBuckets, jsDebugGraphRollupBuckets]) {
-    for (const bucket of map.values()) {
-      for (const item of bucket?.hostMetrics?.gpuDevices?.values?.() || []) {
-        if (Number(item?.samples || 0) > 0) return true;
-      }
+  for (const bucket of jsDebugGraphBuckets.values()) {
+    for (const item of bucket?.hostMetrics?.gpuDevices?.values?.() || []) {
+      if (Number(item?.samples || 0) > 0) return true;
     }
   }
   return false;
@@ -44520,7 +44551,7 @@ function debugGraphWaitingForServerStats() {
 
 function debugGraphMetaHtml() {
   const items = debugGraphMetaItems();
-  const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadiness.phase === 'loading-initial'
+  const initialHistoryOverlayOwnsLoading = jsDebugHistoryReadinessStateName() === 'loading-initial'
     && jsDebugHistoryReadiness.overlayVisible === true;
   const metaHtml = items.length
     ? items.map(item => `<span class="js-debug-graph-meta-item"${debugGraphExplainAttrs(item.text, item.descKey, {attribute: 'data-js-debug-meta-desc'})}>${esc(item.text)}</span>`).join('<span aria-hidden="true"> | </span>')
@@ -44530,10 +44561,11 @@ function debugGraphMetaHtml() {
 
 function debugGraphHistoryOverlayText(state = jsDebugHistoryReadiness) {
   const range = jsDebugGraphRangeLabel(state.requestedRangeSeconds);
-  if (state.phase === 'loading-initial') return t('debug.graph.history.loadingInitial');
-  if (state.phase === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
-  if (state.phase === 'retrying') return state.error || t('debug.graph.history.retrying', {range});
-  if (state.phase === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
+  const stateName = jsDebugHistoryReadinessStateName(state);
+  if (stateName === 'loading-initial') return t('debug.graph.history.loadingInitial');
+  if (stateName === 'loading-older') return t('debug.graph.history.loadingOlder', {range});
+  if (stateName === 'retrying') return state.error || t('debug.graph.history.retrying', {range});
+  if (stateName === 'error') return t('debug.graph.history.error', {range, error: state.error || t('common.unknown')});
   return '';
 }
 
@@ -47007,7 +47039,7 @@ function debugGraphInnerHtml(nowMs = Date.now()) {
 
 function debugGraphHtml() {
   const nowMs = Date.now();
-  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" data-js-debug-history-state="${esc(jsDebugHistoryReadiness.phase)}" aria-busy="${jsDebugHistoryReadinessBusy() ? 'true' : 'false'}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
+  return `<div class="${debugGraphClassName(nowMs)}" data-js-debug-graph data-js-debug-graph-rendered-at="${esc(nowMs)}" data-js-debug-history-state="${esc(jsDebugHistoryReadinessStateName())}" aria-busy="${jsDebugHistoryReadinessBusy() ? 'true' : 'false'}" aria-label="${esc(t('debug.summary'))}">${debugGraphInnerHtml(nowMs)}</div>`;
 }
 
 function debugGraphBucketSummary(nowMs = Date.now()) {
@@ -47015,12 +47047,15 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   const domain = debugGraphDomain(nowMs, jsDebugGraphRangeSeconds);
   const buckets = debugGraphDisplayBuckets(nowMs, {rangeSeconds: jsDebugGraphRangeSeconds});
   const availableRangeSeconds = debugGraphAvailableRangeOptions(nowMs).map(option => option.seconds);
+  // rawBuckets/rollupBuckets survive as derived diagnostics of the ONE bucket Map:
+  // "raw" is the finest (sub-middle-tier) durations, "rollup" everything coarser.
+  const cachedBuckets = [...jsDebugGraphBuckets.values()];
   return {
-    rawBuckets: jsDebugGraphRawBuckets.size,
-    rollupBuckets: jsDebugGraphRollupBuckets.size,
-    middleBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
-    oldBuckets: [...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
-    tierBucketCounts: jsDebugGraphTiers.map(tier => [...jsDebugGraphRawBuckets.values(), ...jsDebugGraphRollupBuckets.values()].filter(bucket => bucket.durationMs === tier.bucketMs).length),
+    rawBuckets: cachedBuckets.filter(bucket => bucket.durationMs < jsDebugGraphMiddleBucketMs).length,
+    rollupBuckets: cachedBuckets.filter(bucket => bucket.durationMs >= jsDebugGraphMiddleBucketMs).length,
+    middleBuckets: cachedBuckets.filter(bucket => bucket.durationMs === jsDebugGraphMiddleBucketMs).length,
+    oldBuckets: cachedBuckets.filter(bucket => bucket.durationMs === jsDebugGraphRollupBucketMs).length,
+    tierBucketCounts: jsDebugGraphTiers.map(tier => cachedBuckets.filter(bucket => bucket.durationMs === tier.bucketMs).length),
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
@@ -47118,8 +47153,8 @@ function maybePrefetchJsDebugHistory() {
   void prefetchJsDebugHistoryFullRetention();
 }
 
-// Silent cache-fill of the whole retention window. Populates ONLY the shared bucket Maps
-// (jsDebugGraphRawBuckets / jsDebugGraphRollupBuckets) so a later range switch renders
+// Silent cache-fill of the whole retention window. Populates ONLY the shared bucket Map
+// (jsDebugGraphBuckets) so a later range switch renders
 // cached content instantly. Deliberately does NOT touch jsDebugHistoryReadiness, the
 // overlay, coverage, or the live cursor: the current view owns loading state, and the
 // normal poll revalidates the switched-to range's fresh tail on top of this cache.
@@ -47237,7 +47272,7 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
   await nextAnimationFrame();
   recordClientPerfCounter('statsHistoryPaint', performanceNow() - paintStartedAt);
   if (!jsDebugHistoryRequestIsCurrent(generation, requestedRangeSeconds, requestedStartSeconds)) return false;
-  const recoveredRetry = jsDebugHistoryReadiness.phase === 'retrying';
+  const recoveredRetry = jsDebugHistoryReadiness.reason === 'retry';
   setJsDebugHistoryReadiness('ready', {
     requestedRangeSeconds,
     requestedStartSeconds,
@@ -47275,7 +47310,7 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
     if (needsHistoryCoverage) {
       const state = jsDebugHistoryReadiness;
-      if (['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) {
+      if (jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) {
         historyRequestSuppressed = true;
       } else {
         const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
@@ -47283,14 +47318,14 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
           && Number(state.targetStartSeconds) === Number(targetStart)
           && Number(state.targetEndSeconds) === Number(targetEnd)
           && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-        if (!currentRequestMatches || state.phase === 'retrying') {
+        if (!currentRequestMatches || state.reason === 'retry') {
           const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
           beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
             targetStartSeconds: targetStart,
             targetEndSeconds: targetEnd,
             requestedEndSeconds: requestWindow.endSeconds,
             requestedResolutionSeconds: coverageResolution,
-            retry: ['error', 'retrying'].includes(state.phase),
+            retry: jsDebugHistoryReadinessErrorLike(state),
           });
         }
         readinessRequest = jsDebugHistoryReadinessSnapshot();
@@ -47318,7 +47353,8 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     const pendingCoverage = normalizedJsDebugHistoryPending(payload?.history);
     if (readinessRequest && pendingCoverage) {
       recordJsDebugStatsDiagnostic('info', `history backfill pending: ${pendingCoverage.reason}`);
-      setJsDebugHistoryReadiness('retrying', {
+      setJsDebugHistoryReadiness('loading', {
+        reason: 'retry',
         error: pendingCoverage.reason,
         nextAutoRetryAtMs: performanceNow() + pendingCoverage.retryAfterMs,
       });
@@ -48146,7 +48182,7 @@ function yoCostPanelHtml() {
   // YO!stats. It deliberately is NOT a [data-js-debug-graph] surface (those get
   // rebuilt with YO!stats content by the graph-refresh loops); the readiness
   // sync toggles this overlay through its own targeted pass.
-  const chartArea = `<div class="js-yocost-chart-area" data-js-yocost-chart-area data-js-debug-history-state="${esc(jsDebugHistoryReadiness.phase)}">${charts}${debugGraphHistoryOverlayHtml()}</div>`;
+  const chartArea = `<div class="js-yocost-chart-area" data-js-yocost-chart-area data-js-debug-history-state="${esc(jsDebugHistoryReadinessStateName())}">${charts}${debugGraphHistoryOverlayHtml()}</div>`;
   return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${chartArea}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
@@ -48537,7 +48573,7 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     restoreElementScrollPosition(scrollOwner, scrollTop, scrollLeft);
     bindDebugCostSummaryTabButtons(graph);
     graph.dataset.jsDebugGraphRenderedAt = String(nowMs);
-    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadiness.phase;
+    graph.dataset.jsDebugHistoryState = jsDebugHistoryReadinessStateName();
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
     delete graph.dataset.jsDebugGraphRefreshPending;
     if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
@@ -48591,7 +48627,7 @@ function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh
   const coverageResolutionSeconds = jsDebugHistoryCoverageResolutionSeconds(requestedStartSeconds, requestedResolutionSeconds);
   if (!retry && !jsDebugHistoryCoverageNeedsRefresh(requestedStartSeconds, requestedDomainEndSeconds, coverageResolutionSeconds)) return false;
   const state = jsDebugHistoryReadiness;
-  if (!retry && ['error', 'retrying'].includes(state.phase) && !jsDebugHistoryAutoRetryDue(state)) return false;
+  if (!retry && jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) return false;
   const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
     && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
     && Number(state.targetStartSeconds) === Number(requestedStartSeconds)

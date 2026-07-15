@@ -6134,8 +6134,8 @@ def test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight
               finalBusy: finalGraph?.getAttribute('aria-busy'),
               finalPhase: finalGraph?.dataset.jsDebugHistoryState,
               finalOverlayHidden: finalGraph?.querySelector('[data-js-debug-history-overlay]')?.hidden,
-              durableCpuStarts: [...jsDebugGraphRawBuckets.values()]
-                .filter(bucket => Number(bucket.systemCpuCount) > 0)
+              durableCpuStarts: [...jsDebugGraphBuckets.values()]
+                .filter(bucket => Number(bucket.durationMs) < 10000 && Number(bucket.systemCpuCount) > 0)
                 .map(bucket => Math.floor(Number(bucket.startMs) / 1000))
                 .sort((left, right) => left - right),
             };
