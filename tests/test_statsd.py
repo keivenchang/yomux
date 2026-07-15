@@ -1891,13 +1891,18 @@ def test_statsd_large_agent_scan_streams_atoms_to_bounded_spool(monkeypatch, tmp
         "path": str(spool), "cursor_start": -1, "cursor_duration": -1, "cursor_event": "",
         "target_state": target_state, "sample_time": 1060, "count": count, "changed": 0,
     }
-    pages = []
+    merges = []
     monkeypatch.setattr(
         service, "merge_server_records",
-        lambda records, **_kwargs: pages.append(sum(len(record["usage_atoms"]) for record in records)) or {"ok": True, "changed": len(records)},
+        lambda records, **_kwargs: merges.append(sum(len(record["usage_atoms"]) for record in records)) or {"ok": True, "changed": len(records)},
     )
+    # A generous budget so one drain processes the whole read batch deterministically.
+    monkeypatch.setattr(statsd, "STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS", 60.0)
     assert service._drain_agent_token_atom_spool() is True
-    assert pages == [statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS]
+    # Each merge is exactly ONE atom (the bounded projection unit that cannot starve the
+    # writer); one drain reads up to a page of rows and loops one-atom merges within budget.
+    assert merges and all(count == 1 for count in merges)
+    assert len(merges) == min(50_000, statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS)
     assert service.agent_token_atom_persistence is not None
     service.agent_token_atom_persistence = None
     service.store.close()
@@ -1956,6 +1961,47 @@ def test_statsd_cpu_write_stays_responsive_during_atom_spool_maintenance(monkeyp
     assert response["ok"] is True
     assert atom_page_sizes[0] == 1
     assert elapsed < 0.9
+
+
+def test_atom_spool_drain_catches_up_a_large_backlog_not_one_per_drain(monkeypatch, tmp_path):
+    """After an offline rebuild the live spool holds a large atom backlog. One atom per
+    DRAIN could not clear it before new atoms accrued, so the cursor never reached the
+    recent atoms and the Cost summary read 0 tokens on recent ranges for the whole catch-up
+    window (2026-07-15). The budget-bounded drain must clear a large backlog in a handful of
+    drains while keeping each MERGE one atom (the responsiveness unit)."""
+    spool = tmp_path / "backlog-atoms.sqlite3"
+    total = 1000
+    with sqlite3.connect(spool) as connection:
+        connection.execute("CREATE TABLE atoms (bucket_start INTEGER NOT NULL, duration INTEGER NOT NULL, event_key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(bucket_start, duration, event_key))")
+        for index in range(total):
+            normalized = statsd.normalized_usage_atom(_spool_test_atom(index, 1050.0 + (index % 20)))
+            connection.execute(
+                "INSERT INTO atoms VALUES(?, ?, ?, ?)",
+                (1050 + (index % 20), 1, f"{statsd._agent_token_spool_identity(normalized)}:{index}", json.dumps(normalized)),
+            )
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    service.agent_token_atom_persistence = {
+        "path": str(spool), "cursor_start": -1, "cursor_duration": -1, "cursor_event": "",
+        "target_state": {}, "sample_time": 1060, "count": total, "changed": 0,
+    }
+    merge_sizes = []
+    original_merge = service.merge_server_records
+    monkeypatch.setattr(service, "merge_server_records", lambda records, **kw: (merge_sizes.append(sum(len(r["usage_atoms"]) for r in records)), original_merge(records, **kw))[1])
+    # Generous budget so each drain processes its whole read page deterministically.
+    monkeypatch.setattr(statsd, "STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS", 60.0)
+    drains = 0
+    while service.agent_token_atom_persistence is not None and drains < 100:
+        service._drain_agent_token_atom_spool()
+        drains += 1
+    assert service.agent_token_atom_persistence is None, "the whole backlog drains"
+    # A handful of drains (ceil(total/page)+empty), NOT ~total drains (the 1-per-drain bug).
+    assert drains <= (total // statsd.STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS) + 2
+    assert len(merge_sizes) == total and all(size == 1 for size in merge_sizes), "each merge is one atom"
+    # The backlog produced real cost components (not silently dropped).
+    history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": 1040, "end": 0, "resolution_seconds": 1, "max_points": 200})
+    priced = any((r.get("cost_summary") or {}).get("components") for r in history.get("records") or [])
+    assert priced, "the drained atoms populate cost_summary components"
+    service.store.close()
 
 
 def test_statsd_hot_write_does_not_probe_or_restart_on_contention(monkeypatch, tmp_path):

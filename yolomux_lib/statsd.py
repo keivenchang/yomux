@@ -126,9 +126,19 @@ STATS_USAGE_ATOM_MIGRATION_BATCH_RECORDS = 500
 # simple record count suggests on a memory-constrained host.
 STATSD_PRICING_REPROJECTION_BATCH_BUCKETS = 1
 STATSD_AGENT_TOKEN_PERSIST_BATCH_RECORDS = 1
-# A page executes on statsd's sole SQLite/RPC owner. One atom is the bounded
-# unit: a "record" may carry expensive pricing and summary projection work.
-STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 1
+# The atom drain executes on statsd's sole SQLite/RPC owner. Each MERGE stays the bounded
+# unit — one atom, since a single record can carry expensive pricing/summary projection —
+# so no merge can starve the one-second CPU writer. But one atom PER DRAIN was too slow to
+# matter: after an offline rebuild the live spool holds tens of thousands of already-merged
+# atoms that re-drain as no-op dedups, and at 1/cycle the cursor never reaches the recent
+# atoms, so the spool stays stale (its newest atom hours old), new atom scans cannot install
+# over the undrained spool, and the Cost summary reads 0 tokens on recent ranges while the
+# token charts (a separate path) stay current. The fix loops one-atom merges within a small
+# wall-clock BUDGET per drain: cheap dedup atoms clear fast (thousands/sec), while a genuinely
+# expensive merge still yields after one. STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS is the rows
+# READ per drain (an upper bound); the budget is the real limiter.
+STATSD_AGENT_TOKEN_ATOM_PAGE_RECORDS = 2000
+STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS = 0.01
 
 
 def _scan_agent_token_rows_in_worker(
@@ -1726,24 +1736,28 @@ class PersistentStatsService:
                 path.unlink(missing_ok=True)
                 return True
             connection.close()
-            records: list[dict[str, Any]] = []
-            for raw_start, raw_duration, _event_key, raw_payload in rows:
-                bucket_start, duration = int(raw_start), int(raw_duration)
-                if not records or records[-1]["_statsd_duration"] != duration or records[-1]["time"] != bucket_start:
-                    records.append({"time": bucket_start, "_statsd_duration": duration, "usage_atoms": []})
-                records[-1]["usage_atoms"].append(json.loads(str(raw_payload)))
-            merged = self.merge_server_records(
-                records,
-                now=float(persistence.get("sample_time") or time.time()),
-                compact=False,
-            )
+            # Merge ONE atom per merge (the bounded projection unit) but loop within a small
+            # wall-clock budget so a backlog of cheap dedup atoms clears fast, while a single
+            # expensive merge still yields after one. The cursor advances to the last merged
+            # atom, so a mid-batch stop safely resumes next drain.
+            sample_time = float(persistence.get("sample_time") or time.time())
+            budget_deadline = time.monotonic() + STATSD_AGENT_TOKEN_ATOM_DRAIN_BUDGET_SECONDS
+            total_changed = 0
+            processed_atoms = 0
+            for raw_start, raw_duration, raw_event, raw_payload in rows:
+                record = {"time": int(raw_start), "_statsd_duration": int(raw_duration), "usage_atoms": [json.loads(str(raw_payload))]}
+                merged = self.merge_server_records([record], now=sample_time, compact=False)
+                total_changed += int(merged.get("changed") or 0)
+                persistence["cursor_start"] = int(raw_start)
+                persistence["cursor_duration"] = int(raw_duration)
+                persistence["cursor_event"] = str(raw_event)
+                processed_atoms += 1
+                if time.monotonic() >= budget_deadline:
+                    break
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             self.last_sampler_failure = redact_local_service_text(exc)
             return True
-        persistence["cursor_start"] = int(rows[-1][0])
-        persistence["cursor_duration"] = int(rows[-1][1])
-        persistence["cursor_event"] = str(rows[-1][2])
-        persistence["changed"] = int(persistence.get("changed") or 0) + int(merged.get("changed") or 0)
+        persistence["changed"] = int(persistence.get("changed") or 0) + total_changed
         self._store_agent_token_atom_spool(persistence)
         return True
 
