@@ -6393,6 +6393,76 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     );
   });
 
+  test('YO!stats honest outage: refinement never smears a coarse aggregate back across the gap for any family', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
+    const nowSec = now / 1000;
+    api.setDebugGraphRangeForTest(30 * 60, {render: false});
+    const domainStartSec = nowSec - 30 * 60;
+    const outageEndSec = nowSec - 15 * 60; // outage covers [now-30m, now-15m]; fine data only after it.
+    // Fine data (low values) only in the recent suffix, carrying every family.
+    const fine = [];
+    for (let t = outageEndSec; t < nowSec; t += 30) {
+      fine.push({
+        start: t, duration: 1, sequence: fine.length + 1,
+        cpu_total_percent: 20, cpu_count: 1, system_cpu_total_percent: 25, system_cpu_count: 1,
+        active_agent_total: 1,
+        agent_token_rates: {'s1:0': {tokens: 100, seconds: 1, samples: 1, total: 100, model_rates: {'gpt-5': {tokens: 100, seconds: 1, samples: 1, total: 100}}}},
+        host_metrics: {
+          system_memory_used_total_bytes: 200, system_memory_capacity_total_bytes: 1000, system_memory_count: 1,
+          service_load: {'web:8881': {label: 'web', cpu_total_percent: 15, cpu_samples: 1, rss_total_bytes: 2e8, rss_samples: 1}},
+          gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 30, memory_used_total_bytes: 5e9, memory_capacity_total_bytes: 5e10, samples: 1}},
+        },
+        cost_summary: {total_micro_usd: 5, components: [{provider: 'openai', model: 'gpt-5', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 100, micro_usd: 5}]},
+      });
+    }
+    // A coarse 600s wide bucket STRADDLING the recovery boundary with DISTINCTLY HIGH
+    // aggregates. Retained, it both collapses the whole view to 600s and smears its high
+    // values backward across the gap.
+    const coarse = {
+      start: outageEndSec - 300, duration: 600, sequence: 9999,
+      cpu_total_percent: 90 * 600, cpu_count: 600, system_cpu_total_percent: 95 * 600, system_cpu_count: 600,
+      active_agent_total: 600,
+      agent_token_rates: {'s1:0': {tokens: 6000, seconds: 600, samples: 600, total: 6000, model_rates: {'gpt-5': {tokens: 6000, seconds: 600, samples: 600, total: 6000}}}},
+      host_metrics: {
+        system_memory_used_total_bytes: 900 * 600, system_memory_capacity_total_bytes: 1000 * 600, system_memory_count: 600,
+        service_load: {'web:8881': {label: 'web', cpu_total_percent: 92 * 600, cpu_samples: 600, rss_total_bytes: 2e8, rss_samples: 600}},
+        gpu_devices: {'gpu:0': {label: 'GPU 0', util_total_percent: 95 * 600, memory_used_total_bytes: 5e9, memory_capacity_total_bytes: 5e10, samples: 600}},
+      },
+      cost_summary: {total_micro_usd: 3000, components: [{provider: 'openai', model: 'gpt-5', direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens', quantity: 60000, micro_usd: 3000}]},
+    };
+    api.debugGraphApplyServerHistoryForTest({sequence: 10000, records: [coarse, ...fine]});
+    // The authoritative fine refinement over the covered suffix removes the straddling
+    // coarse bucket (checkbox 5), so its high aggregate can no longer claim the outage nor
+    // hold the whole view at the coarse tier.
+    api.debugGraphRemoveCoarserServerBucketsForTest(outageEndSec, nowSec, 1);
+    // High coarse value / low fine value per family; after refinement no family may render
+    // near its coarse aggregate anywhere in the domain (no backward smear), and the fine
+    // tier is restored (many slots, not the ~3 the 600s bucket collapsed it to).
+    // Coarse aggregate -> ceiling (between the fine value and the high coarse value) per
+    // measurable family. Agent status, Agent tokens, and Model tokens ride the SAME per-bucket
+    // record, so removing the straddling bucket de-smears them together; Cost is checked below.
+    const expectations = {
+      'cpu': 45,               // fine 20, coarse 90
+      'systemCpu': 45,         // fine 25, coarse 95
+      'systemMemory': 500,     // fine 200 used-bytes, coarse 900
+      'serviceLoad:web:8881': 45, // fine 15, coarse 92 (Server Load)
+      'gpu:gpuUtil:gpu:0': 55,    // fine 30, coarse 95
+    };
+    const series = new Map(api.debugGraphSeriesDataForTest(now).map(s => [s.key, s]));
+    for (const [key, ceiling] of Object.entries(expectations)) {
+      const s = series.get(key);
+      assert.ok(s, `family ${key} has a series`);
+      const values = s.values.filter(value => Number.isFinite(value));
+      assert.ok(values.length >= 10, `${key}: the fine tier is restored (${values.length} slots, not the ~3 the coarse bucket forced)`);
+      assert.ok(Math.max(...values) <= ceiling, `${key}: the coarse aggregate never smears into the view (max ${Math.max(...values)} <= ${ceiling})`);
+    }
+    // Cost rides the same buckets: after refinement the display cost reflects only the fine
+    // records, never the coarse bucket's inflated 3000 micro-USD aggregate.
+    const costTotal = api.debugGraphCostSummaryForTest(api.debugGraphDisplayBucketsForTest(now)).totalMicroUsd;
+    assert.ok(costTotal > 0 && costTotal < 3000, `Cost reflects only the fine records, not the coarse smear (got ${costTotal})`);
+  });
+
   test('YO!stats full-retention prefetch cannot re-coarsen an active fine domain', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
