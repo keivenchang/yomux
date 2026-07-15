@@ -1325,6 +1325,8 @@ globalThis.__layoutTestApi = {
   jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
   debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
   resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
+  clearJsDebugGraphDataForTest: clearJsDebugGraphData,
+  setDateNowForTest(nowMs) { Date.now = () => Number(nowMs); },
   retryJsDebugHistoryForTest: retryJsDebugHistory,
   initializeJsDebugStatsBeforeStreamsForTest: initializeJsDebugStatsBeforeStreams,
   pollJsDebugStatsOnIntervalForTest: pollJsDebugStatsOnInterval,
