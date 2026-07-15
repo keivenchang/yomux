@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "Te laat / gemist",
   "debug.system.sampler.header.lateMiss.short": "laat/miss",
   "debug.system.sampler.header.runtime.full": "Laatste looptijd",
-  "debug.system.sampler.header.runtime.short": "looptijd"
+  "debug.system.sampler.header.runtime.short": "looptijd",
+  "login.error.rateLimitedMinutes": "Te veel pogingen. Wacht een paar minuten en probeer het opnieuw.",
+  "login.error.rateLimitedHours": "Te veel pogingen. Wacht een paar uur en probeer het opnieuw.",
+  "auth.error.rateLimitedMinutes": "Te veel verzoeken. Wacht een paar minuten en probeer het opnieuw.",
+  "auth.error.rateLimitedHours": "Te veel verzoeken. Wacht een paar uur en probeer het opnieuw."
 }

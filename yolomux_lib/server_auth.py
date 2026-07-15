@@ -26,6 +26,9 @@ from .common import error_payload
 from .common import test_auth_bypass_enabled
 from .locales import normalize_locale
 from .locales import resolve_locale_preference
+from .login_rate_limit import ADMIT
+from .login_rate_limit import AdmissionDecision
+from .login_rate_limit import RETRY_BAND_HOURS
 from .http_routes import route_for_request
 from .http_routes import SHARE_ACCESS_NONE
 from .http_routes import SHARE_ACCESS_READONLY
@@ -39,7 +42,10 @@ from .web import setup_auth_html
 
 
 class AuthMixin:
-    def basic_auth_identity(self) -> AuthIdentity | None:
+    def basic_auth_credentials(self) -> tuple[str, str] | None:
+        """Decode `Authorization: Basic` into (username, password), or None if the header
+        is absent/malformed. Split out from verification so the credentials can be routed
+        through login throttling before the PBKDF2 check runs."""
         header = self.headers.get("Authorization", "")
         scheme, separator, encoded = header.partition(" ")
         if not separator or scheme.lower() != "basic":
@@ -51,7 +57,68 @@ class AuthMixin:
         username, separator, password = decoded.partition(":")
         if not separator:
             return None
-        return auth_identity_for_credentials(username, password)
+        return (username, password)
+
+    def basic_auth_identity(self) -> AuthIdentity | None:
+        credentials = self.basic_auth_credentials()
+        if credentials is None:
+            return None
+        return auth_identity_for_credentials(*credentials)
+
+    # --- login throttling (shared by both password paths) ---
+
+    def client_source_ip(self) -> str:
+        """The socket peer address. YOLOmux deliberately does not trust
+        X-Forwarded-For/Forwarded (any client can forge them); behind a reverse proxy or
+        SSH tunnel all clients share the tunnel/proxy peer, which is safe but coarser."""
+        return self.client_address[0] if isinstance(self.client_address, tuple) and self.client_address else ""
+
+    def login_rate_limiter(self) -> Any:
+        return getattr(self.server.app, "login_rate_limiter", None)
+
+    def verify_login_credentials(self, username: str, password: str) -> tuple[AuthIdentity | None, AdmissionDecision]:
+        """Throttle-aware credential verification shared by the browser and Basic paths.
+
+        Checks admission BEFORE the PBKDF2 verifier, so a blocked attempt never hashes;
+        records the outcome after so the username staged-backoff advances on failure and
+        resets on success while the network buckets keep their charge. Returns
+        (identity_or_None, decision); when `decision.admitted` is False the caller must
+        emit a generic 429 without having leaked whether the account exists."""
+        limiter = self.login_rate_limiter()
+        if limiter is None:
+            # No limiter wired (minimal/legacy handlers in tests): preserve prior behavior.
+            return auth_identity_for_credentials(username, password), ADMIT
+        client_ip = self.client_source_ip()
+        decision = limiter.check_and_reserve(client_ip, username)
+        if not decision.admitted:
+            return None, decision
+        identity = auth_identity_for_credentials(username, password)
+        limiter.record_result(client_ip, username, identity is not None)
+        return identity, decision
+
+    def reject_rate_limited(self, decision: AdmissionDecision) -> None:
+        """Generic throttling response for the protected-route (Basic/JSON or HTML) path.
+        Reveals nothing about which bucket fired, whether the account exists, attempts
+        used, or an exact reset time — only a coarse minutes/hours band."""
+        self.close_after_unread_body()
+        band_suffix = "Hours" if decision.retry_band == RETRY_BAND_HOURS else "Minutes"
+        if self.wants_html():
+            display_locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
+            self.write_html(
+                login_html(
+                    next_path="/",
+                    error=server_string(display_locale, f"login.error.rateLimited{band_suffix}"),
+                    secure=self.request_is_https(),
+                    current_locale=self.request_locale_pref(),
+                    accept_language=self.headers.get("Accept-Language", ""),
+                ),
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+            )
+            return
+        self.write_json(
+            error_payload("too many requests", message_key=f"auth.error.rateLimited{band_suffix}"),
+            status=HTTPStatus.TOO_MANY_REQUESTS,
+        )
 
     def cookie_auth_identity(self) -> AuthIdentity | None:
         cookie_name = self.auth_cookie_name()
@@ -297,14 +364,20 @@ class AuthMixin:
             self._auth_identity = None
             self.reject_unauthorized()
             return False
-        identity = self.basic_auth_identity()
-        if identity is not None:
-            self._auth_identity = identity
-            self._auth_cookie_identity = identity
-            if self.role_allows(identity, required_role):
-                return True
-            self.reject_forbidden(identity, required_role)
-            return False
+        credentials = self.basic_auth_credentials()
+        if credentials is not None:
+            identity, decision = self.verify_login_credentials(*credentials)
+            if not decision.admitted:
+                self._auth_identity = None
+                self.reject_rate_limited(decision)
+                return False
+            if identity is not None:
+                self._auth_identity = identity
+                self._auth_cookie_identity = identity
+                if self.role_allows(identity, required_role):
+                    return True
+                self.reject_forbidden(identity, required_role)
+                return False
         self._auth_identity = None
         self.reject_unauthorized()
         return False
@@ -365,7 +438,7 @@ class AuthMixin:
             return
         username = form.get("username", [""])[0]
         password = form.get("password", [""])[0]
-        identity = auth_identity_for_credentials(username, password)
+        identity, decision = self.verify_login_credentials(username, password)
         if identity is None:
             self.close_after_unread_body()
             locale = normalize_locale(
@@ -374,15 +447,24 @@ class AuthMixin:
                 allow_system=True,
             )
             display_locale = resolve_locale_preference(locale, self.headers.get("Accept-Language", ""))
+            if not decision.admitted:
+                # Throttled before any hash: generic coarse message, never revealing the
+                # firing bucket, whether the account exists, or an exact reset time.
+                message_key = "login.error.rateLimitedHours" if decision.retry_band == RETRY_BAND_HOURS else "login.error.rateLimitedMinutes"
+                error_text = server_string(display_locale, message_key)
+                status = HTTPStatus.TOO_MANY_REQUESTS
+            else:
+                error_text = server_string(display_locale, "login.error.invalid")
+                status = HTTPStatus.UNAUTHORIZED
             self.write_html(
                 login_html(
                     next_path=next_path,
-                    error=server_string(display_locale, "login.error.invalid"),
+                    error=error_text,
                     secure=self.request_is_https(),
                     current_locale=locale,
                     accept_language=self.headers.get("Accept-Language", ""),
                 ),
-                status=HTTPStatus.UNAUTHORIZED,
+                status=status,
             )
             return
         # Phase 1: persist the login-screen language choice to general.language now that auth

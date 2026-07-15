@@ -2593,5 +2593,9 @@
   "debug.system.sampler.header.lateMiss.full": "In ritardo/perso",
   "debug.system.sampler.header.lateMiss.short": "in ritardo/mancata",
   "debug.system.sampler.header.runtime.full": "Ultima esecuzione",
-  "debug.system.sampler.header.runtime.short": "tempo di esecuzione"
+  "debug.system.sampler.header.runtime.short": "tempo di esecuzione",
+  "login.error.rateLimitedMinutes": "Troppi tentativi. Attendi qualche minuto e riprova.",
+  "login.error.rateLimitedHours": "Troppi tentativi. Attendi qualche ora e riprova.",
+  "auth.error.rateLimitedMinutes": "Troppe richieste. Attendi qualche minuto e riprova.",
+  "auth.error.rateLimitedHours": "Troppe richieste. Attendi qualche ora e riprova."
 }

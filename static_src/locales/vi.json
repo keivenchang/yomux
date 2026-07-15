@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "Trễ/bỏ lỡ",
   "debug.system.sampler.header.lateMiss.short": "trễ/trễ",
   "debug.system.sampler.header.runtime.full": "Lần chạy cuối cùng",
-  "debug.system.sampler.header.runtime.short": "thời gian chạy"
+  "debug.system.sampler.header.runtime.short": "thời gian chạy",
+  "login.error.rateLimitedMinutes": "Quá nhiều lần thử. Vui lòng đợi vài phút rồi thử lại.",
+  "login.error.rateLimitedHours": "Quá nhiều lần thử. Vui lòng đợi vài giờ rồi thử lại.",
+  "auth.error.rateLimitedMinutes": "Quá nhiều yêu cầu. Vui lòng đợi vài phút rồi thử lại.",
+  "auth.error.rateLimitedHours": "Quá nhiều yêu cầu. Vui lòng đợi vài giờ rồi thử lại."
 }

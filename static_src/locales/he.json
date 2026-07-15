@@ -2593,5 +2593,9 @@
   "debug.system.sampler.header.lateMiss.full": "מאוחר / החמצה",
   "debug.system.sampler.header.lateMiss.short": "מאוחר/פספוס",
   "debug.system.sampler.header.runtime.full": "זמן ריצה אחרון",
-  "debug.system.sampler.header.runtime.short": "זמן ריצה"
+  "debug.system.sampler.header.runtime.short": "זמן ריצה",
+  "login.error.rateLimitedMinutes": "יותר מדי ניסיונות. המתן כמה דקות ונסה שוב.",
+  "login.error.rateLimitedHours": "יותר מדי ניסיונות. המתן כמה שעות ונסה שוב.",
+  "auth.error.rateLimitedMinutes": "יותר מדי בקשות. המתן כמה דקות ונסה שוב.",
+  "auth.error.rateLimitedHours": "יותר מדי בקשות. המתן כמה שעות ונסה שוב."
 }

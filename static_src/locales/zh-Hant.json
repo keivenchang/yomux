@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "遲到/錯過",
   "debug.system.sampler.header.lateMiss.short": "遲到/錯過",
   "debug.system.sampler.header.runtime.full": "上次運行時間",
-  "debug.system.sampler.header.runtime.short": "運行時"
+  "debug.system.sampler.header.runtime.short": "運行時",
+  "login.error.rateLimitedMinutes": "嘗試次數過多。請稍候幾分鐘後再試。",
+  "login.error.rateLimitedHours": "嘗試次數過多。請稍候幾小時後再試。",
+  "auth.error.rateLimitedMinutes": "請求過多。請稍候幾分鐘後再試。",
+  "auth.error.rateLimitedHours": "請求過多。請稍候幾小時後再試。"
 }

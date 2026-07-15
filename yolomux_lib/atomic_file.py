@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import sqlite3
 import threading
 import time
 from contextlib import contextmanager
@@ -67,23 +68,78 @@ def load_or_create_secret_key(path: Path, num_bytes: int = 32) -> bytes:
     deliberately NOT routed here: it stores a hex-text form with truncate-on-rewrite
     semantics, and unifying it would change that on-disk format and invalidate every
     live login cookie.
+
+    Concurrency: an in-process lock serializes threads, and the exclusive create plus a
+    bounded read-retry covers cross-process races — a peer that lost the create must not
+    read the file in the window after O_EXCL creation but before the bytes are flushed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        secret = path.read_bytes()
-    except FileNotFoundError:
-        secret = os.urandom(num_bytes)
+    with _lock_for(path):
+        for _ in range(200):
+            try:
+                secret = path.read_bytes()
+            except FileNotFoundError:
+                secret = os.urandom(num_bytes)
+                try:
+                    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                except FileExistsError:
+                    # A concurrent starter won the create; loop to read its key.
+                    continue
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(secret)
+                    output.flush()
+                    os.fsync(output.fileno())
+                return secret
+            if len(secret) >= num_bytes:
+                return secret
+            # The creator has claimed the file but not finished writing; brief retry.
+            time.sleep(0.005)
+        raise ValueError(f"secret key at {path} did not become readable ({num_bytes} bytes)")
+
+
+def open_wal_database(path: Path, busy_timeout_ms: int, *, row_factory: Any = None) -> sqlite3.Connection:
+    """Open a WAL-friendly SQLite connection under a private 0700 parent dir.
+
+    chat_store and the login rate-limiter both open a multi-writer WAL database with the
+    same connect timeout + busy_timeout so concurrent writers wait rather than error;
+    this is the one owner of that open dance (callers add their own schema-specific
+    PRAGMAs like foreign_keys). `isolation_level=None` keeps autocommit so callers drive
+    explicit BEGIN IMMEDIATE transactions.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    connection = sqlite3.connect(path, timeout=busy_timeout_ms / 1000, isolation_level=None)
+    if row_factory is not None:
+        connection.row_factory = row_factory
+    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+    return connection
+
+
+def enable_wal_with_retry(connection: sqlite3.Connection, attempts: int = 6) -> None:
+    """Turn on WAL journaling, retrying briefly while another connection holds the lock
+    during the mode switch. Shared by every store that opens the file from more than one
+    process."""
+    for attempt in range(attempts):
         try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            # A concurrent starter won the create; adopt its key so all agree.
-            secret = path.read_bytes()
-        else:
-            with os.fdopen(descriptor, "wb") as output:
-                output.write(secret)
-    if len(secret) < num_bytes:
-        raise ValueError(f"secret key at {path} is too short ({len(secret)} < {num_bytes} bytes)")
-    return secret
+            connection.execute("PRAGMA journal_mode = WAL")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                raise
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.02 * (attempt + 1))
+
+
+def begin_wal_migration(connection: sqlite3.Connection) -> int:
+    """Enable WAL, enter an exclusive (BEGIN IMMEDIATE) migration transaction, and return
+    the current PRAGMA user_version. The shared prologue for every user_version-migrated
+    store; each caller then branches on the returned version with its own schema steps and
+    commits. Callers hold their own init lock and roll back / close on error."""
+    enable_wal_with_retry(connection)
+    connection.execute("PRAGMA synchronous = NORMAL")
+    connection.execute("BEGIN IMMEDIATE")
+    return int(connection.execute("PRAGMA user_version").fetchone()[0])
 
 
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:

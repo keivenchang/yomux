@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "देर /चूक",
   "debug.system.sampler.header.lateMiss.short": "देर/चूक",
   "debug.system.sampler.header.runtime.full": "अंतिम रनटाइम",
-  "debug.system.sampler.header.runtime.short": "रनटाइम"
+  "debug.system.sampler.header.runtime.short": "रनटाइम",
+  "login.error.rateLimitedMinutes": "बहुत अधिक प्रयास। कृपया कुछ मिनट प्रतीक्षा करें और पुनः प्रयास करें।",
+  "login.error.rateLimitedHours": "बहुत अधिक प्रयास। कृपया कुछ घंटे प्रतीक्षा करें और पुनः प्रयास करें।",
+  "auth.error.rateLimitedMinutes": "बहुत अधिक अनुरोध। कृपया कुछ मिनट प्रतीक्षा करें और पुनः प्रयास करें।",
+  "auth.error.rateLimitedHours": "बहुत अधिक अनुरोध। कृपया कुछ घंटे प्रतीक्षा करें और पुनः प्रयास करें।"
 }

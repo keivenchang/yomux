@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "Verspätet / verpasst",
   "debug.system.sampler.header.lateMiss.short": "verspätet/verpasst",
   "debug.system.sampler.header.runtime.full": "Letzte Laufzeit",
-  "debug.system.sampler.header.runtime.short": "Laufzeit"
+  "debug.system.sampler.header.runtime.short": "Laufzeit",
+  "login.error.rateLimitedMinutes": "Zu viele Versuche. Bitte warten Sie einige Minuten und versuchen Sie es erneut.",
+  "login.error.rateLimitedHours": "Zu viele Versuche. Bitte warten Sie einige Stunden und versuchen Sie es erneut.",
+  "auth.error.rateLimitedMinutes": "Zu viele Anfragen. Bitte warten Sie einige Minuten und versuchen Sie es erneut.",
+  "auth.error.rateLimitedHours": "Zu viele Anfragen. Bitte warten Sie einige Stunden und versuchen Sie es erneut."
 }

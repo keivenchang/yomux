@@ -96,6 +96,10 @@ from .common import YOLOMUX_VERSION
 from .common import UPLOAD_MAX_FILES
 from .common import UPLOAD_MAX_BYTES
 from .locales import LANGUAGE_PREFERENCES
+from .login_rate_limit import LOGIN_THROTTLE_DATABASE_NAME
+from .login_rate_limit import LOGIN_THROTTLE_OVERRIDE_NAME
+from .login_rate_limit import LoginRateLimiter
+from .login_rate_limit import load_login_rate_policy
 from .locales import message_descriptor
 from .locales import message_fields
 from .locales import normalize_locale
@@ -1751,6 +1755,13 @@ class TmuxWebtermApp:
             self.chat_store,
             cursor_secret_path=common.STATE_DIR / "chat-cursor.key",
             retention_days=self.chat_retention_days,
+        )
+        # Shared login throttle: one WAL SQLite file under the state dir enforces the
+        # policy across every port pointing here. Admission runs before PBKDF2 in the
+        # auth mixin; policy overrides are validated at load and fall back to defaults.
+        self.login_rate_limiter = LoginRateLimiter(
+            common.STATE_DIR / LOGIN_THROTTLE_DATABASE_NAME,
+            policy=load_login_rate_policy(common.CONFIG_DIR / LOGIN_THROTTLE_OVERRIDE_NAME),
         )
         # DOIT.58 Phase 1: per-session/window user+agent activity ledger (heartbeat-coalesced
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.

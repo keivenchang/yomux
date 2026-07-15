@@ -67,17 +67,21 @@ from __future__ import annotations
 import hashlib
 import hmac
 import ipaddress
+import json
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from typing import Callable
 from typing import Iterator
 
+from .atomic_file import begin_wal_migration
 from .atomic_file import load_or_create_secret_key
+from .atomic_file import open_wal_database
 
 
 # --- Centrally owned, validated policy defaults ---------------------------------
@@ -173,6 +177,73 @@ class LoginRatePolicy:
 
 
 DEFAULT_LOGIN_RATE_POLICY = LoginRatePolicy().validated()
+
+# Operator overrides live in a dedicated JSON file in the config dir, NOT in auth.yaml.
+# auth.yaml's hand-rolled parser only understands the `users:` list and drops unknown
+# keys, and its normalization rewrite (plaintext -> hashed passwords) would silently
+# delete a policy section — a config-loss footgun for a security control. This separate,
+# validated, 0600 file sits alongside auth.yaml and is documented in DEVELOPMENT.md.
+LOGIN_THROTTLE_OVERRIDE_NAME = "login-rate-limit.json"
+
+
+def _bucket_from_mapping(value: Any, fallback: BucketPolicy) -> BucketPolicy:
+    if not isinstance(value, dict):
+        raise ValueError("bucket override must be a mapping")
+    return BucketPolicy(
+        capacity=int(value.get("capacity", fallback.capacity)),
+        refill_per_minute=float(value.get("refill_per_minute", fallback.refill_per_minute)),
+    )
+
+
+def login_rate_policy_from_mapping(overrides: dict[str, Any]) -> LoginRatePolicy:
+    """Build a validated policy from a mapping of override keys layered on the defaults.
+    Unknown keys are ignored; recognized keys are type-checked and the whole result is
+    run through `validated()` so an operator cannot install an incoherent policy (e.g. a
+    broad bucket stricter than the exact one)."""
+    base = DEFAULT_LOGIN_RATE_POLICY
+    scalar_fields = (
+        "exact_ipv4_prefix", "exact_ipv6_prefix", "nearby_ipv4_prefix", "nearby_ipv6_prefix",
+        "broad_ipv4_prefix", "broad_ipv6_prefix", "username_initial_allowance", "username_hard_ceiling",
+    )
+    kwargs: dict[str, Any] = {name: int(overrides[name]) for name in scalar_fields if name in overrides}
+    for name, fallback in (
+        ("exact_bucket", base.exact_bucket),
+        ("nearby_bucket", base.nearby_bucket),
+        ("broad_bucket", base.broad_bucket),
+        ("global_bucket", base.global_bucket),
+    ):
+        if name in overrides:
+            kwargs[name] = _bucket_from_mapping(overrides[name], fallback)
+    if "username_cooldown_ladder" in overrides:
+        ladder = overrides["username_cooldown_ladder"]
+        if not isinstance(ladder, list) or not ladder:
+            raise ValueError("username_cooldown_ladder must be a non-empty list")
+        kwargs["username_cooldown_ladder"] = tuple(int(step) for step in ladder)
+    return replace(base, **kwargs).validated()
+
+
+def load_login_rate_policy(override_path: Path | str | None = None) -> LoginRatePolicy:
+    """Return the active policy: defaults, with a validated override file layered on when
+    present. Any problem (missing file, bad JSON, invalid values) falls back to the safe
+    defaults rather than raising into server startup — the defaults ARE the intended
+    policy, so a typo must never weaken protection or block boot. Returns
+    `DEFAULT_LOGIN_RATE_POLICY` unchanged when no override applies."""
+    if override_path is None:
+        return DEFAULT_LOGIN_RATE_POLICY
+    path = Path(override_path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return DEFAULT_LOGIN_RATE_POLICY
+    try:
+        overrides = json.loads(raw)
+        if not isinstance(overrides, dict):
+            raise ValueError("override file must contain a JSON object")
+        return login_rate_policy_from_mapping(overrides)
+    except (ValueError, TypeError):
+        # Malformed or incoherent override: keep the safe defaults. The degraded config is
+        # surfaced through the limiter's diagnostics healthy/override fields at the call site.
+        return DEFAULT_LOGIN_RATE_POLICY
 
 
 # --- Network scope key derivation (IP canonicalization) -------------------------
@@ -412,25 +483,7 @@ class LoginRateLimiter:
         return self._secret
 
     def _raw_connection(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
-        connection = sqlite3.connect(self.path, timeout=self.busy_timeout_ms / 1000, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
-        return connection
-
-    @staticmethod
-    def _enable_wal(connection: sqlite3.Connection) -> None:
-        for attempt in range(6):
-            try:
-                connection.execute("PRAGMA journal_mode = WAL")
-                return
-            except sqlite3.OperationalError as error:
-                if "locked" not in str(error).lower() and "busy" not in str(error).lower():
-                    raise
-                if attempt == 5:
-                    raise
-                time.sleep(0.02 * (attempt + 1))
+        return open_wal_database(self.path, self.busy_timeout_ms, row_factory=sqlite3.Row)
 
     def _initialize(self) -> None:
         if self._initialized:
@@ -441,10 +494,7 @@ class LoginRateLimiter:
             connection: sqlite3.Connection | None = None
             try:
                 connection = self._raw_connection()
-                self._enable_wal(connection)
-                connection.execute("PRAGMA synchronous = NORMAL")
-                connection.execute("BEGIN IMMEDIATE")
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+                version = begin_wal_migration(connection)
                 if version > LOGIN_THROTTLE_SCHEMA_VERSION:
                     raise LoginRateLimiterError(
                         f"login throttle schema {version} is newer than supported {LOGIN_THROTTLE_SCHEMA_VERSION}"

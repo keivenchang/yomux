@@ -2547,5 +2547,9 @@
   "yolo.status.watching": "watching",
   "yolo.title": "YOLO {state}",
   "yolo.titleForSession": "YOLO {state} for {session}",
-  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access"
+  "yolo.titleReadonly": "YOLO {state} for {session}; readonly access",
+  "login.error.rateLimitedMinutes": "Too many attempts. Please wait a few minutes and try again.",
+  "login.error.rateLimitedHours": "Too many attempts. Please wait a few hours and try again.",
+  "auth.error.rateLimitedMinutes": "Too many requests. Please wait a few minutes and try again.",
+  "auth.error.rateLimitedHours": "Too many requests. Please wait a few hours and try again."
 }

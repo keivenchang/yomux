@@ -2731,5 +2731,9 @@
   "debug.system.sampler.header.lateMiss.full": "متأخرا / غاب",
   "debug.system.sampler.header.lateMiss.short": "متأخر/ملكة جمال",
   "debug.system.sampler.header.runtime.full": "وقت التشغيل الأخير",
-  "debug.system.sampler.header.runtime.short": "وقت التشغيل"
+  "debug.system.sampler.header.runtime.short": "وقت التشغيل",
+  "login.error.rateLimitedMinutes": "محاولات كثيرة جدًا. يرجى الانتظار بضع دقائق والمحاولة مرة أخرى.",
+  "login.error.rateLimitedHours": "محاولات كثيرة جدًا. يرجى الانتظار بضع ساعات والمحاولة مرة أخرى.",
+  "auth.error.rateLimitedMinutes": "طلبات كثيرة جدًا. يرجى الانتظار بضع دقائق والمحاولة مرة أخرى.",
+  "auth.error.rateLimitedHours": "طلبات كثيرة جدًا. يرجى الانتظار بضع ساعات والمحاولة مرة أخرى."
 }

@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "遅刻・欠席",
   "debug.system.sampler.header.lateMiss.short": "遅刻/欠席",
   "debug.system.sampler.header.runtime.full": "最終ランタイム",
-  "debug.system.sampler.header.runtime.short": "ランタイム"
+  "debug.system.sampler.header.runtime.short": "ランタイム",
+  "login.error.rateLimitedMinutes": "試行回数が多すぎます。数分待ってからもう一度お試しください。",
+  "login.error.rateLimitedHours": "試行回数が多すぎます。数時間待ってからもう一度お試しください。",
+  "auth.error.rateLimitedMinutes": "リクエストが多すぎます。数分待ってからもう一度お試しください。",
+  "auth.error.rateLimitedHours": "リクエストが多すぎます。数時間待ってからもう一度お試しください。"
 }

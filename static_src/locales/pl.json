@@ -2639,5 +2639,9 @@
   "debug.system.sampler.header.lateMiss.full": "Spóźniony/nieodebrany",
   "debug.system.sampler.header.lateMiss.short": "spóźniony/spóźniony",
   "debug.system.sampler.header.runtime.full": "Ostatni czas działania",
-  "debug.system.sampler.header.runtime.short": "czas wykonania"
+  "debug.system.sampler.header.runtime.short": "czas wykonania",
+  "login.error.rateLimitedMinutes": "Zbyt wiele prób. Odczekaj kilka minut i spróbuj ponownie.",
+  "login.error.rateLimitedHours": "Zbyt wiele prób. Odczekaj kilka godzin i spróbuj ponownie.",
+  "auth.error.rateLimitedMinutes": "Zbyt wiele żądań. Odczekaj kilka minut i spróbuj ponownie.",
+  "auth.error.rateLimitedHours": "Zbyt wiele żądań. Odczekaj kilka godzin i spróbuj ponownie."
 }

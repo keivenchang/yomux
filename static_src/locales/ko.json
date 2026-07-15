@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "지각/부재",
   "debug.system.sampler.header.lateMiss.short": "지각/부재",
   "debug.system.sampler.header.runtime.full": "마지막 런타임",
-  "debug.system.sampler.header.runtime.short": "런타임"
+  "debug.system.sampler.header.runtime.short": "런타임",
+  "login.error.rateLimitedMinutes": "시도가 너무 많습니다. 몇 분 후에 다시 시도해 주세요.",
+  "login.error.rateLimitedHours": "시도가 너무 많습니다. 몇 시간 후에 다시 시도해 주세요.",
+  "auth.error.rateLimitedMinutes": "요청이 너무 많습니다. 몇 분 후에 다시 시도해 주세요.",
+  "auth.error.rateLimitedHours": "요청이 너무 많습니다. 몇 시간 후에 다시 시도해 주세요."
 }

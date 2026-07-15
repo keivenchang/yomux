@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "Geç / cevapsız",
   "debug.system.sampler.header.lateMiss.short": "geç/özledim",
   "debug.system.sampler.header.runtime.full": "Son çalışma zamanı",
-  "debug.system.sampler.header.runtime.short": "çalışma zamanı"
+  "debug.system.sampler.header.runtime.short": "çalışma zamanı",
+  "login.error.rateLimitedMinutes": "Çok fazla deneme. Lütfen birkaç dakika bekleyip tekrar deneyin.",
+  "login.error.rateLimitedHours": "Çok fazla deneme. Lütfen birkaç saat bekleyip tekrar deneyin.",
+  "auth.error.rateLimitedMinutes": "Çok fazla istek. Lütfen birkaç dakika bekleyip tekrar deneyin.",
+  "auth.error.rateLimitedHours": "Çok fazla istek. Lütfen birkaç saat bekleyip tekrar deneyin."
 }

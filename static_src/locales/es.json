@@ -2593,5 +2593,9 @@
   "debug.system.sampler.header.lateMiss.full": "Tarde / perdido",
   "debug.system.sampler.header.lateMiss.short": "tarde/extrañar",
   "debug.system.sampler.header.runtime.full": "Último tiempo de ejecución",
-  "debug.system.sampler.header.runtime.short": "tiempo de ejecución"
+  "debug.system.sampler.header.runtime.short": "tiempo de ejecución",
+  "login.error.rateLimitedMinutes": "Demasiados intentos. Espera unos minutos e inténtalo de nuevo.",
+  "login.error.rateLimitedHours": "Demasiados intentos. Espera unas horas e inténtalo de nuevo.",
+  "auth.error.rateLimitedMinutes": "Demasiadas solicitudes. Espera unos minutos e inténtalo de nuevo.",
+  "auth.error.rateLimitedHours": "Demasiadas solicitudes. Espera unas horas e inténtalo de nuevo."
 }

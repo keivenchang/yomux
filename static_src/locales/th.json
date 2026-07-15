@@ -2547,5 +2547,9 @@
   "debug.system.sampler.header.lateMiss.full": "สาย/พลาด",
   "debug.system.sampler.header.lateMiss.short": "สาย/พลาด",
   "debug.system.sampler.header.runtime.full": "รันไทม์ล่าสุด",
-  "debug.system.sampler.header.runtime.short": "รันไทม์"
+  "debug.system.sampler.header.runtime.short": "รันไทม์",
+  "login.error.rateLimitedMinutes": "พยายามมากเกินไป โปรดรอสักสองสามนาทีแล้วลองใหม่อีกครั้ง",
+  "login.error.rateLimitedHours": "พยายามมากเกินไป โปรดรอสองสามชั่วโมงแล้วลองใหม่อีกครั้ง",
+  "auth.error.rateLimitedMinutes": "คำขอมากเกินไป โปรดรอสักสองสามนาทีแล้วลองใหม่อีกครั้ง",
+  "auth.error.rateLimitedHours": "คำขอมากเกินไป โปรดรอสองสามชั่วโมงแล้วลองใหม่อีกครั้ง"
 }

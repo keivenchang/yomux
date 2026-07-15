@@ -2639,5 +2639,9 @@
   "debug.system.sampler.header.lateMiss.full": "Опоздал/пропустил",
   "debug.system.sampler.header.lateMiss.short": "опоздать/пропустить",
   "debug.system.sampler.header.runtime.full": "Последнее время выполнения",
-  "debug.system.sampler.header.runtime.short": "время выполнения"
+  "debug.system.sampler.header.runtime.short": "время выполнения",
+  "login.error.rateLimitedMinutes": "Слишком много попыток. Подождите несколько минут и повторите попытку.",
+  "login.error.rateLimitedHours": "Слишком много попыток. Подождите несколько часов и повторите попытку.",
+  "auth.error.rateLimitedMinutes": "Слишком много запросов. Подождите несколько минут и повторите попытку.",
+  "auth.error.rateLimitedHours": "Слишком много запросов. Подождите несколько часов и повторите попытку."
 }

@@ -2593,5 +2593,9 @@
   "debug.system.sampler.header.lateMiss.full": "En retard / manqué",
   "debug.system.sampler.header.lateMiss.short": "en retard/manqué",
   "debug.system.sampler.header.runtime.full": "Dernière exécution",
-  "debug.system.sampler.header.runtime.short": "durée d'exécution"
+  "debug.system.sampler.header.runtime.short": "durée d'exécution",
+  "login.error.rateLimitedMinutes": "Trop de tentatives. Veuillez patienter quelques minutes, puis réessayer.",
+  "login.error.rateLimitedHours": "Trop de tentatives. Veuillez patienter quelques heures, puis réessayer.",
+  "auth.error.rateLimitedMinutes": "Trop de requêtes. Veuillez patienter quelques minutes, puis réessayer.",
+  "auth.error.rateLimitedHours": "Trop de requêtes. Veuillez patienter quelques heures, puis réessayer."
 }
