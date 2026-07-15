@@ -154,7 +154,6 @@ def seed_real_store(service, now: int) -> None:
                     }],
                     "now": sample_time,
                     "compact": False,
-                    "refresh_rollups": False,
                 })
                 assert marker["ok"] is True
 

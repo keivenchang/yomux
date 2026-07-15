@@ -47,7 +47,7 @@ from . import session_files
 # The transport envelope remains at ``LOCAL_RPC_VERSION``. This version names
 # the statsd RPC contract and forces old children to restart when new actions
 # or response fields are added during a rolling server update.
-STATSD_PROTOCOL_VERSION = 21
+STATSD_PROTOCOL_VERSION = 22
 STATSD_COMPAT_PROTOCOL_VERSION = 8
 STATSD_DEFAULT_IDLE_SECONDS = 300.0
 STATSD_SOCKET_NAME = "statsd.sock"
@@ -81,9 +81,6 @@ STATS_HISTORY_TIERS = (
     (12 * 60 * 60, 5 * 60),
     (STATS_HISTORY_RETENTION_SECONDS, 10 * 60),
 )
-STATS_HISTORY_PERSISTED_ROLLUP_SECONDS = (10, 60, 300, 600)
-STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS = 4
-STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS = 0.08
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
@@ -880,12 +877,6 @@ class PersistentStatsService:
         # SQLite owner. This state makes it cooperative instead of blocking
         # startup until the full retained history has been rewritten.
         self.pricing_reprojection: dict[str, Any] | None = None
-        self.rollup_backfill: dict[str, int] | None = None
-        # Dirty raw writes coalesce by durable rollup window.  A recovery page
-        # may touch dozens of records in the same four windows; it must not
-        # rebuild those windows inline on the RPC thread.
-        self.rollup_pending: set[tuple[int, int]] = set()
-        self.rollup_jobs: dict[tuple[int, int], dict[str, Any]] = {}
         self.retention_compaction: dict[str, Any] | None = None
         self.retention_normalization_complete = False
         self.maintenance_turn = 0
@@ -917,15 +908,13 @@ class PersistentStatsService:
     def _idle_shutdown_ready(self) -> bool:
         # The listener and SQLite writer are intentionally one thread. Advance
         # exactly one maintenance family after an actual 100ms accept timeout;
-        # doing token + pricing + rollup work in one turn starves queued CPU RPCs.
-        maintenance_kind = self.maintenance_turn % 4
+        # doing token + pricing + retention work in one turn starves queued CPU RPCs.
+        maintenance_kind = self.maintenance_turn % 3
         self.maintenance_turn += 1
         if maintenance_kind == 0:
             self._drain_agent_token_scan_result()
         elif maintenance_kind == 1:
             self._maybe_reproject_cost_summaries()
-        elif maintenance_kind == 2:
-            self._rollup_maintenance_step()
         else:
             self._retention_maintenance_step()
         with self.agent_token_scan_lock:
@@ -938,8 +927,7 @@ class PersistentStatsService:
             )
         # An elected sampler is active work even while no browser reads YO!stats.
         maintenance_pending = self.pricing_reprojection is not None
-        rollup_pending = bool(self.rollup_pending or self.rollup_jobs or self.rollup_backfill is not None)
-        return not scan_active and not maintenance_pending and not rollup_pending and self.retention_compaction is None and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
+        return not scan_active and not maintenance_pending and self.retention_compaction is None and not self.leases and monotonic_clock() - self.last_client_at >= self.idle_seconds
 
     @staticmethod
     def _legacy_client_bucket(snapshot: Any) -> dict[str, Any] | None:
@@ -1094,7 +1082,6 @@ class PersistentStatsService:
             client["sequence"] = next_sequence
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             self.store.upsert_bucket(bucket)
-            self._enqueue_persisted_rollups(sample_time)
             changed += 1
         if changed:
             if compact:
@@ -1200,7 +1187,6 @@ class PersistentStatsService:
         *,
         now: float | None = None,
         compact: bool = True,
-        refresh_rollups: bool = True,
     ) -> dict[str, Any]:
         """Apply owner-only server, process, token, and host deltas durably."""
         if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
@@ -1307,10 +1293,6 @@ class PersistentStatsService:
                         "owner_generation": coverage_generation,
                     })
             self.store.upsert_bucket_with_coverage(bucket, coverage_samples)
-            if refresh_rollups:
-                self._refresh_persisted_rollups(sample_time)
-            else:
-                self._enqueue_persisted_rollups(sample_time)
             changed += 1
         if changed and compact:
             self._compact_history(sample_now)
@@ -1319,85 +1301,6 @@ class PersistentStatsService:
         if changed:
             self._encoded_query_cache.clear()
         return {"ok": True, "changed": changed, "sequence": int(self.store.diagnostics().get("sequence") or 0)}
-
-    def _refresh_persisted_rollups(self, sample_time: float) -> None:
-        """Rebuild only the aggregate windows touched by one durable write."""
-
-        for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS:
-            start = int(math.floor(sample_time / duration) * duration)
-            self._refresh_persisted_rollup_window(start, duration)
-
-    def _refresh_persisted_rollup_window(self, start: int, duration: int) -> None:
-        sources = self.store.query_buckets(start=start, end=start + duration)
-        if not sources:
-            return
-        aggregate = stats_store.empty_bucket(start, duration)
-        for source in sources:
-            self._merge_bucket(aggregate, source)
-        self.store.upsert_rollup(aggregate)
-
-    def _enqueue_persisted_rollups(self, sample_time: float) -> None:
-        for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS:
-            start = int(math.floor(sample_time / duration) * duration)
-            key = (start, duration)
-            # A partially accumulated job cannot include a new raw write
-            # safely; discard it and recompute the coalesced window.
-            self.rollup_jobs.pop(key, None)
-            self.rollup_pending.add(key)
-
-    def _rollup_maintenance_step(self) -> dict[str, Any]:
-        """Cooperatively converge dirty and startup rollups between requests."""
-        deadline = monotonic_clock() + STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS
-        progressed = 0
-        if self.rollup_pending:
-            start, duration = min(self.rollup_pending)
-            self.rollup_pending.remove((start, duration))
-            self.rollup_jobs[(start, duration)] = {
-                "after_start": start - 1,
-                "after_duration": -1,
-                "aggregate": stats_store.empty_bucket(start, duration),
-            }
-            progressed = 1
-        elif self.rollup_jobs and monotonic_clock() < deadline:
-            start, duration = min(self.rollup_jobs)
-            job = self.rollup_jobs[(start, duration)]
-            rows = self.store.rollup_source_page(
-                start=start, end=start + duration,
-                after_start=int(job["after_start"]), after_duration=int(job["after_duration"]),
-                limit=STATSD_ROLLUP_MAINTENANCE_PAGE_ROWS,
-            )
-            if rows:
-                for source in rows:
-                    self._merge_bucket(job["aggregate"], source)
-                last = rows[-1]
-                job["after_start"], job["after_duration"] = int(last["start"]), int(last["duration"])
-                progressed = len(rows)
-            else:
-                aggregate = job["aggregate"]
-                self.rollup_jobs.pop((start, duration), None)
-                if int(aggregate.get("sequence") or 0):
-                    self.store.upsert_rollup(aggregate)
-                progressed = 1
-        elif self.rollup_backfill is not None and monotonic_clock() < deadline:
-            rows = self.store.maintenance_buckets_after(
-                after_start=int(self.rollup_backfill["after_start"]),
-                after_duration=int(self.rollup_backfill["after_duration"]), limit=1,
-            )
-            if not rows:
-                self.rollup_backfill = None
-            else:
-                source = rows[0]
-                self.rollup_backfill["after_start"] = int(source["start"])
-                self.rollup_backfill["after_duration"] = int(source["duration"])
-                self.rollup_backfill["processed"] = int(self.rollup_backfill["processed"]) + 1
-                self._enqueue_persisted_rollups(float(source["start"]))
-                progressed = 1
-        pending = bool(self.rollup_pending or self.rollup_jobs or self.rollup_backfill is not None)
-        return {"ok": True, "pending": pending, "processed": progressed}
-
-    def _rollup_backfill_step(self) -> dict[str, Any]:
-        """Compatibility name for focused callers; use the shared queue."""
-        return self._rollup_maintenance_step()
 
     def _enqueue_retention_compaction(self, now: float) -> None:
         if self.retention_compaction is None:
@@ -1434,16 +1337,10 @@ class PersistentStatsService:
                         target = self.store.bucket(target_start, target_duration) or stats_store.empty_bucket(target_start, target_duration)
                         self._merge_bucket(target, source)
                         self.store.replace_compacted_bucket(start, duration, target)
-                        # A rollup job may have observed the source before this
-                        # atomic move. Invalidate it so its eventual projection
-                        # is derived wholly from the final compacted sources.
-                        self._enqueue_persisted_rollups(float(target_start))
                     elif normalized:
                         self.store.upsert_bucket(source)
                 return {"ok": True, "pending": True, "processed": 1}
-            if self.retention_normalization_complete:
-                state["phase"] = "rollups"
-            else:
+            if not self.retention_normalization_complete:
                 state.update({"phase": "normalize", "after_start": -1, "after_duration": -1})
         if state["phase"] == "normalize":
             rows = self.store.maintenance_buckets_after(
@@ -1457,11 +1354,6 @@ class PersistentStatsService:
                     self.store.upsert_bucket(source)
                 return {"ok": True, "pending": True, "processed": 1}
             self.retention_normalization_complete = True
-            state["phase"] = "rollups"
-        stale_rollup = self.store.oldest_rollup_before(cutoff)
-        if stale_rollup is not None:
-            self.store.delete_rollup(*stale_rollup)
-            return {"ok": True, "pending": True, "processed": 1}
         # Epoch intervals are independent of raw-row compaction, but obey the
         # same retention window once the row pass has converged.
         self.store.retain_after(cutoff)
@@ -1827,7 +1719,6 @@ class PersistentStatsService:
                 records,
                 now=float(persistence.get("sample_time") or time.time()),
                 compact=False,
-                refresh_rollups=False,
             )
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             self.last_sampler_failure = redact_local_service_text(exc)
@@ -2186,7 +2077,7 @@ class PersistentStatsService:
             # stall. Normal live maintenance keeps its existing compaction
             # path; recovery deliberately defers it.
             merged = self.merge_server_records(
-                page, now=persistence["sample_time"], compact=False, refresh_rollups=False,
+                page, now=persistence["sample_time"], compact=False,
             ) if page else {"ok": True, "changed": 0}
         except (OSError, RuntimeError, TypeError, ValueError, sqlite3.Error) as exc:
             # Keep the exact pending cursor and uncommitted baseline. A later
@@ -2907,7 +2798,7 @@ class PersistentStatsService:
     ) -> None:
         """Merge ``source`` into ``target`` for the selected manifest field groups.
 
-        Durable merges (compaction, rollups, imports) pass every group. The
+        Durable merges (compaction, imports) pass every group. The
         response-only history aggregation narrows to the wire groups a record
         will carry — and 'always' groups (host metrics, server scalars) are
         structurally non-excludable via ``normalized_field_groups``, so a
@@ -2974,7 +2865,7 @@ class PersistentStatsService:
                 target_summary["active_catalog_revision"] = 0
             if source_summary.get("freshness"):
                 target_summary["freshness"] = str(source_summary["freshness"])
-            # Durable rollups retain the storage byte/count bounds and
+            # Durable merges retain the storage byte/count bounds and
             # transcript de-duplication enforced by the canonical projector.
             # Response-only history aggregation bypasses this branch and uses
             # its incremental dimension accumulator instead.
@@ -3113,27 +3004,14 @@ class PersistentStatsService:
         if max_points:
             span = max(1, (end or available_end) - (start or available_start))
             effective_resolution = max(effective_resolution, math.ceil(span / max_points))
-        # Live cursor deltas must remain raw so their sequence semantics are
-        # exact. Persisted rollups serve bounded range/zoom reads only.
-        persisted_rollup = (
-            next((duration for duration in STATS_HISTORY_PERSISTED_ROLLUP_SECONDS if duration >= effective_resolution), 0)
-            if end and effective_resolution >= STATS_HISTORY_PERSISTED_ROLLUP_SECONDS[1]
-            else 0
-        )
+        # Every read — live cursor delta or bounded range/zoom — serves from
+        # the ONE graduated stats_buckets store; explicit resolution picks
+        # (1/10/60/300s) map onto the graduated tiers via the group-by-target-
+        # resolution encode below.  (The persisted rollup tables are retired:
+        # live systems always served ranges from the graduated buckets anyway.)
         query_started = time.perf_counter()
-        source_buckets = (
-            self.store.query_rollups(duration=persisted_rollup, start=start, end=end)
-            if persisted_rollup and end
-            else self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
-        )
-        # A new database has no historic rollups yet; range reads must stay
-        # exact while incremental writes backfill the durable aggregate tiers.
-        if persisted_rollup and end and not source_buckets:
-            source_buckets = self.store.query_buckets(start=start, end=end)
-            persisted_rollup = 0
+        source_buckets = self.store.query_buckets(after_sequence=after_sequence if not end else 0, start=start, end=end)
         query_ms = (time.perf_counter() - query_started) * 1000
-        if persisted_rollup:
-            effective_resolution = persisted_rollup
         # The manifest wire groups a returned record carries: everything —
         # token detail (rates, cost, token scalars) rides every record of the
         # single history stream. Only the legacy compat path (an old client
@@ -3500,7 +3378,6 @@ class PersistentStatsService:
                     [record for record in records if isinstance(record, dict)],
                     now=request.get("now"),
                     compact=request.get("compact") is not False,
-                    refresh_rollups=request.get("refresh_rollups") is not False,
                 )
                 return {**merged, **hot_version}, b""
             except (TypeError, ValueError, sqlite3.Error) as exc:
@@ -3628,9 +3505,6 @@ class PersistentStatsService:
         """Open/migrate the durable store only after this daemon owns the lock."""
         self.import_legacy_history_once()
         self.agent_token_atom_persistence = self._load_agent_token_atom_spool()
-        # Socket publication must mean it can answer immediately. The full
-        # retained-history pass advances in bounded listener idle turns.
-        self.rollup_backfill = {"after_start": -1, "after_duration": -1, "processed": 0}
         self._schedule_cost_reprojection()
 
     def _shutdown(self) -> None:
@@ -3878,13 +3752,12 @@ class StatsClient(LocalServiceClient):
         *,
         now: float | None = None,
         compact: bool = False,
-        refresh_rollups: bool = False,
         timeout: float = 3.0,
     ) -> dict[str, Any]:
         return self._request_live_or_start(
             {
                 "action": "merge_server_records", "records": records, "now": now,
-                "compact": compact, "refresh_rollups": refresh_rollups,
+                "compact": compact,
             },
             timeout=timeout,
         )

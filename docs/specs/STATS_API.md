@@ -86,10 +86,25 @@ family still renders. Transport failure is the other bounded Retry state. Ranges
 inclusive `start`, exclusive `end`. A legacy schema-2 read-only database derives
 intervals and epochs from retained bucket gaps without mutating the database.
 
-Range reads may use persisted rollups, but one instant has one durable source;
-consumers must not sum overlapping raw and rollup records. A lower-bound or
-truncated cost summary is explicitly incomplete while token counters remain
+One instant has one durable source: every read — live cursor delta or bounded
+range/zoom — serves from the graduated `stats_buckets` tiers, with coarser
+requested resolutions aggregated at serve time by the group-by-target-resolution
+encode (the persisted rollup tiers are retired; they were empty on live
+systems and serving always fell back to the graduated buckets). A lower-bound
+or truncated cost summary is explicitly incomplete while token counters remain
 independently visible.
+
+The durable store (schema 4) is exactly three tables: `stats_buckets` — each
+fact stored once, in `bucket_json` — plus `stats_coverage_intervals` and
+`schema_meta`. Every write path is a full-bucket read-modify-write of
+`bucket_json`, which is why the four legacy normalized side tables
+(`stats_clients`/`stats_processes`/`stats_agent_rates`/`stats_host_metrics`)
+were pure duplication and were retired together with `stats_rollups`. The
+writer migrates a legacy schema-3 database once on open (side-table groups
+missing from a `bucket_json` are folded in, rollup projections are dropped);
+the read-only `StatsHistoryReader` never migrates — it reads only the three
+surviving tables, which exist under both schemas, so it serves an un-migrated
+database unchanged and follows the owner's migration transparently.
 
 Pricing is an offline-first, effective-dated catalog. The packaged seed covers
 current common model families with reviewed HTTPS provenance, check dates, and
@@ -144,10 +159,10 @@ second, Agent Status and GPU every 10 seconds, system memory every 60 seconds,
 and tokens every 10 seconds while watched or 60 seconds while idle. Each
 worker merges only its partial record into statsd; a slow family cannot delay
 another family's deadline. Hot family writes address the live socket directly
-and do not synchronously compact history or rebuild rollups. Queued RPC writes
-run before maintenance; after a real listener-idle turn, statsd round-robins
-one bounded token, cost, rollup, or retention step. Browser/client uploads also
-enqueue rollup and retention work instead of compacting the full store inline.
+and do not synchronously compact history. Queued RPC writes run before
+maintenance; after a real listener-idle turn, statsd round-robins one bounded
+token, cost, or retention step. Browser/client uploads also enqueue retention
+work instead of compacting the full store inline.
 History and response encoding run in-process in each web server against a
 read-only WAL handle; the System view's Local-services roster reports the four
 spawned services (indexd, statsd, jobd, approvald) — the statsd row's history

@@ -2641,7 +2641,7 @@ class TmuxWebtermApp:
         record = self.stats_record_with_sampler_coverage(family, record)
         now = float(record.get("time") or sample.get("time") or time.time())
         merged = self.stats_client.merge_server_records(
-            [record], now=now, compact=False, refresh_rollups=False,
+            [record], now=now, compact=False,
             timeout=0.9 if family == "cpu" else 3.0,
         )
         if not merged.get("ok"):

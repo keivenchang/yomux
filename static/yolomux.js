@@ -41779,8 +41779,9 @@ const jsDebugGraphMaxDisplayPoints = 120;
 const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000]);
 // User-directed Resolution picker universe. Deliberately DECOUPLED from the AUTO
 // effective-resolution set (jsDebugGraphDisplayBucketMs): each of these four values
-// maps 1:1 onto a stored tier (raw 1s + persisted 10/60/300s rollups) so an explicit
-// pick is served straight from a precomputed tier with no server-side re-aggregation.
+// matches a durable graduated retention tier (raw 1s + the 10/60/300s bands), so an
+// explicit pick is served from the graduated buckets — buckets at or coarser than the
+// pick pass through unchanged; finer newer buckets group up to it at serve time.
 // AUTO/effective clamping may still RENDER coarser values (e.g. 600s for the oldest
 // retention windows) — that honest retained resolution is shown in the label, not the
 // picker. Persisted/deeplinked out-of-set overrides normalize into this set.

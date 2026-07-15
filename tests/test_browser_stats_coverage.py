@@ -27,7 +27,7 @@ def _morning_after_protocol_history(tmp_path):
             "action": "ping",
             "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
         })
-        assert protocol["version"] == statsd.STATSD_PROTOCOL_VERSION == 21
+        assert protocol["version"] == statsd.STATSD_PROTOCOL_VERSION == 22
         for segment_start, segment_end, bucket_seconds in (
             (retained_start, sleep_start, 600),
             (wake_time, now, 60),
@@ -114,7 +114,6 @@ def _morning_after_protocol_history(tmp_path):
                     }],
                     "now": sample_time,
                     "compact": False,
-                    "refresh_rollups": False,
                 })
                 assert marker["ok"] is True
                 assert marker["version"] == statsd.STATSD_PROTOCOL_VERSION
@@ -336,7 +335,7 @@ def _mixed_resolution_history(tmp_path):
                 bucket.update({"sequence": sequence, "server_sequence": sequence, "cpu_total_percent": 25.0, "cpu_count": 1.0, "system_cpu_total_percent": 40.0, "system_cpu_count": 1.0})
                 service.store.upsert_bucket(bucket)
         for family, cadence in (("cpu", 3600),):
-            service.handle({"action": "merge_server_records", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "records": [{"time": now - 3600, "_stats_coverage": {"family": family, "cadence_seconds": cadence, "epoch_id": f"e:{family}", "owner_generation": 1}}], "now": now - 3600, "compact": False, "refresh_rollups": False})
+            service.handle({"action": "merge_server_records", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "records": [{"time": now - 3600, "_stats_coverage": {"family": family, "cadence_seconds": cadence, "epoch_id": f"e:{family}", "owner_generation": 1}}], "now": now - 3600, "compact": False})
         history = service.handle({"action": "history", "protocol_version": statsd.STATSD_PROTOCOL_VERSION, "start": now - 3600, "end": 0, "resolution_seconds": 1, "max_points": 6000, "client_id": "mixres"})
         assert history["ok"] is True
     finally:
