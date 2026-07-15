@@ -373,6 +373,7 @@ def test_explicit_fine_resolution_serves_exact_never_coarsened(browser, tmp_path
         """
         const done = arguments[arguments.length - 1];
         (async () => {
+          setDebugGraphExactResolutionEnabled(true);  // exercise the exact serve path (dark-launched default off)
           stopJsDebugStatsPolling(); clearJsDebugGraphData(); resetJsDebugHistoryReadiness();
           setDebugGraphRange(3600, {render: false});
           setDebugGraphResolutionOverride(10);
