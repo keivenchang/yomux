@@ -124,3 +124,41 @@ def test_reads_raw_samples_and_materializes_end_to_end(tmp_path):
     buckets = svc.materialize_buckets(60, read)
     assert [b["start"] for b in buckets] == [0, 60]
     assert buckets[0]["cpu_total_percent"] == 40.0 and buckets[0]["cpu_count"] == 2.0  # (10+30)/2 avg=20
+
+
+def test_materialization_generations_are_immutable_and_atomic(tmp_path):
+    svc = _service(tmp_path)
+    conn = svc.store._connection()
+    with conn:
+        for t, pct in [(1.0, 10.0), (2.0, 30.0), (65.0, 50.0)]:
+            conn.execute(
+                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
+                ("cpu", "", t, "e", f'{{"cpu_total_percent": {pct}, "cpu_count": 1.0}}'),
+            )
+    assert svc.materialization_generation() == 0
+    assert svc.read_materialized_layer(60) == []  # unbuilt -> empty, never a crash
+
+    summary = svc.rebuild_materialization(0, 120, now=1000.0)
+    assert summary["generation"] == 1
+    # Every preset resolution layer is built from one read.
+    assert set(summary["resolutions"]) == {1, 10, 60, 300}
+    layer60 = svc.read_materialized_layer(60)
+    assert [b["start"] for b in layer60] == [0, 60]
+    assert layer60[0]["cpu_total_percent"] == 40.0
+
+    # A reader's mutation cannot corrupt the immutable published generation.
+    layer60[0]["cpu_total_percent"] = -999.0
+    assert svc.read_materialized_layer(60)[0]["cpu_total_percent"] == 40.0
+
+    # Rebuild bumps the generation and republishes atomically.
+    assert svc.rebuild_materialization(0, 120, now=2000.0)["generation"] == 2
+    assert svc.materialization_generation() == 2
+
+
+def test_status_reports_materialization_health(tmp_path):
+    svc = _service(tmp_path)
+    svc.rebuild_materialization(0, 60, now=5.0)
+    status, _binary = svc.handle_with_binary({"action": "status"})
+    mat = status["materialization"]
+    assert mat["generation"] == 1 and mat["built_at"] == 5.0
+    assert set(mat["layers"]) == {1, 10, 60, 300}

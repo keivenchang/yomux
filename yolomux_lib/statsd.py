@@ -937,6 +937,50 @@ class PersistentStatsService:
         self._last_vacuum_at: float | None = None
         self._vacuum_interval_seconds = self._roll_vacuum_interval()
         self.last_vacuum_result: dict[str, int] = {}
+        # Immutable copy-on-write materialization generations (DOIT.1 item 3 engine).
+        # Each rebuild produces a NEW frozen generation published atomically; readers
+        # see one consistent generation and a stale builder cannot overwrite a newer
+        # one. Empty until the first rebuild; additive — does not affect serving yet.
+        self._materialization: dict[str, Any] = {"generation": 0, "layers": {}, "built_at": 0.0, "window": (0, 0)}
+
+    def rebuild_materialization(self, start: float, end: float, now: float) -> dict[str, Any]:
+        """Build every preset resolution layer from raw samples and publish atomically.
+
+        Reads raw samples ONCE, materializes each resolution in `RESOLUTION_CHOICES`,
+        and swaps in a new immutable generation. Building off one consistent read is
+        why a later stale build can't publish partial/mixed layers. Returns the
+        published generation summary.
+        """
+        samples = self._read_raw_samples(start, end)
+        layers = {
+            resolution: tuple(self.materialize_buckets(resolution, samples))
+            for resolution in stats_resolution.RESOLUTION_CHOICES
+        }
+        generation = {
+            "generation": int(self._materialization["generation"]) + 1,
+            "layers": layers,
+            "built_at": float(now),
+            "window": (int(start), int(end)),
+        }
+        # Atomic publish: one reference swap; readers before this see the old
+        # generation whole, readers after see the new one whole.
+        self._materialization = generation
+        return {
+            "generation": generation["generation"],
+            "resolutions": {resolution: len(buckets) for resolution, buckets in layers.items()},
+            "built_at": generation["built_at"],
+        }
+
+    def materialization_generation(self) -> int:
+        return int(self._materialization["generation"])
+
+    def read_materialized_layer(self, resolution: int) -> list[dict[str, Any]]:
+        """Return a deep copy of the cached exact-resolution layer, or [] if unbuilt.
+
+        Deep-copied so a caller can never mutate the immutable published generation.
+        """
+        layer = self._materialization["layers"].get(int(resolution))
+        return [copy.deepcopy(bucket) for bucket in layer] if layer else []
 
     def _roll_vacuum_interval(self) -> float:
         """A fresh jittered ~1h interval so instances don't vacuum in lockstep."""
@@ -3548,6 +3592,14 @@ class PersistentStatsService:
             "status": status,
             "last_vacuum_at": self._last_vacuum_at or 0.0,
             "last_vacuum": dict(self.last_vacuum_result),
+            # Materialization engine health (DOIT.1 items 3/8): current generation,
+            # when it was built, and how many exact buckets each resolution layer holds.
+            "materialization": {
+                "generation": int(self._materialization["generation"]),
+                "built_at": float(self._materialization["built_at"]),
+                "window": list(self._materialization["window"]),
+                "layers": {resolution: len(buckets) for resolution, buckets in self._materialization["layers"].items()},
+            },
             # Canonical Range x Resolution policy advertised once from the single
             # owner (stats_resolution) so the dumb browser (DOIT.1 item 6) reads
             # choices from the server instead of a hand-copied JS table. Additive
