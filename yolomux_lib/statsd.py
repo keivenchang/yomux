@@ -14,6 +14,7 @@ import json
 import math
 import multiprocessing
 import os
+import random
 import sqlite3
 import tempfile
 import threading
@@ -29,6 +30,7 @@ from typing import Any
 from typing import Callable
 
 from . import stats_families
+from . import stats_resolution
 from .common import STATE_DIR
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
@@ -81,6 +83,26 @@ STATSD_USAGE_ATOM_MIGRATION_STATUS_KEY = "usage_atom_migration_status"
 STATSD_USAGE_ATOM_MIGRATION_VERSION = 1
 STATSD_PRICING_REPROJECTION_MARKER = "pricing_reprojection_catalog_revision"
 STATSD_PRICING_PROJECTION_POLICY_VERSION = 2
+# Periodic VACUUM: retention/compaction free pages but SQLite (auto_vacuum off)
+# never returns them to the OS, so the file bloats (observed 210 MB = 85% dead
+# freelist over ~32 MB real data). VACUUM ~ every random hour reclaims it. The
+# wall-clock timestamp of the last VACUUM is persisted in schema_meta so the
+# cadence survives a statsd restart (statsd exits when idle and respawns on
+# demand); the interval is re-rolled with jitter each time so many co-located
+# statsd instances do not all vacuum on the same tick.
+STATSD_VACUUM_MARKER = "last_vacuum_at"
+STATSD_VACUUM_INTERVAL_MIN_SECONDS = 45 * 60
+STATSD_VACUUM_INTERVAL_MAX_SECONDS = 75 * 60
+# DOIT.1 item 2: one-time, startup-gated, atomic migration that populates the raw
+# observation tables from the graduated buckets. Recovery rule per family: a
+# bucket of duration D preserves family F's real data iff D <= F's native cadence
+# (finer-or-equal = a real observation to keep; coarser = aggregated-away, recorded
+# as a coarse-only coverage floor, never split into invented fine samples). Cost
+# atoms are recovered from bucket cost_summary.components by identity. This step is
+# POPULATE-ONLY: it keeps stats_buckets so current serving is unaffected — the
+# old-table deletion and the exact-resolution serve switch defer to items 3-5.
+STATSD_RAW_MIGRATION_MARKER = "raw_schema_version"
+STATSD_RAW_MIGRATION_VERSION = 1
 STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
 STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
@@ -907,6 +929,65 @@ class PersistentStatsService:
         self.retention_compaction: dict[str, Any] | None = None
         self.retention_normalization_complete = False
         self.maintenance_turn = 0
+        # Wall-clock (not monotonic — must survive a restart) of the last VACUUM.
+        # Loaded LAZILY on the first _maybe_vacuum call, never in __init__: the
+        # read-only StatsHistoryReader builds a service and swaps in a read-only
+        # store, so touching the store here would eagerly create the writer DB
+        # file and break the reader's "database does not exist yet" path.
+        self._last_vacuum_at: float | None = None
+        self._vacuum_interval_seconds = self._roll_vacuum_interval()
+        self.last_vacuum_result: dict[str, int] = {}
+
+    def _roll_vacuum_interval(self) -> float:
+        """A fresh jittered ~1h interval so instances don't vacuum in lockstep."""
+        return random.uniform(STATSD_VACUUM_INTERVAL_MIN_SECONDS, STATSD_VACUUM_INTERVAL_MAX_SECONDS)
+
+    def _load_last_vacuum_at(self, now: float) -> float:
+        """Read the persisted VACUUM timestamp; seed to `now` when absent.
+
+        Seeding an absent marker to `now` (rather than 0) means a fresh DB does
+        not vacuum immediately on startup — the first vacuum lands ~an hour in,
+        keeping the disruptive TRUNCATE checkpoint away from the read-only WAL
+        peer during startup. The 177 MB one-time reclaim on the existing live DB
+        is handled out of band, not by pretending the marker is ancient.
+        """
+        try:
+            marker = self.store.metadata_value(STATSD_VACUUM_MARKER)
+        except sqlite3.Error:
+            marker = None
+        if marker is None:
+            self.store.set_metadata_value(STATSD_VACUUM_MARKER, repr(now))
+            return now
+        try:
+            return float(marker)
+        except (TypeError, ValueError):
+            return now
+
+    def _maybe_vacuum(self, now: float) -> bool:
+        """Reclaim freed pages when a jittered ~1h has passed since the last VACUUM.
+
+        Skips while a retention/compaction pass is mid-flight (VACUUM takes an
+        exclusive lock and rewrites the file; let the active pass finish first).
+        Persists the new wall-clock timestamp to schema_meta before re-rolling
+        the interval so the cadence holds across restarts. Returns True iff it
+        vacuumed.
+        """
+        if self.retention_compaction is not None:
+            return False
+        if self._last_vacuum_at is None:
+            self._last_vacuum_at = self._load_last_vacuum_at(now)
+        if now - self._last_vacuum_at < self._vacuum_interval_seconds:
+            return False
+        try:
+            self.last_vacuum_result = self.store.vacuum()
+        except sqlite3.Error:
+            # A locked/busy DB just retries on a later maintenance turn; never
+            # let a maintenance VACUUM crash the listener thread.
+            return False
+        self._last_vacuum_at = now
+        self.store.set_metadata_value(STATSD_VACUUM_MARKER, repr(now))
+        self._vacuum_interval_seconds = self._roll_vacuum_interval()
+        return True
 
     def _pricing_catalog_metadata(self) -> tuple[str, int]:
         """Read local catalog status for a projection without fetching providers."""
@@ -936,14 +1017,16 @@ class PersistentStatsService:
         # The listener and SQLite writer are intentionally one thread. Advance
         # exactly one maintenance family after an actual 100ms accept timeout;
         # doing token + pricing + retention work in one turn starves queued CPU RPCs.
-        maintenance_kind = self.maintenance_turn % 3
+        maintenance_kind = self.maintenance_turn % 4
         self.maintenance_turn += 1
         if maintenance_kind == 0:
             self._drain_agent_token_scan_result()
         elif maintenance_kind == 1:
             self._maybe_reproject_cost_summaries()
-        else:
+        elif maintenance_kind == 2:
             self._retention_maintenance_step()
+        else:
+            self._maybe_vacuum(time.time())
         with self.agent_token_scan_lock:
             scan_active = (
                 self.agent_token_scan_worker is not None
@@ -2688,6 +2771,135 @@ class PersistentStatsService:
             )
             self.store.retain_after(cutoff)
 
+    @staticmethod
+    def _raw_family_payload(bucket: dict[str, Any], family: dict[str, Any]) -> dict[str, Any]:
+        """Slice one family's fields out of a bucket for a raw-sample payload.
+
+        bucket_fields live at the top level, host_metric_fields under
+        ``host_metrics``, and the detail document (agent_token_rates/cost_summary)
+        under ``detail_field`` — all derived from the single family manifest so
+        this never hand-lists field names.
+        """
+        payload: dict[str, Any] = {}
+        for field in family["bucket_fields"]:
+            if field in bucket:
+                payload[field] = bucket[field]
+        host = bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else {}
+        host_slice = {field: host[field] for field in family["host_metric_fields"] if field in host}
+        if host_slice:
+            payload["host_metrics"] = host_slice
+        detail = family.get("detail_field")
+        if detail and bucket.get(detail):
+            payload[detail] = bucket[detail]
+        return payload
+
+    def _recover_raw_observations(self) -> dict[str, Any]:
+        """Classify every graduated bucket into raw samples, atoms, and coarse coverage.
+
+        Returns the in-memory recovered sets plus a reconciliation summary. Pure
+        read; no DB writes happen here so a failed reconciliation leaves the DB
+        untouched.
+        """
+        sample_rows: list[tuple[str, str, float, str, int, str]] = []
+        coarse_coverage: list[tuple[str, str, int, int, int, int, str]] = []
+        atoms: dict[tuple[str, str, str, str, str], tuple[float, str]] = {}
+        family_bucket_hits = 0  # every (bucket, family-with-data) must be accounted for
+        accounted = 0
+        for bucket in self.store.all_buckets():
+            start = int(bucket.get("start") or 0)
+            duration = int(bucket.get("duration") or 0)
+            if start <= 0 or duration <= 0:
+                continue
+            for family in stats_families.STATS_FAMILY_MANIFEST:
+                name = family["name"]
+                if name == "raw":
+                    continue  # coverage-only companion of cpu; no rows of its own
+                if not stats_store.StatsStore._legacy_bucket_has_family(bucket, name):
+                    continue
+                family_bucket_hits += 1
+                if name == "cost":
+                    # Cost recovers as identity-deduped usage atoms, not a sample.
+                    summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
+                    for component in summary.get("components") or []:
+                        key = (
+                            str(component.get("event_id") or ""),
+                            str(component.get("direction") or ""),
+                            str(component.get("modality") or ""),
+                            str(component.get("cache_role") or ""),
+                            str(component.get("unit") or ""),
+                        )
+                        atom_time = float(component.get("timestamp") or start)
+                        atoms.setdefault(key, (atom_time, json.dumps(component, sort_keys=True)))
+                    accounted += 1
+                    continue
+                native = int(family.get("cadence_seconds") or 1)
+                if duration <= native:
+                    # Finer-or-equal to the family's native cadence => a real
+                    # observation. source_id is the bucket start (host-wide); the
+                    # payload is the family's exact fields at that instant.
+                    payload = self._raw_family_payload(bucket, family)
+                    sample_rows.append((name, "", float(start), f"migrated:{start}", 0, json.dumps(payload, sort_keys=True)))
+                else:
+                    # Coarser than native => aggregated-away. Record a coarse-only
+                    # coverage floor (cadence=duration) so the materializer knows a
+                    # finer request must return no-data for this span.
+                    coarse_coverage.append((name, f"migrated-coarse:{start}", start, start + duration, duration, 0, "migrated-coarse"))
+                accounted += 1
+        return {
+            "sample_rows": sample_rows,
+            "coarse_coverage": coarse_coverage,
+            "atoms": atoms,
+            "family_bucket_hits": family_bucket_hits,
+            "accounted": accounted,
+        }
+
+    def migrate_to_raw_observations_once(self) -> dict[str, Any]:
+        """DOIT.1 item 2: startup-gated atomic populate of the raw observation tables.
+
+        Idempotent (marker short-circuit), atomic (one transaction — reconciled
+        before any write, so a failed check leaves the DB byte-identical), and
+        POPULATE-ONLY (keeps stats_buckets; the destructive old-table drop + serve
+        switch land with the materializer). Mirrors import_legacy_history_once.
+        """
+        if self.store.metadata_value(STATSD_RAW_MIGRATION_MARKER) == str(STATSD_RAW_MIGRATION_VERSION):
+            return {"ok": True, "migrated": False, "reason": "already_migrated"}
+        recovered = self._recover_raw_observations()
+        # Reconciliation gate (before any write): every family-bucket-with-data must
+        # be accounted for as a sample, atom source, or coarse-coverage floor; and
+        # the raw-sample count must be bounded by the family-bucket hit count (an
+        # explosion would mean we fabricated fine samples — the forbidden path).
+        if recovered["accounted"] != recovered["family_bucket_hits"]:
+            return {"ok": False, "migrated": False, "reason": "reconcile_incomplete",
+                    "accounted": recovered["accounted"], "hits": recovered["family_bucket_hits"]}
+        if len(recovered["sample_rows"]) > recovered["family_bucket_hits"]:
+            return {"ok": False, "migrated": False, "reason": "reconcile_sample_explosion"}
+        connection = self.store._connection()
+        with connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO stats_raw_samples(family, source_id, sample_time, epoch_id, owner_generation, payload_json) VALUES(?,?,?,?,?,?)",
+                recovered["sample_rows"],
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO stats_usage_atoms(event_id, direction, modality, cache_role, unit, sample_time, atom_json) VALUES(?,?,?,?,?,?,?)",
+                [(k[0], k[1], k[2], k[3], k[4], v[0], v[1]) for k, v in recovered["atoms"].items()],
+            )
+            connection.executemany(
+                "INSERT OR IGNORE INTO stats_coverage_intervals(family, epoch_id, start, end, cadence, owner_generation, source) VALUES(?,?,?,?,?,?,?)",
+                recovered["coarse_coverage"],
+            )
+            connection.execute(
+                "INSERT INTO schema_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (STATSD_RAW_MIGRATION_MARKER, str(STATSD_RAW_MIGRATION_VERSION)),
+            )
+        self.store.vacuum()
+        return {
+            "ok": True,
+            "migrated": True,
+            "raw_samples": len(recovered["sample_rows"]),
+            "usage_atoms": len(recovered["atoms"]),
+            "coarse_coverage": len(recovered["coarse_coverage"]),
+        }
+
     def import_legacy_history_once(self, state_dir: Path | None = None) -> dict[str, Any]:
         """Import the legacy v4 snapshots once before public stats cutover."""
         if self.store.metadata_value(STATSD_LEGACY_IMPORT_MARKER) == str(STATSD_LEGACY_IMPORT_VERSION):
@@ -3292,6 +3504,15 @@ class PersistentStatsService:
             "generation": generation,
             "idle_seconds": self.idle_seconds,
             "status": status,
+            "last_vacuum_at": self._last_vacuum_at or 0.0,
+            "last_vacuum": dict(self.last_vacuum_result),
+            # Canonical Range x Resolution policy advertised once from the single
+            # owner (stats_resolution) so the dumb browser (DOIT.1 item 6) reads
+            # choices from the server instead of a hand-copied JS table. Additive
+            # and served here (not per history response) to avoid bloating every
+            # payload; does not change what history data is served yet (serve-path
+            # exactness lands with the materializer, items 3-5).
+            "resolution_capabilities": stats_resolution.wire_capabilities(),
         }
 
     def handle_with_binary(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
@@ -3535,6 +3756,11 @@ class PersistentStatsService:
     def _start_after_listener(self) -> None:
         """Open/migrate the durable store only after this daemon owns the lock."""
         self.import_legacy_history_once()
+        # NOTE (DOIT.1 item 2): migrate_to_raw_observations_once() is intentionally
+        # NOT called here yet — enabling auto-run at startup is the go-live step that
+        # migrates the real DB, gated on explicit user review. It runs AFTER the
+        # legacy import (so it sees imported buckets) when enabled. Until then it is
+        # exercised only by tests against throwaway DBs.
         self.agent_token_atom_persistence = self._load_agent_token_atom_spool()
         self._schedule_cost_reprojection()
 

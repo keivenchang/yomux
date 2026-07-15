@@ -12,6 +12,7 @@ import copy
 import json
 import math
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,7 @@ class StatsStore:
             self.connection.execute("PRAGMA query_only=ON")
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._quarantine_if_corrupt()
         connection = sqlite3.connect(self.path, timeout=2.0)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
@@ -200,6 +202,27 @@ class StatsStore:
             );
             CREATE INDEX IF NOT EXISTS stats_coverage_family_range
               ON stats_coverage_intervals(family, start, end);
+            -- Original per-family observations (DOIT.1 item 2). One un-aggregated
+            -- instant per row, keyed by emitter identity + real sample time — the
+            -- durable source the memory materializer folds into exact resolution
+            -- layers. Empty until the migration populates it; additive here so a
+            -- fresh or already-current DB simply carries empty tables.
+            CREATE TABLE IF NOT EXISTS stats_raw_samples (
+              family TEXT NOT NULL, source_id TEXT NOT NULL, sample_time REAL NOT NULL,
+              epoch_id TEXT NOT NULL, owner_generation INTEGER NOT NULL DEFAULT 0,
+              payload_json TEXT NOT NULL,
+              PRIMARY KEY (family, source_id, sample_time)
+            );
+            CREATE INDEX IF NOT EXISTS stats_raw_samples_time ON stats_raw_samples(sample_time);
+            -- Event-identity-keyed usage/cost atoms (re-derivable from transcripts),
+            -- separate from time-bucketed samples because they dedup by identity.
+            CREATE TABLE IF NOT EXISTS stats_usage_atoms (
+              event_id TEXT NOT NULL, direction TEXT NOT NULL, modality TEXT NOT NULL,
+              cache_role TEXT NOT NULL, unit TEXT NOT NULL, sample_time REAL NOT NULL,
+              atom_json TEXT NOT NULL,
+              PRIMARY KEY (event_id, direction, modality, cache_role, unit)
+            );
+            CREATE INDEX IF NOT EXISTS stats_usage_atoms_time ON stats_usage_atoms(sample_time);
             """
         )
         self._migrate_retired_tables(connection)
@@ -210,6 +233,46 @@ class StatsStore:
         self._repair_coverage_overlaps(connection)
         connection.commit()
         self.connection = connection
+
+    def _quarantine_if_corrupt(self) -> Path | None:
+        """Move an unreadable/malformed DB aside instead of crash-looping at open.
+
+        A genuinely corrupt file (truncated, "file is not a database", disk image
+        malformed) cannot be opened for schema creation or migration, so the
+        writer would fail on every start. Rather than delete it (which would lose
+        any forensic value and violate "migrate, do not wipe"), rename it to a
+        timestamped `.corrupt-<stamp>` sidecar and let open() create a fresh DB.
+
+        Only genuine corruption is quarantined: a valid empty/new DB, a
+        pre-schema DB ("no such table"), and a transiently locked DB all raise
+        different errors and are left untouched (re-raised or ignored). The probe
+        is a cheap `PRAGMA schema_version` (header check, no full scan), not
+        `integrity_check`, so it stays fast on every open. Returns the sidecar
+        path when it quarantined, else None.
+        """
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return None
+        try:
+            probe = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                probe.execute("PRAGMA schema_version").fetchone()
+            finally:
+                probe.close()
+            return None
+        except sqlite3.DatabaseError as exc:
+            message = str(exc).lower()
+            if "not a database" not in message and "malformed" not in message:
+                # Locked/busy/other transient error — not corruption; let the
+                # real open() handle it (it may retry or surface the error).
+                return None
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        quarantine = self.path.with_name(f"{self.path.name}.corrupt-{stamp}")
+        self.path.rename(quarantine)
+        for suffix in ("-wal", "-shm"):
+            sidecar = self.path.with_name(f"{self.path.name}{suffix}")
+            if sidecar.exists():
+                sidecar.rename(quarantine.with_name(f"{quarantine.name}{suffix}"))
+        return quarantine
 
     @staticmethod
     def _migrate_retired_tables(connection: sqlite3.Connection) -> int:
@@ -517,6 +580,30 @@ class StatsStore:
                 "INSERT INTO schema_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(marker_key), str(marker_value)),
             )
+
+    def vacuum(self) -> dict[str, int]:
+        """Reclaim freed pages to the OS via a full VACUUM.
+
+        Retention/compaction delete rows but SQLite only marks their pages free
+        (auto_vacuum is off), so the file never shrinks on its own — a live DB
+        observed at 210 MB was 85% freelist over ~32 MB of real data. A full
+        VACUUM rebuilds the file at its true size; it is fast on the small live
+        set. VACUUM cannot run inside a transaction, so it uses the connection
+        directly with no open `with connection:` block. Returns before/after
+        byte sizes for diagnostics.
+
+        In WAL mode VACUUM rebuilds the database into the WAL; the main file is
+        NOT truncated until a checkpoint, so a plain VACUUM leaves the on-disk
+        size unchanged (measured: 32 MB stays 32 MB). A TRUNCATE checkpoint after
+        the VACUUM applies the rebuilt pages and shrinks the file to its true
+        size (measured: 32 MB -> 8 KB). WAL mode is preserved across both.
+        """
+        connection = self._connection()
+        before = self.path.stat().st_size if self.path.exists() else 0
+        connection.execute("VACUUM")
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = self.path.stat().st_size if self.path.exists() else 0
+        return {"bytes_before": int(before), "bytes_after": int(after)}
 
     def metadata_value(self, key: str) -> str | None:
         row = self._connection().execute("SELECT value FROM schema_meta WHERE key=?", (str(key),)).fetchone()

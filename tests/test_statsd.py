@@ -258,7 +258,7 @@ def test_stats_store_wal_round_trip_preserves_bucket_in_the_single_owner_table(t
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     }
-    assert tables == {"schema_meta", "stats_buckets", "stats_coverage_intervals"}
+    assert tables == {"schema_meta", "stats_buckets", "stats_coverage_intervals", "stats_raw_samples", "stats_usage_atoms"}
     assert reopened.metadata_value("schema_version") == str(stats_store.STATS_STORE_SCHEMA_VERSION)
     assert reopened._connection().execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     reopened.close()
@@ -401,7 +401,7 @@ def test_stats_store_open_migrates_legacy_side_and_rollup_tables_once(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     }
-    assert tables == {"schema_meta", "stats_buckets", "stats_coverage_intervals"}
+    assert tables == {"schema_meta", "stats_buckets", "stats_coverage_intervals", "stats_raw_samples", "stats_usage_atoms"}
     assert store.metadata_value("schema_version") == str(stats_store.STATS_STORE_SCHEMA_VERSION)
     # Unrelated durable markers survive the migration.
     assert store.metadata_value("legacy_import_version") == "9"
