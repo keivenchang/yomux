@@ -362,11 +362,34 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
 ]);
+// Mirror of yolomux_lib/stats_families.py — the ONE YO!stats family manifest.
+// Per family: the canonical name (identical to the server's
+// stats_coverage_intervals family), the legacy alias names an OLDER server may
+// still write into coverage payloads (canonical is tried first), the true
+// sampler cadence, and the owning chart groups / series. Coverage lookups and
+// chart->family mapping READ this table; inline per-family if/alias chains
+// outside it are contract-banned (tests/yostats_performance.test.js pins both
+// mirrors against each other). modelTokenDimension names which modelTokens
+// chart dimension the family backs ('output' is the generated-token counter;
+// 'default' covers every billing dimension).
+const jsDebugStatsFamilyManifest = Object.freeze({
+  cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
+  service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
+  agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
+  agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
+  cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
+  gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
+  system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory'])}),
+});
+const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
+  .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
+const jsDebugStatsFamilyByModelTokenDimension = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
+  .filter(([, entry]) => entry.modelTokenDimension).map(([family, entry]) => [entry.modelTokenDimension, family])));
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: 10},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: 10, statusNoDataOverlay: true},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
@@ -3779,24 +3802,20 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
 }
 
 function jsDebugHistoryCoverageFamilyForGroup(group) {
-  if (group?.key === 'activity') return 'agent_status';
-  if (group?.key === 'agentTokens') return 'agent_tokens';
-  if (group?.key === 'modelTokens') return jsDebugGraphModelTokenDimension === 'output' ? 'agent_tokens' : 'cost';
-  if (group?.key === 'cpu') return 'cpu';
-  if (group?.key === 'memory') return 'system_memory';
-  if (group?.key === 'gpuUtil' || group?.key === 'gpuMemory') return 'gpu';
-  return '';
+  const key = String(group?.key || '');
+  if (!key) return '';
+  // modelTokens is the one dimension-dependent chart: the manifest declares
+  // which family backs each dimension instead of an inline family if-chain.
+  if (key === 'modelTokens') {
+    return jsDebugStatsFamilyByModelTokenDimension[jsDebugGraphModelTokenDimension === 'output' ? 'output' : 'default'] || '';
+  }
+  return jsDebugStatsFamilyByChartGroup[key] || '';
 }
 
 function jsDebugHistoryCoverageIntervalsForFamily(family) {
   const stores = jsDebugHistoryReadiness.storeCoverageIntervals || {};
-  const aliases = family === 'cpu' ? ['cpu', 'server', 'raw', 'buckets']
-    : family === 'system_memory' ? ['system_memory', 'memory']
-      : family === 'gpu' ? ['gpu', 'gpu_metrics']
-    : family === 'agent_status' ? ['agent_status', 'status']
-      : family === 'agent_tokens' ? ['agent_tokens', 'tokens']
-        : family === 'cost' ? ['cost', 'cost_atoms', 'usage_atoms'] : [];
-  for (const key of aliases) {
+  const manifestEntry = jsDebugStatsFamilyManifest[family];
+  for (const key of manifestEntry ? [family, ...manifestEntry.legacyAliases] : []) {
     if (Object.prototype.hasOwnProperty.call(stores, key)) return stores[key];
   }
   // Per-family independence: once the server reports ANY per-store coverage, a

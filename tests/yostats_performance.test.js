@@ -309,6 +309,69 @@ async function runYostatsPerformanceSuite() {
     assert.equal((source.match(/return `\/api\/stats-sample\?\$\{parts\.join/g) || []).length, 1, 'and it is the parts-joining owner, not a hand-built string');
   });
 
+  test('MANIFEST: one frozen family table owns every YO!stats alias, cadence, and chart mapping in both languages', () => {
+    // Phase 1 of the stability plan: the recurring YO!stats bug class was a flag or
+    // special case on one family silently affecting another (2026-07-14: host metrics
+    // gated on the token-slimming flags blanked Server Load / System memory / GPU at
+    // every range >= 4h). Both sides now READ one manifest — yolomux_lib/stats_families.py
+    // and its client mirror jsDebugStatsFamilyManifest — and this test pins the mirrors
+    // against each other and bans the retired per-family special cases from returning.
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const manifest = api.jsDebugStatsFamilyManifestForTest();
+    const expected = {
+      cpu: {aliases: ['server', 'raw', 'buckets'], cadenceSeconds: 1, chartGroups: ['cpu']},
+      service_load: {aliases: [], cadenceSeconds: 10, chartGroups: []},
+      agent_status: {aliases: ['status'], cadenceSeconds: 10, chartGroups: ['activity']},
+      agent_tokens: {aliases: ['tokens'], cadenceSeconds: 10, chartGroups: ['agentTokens']},
+      cost: {aliases: ['cost_atoms', 'usage_atoms'], cadenceSeconds: 10, chartGroups: []},
+      gpu: {aliases: ['gpu_metrics'], cadenceSeconds: 10, chartGroups: ['gpuUtil', 'gpuMemory']},
+      system_memory: {aliases: ['memory'], cadenceSeconds: 60, chartGroups: ['memory']},
+    };
+    assert.deepStrictEqual([...Object.keys(manifest)].sort(), Object.keys(expected).sort(), 'the client mirror carries exactly the charted families');
+    const familyManifestSource = fs.readFileSync('yolomux_lib/stats_families.py', 'utf8');
+    for (const [family, entry] of Object.entries(expected)) {
+      assert.deepStrictEqual([...manifest[family].legacyAliases], entry.aliases, `${family}: legacy aliases`);
+      assert.deepStrictEqual([...manifest[family].chartGroups], entry.chartGroups, `${family}: chart groups`);
+      assert.equal(manifest[family].cadenceSeconds, entry.cadenceSeconds, `${family}: true sampler cadence`);
+      assert.match(familyManifestSource, new RegExp(`name="${family}"`), `${family}: exists in the python manifest`);
+      assert.match(familyManifestSource, new RegExp(`cadence_seconds=${entry.cadenceSeconds}[,\\n]`), `${family}: python manifest carries the same cadence somewhere`);
+      for (const alias of entry.aliases) {
+        assert.ok(familyManifestSource.includes(`"${alias}"`), `${family}: alias ${alias} exists in the python manifest`);
+      }
+    }
+    // The chart->family mapping resolves through the manifest, including the
+    // dimension-dependent modelTokens chart.
+    const groupFor = key => api.jsDebugHistoryCoverageFamilyForGroupForTest({key});
+    assert.equal(groupFor('activity'), 'agent_status');
+    assert.equal(groupFor('memory'), 'system_memory');
+    assert.equal(groupFor('gpuUtil'), 'gpu');
+    assert.equal(groupFor('gpuMemory'), 'gpu');
+    assert.equal(groupFor('cpu'), 'cpu');
+    assert.equal(groupFor('agentTokens'), 'agent_tokens');
+    assert.equal(groupFor('serversLoad'), '', 'serversLoad keeps its pre-manifest no-coverage-overlay behavior');
+    api.setDebugGraphModelTokenDimensionForTest('output');
+    assert.equal(groupFor('modelTokens'), 'agent_tokens');
+    api.setDebugGraphModelTokenDimensionForTest('all');
+    assert.equal(groupFor('modelTokens'), 'cost');
+
+    // GREP-PROOF: the retired per-family special cases stay dead outside the manifest owners.
+    const clientSource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+    const intervalsFn = clientSource.match(/function jsDebugHistoryCoverageIntervalsForFamily\([\s\S]*?\n\}/)[0];
+    assert.ok(intervalsFn.includes('jsDebugStatsFamilyManifest'), 'the coverage-interval lookup reads the manifest');
+    assert.equal(/'server'|'buckets'|'gpu_metrics'|'usage_atoms'|'memory'|'tokens'|'status'/.test(intervalsFn), false, 'inline alias arrays are gone from the coverage lookup');
+    const familyForGroupFn = clientSource.match(/function jsDebugHistoryCoverageFamilyForGroup\([\s\S]*?\n\}/)[0];
+    assert.equal(/'agent_status'|'system_memory'|'agent_tokens'|'gpu'|'cpu'/.test(familyForGroupFn), false, 'the family if-chain is gone from the chart-group mapping');
+    const statsdSource = fs.readFileSync('yolomux_lib/statsd.py', 'utf8');
+    assert.equal(/include_agent_tokens or field not in/.test(statsdSource), false, 'token slimming is manifest wire-group filtering, not per-field flag branching');
+    assert.equal(/merge_agent_details|merge_cost_summary/.test(statsdSource), false, 'the cross-family merge booleans are retired for manifest field groups');
+    assert.match(statsdSource, /def _merge_bucket\([\s\S]{0,220}field_groups/, '_merge_bucket selects manifest field groups');
+    assert.match(statsdSource, /def _record_from_bucket\([\s\S]{0,220}field_groups/, '_record_from_bucket selects manifest field groups');
+    assert.equal(/coverage_families = \(/.test(statsdSource), false, 'coverage companion fan-out reads the manifest, not inline family tuples');
+    const storeSource = fs.readFileSync('yolomux_lib/local_services/stats_store.py', 'utf8');
+    assert.equal(/STATS_COVERAGE_FAMILIES = \(/.test(storeSource), false, 'the store derives coverage families from the manifest');
+    assert.equal(/"system_memory": 60/.test(storeSource), false, 'the store derives legacy cadences from the manifest');
+  });
+
   test('host charts (Server Load, System memory, GPU) render at the 4h / 120s view when their data is present', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const now = Math.floor(Date.now() / 1000 / 120) * 120 * 1000;

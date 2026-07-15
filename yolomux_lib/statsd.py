@@ -26,6 +26,7 @@ from pathlib import Path
 from time import monotonic as monotonic_clock
 from typing import Any
 
+from . import stats_families
 from .common import STATE_DIR
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
@@ -80,7 +81,7 @@ STATSD_ROLLUP_MAINTENANCE_BUDGET_SECONDS = 0.08
 STATS_AGENT_TOKEN_BUCKET_SECONDS = 60
 STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = 180.0
 STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
-STATS_AGENT_TOKEN_HISTORY_FIELDS = ("tokens_per_agent_total", "agent_token_samples")
+STATS_AGENT_TOKEN_HISTORY_FIELDS = stats_families.TOKEN_STREAM_BUCKET_FIELDS
 STATS_COST_COMPONENT_DIMENSION_FIELDS = (
     "provider", "model", "model_evidence", "effort", "direction", "modality", "cache_role", "unit",
     "root_thread_id", "agent_thread_id", "parent_thread_id", "depth", "endpoint", "tool_name",
@@ -1238,13 +1239,7 @@ class PersistentStatsService:
             bucket["sequence"] = max(int(bucket.get("sequence") or 0), next_sequence)
             coverage_samples: list[dict[str, Any]] = []
             if coverage_valid:
-                if coverage_family == "agent_tokens":
-                    coverage_families = ("agent_tokens", "cost")
-                elif coverage_family == "cpu":
-                    coverage_families = ("cpu", "raw")
-                else:
-                    coverage_families = (coverage_family,)
-                for family in coverage_families:
+                for family in stats_families.coverage_families_for(coverage_family):
                     coverage_start = max(0, int(math.floor(sample_time)))
                     coverage_cadence_seconds = max(1, int(math.ceil(coverage_cadence)))
                     coverage_samples.append({
@@ -2781,7 +2776,17 @@ class PersistentStatsService:
         return {"ok": True, "imported": True, "rows": len(buckets)}
 
     @staticmethod
-    def _record_from_bucket(bucket: dict[str, Any], client_id: str = "", *, include_agent_tokens: bool = True) -> dict[str, Any]:
+    def _record_from_bucket(
+        bucket: dict[str, Any],
+        client_id: str = "",
+        *,
+        field_groups: frozenset[str] = stats_families.ALL_FIELD_GROUPS,
+    ) -> dict[str, Any]:
+        # Wire-group filtering (see stats_families): 'always' groups are
+        # re-added by normalized_field_groups, so no selection derived from one
+        # family's slimming can strip an unrelated family from the record.
+        groups = stats_families.normalized_field_groups(field_groups)
+        encoded_fields = frozenset(stats_families.bucket_fields_for_groups(groups))
         clients = bucket.get("clients") if isinstance(bucket.get("clients"), dict) else {}
         clean_requested_client_id = stats_history_client_id(client_id)
         client = clients.get(clean_requested_client_id) if clean_requested_client_id else clients.get("")
@@ -2819,20 +2824,22 @@ class PersistentStatsService:
             **{
                 field: float(bucket.get(field) or 0.0)
                 for field in stats_store.SERVER_FIELDS
-                if include_agent_tokens or field not in STATS_AGENT_TOKEN_HISTORY_FIELDS
+                if field in encoded_fields
             },
         }
-        if include_agent_tokens:
+        if stats_families.FIELD_GROUP_AGENT_TOKEN_RATES in groups:
             record["agent_token_rates"] = agent_token_rates_response(
                 bucket.get("agent_token_rates"), bucket.get("cost_summary")
             )
+        if stats_families.FIELD_GROUP_COST_SUMMARY in groups:
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
-        # Host metrics ride EVERY history record regardless of the agent-token slimming:
-        # token rates and cost have the separate compact token stream at wide ranges, but
-        # Server Load / System memory / GPU have no other delivery path — gating them on
-        # include_agent_tokens blanked those charts at every range that sets a token
-        # resolution (>= 4h).
-        record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
+        # Host metrics ride EVERY history record: they are an 'always' wire
+        # group in the manifest because Server Load / System memory / GPU have
+        # no other delivery path, while token rates and cost have the separate
+        # compact token stream at wide ranges. Gating them on the token
+        # slimming blanked those charts at every range >= 4h (2026-07-14).
+        if stats_families.FIELD_GROUP_HOST_METRICS in groups:
+            record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
         return record
 
     def _merge_bucket(
@@ -2840,10 +2847,18 @@ class PersistentStatsService:
         target: dict[str, Any],
         source: dict[str, Any],
         *,
-        merge_cost_summary: bool = True,
-        merge_agent_details: bool = True,
+        field_groups: frozenset[str] = stats_families.ALL_FIELD_GROUPS,
     ) -> None:
-        for field in stats_store.SERVER_FIELDS:
+        """Merge ``source`` into ``target`` for the selected manifest field groups.
+
+        Durable merges (compaction, rollups, imports) pass every group. The
+        response-only history aggregation narrows to the wire groups a record
+        will carry — and 'always' groups (host metrics, server scalars) are
+        structurally non-excludable via ``normalized_field_groups``, so a
+        token-slimming selection can never strip an unrelated family again.
+        """
+        groups = stats_families.normalized_field_groups(field_groups)
+        for field in stats_families.bucket_fields_for_groups(groups):
             target[field] = float(target.get(field) or 0.0) + float(source.get(field) or 0.0)
         target["sequence"] = max(int(target.get("sequence") or 0), int(source.get("sequence") or 0), int(source.get("server_sequence") or 0))
         target["server_sequence"] = max(int(target.get("server_sequence") or 0), int(source.get("server_sequence") or 0))
@@ -2858,7 +2873,7 @@ class PersistentStatsService:
                             existing[field] = float(existing.get(field) or 0.0) + float(value)
                         elif field not in existing or value:
                             existing[field] = value
-        if merge_agent_details:
+        if stats_families.FIELD_GROUP_AGENT_TOKEN_RATES in groups:
             target_rates = target.setdefault("agent_token_rates", {})
             source_rates = source.get("agent_token_rates") if isinstance(source.get("agent_token_rates"), dict) else {}
             for rate_key, values in source_rates.items():
@@ -2871,7 +2886,7 @@ class PersistentStatsService:
                 if values.get("source"):
                     existing["source"] = str(values["source"])
                 PersistentStatsService._merge_agent_token_model_rates(existing, values.get("model_rates"))
-        if merge_cost_summary:
+        if stats_families.FIELD_GROUP_COST_SUMMARY in groups:
             target_summary = target.setdefault("cost_summary", {})
             source_summary = source.get("cost_summary") if isinstance(source.get("cost_summary"), dict) else {}
             target_components = target_summary.get("components") if isinstance(target_summary.get("components"), list) else []
@@ -2908,52 +2923,56 @@ class PersistentStatsService:
             # Response-only history aggregation bypasses this branch and uses
             # its incremental dimension accumulator instead.
             self._merge_usage_components(target, [])
-        # Host metrics (Server Load / System memory / GPU) merge UNCONDITIONALLY. They are
-        # unrelated to the agent-token payload slimming that merge_agent_details exists for;
-        # gating them on that flag silently stripped every host family from history responses
-        # whenever the client used the separate compact token stream (all ranges >= 4h, which
-        # send token_resolution > 0 -> include_agent_tokens=False) and blanked those charts.
+        # Host metrics (Server Load / System memory / GPU) are an 'always' wire
+        # group: normalized_field_groups re-adds them to every selection, so no
+        # token-slimming flag can strip them again (they were once gated on the
+        # agent-token flags, which blanked those charts at every range >= 4h).
+        # Field names and merge kinds come from the manifest's canonical
+        # HOST_METRIC_FIELDS table, in storage order.
         source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
-        if source_metrics:
+        if source_metrics and stats_families.FIELD_GROUP_HOST_METRICS in groups:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
-            for field in ("cpu_label", "system_memory_label"):
-                if source_metrics.get(field):
-                    target_metrics[field] = str(source_metrics[field])
-            for field in ("system_memory_used_total_bytes", "system_memory_capacity_total_bytes", "system_memory_count"):
-                target_metrics[field] = float(target_metrics.get(field) or 0.0) + float(source_metrics.get(field) or 0.0)
-            for mapping_field in ("cpu_processes", "memory_processes", "gpu_util_processes", "gpu_memory_processes", "gpu_devices"):
-                source_items = source_metrics.get(mapping_field) if isinstance(source_metrics.get(mapping_field), dict) else {}
-                target_items = target_metrics.setdefault(mapping_field, {})
-                for item_key, source_item in source_items.items():
+            for field, kind in stats_families.HOST_METRIC_FIELDS:
+                if kind == "label":
+                    if source_metrics.get(field):
+                        target_metrics[field] = str(source_metrics[field])
+                    continue
+                if kind == "sum":
+                    target_metrics[field] = float(target_metrics.get(field) or 0.0) + float(source_metrics.get(field) or 0.0)
+                    continue
+                source_items = source_metrics.get(field) if isinstance(source_metrics.get(field), dict) else {}
+                target_items = target_metrics.setdefault(field, {})
+                if kind == "map_sum":
+                    for item_key, source_item in source_items.items():
+                        if not isinstance(source_item, dict):
+                            continue
+                        item = target_items.setdefault(str(item_key), {"label": str(source_item.get("label") or item_key)})
+                        item["label"] = str(source_item.get("label") or item.get("label") or item_key)
+                        for item_field, value in source_item.items():
+                            if item_field == "label":
+                                continue
+                            if isinstance(value, (int, float)):
+                                item[item_field] = float(item.get(item_field) or 0.0) + float(value)
+                    continue
+                # kind == "service_load": total/samples/min/max per cpu and rss
+                for service_key, source_item in source_items.items():
                     if not isinstance(source_item, dict):
                         continue
-                    item = target_items.setdefault(str(item_key), {"label": str(source_item.get("label") or item_key)})
-                    item["label"] = str(source_item.get("label") or item.get("label") or item_key)
-                    for field, value in source_item.items():
-                        if field == "label":
+                    item = target_items.setdefault(str(service_key), {"label": str(source_item.get("label") or service_key)})
+                    item["label"] = str(source_item.get("label") or item.get("label") or service_key)
+                    for prefix in ("cpu", "rss"):
+                        unit = "percent" if prefix == "cpu" else "bytes"
+                        total_key, samples_key = f"{prefix}_total_{unit}", f"{prefix}_samples"
+                        minimum_key, maximum_key = f"{prefix}_min_{unit}", f"{prefix}_max_{unit}"
+                        source_samples = float(source_item.get(samples_key) or 0.0)
+                        if source_samples <= 0:
                             continue
-                        if isinstance(value, (int, float)):
-                            item[field] = float(item.get(field) or 0.0) + float(value)
-            source_services = source_metrics.get("service_load") if isinstance(source_metrics.get("service_load"), dict) else {}
-            target_services = target_metrics.setdefault("service_load", {})
-            for service_key, source_item in source_services.items():
-                if not isinstance(source_item, dict):
-                    continue
-                item = target_services.setdefault(str(service_key), {"label": str(source_item.get("label") or service_key)})
-                item["label"] = str(source_item.get("label") or item.get("label") or service_key)
-                for prefix in ("cpu", "rss"):
-                    unit = "percent" if prefix == "cpu" else "bytes"
-                    total_key, samples_key = f"{prefix}_total_{unit}", f"{prefix}_samples"
-                    minimum_key, maximum_key = f"{prefix}_min_{unit}", f"{prefix}_max_{unit}"
-                    source_samples = float(source_item.get(samples_key) or 0.0)
-                    if source_samples <= 0:
-                        continue
-                    previous_samples = float(item.get(samples_key) or 0.0)
-                    source_minimum = float(source_item.get(minimum_key) or 0.0)
-                    item[total_key] = float(item.get(total_key) or 0.0) + float(source_item.get(total_key) or 0.0)
-                    item[samples_key] = previous_samples + source_samples
-                    item[minimum_key] = min(float(item.get(minimum_key) or source_minimum), source_minimum) if previous_samples > 0 else source_minimum
-                    item[maximum_key] = max(float(item.get(maximum_key) or 0.0), float(source_item.get(maximum_key) or 0.0))
+                        previous_samples = float(item.get(samples_key) or 0.0)
+                        source_minimum = float(source_item.get(minimum_key) or 0.0)
+                        item[total_key] = float(item.get(total_key) or 0.0) + float(source_item.get(total_key) or 0.0)
+                        item[samples_key] = previous_samples + source_samples
+                        item[minimum_key] = min(float(item.get(minimum_key) or source_minimum), source_minimum) if previous_samples > 0 else source_minimum
+                        item[maximum_key] = max(float(item.get(maximum_key) or 0.0), float(source_item.get(maximum_key) or 0.0))
 
     def _encoded_history(self, request: dict[str, Any]) -> dict[str, Any]:
         history_started = time.perf_counter()
@@ -3051,6 +3070,16 @@ class PersistentStatsService:
         query_ms = (time.perf_counter() - query_started) * 1000
         if persisted_rollup:
             effective_resolution = persisted_rollup
+        # The manifest wire groups a returned record carries: 'always' groups
+        # plus, when the client did not request the separate compact token
+        # stream, the token_stream groups (rates, cost, token scalars).
+        record_field_groups = stats_families.wire_field_groups(include_token_stream=include_agent_tokens)
+        include_cost_projection = stats_families.FIELD_GROUP_COST_SUMMARY in record_field_groups
+        # Cost components accumulate through the incremental dimension
+        # accumulator below (rebuilding a growing component list per merge is
+        # quadratic for token-heavy ranges), so the per-bucket merge excludes
+        # the cost_summary group and the projection is applied after grouping.
+        merge_field_groups = record_field_groups - {stats_families.FIELD_GROUP_COST_SUMMARY}
         def encode_records(target_resolution: int) -> list[dict[str, Any]]:
             grouped: dict[tuple[int, int], dict[str, Any]] = {}
             cost_groups: dict[tuple[int, int], dict[tuple[str, ...], dict[str, Any]]] = {}
@@ -3068,13 +3097,8 @@ class PersistentStatsService:
                 # quadratic for token-heavy ranges.  Accumulate billing
                 # dimensions once and project the public summary after all
                 # source buckets have been merged.
-                self._merge_bucket(
-                    target,
-                    bucket,
-                    merge_cost_summary=False,
-                    merge_agent_details=include_agent_tokens,
-                )
-                if include_agent_tokens:
+                self._merge_bucket(target, bucket, field_groups=merge_field_groups)
+                if include_cost_projection:
                     source_summary = bucket.get("cost_summary") if isinstance(bucket.get("cost_summary"), dict) else {}
                     source_components = [
                         item for item in source_summary.get("components", []) if isinstance(item, dict)
@@ -3099,7 +3123,7 @@ class PersistentStatsService:
                         pass
                     if source_summary.get("freshness"):
                         metadata["freshness"] = str(source_summary["freshness"])
-            if include_agent_tokens:
+            if include_cost_projection:
                 for bucket_key, target in grouped.items():
                     metadata = cost_metadata.get(bucket_key, {})
                     summary = target.setdefault("cost_summary", {})
@@ -3111,7 +3135,7 @@ class PersistentStatsService:
                     if metadata.get("freshness"):
                         summary["freshness"] = str(metadata["freshness"])
             return [
-                self._record_from_bucket(bucket, client_id, include_agent_tokens=include_agent_tokens)
+                self._record_from_bucket(bucket, client_id, field_groups=record_field_groups)
                 for _key, bucket in sorted(grouped.items())
                 if int(bucket.get("sequence") or 0) > after_sequence
             ]
@@ -3208,7 +3232,7 @@ class PersistentStatsService:
                 "sequence": token_payload["sequence"],
                 "latest_sequence": token_payload["latest_sequence"],
                 "records": [
-                    {key: record[key] for key in ("start", "duration", "sequence", "tokens_per_agent_total", "agent_token_samples", "agent_token_rates", "cost_summary")}
+                    {key: record[key] for key in stats_families.TOKEN_STREAM_RECORD_KEYS}
                     for record in token_payload["records"]
                 ],
                 "resolution_seconds": token_request["resolution_seconds"],

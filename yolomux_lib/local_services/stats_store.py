@@ -15,6 +15,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from .. import stats_families
+
 
 STATS_STORE_SCHEMA_VERSION = 3
 STATS_STORE_MAX_JSON_BYTES = 256 * 1024
@@ -22,17 +24,10 @@ STATS_STORE_MAX_ROWS_PER_QUERY = 20_000
 STATS_COST_SUMMARY_MAX_COMPONENTS = 4096
 STATS_COST_SUMMARY_MAX_BYTES = 160 * 1024
 STATS_COVERAGE_MAX_INTERVALS = 128
-STATS_COVERAGE_FAMILIES = ("raw", "cpu", "service_load", "agent_status", "agent_tokens", "cost", "gpu", "system_memory")
-STATS_COVERAGE_LEGACY_CADENCE = {
-    "raw": 1,
-    "cpu": 1,
-    "service_load": 10,
-    "agent_status": 10,
-    "agent_tokens": 60,
-    "cost": 60,
-    "gpu": 10,
-    "system_memory": 60,
-}
+# Family facts (names, cadences, storage fields) have ONE owner: the frozen
+# manifest in yolomux_lib/stats_families.py. This module only derives.
+STATS_COVERAGE_FAMILIES = stats_families.STATS_COVERAGE_FAMILY_NAMES
+STATS_COVERAGE_LEGACY_CADENCE = stats_families.STATS_COVERAGE_LEGACY_CADENCE
 
 BROWSER_FIELDS = (
     "api_count",
@@ -44,36 +39,13 @@ BROWSER_FIELDS = (
     "disconnected_ms",
 )
 PROCESS_FIELDS = ("cpu_total_percent", "cpu_count")
-SERVER_FIELDS = (
-    "cpu_total_percent",
-    "cpu_count",
-    "system_cpu_total_percent",
-    "system_cpu_count",
-    "ask_agent_total",
-    "run_agent_total",
-    "transition_agent_total",
-    "idle_agent_total",
-    "active_agent_total",
-    "inactive_agent_total",
-    "agent_activity_samples",
-    "tokens_per_agent_total",
-    "agent_token_samples",
-)
+SERVER_FIELDS = stats_families.SERVER_BUCKET_FIELDS
 
 
 def empty_host_metrics() -> dict[str, Any]:
     return {
-        "cpu_label": "",
-        "system_memory_label": "",
-        "system_memory_used_total_bytes": 0.0,
-        "system_memory_capacity_total_bytes": 0.0,
-        "system_memory_count": 0.0,
-        "cpu_processes": {},
-        "memory_processes": {},
-        "gpu_util_processes": {},
-        "gpu_memory_processes": {},
-        "gpu_devices": {},
-        "service_load": {},
+        name: "" if kind == "label" else 0.0 if kind == "sum" else {}
+        for name, kind in stats_families.HOST_METRIC_FIELDS
     }
 
 

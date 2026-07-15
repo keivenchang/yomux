@@ -1232,6 +1232,15 @@ globalThis.__layoutTestApi = {
   yocostItemId,
   debugPanelHtmlForTest: debugPanelHtml,
   jsDebugGraphChartGroupsForTest() { return jsDebugGraphChartGroups.map(group => ({...group})); },
+  jsDebugStatsFamilyManifestForTest() {
+    return Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest).map(([family, entry]) => [family, {
+      ...entry,
+      legacyAliases: [...entry.legacyAliases],
+      chartGroups: [...entry.chartGroups],
+      series: [...entry.series],
+    }]));
+  },
+  jsDebugHistoryCoverageFamilyForGroupForTest: jsDebugHistoryCoverageFamilyForGroup,
   jsDebugGraphDescriptionKeyByLabelKeyForTest() { return {...jsDebugGraphDescriptionKeyByLabelKey}; },
   debugGraphMetaHtmlForTest: debugGraphMetaHtml,
   debugGraphBucketSummaryForTest: debugGraphBucketSummary,

@@ -41,59 +41,67 @@ def _host_metrics(step: int) -> dict:
     }
 
 
+def seed_real_store(service, now: int) -> None:
+    """Seed every family at its true cadence, plus the genuine outage, through the REAL service.
+
+    Shared with tests/test_stats_wire_parity.py, which pins the exact wire bytes this
+    store encodes for every contract-tested request shape.
+    """
+    sequence = 0
+    for span_start, span_end, step in (
+        (now - 24 * 3600, now - 8 * 3600, 600),
+        (now - 8 * 3600, now - 4 * 3600, 120),
+        (now - 4 * 3600, now - 1800, 60),
+        (now - 1800, now, 10),
+    ):
+        for start in range(span_start, span_end, step):
+            if now - OUTAGE_START_AGO <= start < now - OUTAGE_END_AGO:
+                continue  # the genuine outage: nothing was recorded
+            sequence += 1
+            bucket = stats_store.empty_bucket(start, step)
+            bucket.update({
+                "sequence": sequence, "server_sequence": sequence,
+                "cpu_total_percent": 20.0 * step, "cpu_count": float(step),
+                "system_cpu_total_percent": 30.0 * step, "system_cpu_count": float(step),
+                "run_agent_total": 1.0, "idle_agent_total": 1.0, "agent_activity_samples": 1.0,
+                "tokens_per_agent_total": 120.0, "agent_token_samples": 1.0,
+            })
+            bucket["host_metrics"] = _host_metrics(step)
+            service.store.upsert_bucket(bucket)
+
+    # Real coverage epochs: recorded before and after the outage, never across it, at
+    # each family's TRUE sampler cadence (a span-sized cadence would poison the serve
+    # tier choice into uniform-coarsest for every request).
+    for family in ("cpu", "agent_status", "agent_tokens", "gpu", "system_memory", "service_load"):
+        cadence = {"cpu": 1, "system_memory": 60}.get(family, 10)
+        for span_start, span_end, epoch, generation in (
+            (now - 24 * 3600, now - OUTAGE_START_AGO, "before-outage", 1),
+            (now - OUTAGE_END_AGO, now, "after-outage", 2),
+        ):
+            for sample_time in (span_start, span_end - cadence):
+                marker = service.handle({
+                    "action": "merge_server_records",
+                    "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
+                    "records": [{
+                        "time": sample_time,
+                        "_stats_coverage": {
+                            "family": family,
+                            "cadence_seconds": span_end - span_start if sample_time == span_start else cadence,
+                            "epoch_id": f"{epoch}:{family}",
+                            "owner_generation": generation,
+                        },
+                    }],
+                    "now": sample_time,
+                    "compact": False,
+                    "refresh_rollups": False,
+                })
+                assert marker["ok"] is True
+
+
 def _seed_real_pipeline(tmp_path, now: int) -> dict:
     service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
     try:
-        sequence = 0
-        for span_start, span_end, step in (
-            (now - 24 * 3600, now - 8 * 3600, 600),
-            (now - 8 * 3600, now - 4 * 3600, 120),
-            (now - 4 * 3600, now - 1800, 60),
-            (now - 1800, now, 10),
-        ):
-            for start in range(span_start, span_end, step):
-                if now - OUTAGE_START_AGO <= start < now - OUTAGE_END_AGO:
-                    continue  # the genuine outage: nothing was recorded
-                sequence += 1
-                bucket = stats_store.empty_bucket(start, step)
-                bucket.update({
-                    "sequence": sequence, "server_sequence": sequence,
-                    "cpu_total_percent": 20.0 * step, "cpu_count": float(step),
-                    "system_cpu_total_percent": 30.0 * step, "system_cpu_count": float(step),
-                    "run_agent_total": 1.0, "idle_agent_total": 1.0, "agent_activity_samples": 1.0,
-                    "tokens_per_agent_total": 120.0, "agent_token_samples": 1.0,
-                })
-                bucket["host_metrics"] = _host_metrics(step)
-                service.store.upsert_bucket(bucket)
-
-        # Real coverage epochs: recorded before and after the outage, never across it, at
-        # each family's TRUE sampler cadence (a span-sized cadence would poison the serve
-        # tier choice into uniform-coarsest for every request).
-        for family in ("cpu", "agent_status", "agent_tokens", "gpu", "system_memory", "service_load"):
-            cadence = {"cpu": 1, "system_memory": 60}.get(family, 10)
-            for span_start, span_end, epoch, generation in (
-                (now - 24 * 3600, now - OUTAGE_START_AGO, "before-outage", 1),
-                (now - OUTAGE_END_AGO, now, "after-outage", 2),
-            ):
-                for sample_time in (span_start, span_end - cadence):
-                    marker = service.handle({
-                        "action": "merge_server_records",
-                        "protocol_version": statsd.STATSD_PROTOCOL_VERSION,
-                        "records": [{
-                            "time": sample_time,
-                            "_stats_coverage": {
-                                "family": family,
-                                "cadence_seconds": span_end - span_start if sample_time == span_start else cadence,
-                                "epoch_id": f"{epoch}:{family}",
-                                "owner_generation": generation,
-                            },
-                        }],
-                        "now": sample_time,
-                        "compact": False,
-                        "refresh_rollups": False,
-                    })
-                    assert marker["ok"] is True
-
+        seed_real_store(service, now)
         histories = {}
         for range_seconds in RANGES:
             history = service._encoded_history(reader_history_request(range_seconds, now, client_id="golden-pipeline"))

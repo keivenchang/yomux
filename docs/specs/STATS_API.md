@@ -45,6 +45,23 @@ restart, owner change, or a wall-clock discontinuity cannot paint a stale roster
 through the outage. `epochs` describes those bounded sampler segments and
 `epochs_truncated` reports list truncation.
 
+Family facts have ONE owner: the frozen manifest in
+`yolomux_lib/stats_families.py` (mirrored client-side as
+`jsDebugStatsFamilyManifest` in `static_src/js/yolomux/83_debug_panel.js`, the
+two pinned against each other by `tests/yostats_performance.test.js`). Per
+family it declares the canonical name — identical to the
+`stats_coverage_intervals` family — plus legacy coverage aliases, sampler
+cadence, storage fields, wire field group, delivery path, merge rule, chart
+groups, and coverage companions. Wire field groups replace the retired
+cross-family booleans (`include_agent_tokens` field branching,
+`merge_agent_details`, `merge_cost_summary`): `token_stream` groups (token
+scalars, agent token rates, cost summary) are slimmed from main history records
+exactly when the client requests the separate compact token stream, while
+`always` groups (server scalars, host metrics) are structurally non-excludable,
+so no future flag derived from one family's needs can strip an unrelated
+family. `tests/test_stats_wire_parity.py` pins the encoded wire bytes against
+the pre-manifest capture.
+
 The requested/available/covered bounds, `complete`, older-page facts,
 resolution, source/returned counts, and cursor facts remain as a compatibility
 envelope during migration, but they do not replace the interval list or prove
