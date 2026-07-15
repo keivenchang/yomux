@@ -2998,8 +2998,9 @@ class TmuxWebtermApp:
         history_resolution_seconds: int = 0,
         history_max_points: int = 0,
         include_history: bool = True,
+        exact_resolution: bool = False,
     ) -> dict[str, Any]:
-        return {
+        request = {
             "include_history": bool(include_history),
             "since": max(0, since),
             "client_id": client_id,
@@ -3012,6 +3013,11 @@ class TmuxWebtermApp:
             "resolution_seconds": max(0, history_resolution_seconds),
             "max_points": max(0, history_max_points),
         }
+        # Opt-in exact-resolution serve (DOIT.1 cutover). Additive: default off, so
+        # the reader request is byte-identical to today until the client sends it.
+        if exact_resolution:
+            request["exact_resolution"] = 1
+        return request
 
     def check_stats_coverage_integrity(self) -> dict[str, Any] | None:
         """Read-only durable-coverage self-check that surfaces violations to Logs.
@@ -3110,6 +3116,7 @@ class TmuxWebtermApp:
         history_resolution_seconds: int = 0,
         history_max_points: int = 0,
         include_history: bool = True,
+        exact_resolution: bool = False,
     ) -> tuple[dict[str, Any], bytes]:
         sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
         encode_started = time.perf_counter()
@@ -3128,6 +3135,7 @@ class TmuxWebtermApp:
                 history_resolution_seconds=history_resolution_seconds,
                 history_max_points=history_max_points,
                 include_history=include_history,
+                exact_resolution=exact_resolution,
             ),
         )
         if not response.get("ok"):

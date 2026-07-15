@@ -47246,6 +47246,7 @@ function jsDebugStatsSampleQuery(params = {}) {
     historyResolution = 1,
     historyMaxPoints = jsDebugStatsHistoryMaxPoints,
     history = true,
+    exactResolution = false,
   } = params;
   const parts = [
     `since=${encodeURIComponent(String(since))}`,
@@ -47256,6 +47257,9 @@ function jsDebugStatsSampleQuery(params = {}) {
     `history_resolution=${encodeURIComponent(String(historyResolution))}`,
     `history_max_points=${encodeURIComponent(String(historyMaxPoints))}`,
   ];
+  // Opt-in exact-resolution serve (DOIT.1 cutover). Additive: omitted by default,
+  // so the request shape and its goldens are unchanged until the renderer flips.
+  if (exactResolution) parts.push('exact_resolution=1');
   if (!history) parts.push('history=0');
   return `/api/stats-sample?${parts.join('&')}`;
 }

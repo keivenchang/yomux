@@ -45,6 +45,7 @@ def stats_sample_query(
     history_resolution: int = 1,
     history_max_points: int = STATS_HISTORY_MAX_POINTS,
     history: bool = True,
+    exact_resolution: bool = False,
 ) -> str:
     """Byte-identical mirror of jsDebugStatsSampleQuery."""
 
@@ -61,6 +62,8 @@ def stats_sample_query(
         f"history_resolution={encoded(history_resolution)}",
         f"history_max_points={encoded(history_max_points)}",
     ]
+    if exact_resolution:
+        parts.append("exact_resolution=1")
     if not history:
         parts.append("history=0")
     return "/api/stats-sample?" + "&".join(parts)

@@ -108,3 +108,20 @@ def test_no_test_hand_rolls_a_stats_sample_query_string():
                 continue
             offenders.append(f"{path.relative_to(tests_dir)}:{number}")
     assert offenders == [], f"hand-rolled stats-sample queries (route through the shared owners): {offenders}"
+
+
+def test_exact_resolution_plumbing_is_additive_and_threads_through():
+    """exact_resolution is off by default (request shape unchanged) and, when on,
+    appears in the client query and the app's reader request."""
+    from tests.browser_helpers import stats_request_shapes as shapes
+    from yolomux_lib.app import TmuxWebtermApp
+
+    default_q = shapes.stats_sample_query(history_start=1, history_end=2, history_resolution=10)
+    assert "exact_resolution" not in default_q  # additive: default off
+    exact_q = shapes.stats_sample_query(history_start=1, history_end=2, history_resolution=10, exact_resolution=True)
+    assert "exact_resolution=1" in exact_q
+
+    off = TmuxWebtermApp.stats_sample_history_query(history_resolution_seconds=10)
+    assert "exact_resolution" not in off
+    on = TmuxWebtermApp.stats_sample_history_query(history_resolution_seconds=10, exact_resolution=True)
+    assert on["exact_resolution"] == 1 and on["resolution_seconds"] == 10
