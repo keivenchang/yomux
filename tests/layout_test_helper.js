@@ -1526,6 +1526,7 @@ globalThis.__layoutTestApi = {
   chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
   setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
   debugGraphTimeLabelForTest: debugGraphTimeLabel,
+  debugGraphXAxisHtmlForTest: debugGraphXAxisHtml,
   debugGraphExactTimeLabelForTest: debugGraphExactTimeLabel,
   chatEmojiSearchTextForTest: chatEmojiSearchText,
   chatRecentEmojiForTest: chatRecentEmoji,

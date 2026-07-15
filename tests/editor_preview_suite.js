@@ -7007,6 +7007,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.debugGraphLivePulseHtmlForTest([], [], {...liveDomain, zoomed: true}, now), '', 'the pulse is suppressed on a zoomed view');
   });
 
+  test('YO!stats x-axis omits seconds except on a sub-minute zoom', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Date.UTC(2026, 6, 15, 8, 14, 15);
+    const tickText = html => [...html.matchAll(/data-js-debug-x-tick="[^"]+"[^>]*>([^<]+)</g)].map(m => m[1]);
+    // 1h range: ticks are 30 minutes apart, so HH:MM (no seconds).
+    for (const rangeSeconds of [60 * 60, 4 * 3600, 5 * 60]) {
+      const labels = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - rangeSeconds * 1000, endMs: now}));
+      assert.ok(labels.length >= 3, `${rangeSeconds}s axis renders ticks`);
+      assert.ok(labels.every(label => !/\d{1,2}:\d{2}:\d{2}/.test(label)), `${rangeSeconds}s x-axis labels omit seconds: ${labels.join(', ')}`);
+    }
+    // A tight sub-minute drag-zoom keeps seconds (the half-span is under a minute).
+    const zoomLabels = tickText(api.debugGraphXAxisHtmlForTest({startMs: now - 40 * 1000, endMs: now}));
+    assert.ok(zoomLabels.some(label => /\d{1,2}:\d{2}:\d{2}/.test(label)), `a sub-minute zoom keeps seconds: ${zoomLabels.join(', ')}`);
+  });
+
   test('YO!stats slides only short live ranges with the wall clock', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     api.clearDebugGraphZoomForTest();

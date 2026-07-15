@@ -4286,8 +4286,12 @@ function debugGraphXAxisHtml(domain) {
     {name: 'end', ms: endMs},
   ];
   const includeDate = debugGraphLocalDateKey(startMs) !== debugGraphLocalDateKey(endMs);
+  // Seconds are noise once the three ticks are more than a minute apart (every real range
+  // from 5m up, and 1h/4h/... where the ticks span many minutes): show HH:MM. Seconds
+  // return only on a tight drag-zoom whose half-span is under a minute.
+  const includeSeconds = !includeDate && ((endMs - startMs) / 2) < 60 * 1000;
   return `<div class="js-debug-x-axis" data-js-debug-x-axis>
-    ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate}))}</span>`).join('')}
+    ${ticks.map(tick => `<span data-js-debug-x-tick="${esc(tick.name)}"${includeDate ? ` data-js-debug-x-date="${esc(debugGraphLocalDateKey(tick.ms))}"` : ''}>${esc(debugGraphTimeLabel(tick.ms, {includeDate, includeSeconds}))}</span>`).join('')}
   </div>`;
 }
 
