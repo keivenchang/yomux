@@ -7009,10 +7009,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
 
   test('YO!stats exact-resolution dark-launch requests and renders at the preset', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
-    // Default OFF: always requests 1s, no exact_resolution flag (unchanged contract).
-    assert.equal(api.jsDebugRequestedHistoryResolutionSecondsForTest(), 1, 'default asks for 1s');
-    assert.ok(!api.jsDebugStatsSampleQueryForTest({historyResolution: 1}).includes('exact_resolution'), 'default omits exact flag');
-    // ON: 5m at an explicit 10s pick requests exactly 10s + the exact flag.
+    // Exact resolution is now the DEFAULT: legacy path is opt-out.
+    api.setDebugGraphExactResolutionForTest(false);
+    assert.equal(api.jsDebugRequestedHistoryResolutionSecondsForTest(), 1, 'legacy path asks for 1s');
+    assert.ok(!api.jsDebugStatsSampleQueryForTest({historyResolution: 1}).includes('exact_resolution'), 'legacy omits exact flag');
+    // DEFAULT (exact on): 5m at an explicit 10s pick requests exactly 10s + the exact flag.
     api.setDebugGraphExactResolutionForTest(true);
     api.setDebugGraphRangeForTest(5 * 60, {render: false});
     api.setDebugGraphResolutionOverrideForTest(10);

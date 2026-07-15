@@ -42626,12 +42626,11 @@ function jsDebugHistoryCoverageNeedsRefresh(startSeconds, endSeconds, resolution
   return cursor <= startSeconds;
 }
 
-// DOIT.1 cutover, DARK-LAUNCHED: when true, the browser requests the exact preset
-// resolution (server returns exactly that, honest no-data past each tier) instead of
-// always asking for 1s and coarsening/stitching client-side. Default false so live
-// charts and the never-regress invariant sweep are byte-unchanged; flip to true (or
-// set window.__yolomuxExactStats) after reviewing the exact path on a live chart.
-let jsDebugGraphExactResolutionEnabled = (typeof globalThis !== 'undefined' && globalThis.__yolomuxExactStats === true);
+// DOIT.1 cutover: the browser requests the exact preset resolution (server returns
+// exactly that, honest no-data past each tier) instead of always asking for 1s and
+// coarsening/stitching client-side. Now the DEFAULT; set window.__yolomuxExactStats
+// = false to fall back to the legacy coarsen-and-stitch path.
+let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && globalThis.__yolomuxExactStats === false);
 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO

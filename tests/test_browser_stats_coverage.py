@@ -354,7 +354,7 @@ def _mixed_resolution_history(tmp_path):
     return {"now": now, "history": history}
 
 
-def test_explicit_fine_resolution_coarsens_until_the_whole_range_is_covered(browser, tmp_path):
+def test_explicit_fine_resolution_serves_exact_never_coarsened(browser, tmp_path):
     """A 10s override on a range whose older span is only 60s must render the FULL
     range at one coarsened resolution (60s), never a finer half-empty chart."""
     fixture = _mixed_resolution_history(tmp_path)
@@ -388,13 +388,12 @@ def test_explicit_fine_resolution_coarsens_until_the_whole_range_is_covered(brow
         """
     )
     assert out.get("scriptError") is None, out
-    # Coverage for the whole range is 60s; the 10s override must coarsen to 60s.
-    assert out["coverageResSec"] == 60, out
-    assert out["displayResSec"] >= out["coverageResSec"], out
-    assert out["displayResSec"] == 60, out
-    # Full range rendered (buckets reach back ~60 min), not a half-empty chart.
-    assert out["startsAgoMin"] >= 55, out
-    assert out["bucketCount"] >= 50, out
+    # EXACT mode (DOIT.1 cutover, now default): an explicit 10s pick is served
+    # EXACTLY at 10s, never silently promoted/coarsened up to the 60s coverage
+    # tier. Spans where only 60s data exists become honest no-data at 10s rather
+    # than a coarsened stitch under the 10s label.
+    assert out["displayResSec"] == 10, out
+    assert out["displayResSec"] != out["coverageResSec"], out  # not coarsened to coverage
 
 def test_switching_from_wide_range_does_not_coarsen_short_range_to_stale_resolution(browser, tmp_path):
     """Regression for '10s@1h shows 600s': after a wide (24h) view establishes a
