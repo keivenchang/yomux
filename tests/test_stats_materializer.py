@@ -232,3 +232,19 @@ def test_encoded_history_exact_mode_serves_uniform_resolution(tmp_path):
     assert exact_durations == {10}, exact_durations  # uniform, no coarser mixed in
     # The 60s-only span (600..960) is honestly absent at 10s.
     assert all(int(r["start"]) >= 1000 for r in exact["records"])
+
+
+def test_exact_mode_marks_coarse_only_spans_as_no_data(tmp_path):
+    svc = _service(tmp_path)
+    for t in range(1000, 1060):  # fine 1s
+        svc.store.upsert_bucket({"start": t, "duration": 1, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": 10.0, "cpu_count": 1.0})
+    for t in range(600, 960, 60):  # coarse 60s (too coarse for 10s)
+        svc.store.upsert_bucket({"start": t, "duration": 60, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": 600.0, "cpu_count": 60.0})
+    default = svc._encoded_history({"start": 600, "end": 1060, "resolution_seconds": 10})
+    exact = svc._encoded_history({"start": 600, "end": 1060, "resolution_seconds": 10, "exact_resolution": 1})
+    default_spans = [(i["start"], i["end"]) for i in default["coverage"]["intervals"]]
+    exact_spans = [(i["start"], i["end"]) for i in exact["coverage"]["intervals"]]
+    assert (600, 960) in default_spans  # default covers the coarse span
+    assert exact_spans == [(1000, 1060)]  # exact: coarse span is honest no-data at 10s

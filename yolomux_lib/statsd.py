@@ -3549,6 +3549,29 @@ class PersistentStatsService:
             effective_resolution = max(effective_resolution + 1, math.ceil(effective_resolution * len(records) / max_points))
             records = encode_records(effective_resolution)
         intervals = coverage_facts["intervals"]
+        if exact_resolution:
+            # Restrict coverage to spans where a source bucket is fine enough to
+            # serve this resolution (duration <= resolution). Coarse-only spans
+            # become no-data at this resolution, so the browser draws an honest gap
+            # there instead of interpolating a line across data that does not exist.
+            fine_spans: list[tuple[int, int]] = []
+            for bucket in sorted(source_buckets, key=lambda b: int(b.get("start") or 0)):
+                bd = int(bucket.get("duration") or 0)
+                bs = int(bucket.get("start") or 0)
+                if bd <= 0 or bd > effective_resolution:
+                    continue
+                if fine_spans and bs <= fine_spans[-1][1]:
+                    fine_spans[-1] = (fine_spans[-1][0], max(fine_spans[-1][1], bs + bd))
+                else:
+                    fine_spans.append((bs, bs + bd))
+            restricted: list[dict[str, Any]] = []
+            for interval in intervals:
+                istart, iend = int(interval["start"]), int(interval["end"])
+                for span_start, span_end in fine_spans:
+                    lo, hi = max(istart, span_start), min(iend, span_end)
+                    if lo < hi:
+                        restricted.append({**interval, "start": lo, "end": hi})
+            intervals = restricted
         covered_start = int(intervals[0]["start"]) if intervals else 0
         covered_end = int(intervals[-1]["end"]) if intervals else 0
         requested_start = start or covered_start
