@@ -3438,3 +3438,30 @@ def test_registry_health_rejects_code_revision_drift(tmp_path, monkeypatch):
     monkeypatch.setattr(plain, "_request", fake_request)
     responses = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 123}
     assert plain.healthy() is True, "services that have not opted in keep the old contract"
+
+
+def test_retire_fires_on_same_protocol_code_revision_drift(tmp_path, monkeypatch):
+    """Live-QA regression (2026-07-15): healthy() rejected a same-protocol stale-revision
+    daemon, but _retire_incompatible_service only retired on PROTOCOL drift — the stale
+    daemon kept the socket, the fresh spawn could not bind, and ensure_started failed
+    forever. Drifted revision must drive the same shutdown as a protocol bump."""
+    spec = LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", statsd.STATSD_PROTOCOL_VERSION, code_revision="currentrev12")
+    registry = LocalServiceRegistry(tmp_path, spec, socket_path=tmp_path / "statsd.sock")
+
+    actions = []
+    ping = {"ok": True, "version": statsd.STATSD_PROTOCOL_VERSION, "pid": 4242, "code_revision": "staleoldrev0"}
+
+    def fake_request(action, payload=None, timeout=0.2):
+        actions.append(action)
+        return dict(ping) if action == "ping" else {"ok": True}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr("yolomux_lib.local_services.registry.pid_is_alive", lambda pid: "shutdown" not in actions)
+
+    registry._retire_incompatible_service()
+    assert "shutdown" in actions, "same-protocol revision drift must retire the daemon"
+
+    actions.clear()
+    ping["code_revision"] = "currentrev12"
+    registry._retire_incompatible_service()
+    assert "shutdown" not in actions, "a matching daemon must never be shut down"

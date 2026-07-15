@@ -3161,13 +3161,17 @@ class TmuxWebtermApp:
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
         self.pricing_refresh_coordinator.start_periodic()
-        if self.stats_client.ensure_started():
-            self.start_stats_metric_scheduler()
-        else:
+        # Never gate the scheduler on statsd availability: each family loop already
+        # survives per-cycle statsd failures and self-heals when the daemon returns.
+        # Gating here turned one failed ensure_started at acquisition into a PERMANENT
+        # sampling outage (2026-07-15: a stale-revision daemon held the socket at boot
+        # and YO!stats stayed blank until the next owner handoff).
+        if not self.stats_client.ensure_started():
             self.log_event(
-                None, "statsd_sampler_unavailable", "statsd metric scheduler could not start",
+                None, "statsd_sampler_unavailable", "statsd unavailable at sampler start; scheduler will retry per cycle",
                 {"diagnostic": "statsd unavailable"}, message_key="events.message.statsHistory.sampleFailed",
             )
+        self.start_stats_metric_scheduler()
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")

@@ -147,11 +147,16 @@ class LocalServiceRegistry:
             pass
 
     def _retire_incompatible_service(self) -> None:
-        """Stop the service currently bound to our socket after a protocol bump."""
+        """Stop the service currently bound to our socket after a protocol bump or
+        code-revision drift. Same-protocol drift matters: without it the stale daemon
+        keeps the socket, the fresh spawn cannot bind, and ensure_started fails forever."""
         response = self._request("ping", timeout=0.15)
         service_pid = int(response.get("pid") or 0)
         service_version = int(response.get("version") or 0)
-        if not response.get("ok") or not service_pid or service_version == self.spec.protocol_version:
+        compatible = service_version == self.spec.protocol_version and (
+            not self.spec.code_revision or str(response.get("code_revision") or "") == self.spec.code_revision
+        )
+        if not response.get("ok") or not service_pid or compatible:
             return
         record = self._read_record()
         record_pid = int(record.get("pid") or 0)

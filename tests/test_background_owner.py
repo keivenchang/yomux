@@ -1603,3 +1603,30 @@ def test_many_search_index_events_and_queries_schedule_one_refresh(monkeypatch, 
 
     assert starts == [tmp_path]
     assert len(index.dirty_paths) == 1
+
+
+def test_owner_acquisition_starts_sampler_scheduler_even_when_statsd_is_down(no_control_socket, monkeypatch, tmp_path):
+    """Never-hard-gate regression (2026-07-15): a stale statsd daemon held the socket at
+    boot, ensure_started() failed once at owner acquisition, and the old one-shot gate
+    skipped start_stats_metric_scheduler forever — YO!stats stayed blank until the next
+    owner handoff. The scheduler must start regardless; its family loops already survive
+    per-cycle statsd failures and self-heal when the daemon returns."""
+    webapp = app_module.TmuxWebtermApp(["1"])
+    owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", clock=lambda: 100.0)
+    owner.owner = True
+    owner.status = "owner"
+    webapp.background_owner = owner
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
+    monkeypatch.setattr(webapp.pricing_refresh_coordinator, "start_periodic", lambda: None)
+    monkeypatch.setattr(app_module.StatsClient, "ensure_started", lambda self: False)
+    scheduler_starts = []
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: scheduler_starts.append(True) or True)
+    try:
+        webapp.handle_background_owner_acquired({"last_transition": "acquired"})
+        events = webapp.event_log.tail(limit=10)
+    finally:
+        webapp.control_server.stop()
+
+    assert scheduler_starts == [True], "statsd being down must not gate the sampler scheduler"
+    assert "statsd_sampler_unavailable" in {event["type"] for event in events}
