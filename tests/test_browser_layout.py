@@ -5647,6 +5647,79 @@ def test_debug_graph_range_slider_hover_and_drag_zoom(browser, tmp_path):
     assert drag_metrics["rangeSeconds"] > 300, drag_metrics
 
 
+def test_debug_graph_touch_drag_zooms_and_tap_reads(browser, tmp_path):
+    """On touch, a drag must zoom (touch-action:none + pointer capture) and a tap
+    must show the value tooltip without zooming, staying pinned after the finger
+    lifts. One shared handler serves YO!stats and YO!cost, so this covers both."""
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof debugGraphApplyServerHistory === 'function'"
+            " && typeof handleDebugGraphPointerDown === 'function'"
+            " && document.querySelector('[data-js-debug-graph]') !== null;"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        const now = Date.now();
+        const records = [];
+        for (let index = 0; index < 6; index += 1) {
+          records.push({
+            start: Math.floor((now - ((240 - (index * 30)) * 1000)) / 1000),
+            duration: 1, sequence: 200 + index,
+            cpu_total_percent: 8 + index, cpu_count: 1,
+            system_cpu_total_percent: 24 + index, system_cpu_count: 1,
+          });
+        }
+        debugGraphApplyServerHistory({sequence: 300, records});
+        setJsDebugHistoryReadiness('ready', {loadedStartSeconds: 1, loadedEndSeconds: Infinity, resolutionSeconds: 1,
+          coverageIntervals: [{startSeconds: 0, endSeconds: Infinity, resolutionSeconds: 1}]});
+        setDebugGraphRange(300);
+        renderDebugPanels({force: true});
+        const panel = document.querySelector('.js-debug-panel');
+        // Re-fetch a laid-out chart SVG fresh each time: clear/render replaces the
+        // DOM nodes, so a stale reference reads width 0.
+        const freshSvg = () => Array.from(panel.querySelectorAll('.js-debug-line-chart'))
+          .find(node => node.getBoundingClientRect().width > 10) || null;
+        const touchEvt = (node, clientX) => { const r = node.getBoundingClientRect();
+          return {target: node, clientX, clientY: r.top + r.height / 2, button: 0, pointerId: 1, pointerType: 'touch', preventDefault() {}}; };
+        const svg0 = freshSvg();
+        if (!svg0) return {error: 'no laid-out chart'};
+        const touchAction = getComputedStyle(svg0).touchAction;
+
+        // 1) Touch DRAG across the plot (from the unzoomed initial state) -> zooms.
+        const dragSvg = freshSvg();
+        const dr = dragSvg.getBoundingClientRect();
+        handleDebugGraphPointerDown(touchEvt(dragSvg, dr.left + dr.width * 0.2), panel);
+        handleDebugGraphPointerMove(touchEvt(dragSvg, dr.left + dr.width * 0.8), panel);
+        handleDebugGraphPointerUp(touchEvt(dragSvg, dr.left + dr.width * 0.8), panel);
+        const zoomedAfterDrag = debugGraphDomain().zoomed === true && Boolean(jsDebugGraphZoomDomain);
+
+        // 2) Touch TAP (no movement) -> shows tooltip, does NOT zoom.
+        clearDebugGraphZoom();
+        renderDebugPanels({force: true});
+        const tapSvg = freshSvg();
+        const tr = tapSvg.getBoundingClientRect();
+        const tap = touchEvt(tapSvg, tr.left + tr.width * 0.5);
+        handleDebugGraphPointerDown(tap, panel);
+        const tooltipShownOnTap = !document.querySelector('.js-debug-panel [data-js-debug-hover-tooltip]')?.hidden;
+        handleDebugGraphPointerUp(tap, panel);
+        const zoomedAfterTap = debugGraphDomain().zoomed === true;
+
+        // 3) The pinned tooltip survives the finger lifting (pointerleave on touch).
+        panel.dispatchEvent(new PointerEvent('pointerleave', {bubbles: true}));
+        const tooltipPinnedAfterLift = !document.querySelector('.js-debug-panel [data-js-debug-hover-tooltip]')?.hidden;
+        return {touchAction, zoomedAfterDrag, tooltipShownOnTap, zoomedAfterTap, tooltipPinnedAfterLift};
+        """
+    )
+    assert metrics.get("error") is None, metrics
+    assert metrics["touchAction"] == "none", metrics
+    assert metrics["zoomedAfterDrag"] is True, metrics
+    assert metrics["tooltipShownOnTap"] is True, metrics
+    assert metrics["zoomedAfterTap"] is False, metrics
+    assert metrics["tooltipPinnedAfterLift"] is True, metrics
+
+
 def test_debug_graph_token_rates_render_inline_from_the_single_history_stream(browser, tmp_path):
     """ONE history stream: a range change fetches ordinary history WITHOUT any
     legacy token_* params, and the token chart renders the inline

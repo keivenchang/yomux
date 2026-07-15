@@ -117,6 +117,10 @@ let jsDebugStatsClientConnected = null;
 let jsDebugStatsDisconnectStartedAtMs = null;
 let jsDebugGraphZoomDomain = null;
 let jsDebugGraphSelectionState = null;
+// Last pointer type seen on a chart. Touch has no hover-without-contact, so a
+// tap pins the value tooltip (it must NOT clear on the pointerleave that fires
+// when the finger lifts); a mouse still clears on leave as before.
+let jsDebugGraphLastPointerType = 'mouse';
 let jsDebugGraphRangeSliderDragging = false;
 let jsDebugGraphLiveFrame = 0;
 let jsDebugGraphLiveFrameLastMs = 0;
@@ -6618,7 +6622,7 @@ function bindYoCostPanel(panel) {
     handleDebugGraphPointerDown(event, panel);
   });
   panel.addEventListener('pointermove', event => { handleDebugGraphPointerMove(event, panel); });
-  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLines(panel); });
+  panel.addEventListener('pointerleave', () => { debugGraphClearInteractionLinesUnlessPinned(panel); });
   panel.addEventListener('pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerUp(event, panel);
@@ -7259,6 +7263,29 @@ function debugGraphClearInteractionLines(panel) {
   panel?.querySelectorAll?.('[data-js-debug-legend-item--hovered]').forEach(item => item.classList.remove('js-debug-legend-item--hovered'));
 }
 
+function debugGraphClearInteractionLinesUnlessPinned(panel) {
+  // A touch tap pins the tooltip: the pointerleave that fires when the finger
+  // lifts must not clear it (there is no "move away" gesture on touch). A mouse
+  // leaving the chart clears immediately, exactly as before.
+  if (jsDebugGraphLastPointerType === 'touch') return;
+  debugGraphClearInteractionLines(panel);
+}
+
+function handleDebugGraphOutsideTapDismiss(event) {
+  // Dismiss a pinned touch tooltip when the next tap lands outside the chart that
+  // owns it. A tap on a chart updates the tooltip through the normal pointerdown
+  // path, so only genuinely-outside taps clear here.
+  if (jsDebugGraphLastPointerType !== 'touch') return;
+  if (event.target?.closest?.('.js-debug-line-chart')) return;
+  for (const panel of document.querySelectorAll('.js-debug-graph-view, [data-js-debug-panel]')) {
+    debugGraphClearInteractionLines(panel);
+  }
+}
+
+if (typeof document !== 'undefined' && document?.addEventListener) {
+  document.addEventListener('pointerdown', handleDebugGraphOutsideTapDismiss, true);
+}
+
 function debugGraphSetSelectionRects(panel, startRatio, endRatio) {
   const graph = panel?.querySelector?.('[data-js-debug-graph], [data-js-yocost-graphs]');
   if (!graph) return;
@@ -7300,10 +7327,18 @@ function handleDebugGraphPointerDown(event, panel) {
   const ratio = debugGraphPointerRatioForEvent(event);
   if (ratio == null || event.button > 0) return false;
   event.preventDefault();
+  jsDebugGraphLastPointerType = event.pointerType || 'mouse';
   if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control], [data-js-debug-model-token-dimension]')) document.activeElement.blur?.();
   const svg = event.target.closest('.js-debug-line-chart');
+  // Capture the pointer so a touch drag keeps delivering pointermove even when the
+  // finger strays past the SVG's bounding box mid-drag.
+  if (event.pointerId != null && typeof svg?.setPointerCapture === 'function') {
+    try { svg.setPointerCapture(event.pointerId); } catch (_) { /* capture is best-effort */ }
+  }
   jsDebugGraphSelectionState = {
     panel,
+    svg,
+    pointerId: event.pointerId,
     rect: svg.getBoundingClientRect(),
     domain: debugGraphGridDomain(panel),
     startRatio: ratio,
@@ -7311,6 +7346,9 @@ function handleDebugGraphPointerDown(event, panel) {
   };
   debugGraphSetInteractionLines(panel, ratio);
   debugGraphSetSelectionRects(panel, ratio, ratio);
+  // Touch has no hover-before-press, so surface the value at the touched point
+  // immediately on contact (a mouse already shows it from hover).
+  debugGraphSetHoverTooltip(panel, event, ratio);
   return true;
 }
 
@@ -7333,6 +7371,9 @@ function handleDebugGraphPointerMove(event, panel) {
 function handleDebugGraphPointerUp(event, panel) {
   const selection = jsDebugGraphSelectionState;
   if (!selection || selection.panel !== panel) return;
+  if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
+    try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
+  }
   const ratio = debugGraphSelectionRatioForEvent(event);
   if (ratio != null) selection.currentRatio = ratio;
   const start = Math.max(0, Math.min(1, Number(selection.startRatio)));
@@ -7360,7 +7401,11 @@ function handleDebugGraphPointerUp(event, panel) {
 }
 
 function cancelDebugGraphSelection(panel) {
-  if (jsDebugGraphSelectionState?.panel !== panel) return;
+  const selection = jsDebugGraphSelectionState;
+  if (selection?.panel !== panel) return;
+  if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
+    try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
+  }
   debugGraphClearSelectionRects(panel);
   jsDebugGraphSelectionState = null;
 }
@@ -7468,7 +7513,7 @@ function bindDebugPanel(panel) {
     handleDebugGraphPointerMove(event, panel);
   });
   panel.addEventListener('pointerleave', () => {
-    debugGraphClearInteractionLines(panel);
+    debugGraphClearInteractionLinesUnlessPinned(panel);
   });
   panel.addEventListener('pointerup', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
