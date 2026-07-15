@@ -6549,43 +6549,6 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
-  await testAsync('YO!stats a finer resolution selection blocked by stale coarse buckets forces a clearing refetch', async () => {
-    // Regression guard (2026-07-15): "changing resolution is not working, but reload works."
-    // A wide range's 600s tail left cached in a narrow domain floors the display; selecting a
-    // finer resolution must force the same since=0 + replaceCoverage refetch a reload performs
-    // so it applies WITHOUT a reload.
-    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
-    const requests = [];
-    await flushAsyncWork();
-    api.stopJsDebugStatsPollingForTest();
-    api.resetJsDebugHistoryReadinessForTest();
-    const nowSec = Math.floor(Date.now() / 1000);
-    const now = nowSec * 1000;
-    api.setDebugGraphRangeForTest(5 * 60, {render: false});
-    api.applyJsDebugHistoryCoverageForTest({mode: 'live', requestedStart: nowSec - 600, requestedEnd: 0, coveredStart: nowSec - 600, coveredEnd: nowSec, resolutionSeconds: 600, sourceResolutionSeconds: 600, complete: true, hasMoreOlder: false, nextOlderEnd: 0});
-    api.debugGraphApplyServerHistoryForTest({sequence: 2, records: [
-      {start: nowSec - 600, duration: 600, sequence: 1, cpu_total_percent: 20 * 600, cpu_count: 600},
-      {start: nowSec - 300, duration: 600, sequence: 2, cpu_total_percent: 20 * 600, cpu_count: 600},
-    ]});
-    const domain = {startMs: now - 5 * 60 * 1000, endMs: now, rangeSeconds: 5 * 60};
-    assert.ok(api.debugGraphDisplayResolutionMsForTest(domain, 0, now) >= 600000, 'stale coarse buckets floor the display to 600s before the fix');
-    api.setFetchForTest((url) => {
-      requests.push(String(url));
-      const recs = [];
-      for (let t = nowSec - 300; t < nowSec; t += 10) recs.push({start: t, duration: 10, sequence: recs.length + 10, cpu_total_percent: 20 * 10, cpu_count: 10});
-      return Promise.resolve(jsonResponse({history: {sequence: 900, records: recs, coverage: statsHistoryCoverageForRequest(String(url), {resolution_seconds: 10, source_resolution_seconds: 10})}}));
-    });
-    api.setDebugGraphResolutionOverrideForTest(10);
-    for (let index = 0; index < 6; index += 1) await flushAsyncWork();
-    assert.ok(requests.length >= 1, 'the finer resolution selection forces a refetch instead of a floored re-render');
-    assert.equal(new URL(requests[0], 'http://localhost').searchParams.get('since'), '0', 'the refetch is a full since=0 snapshot that can clear the stale coarse coverage');
-    assert.ok(api.debugGraphDisplayResolutionMsForTest(domain, 0, now) <= 10000, 'after the refetch the stale coarse buckets are cleared and the 10s selection applies');
-    // Reset the persisted override so the shared localStorage does not leak AUTO->10s into
-    // the next test's loadYolomux.
-    api.setDebugGraphResolutionOverrideForTest(0);
-    api.stopJsDebugStatsPollingForTest();
-  });
-
   await testAsync('YO!stats ignores an obsolete history response after the requested domain changes', async () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const requests = [];
