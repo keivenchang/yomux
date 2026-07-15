@@ -131,6 +131,19 @@ def enable_wal_with_retry(connection: sqlite3.Connection, attempts: int = 6) -> 
             time.sleep(0.02 * (attempt + 1))
 
 
+@contextmanager
+def open_wal_session(initialize: Any, connect: Any) -> Any:
+    """Run `initialize()` (lazy schema migration), open a fresh connection via `connect()`,
+    yield it, and always close it. The shared per-operation connection lifecycle for the
+    WAL stores so each caller's `_connection` is a one-line delegator rather than a copy."""
+    initialize()
+    connection = connect()
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
 def begin_wal_migration(connection: sqlite3.Connection) -> int:
     """Enable WAL, enter an exclusive (BEGIN IMMEDIATE) migration transaction, and return
     the current PRAGMA user_version. The shared prologue for every user_version-migrated

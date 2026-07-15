@@ -9,19 +9,18 @@ import json
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Callable
-from typing import Iterator
 
 from .atomic_file import atomic_write_text
 from .atomic_file import begin_wal_migration
 from .atomic_file import file_lock
 from .atomic_file import open_wal_database
+from .atomic_file import open_wal_session
 from .common import STATE_DIR
 
 
@@ -202,14 +201,8 @@ class ChatStore:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        self._initialize()
-        connection = self._raw_connection()
-        try:
-            yield connection
-        finally:
-            connection.close()
+    def _connection(self) -> Any:
+        return open_wal_session(self._initialize, self._raw_connection)
 
     def _initialize(self) -> None:
         if self._initialized:
