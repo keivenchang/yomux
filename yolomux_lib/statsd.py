@@ -999,6 +999,23 @@ class PersistentStatsService:
     def materialization_generation(self) -> int:
         return int(self._materialization["generation"])
 
+    def materialize_delta_bucket(self, resolution: int, sample_time: float) -> dict[str, Any] | None:
+        """Materialize the single exact bucket covering `sample_time` at `resolution`.
+
+        DOIT.1 item 7: one-second activity (and slower family changes) publish ONE
+        changed exact bucket keyed by `(series, start, duration)`, not a full-snapshot
+        refetch. This reads only the raw samples inside that one epoch-aligned window
+        and folds them, so an SSE delta stays cheap and same-resolution — the browser
+        replaces/appends the matching record without re-aggregating. Returns None when
+        that window has no samples (a genuine gap the client leaves as no-data).
+        """
+        if resolution <= 0:
+            raise ValueError(f"resolution must be positive, got {resolution!r}")
+        bucket_start = int(math.floor(float(sample_time) / resolution) * resolution)
+        samples = self._read_raw_samples(bucket_start, bucket_start + resolution)
+        folded = self.materialize_buckets(resolution, samples)
+        return folded[0] if folded else None
+
     def _materialized_snapshot_response(self, request: dict[str, Any]) -> dict[str, Any]:
         """Additive exact-resolution serve action (DOIT.1 item 5, non-switching).
 

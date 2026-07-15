@@ -211,3 +211,21 @@ def test_background_rebuild_skips_empty_and_builds_when_raw_present(tmp_path):
     # Past the cadence with raw data present -> builds.
     assert svc._maybe_rebuild_materialization(now=10_000.0 + statsd.STATSD_MATERIALIZATION_REBUILD_INTERVAL_SECONDS + 1) is True
     assert svc.materialization_generation() == 1
+
+
+def test_delta_bucket_is_single_exact_window(tmp_path):
+    svc = _service(tmp_path)
+    conn = svc.store._connection()
+    with conn:
+        # Two samples in the 60..120 window, one in 120..180.
+        for t, pct in [(65.0, 20.0), (70.0, 40.0), (130.0, 90.0)]:
+            conn.execute(
+                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
+                ("cpu", "", t, "e", f'{{"cpu_total_percent": {pct}, "cpu_count": 1.0}}'),
+            )
+    delta = svc.materialize_delta_bucket(60, 68.0)
+    assert delta["start"] == 60 and delta["duration"] == 60
+    # Only the two samples in this window fold in (not the 130s one).
+    assert delta["cpu_total_percent"] == 60.0 and delta["cpu_count"] == 2.0
+    # A window with no samples is a genuine gap -> None, not a fabricated zero.
+    assert svc.materialize_delta_bucket(60, 300.0) is None
