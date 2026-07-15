@@ -112,29 +112,21 @@ def test_system_memory_host_metrics_fold(tmp_path):
 
 def test_reads_raw_samples_and_materializes_end_to_end(tmp_path):
     svc = _service(tmp_path)
-    conn = svc.store._connection()
-    with conn:
-        for t, pct in [(1.0, 10.0), (2.0, 30.0), (65.0, 50.0)]:
-            conn.execute(
-                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
-                ("cpu", "", t, "e", f'{{"cpu_total_percent": {pct}, "cpu_count": 1.0}}'),
-            )
-    read = svc._read_raw_samples(0, 120)
-    assert len(read) == 3
-    buckets = svc.materialize_buckets(60, read)
+    for t, pct in [(1, 10.0), (2, 30.0), (65, 50.0)]:
+        svc.store.upsert_bucket({"start": t, "duration": 1, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": pct, "cpu_count": 1.0})
+    source = svc.store.query_buckets(start=0, end=120, limit=1000)
+    assert len(source) == 3
+    buckets = svc.materialize_from_buckets(60, source)
     assert [b["start"] for b in buckets] == [0, 60]
     assert buckets[0]["cpu_total_percent"] == 40.0 and buckets[0]["cpu_count"] == 2.0  # (10+30)/2 avg=20
 
 
 def test_materialization_generations_are_immutable_and_atomic(tmp_path):
     svc = _service(tmp_path)
-    conn = svc.store._connection()
-    with conn:
-        for t, pct in [(1.0, 10.0), (2.0, 30.0), (65.0, 50.0)]:
-            conn.execute(
-                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
-                ("cpu", "", t, "e", f'{{"cpu_total_percent": {pct}, "cpu_count": 1.0}}'),
-            )
+    for t, pct in [(1, 10.0), (2, 30.0), (65, 50.0)]:
+        svc.store.upsert_bucket({"start": t, "duration": 1, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": pct, "cpu_count": 1.0})
     assert svc.materialization_generation() == 0
     assert svc.read_materialized_layer(60) == []  # unbuilt -> empty, never a crash
 
@@ -170,13 +162,9 @@ def test_materialized_snapshot_serves_exact_key_or_structured_states(tmp_path):
     pending, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 300, "resolution_seconds": 1})
     assert pending["ok"] and pending["pending"] and pending["retry_after_seconds"] >= 1
 
-    conn = svc.store._connection()
-    with conn:
-        for t in range(0, 300, 10):
-            conn.execute(
-                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
-                ("cpu", "", float(t), "e", '{"cpu_total_percent": 10.0, "cpu_count": 1.0}'),
-            )
+    for t in range(0, 300, 10):
+        svc.store.upsert_bucket({"start": max(1, t), "duration": 1, "sequence": t + 1, "server_sequence": t + 1,
+                                 "cpu_total_percent": 10.0, "cpu_count": 1.0})
     svc.rebuild_materialization(0, 300, now=300.0)
 
     ok, _ = svc.handle_with_binary({"action": "materialized_snapshot", "range_seconds": 300, "resolution_seconds": 1, "end": 300})
@@ -200,12 +188,8 @@ def test_background_rebuild_skips_empty_and_builds_when_raw_present(tmp_path):
     assert svc._maybe_rebuild_materialization(now=10_000.0) is False
     assert svc.materialization_generation() == 0
 
-    conn = svc.store._connection()
-    with conn:
-        conn.execute(
-            "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
-            ("cpu", "", 9_999.0, "e", '{"cpu_total_percent": 10.0, "cpu_count": 1.0}'),
-        )
+    svc.store.upsert_bucket({"start": 9_999, "duration": 1, "sequence": 1, "server_sequence": 1,
+                             "cpu_total_percent": 10.0, "cpu_count": 1.0})
     # Cadence not yet elapsed since the back-off stamp -> still skips.
     assert svc._maybe_rebuild_materialization(now=10_100.0) is False
     # Past the cadence with raw data present -> builds.
@@ -215,14 +199,10 @@ def test_background_rebuild_skips_empty_and_builds_when_raw_present(tmp_path):
 
 def test_delta_bucket_is_single_exact_window(tmp_path):
     svc = _service(tmp_path)
-    conn = svc.store._connection()
-    with conn:
-        # Two samples in the 60..120 window, one in 120..180.
-        for t, pct in [(65.0, 20.0), (70.0, 40.0), (130.0, 90.0)]:
-            conn.execute(
-                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
-                ("cpu", "", t, "e", f'{{"cpu_total_percent": {pct}, "cpu_count": 1.0}}'),
-            )
+    # Two 1s buckets in the 60..120 window, one in 120..180.
+    for t, pct in [(65, 20.0), (70, 40.0), (130, 90.0)]:
+        svc.store.upsert_bucket({"start": t, "duration": 1, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": pct, "cpu_count": 1.0})
     delta = svc.materialize_delta_bucket(60, 68.0)
     assert delta["start"] == 60 and delta["duration"] == 60
     # Only the two samples in this window fold in (not the 130s one).

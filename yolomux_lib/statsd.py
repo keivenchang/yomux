@@ -958,27 +958,58 @@ class PersistentStatsService:
         if now - self._last_materialization_rebuild_at < STATSD_MATERIALIZATION_REBUILD_INTERVAL_SECONDS:
             return False
         try:
-            has_raw = self.store._connection().execute("SELECT 1 FROM stats_raw_samples LIMIT 1").fetchone()
+            has_data = self.store._connection().execute("SELECT 1 FROM stats_buckets LIMIT 1").fetchone()
         except sqlite3.Error:
             return False
-        if has_raw is None:
+        if has_data is None:
             self._last_materialization_rebuild_at = now  # nothing to build; back off
             return False
         self.rebuild_materialization(now - STATS_HISTORY_RETENTION_SECONDS, now, now)
         self._last_materialization_rebuild_at = now
         return True
 
-    def rebuild_materialization(self, start: float, end: float, now: float) -> dict[str, Any]:
-        """Build every preset resolution layer from raw samples and publish atomically.
+    def materialize_from_buckets(self, resolution: int, source_buckets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fold LIVE graduated buckets into exact `resolution` buckets.
 
-        Reads raw samples ONCE, materializes each resolution in `RESOLUTION_CHOICES`,
-        and swaps in a new immutable generation. Building off one consistent read is
-        why a later stale build can't publish partial/mixed layers. Returns the
-        published generation summary.
+        A source bucket of duration D contributes to resolution R only when
+        `D <= R` (it is finer-or-equal, so it can fold up exactly); a coarser
+        source (`D > R`) is skipped, so that span is honestly absent at R rather
+        than up-sampled from data too coarse to support it. This is what lets the
+        exact serve path stay FRESH (stats_buckets is live-maintained) without
+        touching the hot write path or the frozen raw tables. Reuses _merge_bucket.
         """
-        samples = self._read_raw_samples(start, end)
+        if resolution <= 0:
+            raise ValueError(f"resolution must be positive, got {resolution!r}")
+        targets: dict[int, dict[str, Any]] = {}
+        for source in source_buckets:
+            duration = int(source.get("duration") or 0)
+            start = int(source.get("start") or 0)
+            if duration <= 0 or duration > resolution or start <= 0:
+                continue
+            bucket_start = int(math.floor(start / resolution) * resolution)
+            target = targets.get(bucket_start)
+            if target is None:
+                target = stats_store.empty_bucket(bucket_start, resolution)
+                targets[bucket_start] = target
+            self._merge_bucket(target, source)
+        return [targets[key] for key in sorted(targets)]
+
+    def rebuild_materialization(self, start: float, end: float, now: float) -> dict[str, Any]:
+        """Build every preset resolution layer from LIVE buckets and publish atomically.
+
+        Reads the graduated `stats_buckets` ONCE (the live, retention-maintained
+        source — so materialized serving stays FRESH without touching the hot write
+        path) and folds each resolution in `RESOLUTION_CHOICES` via
+        `materialize_from_buckets` (finer-or-equal sources fold up; coarser sources
+        are honestly absent at that resolution). Swaps in a new immutable generation;
+        building off one consistent read is why a later stale build can't publish
+        partial/mixed layers. Returns the published generation summary.
+        """
+        source_buckets = [
+            bucket for bucket in self.store.query_buckets(start=int(start), end=int(end), limit=1_000_000)
+        ]
         layers = {
-            resolution: tuple(self.materialize_buckets(resolution, samples))
+            resolution: tuple(self.materialize_from_buckets(resolution, source_buckets))
             for resolution in stats_resolution.RESOLUTION_CHOICES
         }
         generation = {
@@ -1012,8 +1043,8 @@ class PersistentStatsService:
         if resolution <= 0:
             raise ValueError(f"resolution must be positive, got {resolution!r}")
         bucket_start = int(math.floor(float(sample_time) / resolution) * resolution)
-        samples = self._read_raw_samples(bucket_start, bucket_start + resolution)
-        folded = self.materialize_buckets(resolution, samples)
+        source = self.store.query_buckets(start=bucket_start, end=bucket_start + resolution, limit=100_000)
+        folded = self.materialize_from_buckets(resolution, source)
         return folded[0] if folded else None
 
     def _materialized_snapshot_response(self, request: dict[str, Any]) -> dict[str, Any]:

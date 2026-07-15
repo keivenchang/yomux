@@ -18,13 +18,13 @@ from yolomux_lib import stats_resolution as sr
 def _service_with_24h_raw(tmp_path):
     svc = statsd.PersistentStatsService(tmp_path / "s.sock", tmp_path / "s.sqlite3")
     now = 24 * 60 * 60
+    # One 1s cpu bucket every 5s across 24h -> fine enough to fill every resolution.
     conn = svc.store._connection()
     with conn:
-        # One cpu sample every 5s across 24h -> fine enough to fill every resolution.
-        for t in range(0, now, 5):
+        for t in range(5, now, 5):
             conn.execute(
-                "INSERT INTO stats_raw_samples(family, source_id, sample_time, epoch_id, payload_json) VALUES(?,?,?,?,?)",
-                ("cpu", "", float(t), "e", '{"cpu_total_percent": 12.0, "cpu_count": 1.0}'),
+                "INSERT INTO stats_buckets(start,duration,sequence,server_sequence,bucket_json) VALUES(?,?,?,?,?)",
+                (t, 1, t, t, '{"start": %d, "duration": 1, "cpu_total_percent": 12.0, "cpu_count": 1.0}' % t),
             )
     svc.rebuild_materialization(0, now, now=float(now))
     return svc, now
