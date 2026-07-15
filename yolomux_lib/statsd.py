@@ -3391,6 +3391,9 @@ class PersistentStatsService:
         start = max(0, int(request.get("start") or 0))
         end = max(0, int(request.get("end") or 0))
         resolution = max(0, int(request.get("resolution_seconds") or 0))
+        # Opt-in EXACT mode (must be part of the cache key: an exact request and a
+        # default request share start/end/resolution but return different bytes).
+        exact_resolution = bool(int(request.get("exact_resolution") or 0)) and resolution > 0
         max_points = max(0, int(request.get("max_points") or 0))
         client_id = stats_history_client_id(request.get("client_id") or "")
         # LEGACY COMPAT (retire in a later release): current clients send NO
@@ -3419,6 +3422,7 @@ class PersistentStatsService:
             token_history_start,
             token_history_end,
             generation,
+            exact_resolution,
         )
         cached = self._encoded_query_cache.get(cache_key)
         # monotonic_clock (bound at import) rather than time.monotonic: the
@@ -3445,10 +3449,18 @@ class PersistentStatsService:
         available_start = coverage_facts["available_start"]
         available_end = coverage_facts["available_end"]
         retained_resolution = coverage_facts["retained_resolution"]
-        effective_resolution = max(resolution, retained_resolution)
-        if max_points:
-            span = max(1, (end or available_end) - (start or available_start))
-            effective_resolution = max(effective_resolution, math.ceil(span / max_points))
+        # EXACT mode (DOIT.1 cutover, opt-in, parsed above for the cache key): serve
+        # exactly the requested resolution — do NOT coarsen up to the retained tier,
+        # and (in encode_records) drop source buckets coarser than the target so those
+        # spans are honest no-data instead of a mixed coarser bucket. Default mode is
+        # unchanged, so existing clients/goldens keep their coarsen-and-stitch behavior.
+        if exact_resolution:
+            effective_resolution = resolution
+        else:
+            effective_resolution = max(resolution, retained_resolution)
+            if max_points:
+                span = max(1, (end or available_end) - (start or available_start))
+                effective_resolution = max(effective_resolution, math.ceil(span / max_points))
         # Every read — live cursor delta or bounded range/zoom — serves from
         # the ONE graduated stats_buckets store; explicit resolution picks
         # (1/10/60/300s) map onto the graduated tiers via the group-by-target-
@@ -3474,6 +3486,10 @@ class PersistentStatsService:
             cost_metadata: dict[tuple[int, int], dict[str, Any]] = {}
             for bucket in source_buckets:
                 bucket_start, bucket_duration = int(bucket["start"]), int(bucket["duration"])
+                if exact_resolution and target_resolution and bucket_duration > target_resolution:
+                    # Coarser than the exact request -> honest no-data at this
+                    # resolution; never fold a coarse aggregate up as a fine bucket.
+                    continue
                 if not target_resolution or bucket_duration >= target_resolution:
                     bucket_key = (bucket_start, bucket_duration)
                 else:

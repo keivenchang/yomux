@@ -209,3 +209,26 @@ def test_delta_bucket_is_single_exact_window(tmp_path):
     assert delta["cpu_total_percent"] == 60.0 and delta["cpu_count"] == 2.0
     # A window with no samples is a genuine gap -> None, not a fabricated zero.
     assert svc.materialize_delta_bucket(60, 300.0) is None
+
+
+def test_encoded_history_exact_mode_serves_uniform_resolution(tmp_path):
+    svc = _service(tmp_path)
+    # Fine 1s buckets recent, coarse 60s buckets older.
+    for t in range(1000, 1060):  # 60 x 1s buckets
+        svc.store.upsert_bucket({"start": t, "duration": 1, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": 10.0, "cpu_count": 1.0})
+    for t in range(600, 960, 60):  # older 60s buckets
+        svc.store.upsert_bucket({"start": t, "duration": 60, "sequence": t, "server_sequence": t,
+                                 "cpu_total_percent": 600.0, "cpu_count": 60.0})
+
+    # DEFAULT mode: coarser buckets pass through mixed (current stitch behavior).
+    default = svc._encoded_history({"start": 600, "end": 1060, "resolution_seconds": 10})
+    default_durations = {int(r["duration"]) for r in default["records"]}
+    assert 60 in default_durations  # mixed durations survive in default mode
+
+    # EXACT mode at 10s: 1s buckets fold up to 10s; the 60s (coarser) span is dropped.
+    exact = svc._encoded_history({"start": 600, "end": 1060, "resolution_seconds": 10, "exact_resolution": 1})
+    exact_durations = {int(r["duration"]) for r in exact["records"]}
+    assert exact_durations == {10}, exact_durations  # uniform, no coarser mixed in
+    # The 60s-only span (600..960) is honestly absent at 10s.
+    assert all(int(r["start"]) >= 1000 for r in exact["records"])
