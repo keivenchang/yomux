@@ -61,6 +61,55 @@ def test_agent_status_stacked_average_sums_first(tmp_path):
     assert buckets[0]["agent_activity_samples"] == 2.0
 
 
+def test_token_rate_folds_via_summed_seconds(tmp_path):
+    svc = _service(tmp_path)
+    # Two token samples for one agent in a 60s window: tokens and seconds both sum,
+    # so tokens/min = (tokens_sum / seconds_sum) * 60 stays exact at any resolution.
+    samples = [
+        {"family": "agent_tokens", "sample_time": 5.0, "payload": {
+            "tokens_per_agent_total": 100.0, "agent_token_samples": 1.0,
+            "agent_token_rates": {"a1": {"total": 100.0, "samples": 1.0, "tokens": 100.0, "seconds": 10.0}}}},
+        {"family": "agent_tokens", "sample_time": 25.0, "payload": {
+            "tokens_per_agent_total": 300.0, "agent_token_samples": 1.0,
+            "agent_token_rates": {"a1": {"total": 300.0, "samples": 1.0, "tokens": 300.0, "seconds": 20.0}}}},
+    ]
+    buckets = svc.materialize_buckets(60, samples)
+    assert len(buckets) == 1
+    rate = buckets[0]["agent_token_rates"]["a1"]
+    assert rate["tokens"] == 400.0 and rate["seconds"] == 30.0  # summed -> 400/30*60 tokens/min
+
+
+def test_cost_atoms_dedup_by_identity_when_folded(tmp_path):
+    svc = _service(tmp_path)
+    atom = {"event_id": "e1", "direction": "input", "modality": "text", "cache_role": "none",
+            "unit": "tokens", "quantity": 10, "micro_usd": 5}
+    other = {**atom, "event_id": "e2", "quantity": 20, "micro_usd": 9}
+    samples = [
+        {"family": "cost", "sample_time": 5.0, "payload": {"cost_summary": {"components": [atom]}}},
+        # Same atom identity again (replayed) -> must NOT double-count.
+        {"family": "cost", "sample_time": 15.0, "payload": {"cost_summary": {"components": [dict(atom)]}}},
+        {"family": "cost", "sample_time": 25.0, "payload": {"cost_summary": {"components": [other]}}},
+    ]
+    buckets = svc.materialize_buckets(60, samples)
+    assert len(buckets) == 1
+    ids = sorted(c.get("event_id") for c in buckets[0]["cost_summary"]["components"])
+    assert ids == ["e1", "e2"]  # e1 deduped despite appearing twice
+
+
+def test_system_memory_host_metrics_fold(tmp_path):
+    svc = _service(tmp_path)
+    samples = [
+        {"family": "system_memory", "sample_time": 5.0, "payload": {"host_metrics": {
+            "system_memory_used_total_bytes": 100.0, "system_memory_count": 1.0}}},
+        {"family": "system_memory", "sample_time": 35.0, "payload": {"host_metrics": {
+            "system_memory_used_total_bytes": 300.0, "system_memory_count": 1.0}}},
+    ]
+    buckets = svc.materialize_buckets(60, samples)
+    assert len(buckets) == 1
+    host = buckets[0]["host_metrics"]
+    assert host["system_memory_used_total_bytes"] == 400.0 and host["system_memory_count"] == 2.0
+
+
 def test_reads_raw_samples_and_materializes_end_to_end(tmp_path):
     svc = _service(tmp_path)
     conn = svc.store._connection()
