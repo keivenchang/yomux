@@ -48710,7 +48710,27 @@ function setDebugGraphResolutionOverride(value) {
   // the swap is instant with no overlay. Only when the change genuinely needs finer/coarser
   // history do we show the shared dimmed loading overlay over the still-visible old data and
   // arm a generation-guarded revert-on-failure.
-  const fetching = requestJsDebugHistoryForCurrentDomain();
+  //
+  // A finer selection is floored by the coarsest LOADED bucket, so asking for finer than the
+  // display currently shows (e.g. a wide range's 600s tail still cached in this narrow
+  // domain) cannot take effect by re-render alone — it needs the stale coarse buckets cleared.
+  // Force the same fresh since=0 + replaceCoverage refetch a reload performs, so the finer
+  // resolution applies WITHOUT a reload. This is a one-time user action, so no poll loop
+  // results even when the domain's own data is honestly coarser than requested.
+  const resolutionDomain = debugGraphDomain();
+  const retainedMs = debugGraphMinimumDisplayResolutionMs(resolutionDomain, Date.now());
+  const blockedByStaleCoarse = normalized > 0 && normalized * 1000 < retainedMs;
+  if (blockedByStaleCoarse) {
+    // Immediately evict the stale buckets COARSER than the just-selected resolution from the
+    // active domain (a family's own finer/equal cadence is kept), so the finer selection
+    // applies in the same frame instead of staying floored by the old wide-range tail. The
+    // refetch below refills authoritative data. Scoped to this explicit user action and
+    // thresholded on the selected value, so it can neither loop nor drop a legitimately
+    // coarser family (unlike a blanket per-poll purge).
+    debugGraphRemoveCoarserServerBuckets(Math.floor(Number(resolutionDomain.startMs) / 1000), Math.ceil(Number(resolutionDomain.endMs) / 1000), normalized);
+    refreshDebugGraphSurfaces();
+  }
+  const fetching = requestJsDebugHistoryForCurrentDomain({retry: blockedByStaleCoarse});
   if (!fetching) {
     jsDebugGraphPendingResolutionChange = null;
     return;
