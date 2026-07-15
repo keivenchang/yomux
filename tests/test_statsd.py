@@ -2980,3 +2980,67 @@ def test_coverage_soak_every_range_window_serves_disjoint(tmp_path):
             assert all(int(a["end"]) <= int(b["start"]) for a, b in zip(ordered, ordered[1:])), "disjoint"
             assert len(lists) <= stats_store.STATS_COVERAGE_MAX_INTERVALS, "bounded"
     store.close()
+
+
+def test_host_metrics_survive_history_at_every_range_with_the_real_client_request_shape(tmp_path):
+    """Regression for the blank Server Load / System memory / GPU charts at >= 4h ranges
+    (screenshots 012/013, 2026-07-14): ranges that use the separate compact token stream send
+    token_resolution > 0, which sets include_agent_tokens=False — and BOTH the display-bucket
+    merge and the record encoder gated host_metrics on that flag, silently stripping every
+    host family from wide-range history. Host metrics have no other delivery path, so they
+    must ride every history record regardless of agent-token slimming. This test uses the
+    REAL request shape per range (token_resolution set exactly as the client sends it); the
+    earlier diagnosis missed the bug by probing without token_resolution."""
+    now = int(time.time() // 600 * 600)
+    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
+    try:
+        sequence = 0
+        # Graduated history like the real retention: coarse old tiers through fine recent ones,
+        # every bucket carrying all three host families.
+        for span_start, span_end, step in (
+            (now - 24 * 3600, now - 8 * 3600, 600),
+            (now - 8 * 3600, now - 4 * 3600, 120),
+            (now - 4 * 3600, now - 1800, 60),
+            (now - 1800, now, 10),
+        ):
+            for start in range(span_start, span_end, step):
+                sequence += 1
+                bucket = stats_store.empty_bucket(start, step)
+                bucket.update({"sequence": sequence, "server_sequence": sequence, "cpu_total_percent": 20.0, "cpu_count": 1.0})
+                bucket["host_metrics"] = {
+                    "system_memory_used_total_bytes": 48e9,
+                    "system_memory_capacity_total_bytes": 64e9,
+                    "system_memory_count": 1.0,
+                    "service_load": {"web:8881": {"label": "web", "cpu_total_percent": 12.0, "cpu_samples": 1.0, "rss_total_bytes": 2e8, "rss_samples": 1.0}},
+                    "gpu_devices": {"gpu:0": {"label": "GPU 0", "util_total_percent": 0.0, "memory_used_total_bytes": 2.9e9, "memory_capacity_total_bytes": 51.5e9, "samples": 1.0}},
+                }
+                service.store.upsert_bucket(bucket)
+
+        # The exact per-range request shapes the browser sends: token_resolution=0 below 4h,
+        # 120 at 4h..16h, 300 at 16h+ (debugGraphAgentTokenResolution).
+        for range_seconds, token_resolution in ((1800, 0), (3600, 0), (4 * 3600, 120), (8 * 3600, 120), (24 * 3600, 300)):
+            request = {
+                "history_start": now - range_seconds,
+                "history_end": 0,
+                "history_resolution": 1,
+                "history_max_points": 6000,
+                "include_history": True,
+                "client_id": "range-sweep",
+            }
+            if token_resolution:
+                request["token_resolution"] = token_resolution
+            history = service._encoded_history(request)
+            records = history.get("records", [])
+            assert records, f"range {range_seconds}s returned no records"
+            with_memory = sum(1 for record in records if (record.get("host_metrics") or {}).get("system_memory_count", 0) > 0)
+            with_service = sum(1 for record in records if (record.get("host_metrics") or {}).get("service_load"))
+            with_gpu = sum(1 for record in records if (record.get("host_metrics") or {}).get("gpu_devices"))
+            floor = int(len(records) * 0.9)  # the live edge bucket may be partial
+            assert with_memory >= floor, f"range {range_seconds}s tr={token_resolution}: memory in {with_memory}/{len(records)}"
+            assert with_service >= floor, f"range {range_seconds}s tr={token_resolution}: service_load in {with_service}/{len(records)}"
+            assert with_gpu >= floor, f"range {range_seconds}s tr={token_resolution}: gpu in {with_gpu}/{len(records)}"
+            token_records = sum(1 for record in records if (record.get("tokens_per_agent_total") or 0) > 0 or record.get("agent_token_rates"))
+            if token_resolution:
+                assert token_records == 0, f"range {range_seconds}s: token slimming must still apply (got {token_records})"
+    finally:
+        service.store.close()

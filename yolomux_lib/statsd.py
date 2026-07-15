@@ -2826,8 +2826,13 @@ class PersistentStatsService:
             record["agent_token_rates"] = agent_token_rates_response(
                 bucket.get("agent_token_rates"), bucket.get("cost_summary")
             )
-            record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
             record["cost_summary"] = cost_summary_response(bucket.get("cost_summary"))
+        # Host metrics ride EVERY history record regardless of the agent-token slimming:
+        # token rates and cost have the separate compact token stream at wide ranges, but
+        # Server Load / System memory / GPU have no other delivery path — gating them on
+        # include_agent_tokens blanked those charts at every range that sets a token
+        # resolution (>= 4h).
+        record["host_metrics"] = copy.deepcopy(bucket.get("host_metrics") if isinstance(bucket.get("host_metrics"), dict) else stats_store.empty_host_metrics())
         return record
 
     def _merge_bucket(
@@ -2903,7 +2908,12 @@ class PersistentStatsService:
             # Response-only history aggregation bypasses this branch and uses
             # its incremental dimension accumulator instead.
             self._merge_usage_components(target, [])
-        source_metrics = source.get("host_metrics") if merge_agent_details and isinstance(source.get("host_metrics"), dict) else {}
+        # Host metrics (Server Load / System memory / GPU) merge UNCONDITIONALLY. They are
+        # unrelated to the agent-token payload slimming that merge_agent_details exists for;
+        # gating them on that flag silently stripped every host family from history responses
+        # whenever the client used the separate compact token stream (all ranges >= 4h, which
+        # send token_resolution > 0 -> include_agent_tokens=False) and blanked those charts.
+        source_metrics = source.get("host_metrics") if isinstance(source.get("host_metrics"), dict) else {}
         if source_metrics:
             target_metrics = target.setdefault("host_metrics", stats_store.empty_host_metrics())
             for field in ("cpu_label", "system_memory_label"):
