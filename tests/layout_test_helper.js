@@ -1333,6 +1333,7 @@ globalThis.__layoutTestApi = {
   jsDebugHistoryCoverageResolutionSecondsForTest: jsDebugHistoryCoverageResolutionSeconds,
   jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
   debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
+  purgeCoarsePrefetchBucketsFromActiveDomainForTest: purgeCoarsePrefetchBucketsFromActiveDomain,
   resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
   clearJsDebugGraphDataForTest: clearJsDebugGraphData,
   setDateNowForTest(nowMs) { Date.now = () => Number(nowMs); },

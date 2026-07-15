@@ -6393,7 +6393,28 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     );
   });
 
-  test('YO!stats finer replacement preserves coarse bucket portions outside unaligned coverage', () => {
+  test('YO!stats full-retention prefetch cannot re-coarsen an active fine domain', () => {
+    const api = loadYolomux('?debug=1&sessions=debug', ['1']);
+    const now = Math.floor(Date.now() / 1000 / 60) * 60 * 1000;
+    const nowSec = now / 1000;
+    api.setDebugGraphRangeForTest(30 * 60, {render: false});
+    const domain = {startMs: now - 30 * 60 * 1000, endMs: now, rangeSeconds: 30 * 60};
+    // A fine live tail (1s) with a coarse 600s prefetch bucket landing over the same recent
+    // domain (the "prefetch resolves after the narrow snapshot" race).
+    api.debugGraphApplyServerHistoryForTest({sequence: 3, records: [
+      {start: nowSec - 5, duration: 1, sequence: 1, cpu_total_percent: 20, cpu_count: 1},
+      {start: nowSec - 3, duration: 1, sequence: 2, cpu_total_percent: 20, cpu_count: 1},
+      {start: nowSec - 600, duration: 600, sequence: 3, cpu_total_percent: 20 * 600, cpu_count: 600},
+    ]});
+    const poisoned = api.debugGraphDisplayResolutionMsForTest(domain, 0, now);
+    assert.ok(poisoned >= 600000, 'the coarse prefetch bucket forces the coarse tier before the provenance guard runs');
+    const removed = api.purgeCoarsePrefetchBucketsFromActiveDomainForTest(now);
+    assert.ok(removed >= 1, 'the guard removes the coarse prefetch bucket intersecting the active fine domain');
+    const clean = api.debugGraphDisplayResolutionMsForTest(domain, 0, now);
+    assert.ok(clean < 600000, 'after the guard the active fine domain no longer renders at the coarse prefetch tier');
+  });
+
+  test('YO!stats finer replacement removes every intersecting coarser aggregate', () => {
     const api = loadYolomux('?debug=1&sessions=debug', ['1']);
     const start = Math.floor(Date.now() / 1000 / 10) * 10 - 20;
     api.clearJsDebugEventsForTest();
@@ -6401,8 +6422,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {start, duration: 10, sequence: 4, api_count: 10},
       {start: start + 10, duration: 10, sequence: 5, api_count: 10},
     ]});
-    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start + 5, start + 15, 1), 0, 'unaligned refinement does not delete partially covered coarse buckets');
-    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start, start + 10, 1), 1, 'aligned refinement removes the one fully replaced coarse bucket');
+    // Corrected honesty contract: an unaligned finer replacement must remove BOTH coarse
+    // buckets it straddles, not preserve a partial aggregate that would smear across the
+    // domain (the former behavior was the cache-poisoning path).
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start + 5, start + 15, 1), 2, 'an unaligned refinement removes both intersecting coarse buckets');
+    api.debugGraphApplyServerHistoryForTest({sequence: 5, records: [
+      {start, duration: 10, sequence: 4, api_count: 10},
+      {start: start + 10, duration: 10, sequence: 5, api_count: 10},
+    ]});
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start, start + 10, 1), 1, 'an aligned refinement removes the one replaced coarse bucket and leaves the non-intersecting one');
+    assert.equal(api.debugGraphRemoveCoarserServerBucketsForTest(start - 100, start - 90, 1), 0, 'a refinement disjoint from every coarse bucket removes nothing');
   });
 
   await testAsync('YO!stats ignores an obsolete history response after the requested domain changes', async () => {
