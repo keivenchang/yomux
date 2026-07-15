@@ -14,6 +14,8 @@ from tests.browser_helpers.stats_request_shapes import legacy_reader_history_req
 from tests.browser_helpers.stats_request_shapes import reader_history_request
 from yolomux_lib import statsd
 from yolomux_lib.local_services import stats_store
+from yolomux_lib.local_services.registry import LocalServiceRegistry
+from yolomux_lib.local_services.registry import LocalServiceSpec
 
 
 def _statsd_history_latency_budget_seconds(span_seconds: int, *, cpu_count: int | None = None) -> float:
@@ -3412,8 +3414,6 @@ def test_registry_health_rejects_code_revision_drift(tmp_path, monkeypatch):
     drives the registry's retire-and-respawn path. Missing counts as drift: an old
     daemon that predates the stamp must also be replaced. Respawn is idempotent, so
     this self-heals and can never hang a request (the never-hard-gate rule)."""
-    from yolomux_lib.local_services.registry import LocalServiceRegistry, LocalServiceSpec
-
     spec = LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", statsd.STATSD_PROTOCOL_VERSION, code_revision="currentrev12")
     registry = LocalServiceRegistry(tmp_path, spec, socket_path=tmp_path / "statsd.sock")
 
