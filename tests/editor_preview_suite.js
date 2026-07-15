@@ -6538,6 +6538,16 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       new URL(refineUrl, 'http://localhost').searchParams.get('since'), '0',
       'the first post-switch request is a full since=0 snapshot bounded to the domain, not a cursor delta',
     );
+    // No retry loop: once the fine snapshot satisfies the domain, further passive polls
+    // resume the cursor-delta live tail instead of re-issuing since=0 refinements forever.
+    const settledCount = requests.length;
+    await api.pollJsDebugStatsSampleForTest();
+    for (let index = 0; index < 3; index += 1) await flushAsyncWork();
+    const followUps = requests.slice(settledCount);
+    assert.ok(followUps.length <= 1, `the settled domain does not spin a refetch loop (${followUps.length} follow-up requests)`);
+    for (const url of followUps) {
+      assert.notEqual(new URL(url, 'http://localhost').searchParams.get('since'), '0', 'a satisfied domain resumes cursor-delta polling, not another since=0 refinement');
+    }
   });
 
   await testAsync('YO!stats ignores an obsolete history response after the requested domain changes', async () => {
