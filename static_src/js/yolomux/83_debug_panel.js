@@ -4171,11 +4171,23 @@ function debugGraphBarRectsHtml(series, chartMax, domain, logScale = false) {
     const startMs = debugGraphSeriesTimeMs(series, index);
     const durationMs = Math.max(1000, Number(durations[index] || jsDebugGraphAgentTokenBucketSeconds * 1000));
     const x1 = debugGraphXForTime(startMs, domain);
-    const x2 = debugGraphXForTime(startMs + durationMs, domain);
+    // GUI-only (not a data change): draw each bar across its full DISPLAY slot — from
+    // this grid point to the next — so bars look contiguous instead of thin spikes at
+    // a bucket's active token duration. A ~1px gap keeps adjacent bars visually
+    // distinct. The bucket's real durationMs still drives the tokens/min rate math;
+    // this only affects the rectangle width. The last bar (no next point) falls back
+    // to its own duration.
+    const nextStartMs = debugGraphSeriesTimeMs(series, index + 1);
+    const slotEndMs = Number.isFinite(nextStartMs) && nextStartMs > startMs ? nextStartMs : startMs + durationMs;
+    const x2 = debugGraphXForTime(slotEndMs, domain);
     const slotWidth = Math.max(0, x2 - x1);
-    const gap = jsDebugAgentStatusSeriesKeys.includes(series.key) ? 0 : Math.min(0.15, slotWidth * 0.05);
+    // Agent status is a dense stacked band (10s slots) that reads best fully
+    // contiguous, so keep it gapless; the wider token bars get up to a 1px gap
+    // (always > 0 so adjacent bars stay visually distinct) so they look like
+    // distinct-but-contiguous bars rather than thin spikes.
+    const gap = jsDebugAgentStatusSeriesKeys.includes(series.key) ? 0 : Math.min(1, Math.max(0.1, slotWidth * 0.1));
     const x = x1 + gap / 2;
-    const width = Math.max(0, slotWidth - gap);
+    const width = Math.max(0.5, slotWidth - gap);
     const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true, logScale);
     const stacked = lowerValues ? ` data-js-debug-bar-stacked="${esc(series.key)}"` : '';
     return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(vertical.y.toFixed(2))}" width="${esc(width.toFixed(2))}" height="${esc(vertical.height.toFixed(2))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
