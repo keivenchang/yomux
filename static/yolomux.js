@@ -1865,6 +1865,11 @@ const yolomuxTiming = Object.freeze({
   // Bounded UI wait for the post-confirmation refreshed frame before the explicit
   // `Still loading <target>` Retry/Cancel state (never a silent reveal).
   tmuxWindowSwitchRevealTimeoutMs: uiDelayMs.tmuxWindowSwitchReveal,
+  // The refresh-ack is an accelerator, not a hard gate: a backend that predates the
+  // ack protocol (client/server skew is inherent while static ships from disk) still
+  // honors the refresh and redraws. If no ack lands this long after the CONFIRMED
+  // readback, the barrier self-promotes and reveals on the painted refreshed frame.
+  tmuxWindowSwitchAckFallbackMs: 1000,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
@@ -1893,6 +1898,7 @@ const {
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
   tmuxWindowSwitchRevealTimeoutMs,
+  tmuxWindowSwitchAckFallbackMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,
@@ -68880,7 +68886,24 @@ function beginTmuxWindowSwitchPaintBarrier(session, options = {}) {
     return clearTerminalConnectionState(session, {sequence: options.sequence});
   }
   sendTmuxWindowSwitchRefresh(session, loading);
+  armTmuxWindowSwitchAckFallback(session, Number(loading.sequence));
   return true;
+}
+
+// The refresh-ack accelerates the reveal but must never hard-gate it: a backend that
+// predates the ack protocol still honors the refresh and redraws (client/server skew is
+// inherent while the static bundle ships from disk). If the ack has not landed shortly
+// after the AUTHORITATIVELY CONFIRMED readback, self-promote so the remaining barrier
+// (painted refreshed binary frame) can complete instead of stalling every switch.
+function armTmuxWindowSwitchAckFallback(session, sequence) {
+  if (typeof setTimeout !== 'function') return;
+  setTimeout(() => promoteTmuxWindowSwitchAckFallback(session, sequence), tmuxWindowSwitchAckFallbackMs);
+}
+
+function promoteTmuxWindowSwitchAckFallback(session, sequence) {
+  const loading = tmuxWindowSwitchLoading(session);
+  if (!loading || loading.phase !== 'confirmed' || Number(loading.sequence) !== Number(sequence)) return false;
+  return Boolean(setTmuxWindowSwitchLoadingPhase(session, 'refresh-acknowledged', {sequence: Number(sequence)}));
 }
 
 function sendTmuxWindowSwitchRefresh(session, loading = tmuxWindowSwitchLoading(session)) {

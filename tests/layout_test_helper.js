@@ -1749,6 +1749,7 @@ globalThis.__layoutTestApi = {
   stallTmuxWindowSwitchLoadingForTest: stallTmuxWindowSwitchLoading,
   retryTmuxWindowSwitchLoadingForTest: retryTmuxWindowSwitchLoading,
   cancelTmuxWindowSwitchLoadingForTest: cancelTmuxWindowSwitchLoading,
+  promoteTmuxWindowSwitchAckFallbackForTest: promoteTmuxWindowSwitchAckFallback,
   expireTmuxWindowDirectTargetGuardForTest(session) {
     const record = tmuxWindowNavigationRecord(session);
     if (record?.directTargetGuard) record.directTargetGuard.guardUntilMs = 0;

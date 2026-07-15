@@ -33,6 +33,11 @@ const yolomuxTiming = Object.freeze({
   // Bounded UI wait for the post-confirmation refreshed frame before the explicit
   // `Still loading <target>` Retry/Cancel state (never a silent reveal).
   tmuxWindowSwitchRevealTimeoutMs: uiDelayMs.tmuxWindowSwitchReveal,
+  // The refresh-ack is an accelerator, not a hard gate: a backend that predates the
+  // ack protocol (client/server skew is inherent while static ships from disk) still
+  // honors the refresh and redraws. If no ack lands this long after the CONFIRMED
+  // readback, the barrier self-promotes and reveals on the painted refreshed frame.
+  tmuxWindowSwitchAckFallbackMs: 1000,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
@@ -61,6 +66,7 @@ const {
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
   tmuxWindowSwitchRevealTimeoutMs,
+  tmuxWindowSwitchAckFallbackMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
   commandPaletteMissingPathRetryMs,

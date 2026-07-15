@@ -3309,6 +3309,64 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     }
   });
 
+  await testAsync('tmux window switch reveals through the ack FALLBACK when the backend never acknowledges (client/server skew)', async () => {
+    // Regression for the live "Still loading 1:bash..." hang (screenshot 014): the fresh
+    // bundle ships from disk while the running web server may predate the refresh-ack
+    // protocol. The ack is an accelerator, not a hard gate — after the CONFIRMED readback
+    // the barrier self-promotes on the fallback and reveals on the painted refreshed frame.
+    const api = loadYolomux('', ['meta-preview']);
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    api.setTranscriptInfoForTest('meta-preview', {
+      agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
+      selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
+      panes: [
+        {target: 'meta-preview:0.0', window: '0', pane: '0', window_active: true, active: true, process_label: 'codex', command: 'codex', current_path: '/repo/codex'},
+        {target: 'meta-preview:1.0', window: '1', pane: '0', window_active: false, active: true, process_label: 'claude', command: 'claude', current_path: '/repo/claude'},
+      ],
+    });
+    const frames = [];
+    const writes = [];
+    let writeCallback = null;
+    const term = {focus() {}, write(data, callback) { writes.push(typeof data === 'string' ? data : new TextDecoder().decode(data)); writeCallback = callback || null; }};
+    const socket = {readyState: WebSocket.OPEN, send(message) { frames.push(JSON.parse(message)); }};
+    api.registerTerminalForTest('meta-preview', term, socket);
+    api.setFetchForTest(url => {
+      if (String(url).startsWith('/api/tmux-window')) return Promise.resolve(jsonResponse({ok: true}));
+      if (String(url).startsWith('/api/tmux-signals')) {
+        return Promise.resolve(jsonResponse({ok: true, windows: [
+          {session: 'meta-preview', window_index: '0', active: false, panes: [{target: 'meta-preview:0.0', pane_id: 'meta-preview:0.0', pane_index: '0', window_index: '0', active: true, current_path: '/repo/codex', current_command: 'codex'}]},
+          {session: 'meta-preview', window_index: '1', active: true, panes: [{target: 'meta-preview:1.0', pane_id: 'meta-preview:1.0', pane_index: '0', window_index: '1', active: true, current_path: '/repo/claude', current_command: 'claude'}]},
+        ]}));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    api.tmuxWindowForTest('meta-preview', {windowIndex: '1'}, 'tmux sub-window 1:claude');
+    for (let i = 0; i < 12; i += 1) await flushAsyncWork();
+    let record = api.tmuxWindowNavigationRecordForTest('meta-preview');
+    assert.equal(record.switchLoading?.phase, 'confirmed', 'the readback confirms the switch (legacy backend: no ack will ever arrive)');
+    const refresh = frames.find(frame => frame.type === 'refresh' && frame.txn !== undefined);
+    assert.ok(refresh, 'the refresh request is still sent (a legacy backend honors it silently)');
+
+    // A stale-sequence fallback firing (an older transaction's timer) must do nothing.
+    assert.equal(api.promoteTmuxWindowSwitchAckFallbackForTest('meta-preview', refresh.txn - 1), false, 'an old transaction fallback timer cannot advance the newest barrier');
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading?.phase, 'confirmed', 'phase unchanged by the stale fallback');
+
+    // The armed fallback fires with the current sequence: promote and reveal on the painted frame.
+    assert.equal(api.promoteTmuxWindowSwitchAckFallbackForTest('meta-preview', refresh.txn), true, 'the ack fallback promotes a still-confirmed barrier');
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading?.phase, 'refresh-acknowledged', 'the barrier advances without any server acknowledgement');
+    writeCallback = null;
+    api.processTerminalSocketFrameForTest('meta-preview', new TextEncoder().encode('LEGACY-REFRESHED-BYTES').buffer);
+    assert.equal(typeof writeCallback, 'function', 'the revealing binary frame still uses the xterm write-completion callback');
+    writeCallback();
+    assert.equal(api.tmuxWindowNavigationRecordForTest('meta-preview').switchLoading, null, 'the painted transaction reveals and clears the loading record');
+
+    // A late duplicate fallback for the finished transaction stays a no-op.
+    assert.equal(api.promoteTmuxWindowSwitchAckFallbackForTest('meta-preview', refresh.txn), false, 'a late fallback after reveal is inert');
+    assert.ok(/sendTmuxWindowSwitchRefresh\(session, loading\);\s*\n\s*armTmuxWindowSwitchAckFallback\(session, Number\(loading\.sequence\)\)/.test(source), 'the fallback timer arms exactly where the barrier sends its refresh');
+    assert.ok(/tmuxWindowSwitchAckFallbackMs/.test(source), 'the fallback delay is a named shared timing constant');
+  });
+
   test('attention notifications use shared routing and policy', () => {
     loadYolomux();
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
