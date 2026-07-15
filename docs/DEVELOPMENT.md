@@ -226,7 +226,7 @@ Use `boot.sh` from the checkout you want to serve. `boot.sh` and `yolo-dev-start
 ./boot.sh
 ```
 
-The script accepts any valid TCP port. It defaults to HTTPS `8880` on macOS and `7770` on Linux and still passes the compatible `--self-signed` spelling plus `--dang`; the CLI itself now defaults to the same self-signed HTTPS behavior. `YOLOMUX_PORT` selects an arbitrary primary port and keeps the normal non-dev launch behavior. The macOS dev worktrees conventionally use `8001` through `8003`; the Linux fleet conventionally uses `7771` through `7773`. For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use `--dev` automatically:
+The script accepts any valid TCP port. It defaults to HTTPS `7770` on macOS and Linux and still passes the compatible `--self-signed` spelling plus `--dang`; the CLI itself now defaults to the same self-signed HTTPS behavior. `YOLOMUX_PORT` selects an arbitrary primary port and keeps the normal non-dev launch behavior. The standard Linux/macOS fleet uses `7771` through `7773` for dev worktrees, so Linux-to-Mac forwarding can stay same-port (`7770->7770`, `7771->7771`, etc.). For a dev worktree, run the script from that checkout and pass the port you chose; non-primary ports use `--dev` automatically:
 
 ```bash
 (cd ~/path/to/dev-checkout && ./boot.sh <dev-port>)
@@ -234,7 +234,7 @@ The script accepts any valid TCP port. It defaults to HTTPS `8880` on macOS and 
 
 Override with `YOLOMUX_PORT`, `YOLOMUX_HOST`, `YOLOMUX_LOG_DIR`, `YOLOMUX_START_LOAD_WAIT_SECONDS`, `--port`, `--dev`, or `--no-dev` when testing a non-standard instance. `YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT` pins background ownership to one preferred server while retaining automatic follower failover; `boot.sh` defaults it to its selected primary port. Use `./boot.sh --print-command <dev-port>` to inspect the launch command without restarting anything.
 
-For the standard multi-worktree stack, `yolo-dev-start` defaults the preferred server to `8882` on macOS when that worktree exists (`8880` otherwise), and to `7770` on Linux. Override it with `YOLOMUX_PRIMARY_PORT`. The preferred server starts first; each port must then pass readiness, exactly-one-process, three-sample ownership, empty-refresh-queue, and system-load gates before the next port starts. Discovery checks use the read-only `/api/tmux-session-exists` roster endpoint and must never force a full transcript/metadata rebuild. Every checkout must advertise the same `BACKGROUND_OWNER_PROTOCOL_VERSION`; a stale worktree causes a preflight refusal before tmux, launchd, listeners, or ownership are changed.
+For the standard multi-worktree stack, `yolo-dev-start` defaults the preferred server to `7772` on macOS when the second dev worktree exists (`7770` otherwise), and to `7770` on Linux. Override it with `YOLOMUX_PRIMARY_PORT`. The preferred server starts first; each port must then pass readiness, exactly-one-process, three-sample ownership, empty-refresh-queue, and system-load gates before the next port starts. Discovery checks use the read-only `/api/tmux-session-exists` roster endpoint and must never force a full transcript/metadata rebuild. Every checkout must advertise the same `BACKGROUND_OWNER_PROTOCOL_VERSION`; a stale worktree causes a preflight refusal before tmux, launchd, listeners, or ownership are changed.
 
 To restart a dev worktree in no-auth test mode:
 

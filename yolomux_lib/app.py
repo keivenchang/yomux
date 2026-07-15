@@ -11106,74 +11106,13 @@ class TmuxWebtermApp:
         if result.returncode != 0:
             diagnostic = (result.stderr or result.stdout or "tmux select-window failed").strip()
             return tmux_command_failure_payload(session, diagnostic, window=window_text), HTTPStatus.INTERNAL_SERVER_ERROR
-        self.switch_attached_tmux_clients(session, target)
+        # select-window is the WHOLE job: it changes the session's current window for every
+        # attached client synchronously (that is what a tmux session is). The retired
+        # per-client `switch-client` fan-out here was a no-op by construction (it listed only
+        # same-session clients, which select-window had already switched), serially delayed
+        # every switch response by up to 1s per stale client, and poked the user's own
+        # hand-attached terminals for nothing.
         return {"session": session, "window": window_text, "ok": True}, HTTPStatus.OK
-
-    def switch_attached_tmux_clients(self, session: str, target: str) -> int:
-        started = time.monotonic()
-        client_names = [name for name in (str(row.get("name") or "").strip() for row in tmux_session_client_rows(session)) if name]
-        if not client_names:
-            return 0
-
-        outcomes: list[tuple[str, bool, float, str] | None] = [None] * len(client_names)
-
-        def switch_one(index: int, client_name: str) -> None:
-            client_started = time.monotonic()
-            result = tmux(["switch-client", "-c", client_name, "-t", target], timeout=1.0)
-            elapsed = time.monotonic() - client_started
-            if result.returncode == 0:
-                outcomes[index] = (client_name, True, elapsed, "")
-            else:
-                outcomes[index] = (client_name, False, elapsed, cmd_error(result, "tmux switch-client failed"))
-
-        # Attached clients are independent: switch them concurrently in bounded core-derived
-        # waves so one stale client consumes only its own 1s timeout budget instead of serially
-        # spending it in front of every other client. Plain named threads through the shared
-        # start_thread_with_rollback owner (project thread discipline: no executor pools in the
-        # main process); a thread that fails to start falls back to switching inline. Results
-        # stay ordered/deterministic through the indexed outcomes list.
-        if len(client_names) == 1:
-            switch_one(0, client_names[0])
-        else:
-            wave_size = min(len(client_names), max(2, os.cpu_count() or 2))
-            for wave_start in range(0, len(client_names), wave_size):
-                wave = []
-                for index in range(wave_start, min(wave_start + wave_size, len(client_names))):
-                    worker = threading.Thread(
-                        target=switch_one,
-                        args=(index, client_names[index]),
-                        name=f"tmux-switch-{index}",
-                        daemon=True,
-                    )
-                    try:
-                        common.start_thread_with_rollback(worker, lambda index=index: switch_one(index, client_names[index]))
-                    except RuntimeError:
-                        pass  # rollback already switched this client inline
-                    else:
-                        wave.append(worker)
-                for worker in wave:
-                    # The tmux call itself is bounded at 1s; 2s covers scheduling slack.
-                    worker.join(timeout=2.0)
-        switched = 0
-        slowest_name, slowest_elapsed = "", 0.0
-        for index, outcome in enumerate(outcomes):
-            if outcome is None:
-                logger.debug("tmux switch-client for %s -> %s did not finish within the join bound", client_names[index], target)
-                continue
-            client_name, ok, elapsed, error = outcome
-            if elapsed > slowest_elapsed:
-                slowest_name, slowest_elapsed = client_name, elapsed
-            if ok:
-                switched += 1
-            else:
-                logger.debug("tmux switch-client failed for %s -> %s after %.0fms: %s", client_name, target, elapsed * 1000, error)
-        total_elapsed = time.monotonic() - started
-        log = logger.warning if total_elapsed > 1.0 else logger.debug
-        log(
-            "tmux switch-clients %s: %d/%d clients in %.0fms (slowest %s %.0fms)",
-            target, switched, len(client_names), total_elapsed * 1000, slowest_name, slowest_elapsed * 1000,
-        )
-        return switched
 
     def stop_auto_approve_worker(self, session: str) -> None:
         approval_client = getattr(self, "approval_client", None)

@@ -157,11 +157,11 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-  subgraph p1["yolomux.py :8880"]
+  subgraph p1["yolomux.py :7770"]
     app1["web app"]
     sock1["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
   end
-  subgraph p2["yolomux.py :7770"]
+  subgraph p2["yolomux.py :7771"]
     app2["web app"]
     sock2["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
   end
@@ -237,7 +237,7 @@ flowchart TB
 
 | Flow | Concrete mechanism |
 | --- | --- |
-| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener—`:8880` in the local macOS launch agent, or the port passed to `yolomux.py` (the setup example uses `:9998`). |
+| Browser → YOLOmux | HTTPS API/SSE and RFC 6455 WebSocket on the configured listener—`:7770` in the standard local Linux/macOS launch, or the port passed to `yolomux.py` (the setup example uses `:9998`). |
 | Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. `YOLOMUX_TMUX_SOCKET` adds `tmux -S <socket>` when a non-default tmux socket is required. |
 | Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
 | Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
