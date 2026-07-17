@@ -208,9 +208,11 @@ class SearchIndexerClient:
     """Starts or reaches the one persistent indexer without exposing SQLite writes."""
 
     def __init__(self, socket_path: Path | None = None):
-        self.socket_path = safe_socket_path(socket_path or default_socket_path(), prefix="yolomux-indexd")
+        requested_socket_path = Path(socket_path or default_socket_path())
+        requested_service_dir = Path(socket_path).parent if socket_path is not None else file_index.INDEX_DIR
+        self.socket_path = safe_socket_path(requested_socket_path, prefix="yolomux-indexd")
         self.registry = LocalServiceRegistry(
-            self.socket_path.parent,
+            requested_service_dir,
             LocalServiceSpec(
                 name="indexd",
                 module="yolomux_lib.search_indexer",
@@ -219,6 +221,7 @@ class SearchIndexerClient:
                 idle_seconds=INDEXER_DEFAULT_IDLE_SECONDS,
             ),
             socket_path=self.socket_path,
+            service_dir=requested_service_dir,
         )
 
     def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:

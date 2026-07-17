@@ -25,6 +25,7 @@ from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request
 from .rpc import safe_socket_path
+from .runtime import redact_local_service_text
 
 
 LOCAL_SERVICE_REGISTRY_VERSION = 1
@@ -37,6 +38,8 @@ LOCAL_SERVICE_BACKOFF_SECONDS = 0.25
 LOCAL_SERVICE_MAX_BACKOFF_SECONDS = 8.0
 LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
+LOCAL_SERVICE_START_EXIT_LIMIT = 3
+LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
 
 
 def parse_ps_cpu_seconds(text: str) -> float | None:
@@ -77,6 +80,7 @@ class LocalServiceSpec:
     # daemons surviving restarts while serving old code); a protocol bump already forces
     # respawn, but most code changes do not bump the protocol.
     code_revision: str = ""
+    build_revision: int = 0
 
 
 class LocalServiceRegistry:
@@ -88,11 +92,13 @@ class LocalServiceRegistry:
         spec: LocalServiceSpec,
         *,
         socket_path: Path | None = None,
+        service_dir: Path | None = None,
         popen: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
         clock: Callable[[], float] = monotonic_clock,
         sleep: Callable[[float], None] = sleep_clock,
     ):
         self.state_dir = Path(state_dir).expanduser()
+        self._service_dir = Path(service_dir).expanduser() if service_dir is not None else None
         self.spec = spec
         self._socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{spec.name}") if socket_path is not None else None
         self.popen = popen
@@ -105,10 +111,14 @@ class LocalServiceRegistry:
         self._healthy_until = 0.0
         self._last_resource_sample: tuple[float, float] | None = None
         self._upgrade_required: dict[str, Any] | None = None
+        self._start_exit_count = 0
+        self._last_exit_code: int | None = None
+        self._failure_reason = ""
+        self._terminal_failure = False
 
     @property
     def service_dir(self) -> Path:
-        return self.state_dir / "services"
+        return self._service_dir or self.state_dir / "services"
 
     @property
     def socket_path(self) -> Path:
@@ -125,6 +135,10 @@ class LocalServiceRegistry:
         # A long socket path can fall back under /tmp. Keep durable locks in
         # the configured state directory so service startup never chmods /tmp.
         return self.service_dir / f"{self.spec.name}.service.lock"
+
+    @property
+    def stderr_path(self) -> Path:
+        return self.socket_path.with_suffix(".stderr.log")
 
     def _read_record(self) -> dict[str, Any]:
         try:
@@ -161,8 +175,11 @@ class LocalServiceRegistry:
                 "pid": service_pid,
             }
             return
+        service_build = int(response.get("build") or 0)
         compatible = service_version == self.spec.protocol_version and (
-            not self.spec.code_revision or str(response.get("code_revision") or "") == self.spec.code_revision
+            service_build > self.spec.build_revision
+            or not self.spec.code_revision
+            or str(response.get("code_revision") or "") == self.spec.code_revision
         )
         older_upgrade = (
             service_version > 0
@@ -228,7 +245,11 @@ class LocalServiceRegistry:
         if healthy and self.spec.code_revision:
             # Self-heal on code drift: an old daemon that omits the stamp counts as a
             # mismatch too (respawning is idempotent and safe; never a hang).
-            healthy = str(response.get("code_revision") or "") == self.spec.code_revision
+            service_build = int(response.get("build") or 0)
+            healthy = (
+                service_build > self.spec.build_revision
+                or str(response.get("code_revision") or "") == self.spec.code_revision
+            )
         if healthy:
             self._upgrade_required = None
             self.note_rpc_success()
@@ -258,10 +279,58 @@ class LocalServiceRegistry:
             "updated_at": wall_clock(),
         }
 
-    def _mark_failure(self) -> None:
+    def _mark_failure(
+        self,
+        reason: str = "",
+        *,
+        exit_code: int | None = None,
+        exited_before_ready: bool = False,
+    ) -> None:
         self.failures += 1
+        self._last_exit_code = exit_code
+        self._failure_reason = redact_local_service_text(reason)
+        if exited_before_ready:
+            self._start_exit_count += 1
+            self._terminal_failure = self._start_exit_count >= LOCAL_SERVICE_START_EXIT_LIMIT
         delay = min(LOCAL_SERVICE_MAX_BACKOFF_SECONDS, LOCAL_SERVICE_BACKOFF_SECONDS * (2 ** max(0, self.failures - 1)))
         self.next_start_at = self.clock() + delay
+
+    def _stderr_tail(self) -> str:
+        try:
+            with self.stderr_path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                handle.seek(max(0, size - LOCAL_SERVICE_STDERR_TAIL_BYTES))
+                text = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return redact_local_service_text(lines[-1] if lines else "")
+
+    def _spawn_failure_reason(self, exit_code: int | None) -> str:
+        summary = f"{self.spec.name} exited ({exit_code if exit_code is not None else 'unknown'})"
+        tail = self._stderr_tail()
+        return f"{summary}: {tail}" if tail else summary
+
+    def failure_response(self) -> dict[str, Any]:
+        reason = self._failure_reason or f"{self.spec.name} unavailable"
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "reason": reason,
+            "terminal": self._terminal_failure,
+            "exit_code": self._last_exit_code,
+        }
+
+    def retry(self) -> None:
+        """Clear a latched startup failure for one explicit operator retry."""
+        with self.lock:
+            self.failures = 0
+            self.next_start_at = 0.0
+            self._start_exit_count = 0
+            self._last_exit_code = None
+            self._failure_reason = ""
+            self._terminal_failure = False
 
     def _spawn(self) -> subprocess.Popen[Any] | None:
         idle_seconds = self.spec.idle_seconds
@@ -282,15 +351,18 @@ class LocalServiceRegistry:
             str(idle_seconds),
             *self.spec.extra_args,
         ]
+        self.stderr_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            return self.popen(
-                args,
-                close_fds=True,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
+            with self.stderr_path.open("wb") as output:
+                return self.popen(
+                    args,
+                    close_fds=True,
+                    start_new_session=True,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+        except OSError as error:
+            self._failure_reason = redact_local_service_text(error)
             return None
 
     def ensure_started(self) -> bool:
@@ -303,11 +375,15 @@ class LocalServiceRegistry:
             return True
         if self._upgrade_required is not None:
             return False
+        if self._terminal_failure:
+            return False
         with self.lock:
             if self.healthy():
                 self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
                 return True
             if self._upgrade_required is not None:
+                return False
+            if self._terminal_failure:
                 return False
             if self.clock() < self.next_start_at:
                 return False
@@ -321,7 +397,7 @@ class LocalServiceRegistry:
                 self._remove_stale_record()
                 process = self._spawn()
                 if process is None:
-                    self._mark_failure()
+                    self._mark_failure(self._failure_reason or f"{self.spec.name} spawn failed")
                     return False
                 self.process = process
                 deadline = self.clock() + LOCAL_SERVICE_START_TIMEOUT_SECONDS
@@ -331,11 +407,22 @@ class LocalServiceRegistry:
                         self._write_record(self._record_from_status(status))
                         self.failures = 0
                         self.next_start_at = 0.0
+                        self._start_exit_count = 0
+                        self._last_exit_code = None
+                        self._failure_reason = ""
+                        self._terminal_failure = False
                         return True
-                    if process.poll() is not None:
+                    exit_code = process.poll()
+                    if exit_code is not None:
                         break
                     self.sleep(0.03)
-                self._mark_failure()
+                exit_code = process.poll()
+                reason = self._spawn_failure_reason(exit_code)
+                self._mark_failure(
+                    reason,
+                    exit_code=exit_code,
+                    exited_before_ready=exit_code is not None,
+                )
         return False
 
     def acquire_lease(self) -> dict[str, Any]:
@@ -377,6 +464,10 @@ class LocalServiceRegistry:
             "record": self._read_record(),
             "status": status,
             "upgrade_required": dict(self._upgrade_required or {}),
+            "failure_reason": self._failure_reason,
+            "terminal_failure": self._terminal_failure,
+            "start_exit_count": self._start_exit_count,
+            "last_exit_code": self._last_exit_code,
         }
 
     def resources(self, pid: int) -> dict[str, float | int | None]:

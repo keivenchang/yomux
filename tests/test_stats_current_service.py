@@ -240,6 +240,8 @@ def test_startup_migrates_before_writer_open_preserves_legacy_and_reports_bounde
         "usage_atoms": 0,
         "unavailable_spans": 0,
         "issues": 0,
+        "issue_kinds": (),
+        "skipped_history": False,
     }
     assert json.loads(legacy.read_text(encoding="utf-8")) == {}
     with storage.Store.open_reader(database) as reader:
@@ -723,16 +725,12 @@ def test_cache_hit_does_zero_storage_build_report_or_encoding_work(tmp_path, mon
     service._close()
 
 
-def test_private_browser_snapshots_are_preencoded_and_never_cross_clients(tmp_path):
+def test_shared_browser_snapshots_are_preencoded_and_identical_for_all_clients(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
     )
     client_a = service_module._private_id("browser-a", "test.client")
     client_b = service_module._private_id("browser-b", "test.client")
-    # Real clients record demand via append/snapshot; this fixture builds the
-    # generation directly, so record it explicitly (private views are demand-gated).
-    service._record_private_demand(client_a)
-    service._record_private_demand(client_b)
     observations = (
         storage.Observation("a", "browser", client_a, 99_999, "epoch:a", 1, {
             "kind": "api", "latency_ms": 15,
@@ -772,14 +770,18 @@ def test_private_browser_snapshots_are_preencoded_and_never_cross_clients(tmp_pa
             if name.startswith("browser_")
         }
 
-    assert browser_series("browser-a") == {"browser_api_per_second", "browser_latency_ms"}
-    assert browser_series("browser-b") == {"browser_bandwidth_bytes_per_second", "browser_sse_per_second"}
-    assert browser_series("browser-unknown") == set()
+    expected = {
+        "browser_api_per_second", "browser_latency_ms",
+        "browser_bandwidth_bytes_per_second", "browser_sse_per_second",
+    }
+    assert browser_series("browser-a") == expected
+    assert browser_series("browser-b") == expected
+    assert browser_series("browser-unknown") == expected
     assert encodes == built_encodes
-    assert built_encodes == 26 * 3
+    assert built_encodes == 26
 
 
-def test_current_browser_batch_ack_materializes_all_private_series_for_only_its_client(tmp_path):
+def test_current_browser_batch_ack_materializes_shared_all_client_series(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
         clock=lambda: 100_000.0,
@@ -820,8 +822,6 @@ def test_current_browser_batch_ack_materializes_all_private_series_for_only_its_
             generated_at=100_000, observed_until=100_000,
         )
     service.writer = None
-    private_id = service_module._private_id(raw_client, "test.client")
-    service._record_private_demand(private_id)
     assert service._publish(generation, service._encode_generation(generation)) is True
 
     def browser_series(client_id):
@@ -840,18 +840,14 @@ def test_current_browser_batch_ack_materializes_all_private_series_for_only_its_
         "browser_api_per_second", "browser_sse_per_second", "browser_latency_ms",
         "browser_bandwidth_bytes_per_second", "browser_disconnected_ms",
     }
-    assert browser_series("different-browser") == set()
+    assert browser_series("different-browser") == browser_series(raw_client)
 
 
-def test_private_browser_delta_keys_and_cache_status_are_bounded(tmp_path):
+def test_shared_browser_delta_and_cache_have_no_per_client_keys(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
     )
     service._view_demanded = lambda *args: True  # pins the fully demanded (all-views) contract
-    for index in range(materializer.MAX_PRIVATE_BROWSER_CLIENTS + 1):
-        # demand-gated: fixtures bypass append/snapshot, so record demand directly
-        service._record_private_demand(service_module._private_id(f"client-{index}", "test.client"))
-
     def generation(cache_generation, extra=()):
         observations = tuple(
             storage.Observation(
@@ -872,7 +868,7 @@ def test_private_browser_delta_keys_and_cache_status_are_bounded(tmp_path):
         )
 
     first = generation(10)
-    retained = first.private_source_ids[0]
+    retained = service_module._private_id("client-0", "test.client")
     second = generation(20, (
         storage.Observation(
             "retained-latency", "browser", retained, 100_001, "epoch-retained", 1,
@@ -882,13 +878,8 @@ def test_private_browser_delta_keys_and_cache_status_are_bounded(tmp_path):
     assert service._publish(first, service._encode_generation(first)) is True
     assert service._publish(second, service._encode_generation(second)) is True
 
-    retained_index = next(
-        index
-        for index in range(materializer.MAX_PRIVATE_BROWSER_CLIENTS + 1)
-        if service_module._private_id(f"client-{index}", "test.client") == retained
-    )
     request = delta_request(after_cache_generation=10)
-    request["client_id"] = f"client-{retained_index}"
+    request["client_id"] = "client-0"
     _metadata, binary = service.handle_with_binary(request)
     wire = protocol.validate_delta(json.loads(binary))
     assert any("browser_latency_ms" in bucket["series"] for bucket in wire["buckets"])
@@ -897,20 +888,16 @@ def test_private_browser_delta_keys_and_cache_status_are_bounded(tmp_path):
     other["client_id"] = "unknown-client"
     _metadata, binary = service.handle_with_binary(other)
     wire = protocol.validate_delta(json.loads(binary))
-    assert not any(
-        name.startswith("browser_")
-        for bucket in wire["buckets"]
-        for name in bucket["series"]
-    )
+    assert any("browser_latency_ms" in bucket["series"] for bucket in wire["buckets"])
 
     status = service._status()
-    assert status["cache"]["private_clients"] == materializer.MAX_PRIVATE_BROWSER_CLIENTS
+    assert status["cache"]["private_clients"] == 0
     assert status["cache"]["max_private_clients"] == materializer.MAX_PRIVATE_BROWSER_CLIENTS
-    assert status["cache"]["private_entries"] > 0
-    assert status["cache"]["private_bytes"] > 0
+    assert status["cache"]["private_entries"] == 0
+    assert status["cache"]["private_bytes"] == 0
 
 
-def test_private_browser_overlay_eviction_removes_every_old_cache_key(tmp_path):
+def test_shared_browser_updates_keep_only_public_cache_keys(tmp_path):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
     )
@@ -918,9 +905,6 @@ def test_private_browser_overlay_eviction_removes_every_old_cache_key(tmp_path):
         service_module._private_id(f"client-{index}", "test.client")
         for index in range(materializer.MAX_PRIVATE_BROWSER_CLIENTS + 1)
     )
-    for private_id in private_ids:  # demand-gated: fixtures bypass append/snapshot
-        service._record_private_demand(private_id)
-
     def generation(source_generation, cache_generation, selected):
         observations = tuple(
             storage.Observation(
@@ -945,27 +929,18 @@ def test_private_browser_overlay_eviction_removes_every_old_cache_key(tmp_path):
     second_indexes = tuple(range(1, materializer.MAX_PRIVATE_BROWSER_CLIENTS + 1))
     first = generation(1, 10, first_indexes)
     second = generation(2, 20, second_indexes)
-    evicted = private_ids[0]
-    retained = frozenset(private_ids[index] for index in second_indexes)
-
     assert service._publish(first, service._encode_generation(first)) is True
     assert service._publish(second, service._encode_generation(second)) is True
-    assert set(second.private_source_ids) == retained
-    assert evicted not in {key[2] for key in service._cache.entries}
-    assert evicted not in {key[2] for key in service._delta_entries}
-    assert evicted not in {key[2] for key in service._delta_revisions}
-    assert {
-        key[2] for key in service._cache.entries if key[2] is not None
-    } == retained
-    assert sum(key[2] is not None for key in service._cache.entries) == (
-        service._status()["warm"]["total"] * materializer.MAX_PRIVATE_BROWSER_CLIENTS
-    )
+    assert second.private_source_ids == ()
+    assert {key[2] for key in service._cache.entries} == {None}
+    assert {key[2] for key in service._delta_entries} <= {None}
+    assert {key[2] for key in service._delta_revisions} <= {None}
 
     request = snapshot_request()
     request["client_id"] = "client-0"
     _metadata, binary = service.handle_with_binary(request)
     wire = protocol.validate_snapshot(json.loads(binary))
-    assert not any(
+    assert any(
         name.startswith("browser_")
         for bucket in wire["buckets"]
         for name in bucket["series"]
@@ -1913,7 +1888,7 @@ def test_cli_rejects_noncanonical_database_filename(tmp_path):
     assert raised.value.code == 2
 
 
-def test_private_views_are_demand_gated_and_expire_after_grace(tmp_path):
+def test_browser_views_remain_shared_regardless_of_private_demand(tmp_path):
     monotonic_now = [1_000.0]
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
@@ -1931,17 +1906,13 @@ def test_private_views_are_demand_gated_and_expire_after_grace(tmp_path):
         source_generation=1, cache_generation=10,
         generated_at=100_000, observed_until=100_000,
     )
-    assert set(generation.private_source_ids) == {active, stale}
+    assert generation.private_source_ids == ()
 
-    # Only the demanded client gets private entries; the stale one (with browser
-    # observations still inside retention) no longer multiplies every encode.
     service._record_private_demand(active)
-    monotonic_now[0] += service_module.PRIVATE_DEMAND_GRACE_SECONDS + 1  # stale never asked
-    service._record_private_demand(active)  # refresh within grace
+    monotonic_now[0] += service_module.PRIVATE_DEMAND_GRACE_SECONDS + 1
     clients = {key[2] for key in service._encode_generation(generation)}
-    assert clients == {None, active}
+    assert clients == {None}
 
-    # After the grace passes with no request/append, the private views stop too.
     monotonic_now[0] += service_module.PRIVATE_DEMAND_GRACE_SECONDS + 1
     assert {key[2] for key in service._encode_generation(generation)} == {None}
 
@@ -2206,10 +2177,7 @@ def test_wire_bucket_fragments_are_reused_for_unchanged_bucket_objects(tmp_path,
     assert json.dumps(second, sort_keys=True) == json.dumps([real_build(bucket) for bucket in populated], sort_keys=True)
 
 
-def test_public_plus_four_private_fixture_has_exact_encode_work_counts(tmp_path):
-    """Deterministic work-count comparison fixture (DOIT benchmark evidence):
-    one public view set plus four demanded private clients encodes exactly
-    (slices + AUTO aliases) x (1 + 4) entries — no hidden multipliers."""
+def test_four_browser_sources_still_encode_one_shared_view_set(tmp_path):
     monotonic_now = [1_000.0]
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
@@ -2238,9 +2206,9 @@ def test_public_plus_four_private_fixture_has_exact_encode_work_counts(tmp_path)
         for range_seconds in stats_resolution.RANGE_SECONDS
     )
     auto_aliases_per_client = len(stats_resolution.RANGE_SECONDS)
-    expected_entries = (views_per_client + auto_aliases_per_client) * (1 + len(clients))
-    assert accounting["slices"] == views_per_client * (1 + len(clients))
-    assert accounting["alias_reuses"] == auto_aliases_per_client * (1 + len(clients))
+    expected_entries = views_per_client + auto_aliases_per_client
+    assert accounting["slices"] == views_per_client
+    assert accounting["alias_reuses"] == auto_aliases_per_client
     assert accounting["entries"] == expected_entries
     assert len(entries) == expected_entries
-    assert {key[2] for key in entries} == {None, *private_ids}
+    assert {key[2] for key in entries} == {None}

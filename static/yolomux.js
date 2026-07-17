@@ -42459,7 +42459,7 @@ function bindPreferencesPanel(panel) {
       if (!capabilitiesPromise) {
         onState('loading');
         capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities').catch(error => {
-          onState(error.pending === true ? 'pending' : 'error');
+          onState(error.pending === true ? 'pending' : 'error', error);
           throw error;
         });
       }
@@ -42476,7 +42476,7 @@ function bindPreferencesPanel(panel) {
           ['since_generation', request.since_generation],
         ]), true);
       } catch (error) {
-        onState(error.pending === true ? 'pending' : 'error');
+        onState(error.pending === true ? 'pending' : 'error', error);
         throw error;
       }
       if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
@@ -42593,6 +42593,24 @@ function bindPreferencesPanel(panel) {
           controller.setVisible(visible);
           if (!running) controller.stop();
         }
+      },
+      async retry() {
+        onState('loading');
+        await fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'}).catch(error => {
+          onState('error', error);
+          throw error;
+        });
+        closeStream();
+        capabilitiesPromise = null;
+        if (!controller) {
+          running = true;
+          return activate();
+        }
+        running = true;
+        controller.setVisible(visible);
+        controller.start();
+        controller.handleReconnect();
+        return controller;
       },
       start,
       stop() {
@@ -43421,24 +43439,24 @@ function bindPreferencesPanel(panel) {
     return `stats-${Date.now().toString(36)}-${nextRendererId}`;
   }
 
-  async function fetchJson(fetchImpl, url, allowNotModified = false) {
+  async function fetchJson(fetchImpl, url, allowNotModified = false, requestOptions = {}) {
     const response = await fetchImpl(url, Object.freeze({
-      method: 'GET',
+      method: requestOptions.method || 'GET',
       credentials: 'same-origin',
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),
     }));
     if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
+    let failurePayload = null;
     if (response?.status === 503 && typeof response.json === 'function') {
-      let payload = null;
       try {
-        payload = await response.json();
+        failurePayload = await response.json();
       } catch (_error) {
         // A malformed/unreadable 503 is an ordinary transport failure.
       }
-      const retryAfterSeconds = Number(payload?.retry_after_seconds);
+      const retryAfterSeconds = Number(failurePayload?.retry_after_seconds);
       if (
-        payload?.status === 'pending'
+        failurePayload?.status === 'pending'
         && Number.isSafeInteger(retryAfterSeconds)
         && retryAfterSeconds >= 1
         && retryAfterSeconds <= CURRENT_STATS_PENDING_RETRY_MAX_SECONDS
@@ -43451,8 +43469,11 @@ function bindPreferencesPanel(panel) {
       }
     }
     if (!response || response.status !== 200 || typeof response.json !== 'function') {
-      const error = new Error(`stats request failed with HTTP ${response?.status ?? 'unknown'}`);
+      const reason = String(failurePayload?.reason || '').trim();
+      const error = new Error(reason || `stats request failed with HTTP ${response?.status ?? 'unknown'}`);
       error.status = response?.status ?? 0;
+      error.reason = reason;
+      error.terminal = failurePayload?.terminal === true;
       throw error;
     }
     return response.json();
@@ -46736,8 +46757,8 @@ function debugGraphThisClientMetricBucket(bucket, metric) {
     const mapped = bucket.clients.get(jsDebugStatsClientIdForRequest());
     if (mapped) return mapped;
   }
-  // The server's top-level values belong to this requesting browser. They also preserve
-  // pre-client-map history when another retained client map has no row for this browser.
+  // Current wire values are statsd's fair all-client averages. The retained renderer
+  // still uses its original top-level client slot; no browser-side aggregation occurs.
   return metric.hasData(bucket) ? bucket : null;
 }
 
@@ -47056,7 +47077,7 @@ function debugGraphMetaHtml() {
     && jsDebugHistoryReadiness.overlayVisible === true;
   const metaHtml = items.length
     ? items.map(item => `<span class="js-debug-graph-meta-item"${debugGraphExplainAttrs(item.text, item.descKey, {attribute: 'data-js-debug-meta-desc'})}>${esc(item.text)}</span>`).join('<span aria-hidden="true"> | </span>')
-    : (initialHistoryOverlayOwnsLoading ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
+    : (initialHistoryOverlayOwnsLoading || jsDebugHistoryReadiness.phase === 'error' ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
 
@@ -49745,10 +49766,12 @@ function ensureJsDebugCurrentStatsClient() {
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,
-    onState(state) {
+    onState(state, error) {
       if (state !== 'error') return;
+      const liveSelection = jsDebugCurrentStatsSelection();
       setJsDebugHistoryReadiness('error', {
-        error: 'Current stats stream unavailable',
+        requestedRangeSeconds: liveSelection.rangeSeconds,
+        error: String(error?.reason || error?.message || 'Current stats stream unavailable'),
         nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,
       });
     },
@@ -51696,6 +51719,21 @@ function setDebugGraphChartLayout(value) {
 
 function retryJsDebugHistory() {
   if (jsDebugHistoryReadiness.phase !== 'error' || !jsDebugStatsPanelVisible()) return false;
+  if (jsDebugGraphExactResolutionEnabled) {
+    const client = ensureJsDebugCurrentStatsClient();
+    if (!client) return false;
+    const domain = debugGraphDomain();
+    beginJsDebugHistoryReadiness(Math.max(0, Math.floor(domain.startMs / 1000)), {retry: true});
+    void client.retry().catch(error => {
+      const selection = jsDebugCurrentStatsSelection();
+      setJsDebugHistoryReadiness('error', {
+        requestedRangeSeconds: selection.rangeSeconds,
+        error: String(error?.reason || error?.message || 'Current stats stream unavailable'),
+        nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,
+      });
+    });
+    return true;
+  }
   return requestJsDebugHistoryForCurrentDomain({retry: true});
 }
 

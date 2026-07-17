@@ -57,8 +57,7 @@ RETIREMENT_ARCHIVE_FILENAME = ".stats-v5-retirement.zip"
 RETIREMENT_JOURNAL_FILENAME = ".stats-v5-retirement.json"
 RETIREMENT_MANIFEST_MEMBER = "manifest.json"
 RETIREMENT_FORMAT = 1
-LEGACY_APPLICATION_ID = 0x594F5354
-LEGACY_SCHEMA_VERSION = 4
+RETIRED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 LEGACY_SERVER_FIELDS = (
     "cpu_total_percent", "cpu_count", "system_cpu_total_percent", "system_cpu_count",
     "ask_agent_total", "run_agent_total", "transition_agent_total", "idle_agent_total",
@@ -201,7 +200,16 @@ def migrate(
         work = Path(temporary)
         if legacy.is_file():
             copied = _copy_database(legacy, work / "source", digest)
-            _read_database(copied, recovered, digest, work, state_dir)
+            try:
+                _read_database(copied, recovered, digest, work, state_dir)
+            except MigrationError as error:
+                quarantined = _quarantine_legacy_database(legacy)
+                recovered.sources.append(quarantined.name)
+                recovered.issues.append(MigrationIssue(
+                    "unsupported_legacy_database",
+                    quarantined.name,
+                    str(error)[:256],
+                ))
         for path in (state_dir / name for name in RETIRED_JSON_FILENAMES):
             if path.is_symlink():
                 raise MigrationError(f"retired JSON cannot be a symbolic link: {path.name}")
@@ -397,6 +405,31 @@ def _copy_database(source: Path, destination_dir: Path, digest: Any) -> Path:
     return target
 
 
+def _quarantine_legacy_database(source: Path) -> Path:
+    stamp = f"{time.time_ns()}-{os.getpid()}"
+    target = source.with_name(f"{source.name}.unsupported-{stamp}")
+    moved = False
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = Path(f"{source}{suffix}")
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink() or not candidate.is_file():
+            raise MigrationError(
+                f"unsupported retired database artifact is not a regular file: {candidate.name}"
+            )
+        destination = Path(f"{target}{suffix}")
+        if destination.exists() or destination.is_symlink():
+            raise MigrationError(
+                f"unsupported retired database quarantine already exists: {destination.name}"
+            )
+        os.replace(candidate, destination)
+        moved = True
+    if not moved:
+        raise MigrationError("unsupported retired database disappeared before quarantine")
+    _fsync_directory(source.parent)
+    return target
+
+
 def _read_database(
     path: Path,
     recovered: _Recovered,
@@ -409,12 +442,6 @@ def _read_database(
         connection.row_factory = sqlite3.Row
         if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise MigrationError("retired database integrity check failed")
-        application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
-        schema = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if application_id not in (0, LEGACY_APPLICATION_ID) or schema != LEGACY_SCHEMA_VERSION:
-            raise MigrationError(
-                f"unsupported retired database application/schema {application_id:#x}/{schema}"
-            )
         tables = {
             str(row[0]) for row in connection.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -423,23 +450,42 @@ def _read_database(
         unknown = tables - SUPPORTED_LEGACY_TABLES
         if unknown:
             raise MigrationError(f"unsupported retired database tables: {sorted(unknown)}")
+        if "schema_meta" not in tables:
+            raise MigrationError("retired database has no schema_meta table")
+        application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
+        user_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        if application_id != 0 or user_version != 0:
+            raise MigrationError(
+                f"unsupported retired database application/user version {application_id:#x}/{user_version}"
+            )
+        metadata = {
+            str(row[0]): str(row[1])
+            for row in connection.execute("SELECT key,value FROM schema_meta")
+        }
+        try:
+            schema = int(metadata.get("schema_version", ""))
+        except ValueError as error:
+            raise MigrationError("retired database schema_meta.schema_version is invalid") from error
+        if schema not in RETIRED_SCHEMA_VERSIONS:
+            raise MigrationError(f"unsupported retired database schema_meta version {schema}")
         recovered.sources.append(path.name)
+        recovered.issues.append(MigrationIssue(
+            "retired_schema", path.name, str(schema),
+        ))
         if "stats_usage_atoms" in tables:
             for row in connection.execute(
                 "SELECT event_id,direction,modality,cache_role,unit,sample_time,atom_json "
                 "FROM stats_usage_atoms"
             ):
                 _recover_component(json.loads(str(row[6])), recovered, "stats_usage_atoms", 2, row)
-        if "schema_meta" in tables:
-            metadata = {str(row[0]): str(row[1]) for row in connection.execute("SELECT key,value FROM schema_meta")}
-            recovered.issues.extend(
-                MigrationIssue("retired_marker", "schema_meta", key)
-                for key in sorted(metadata)
-                if key not in {"schema_version", "minimum_writer_protocol", "minimum_writer_build"}
-            )
-            _read_spool(
-                metadata.get("agent_token_atom_spool", ""), recovered, digest, work, state_dir,
-            )
+        recovered.issues.extend(
+            MigrationIssue("retired_marker", "schema_meta", key)
+            for key in sorted(metadata)
+            if key not in {"schema_version", "minimum_writer_protocol", "minimum_writer_build"}
+        )
+        _read_spool(
+            metadata.get("agent_token_atom_spool", ""), recovered, digest, work, state_dir,
+        )
         if "stats_coverage_intervals" in tables:
             _read_coverage(connection, recovered)
         if "stats_raw_samples" in tables:

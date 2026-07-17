@@ -6,9 +6,38 @@ from pathlib import Path
 import pytest
 
 from yolomux_lib import filesystem
+from yolomux_lib.filesystem import search as filesystem_search
 from yolomux_lib.filesystem import FilesystemError
 
 from _git_helpers import git, init_repo
+
+
+def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog):
+    blocked = "/home/test/.azure"
+    safe = "/home/test/project/app.py"
+    dirty = []
+
+    def validated(raw_path):
+        if raw_path == blocked:
+            raise FilesystemError(
+                f"path is blocked because it may contain credentials: {raw_path}",
+                status=403,
+                message_key="fs.error.credentialBlocked",
+            )
+        return Path(raw_path)
+
+    monkeypatch.setattr(filesystem_search.paths, "_validated_path", validated)
+    monkeypatch.setattr(filesystem_search.paths, "_normalized_scope_path", lambda path: path)
+    monkeypatch.setattr(filesystem_search.file_index, "mark_path_dirty", lambda path, include_root: dirty.append(path) or [])
+    monkeypatch.setattr(filesystem_search.file_index, "background_owner_can_build", lambda: True)
+    monkeypatch.setattr(filesystem_search.file_index, "schedule_refreshes", lambda: 0)
+    filesystem_search._LOGGED_BLOCKED_REINDEX_PATHS.clear()
+
+    assert filesystem_search.reindex_roots_for_paths([blocked, safe], reason="fs-watch") == []
+    assert filesystem_search.reindex_roots_for_paths([blocked, safe], reason="fs-watch") == []
+
+    assert dirty == [Path(safe), Path(safe)]
+    assert caplog.messages.count(f"Skipping blocked filesystem watch path: {blocked}") == 1
 
 
 def test_list_directory_returns_entries(tmp_path):

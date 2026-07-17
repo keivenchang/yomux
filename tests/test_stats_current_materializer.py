@@ -131,55 +131,44 @@ def test_one_fold_handles_average_gauge_rate_status_tokens_and_cost():
     assert (bucket.first_observed_at, bucket.last_observed_at) == (11, 13)
 
 
-def test_browser_observations_are_private_overlays_not_shared_series():
+def test_browser_observations_are_shared_as_fair_all_client_averages():
     observations = (
-        Observation("a-api", "browser", "browser:a", 12, "epoch:a", 1, {
-            "kind": "api", "latency_ms": 15, "bytes": 200,
+        Observation("a-api-1", "browser", "browser:a", 11, "epoch:a", 1, {
+            "kind": "api", "latency_ms": 10, "bytes": 100,
+        }),
+        Observation("a-api-2", "browser", "browser:a", 12, "epoch:a", 2, {
+            "kind": "api", "latency_ms": 20, "bytes": 300,
         }),
         Observation("a-disconnect", "browser", "browser:a", 13, "epoch:a", 1, {
             "kind": "disconnect", "duration_ms": 40,
         }),
-        Observation("b-sse", "browser", "browser:b", 12, "epoch:b", 1, {
-            "kind": "sse", "latency_ms": 25,
+        Observation("b-api", "browser", "browser:b", 12, "epoch:b", 1, {
+            "kind": "api", "latency_ms": 30, "bytes": 200,
+        }),
+        Observation("b-disconnect", "browser", "browser:b", 13, "epoch:b", 2, {
+            "kind": "disconnect", "duration_ms": 20,
         }),
     )
     generation = _build(_snapshot(observations=observations))
 
     shared = next(bucket for bucket in generation.layer(10).buckets if bucket.start == 10)
-    client_a = next(
-        bucket
-        for bucket in materializer.slice_generation(
-            generation, 300, 10, private_source_id="browser:a",
-        ).buckets
-        if bucket.start == 10
-    )
-    client_b = next(
-        bucket
-        for bucket in materializer.slice_generation(
-            generation, 300, 10, private_source_id="browser:b",
-        ).buckets
-        if bucket.start == 10
-    )
-    unknown = next(
-        bucket
-        for bucket in materializer.slice_generation(
-            generation, 300, 10, private_source_id="browser:unknown",
-        ).buckets
-        if bucket.start == 10
-    )
+    values = {item.name: item for item in shared.series}
 
-    assert not any(item.name.startswith("browser_") for item in shared.series)
-    assert {item.name for item in client_a.series} == {
-        "browser_api_per_second", "browser_bandwidth_bytes_per_second",
-        "browser_disconnected_ms", "browser_latency_ms",
-    }
-    assert {item.name for item in client_b.series} == {
-        "browser_latency_ms", "browser_sse_per_second",
-    }
-    assert unknown == shared
+    assert values["browser_api_per_second"].value == pytest.approx(0.15)
+    assert values["browser_api_per_second"].source_count == 2
+    assert values["browser_latency_ms"].value == 22.5
+    assert values["browser_latency_ms"].source_count == 2
+    assert values["browser_bandwidth_bytes_per_second"].value == 30
+    assert values["browser_bandwidth_bytes_per_second"].source_count == 2
+    assert values["browser_disconnected_ms"].value == 30
+    assert values["browser_disconnected_ms"].source_count == 2
+    assert generation.private_source_ids == ()
+    assert materializer.slice_generation(
+        generation, 300, 10, private_source_id="browser:unknown",
+    ) == materializer.slice_generation(generation, 300, 10)
 
 
-def test_private_browser_overlay_count_is_bounded_by_most_recent_source():
+def test_all_browser_sources_are_retained_in_shared_series():
     observations = tuple(
         Observation(f"browser-{index}", "browser", f"browser:{index}", 10 + index, f"epoch:{index}", 1, {
             "kind": "api",
@@ -189,15 +178,15 @@ def test_private_browser_overlay_count_is_bounded_by_most_recent_source():
 
     generation = _build(_snapshot(observations=observations), until=30)
 
-    assert len(generation.private_source_ids) == materializer.MAX_PRIVATE_BROWSER_CLIENTS
-    assert "browser:0" not in generation.private_source_ids
-    assert generation.private_source_ids == tuple(
-        f"browser:{index}"
-        for index in range(materializer.MAX_PRIVATE_BROWSER_CLIENTS, 0, -1)
-    )
+    bucket = next(bucket for bucket in generation.layer(10).buckets if bucket.start == 10)
+    api = next(item for item in bucket.series if item.name == "browser_api_per_second")
+
+    assert api.source_count == materializer.MAX_PRIVATE_BROWSER_CLIENTS + 1
+    assert api.value == 0.1
+    assert generation.private_source_ids == ()
 
 
-def test_incremental_browser_overlay_reuses_shared_and_unmodified_private_buckets():
+def test_incremental_browser_update_reuses_unmodified_shared_buckets():
     first_snapshot = _snapshot(observations=(
         Observation("a-1", "browser", "browser:a", 12, "epoch:a", 1, {"kind": "api"}),
         Observation("b-1", "browser", "browser:b", 12, "epoch:b", 1, {"kind": "sse"}),
@@ -220,22 +209,13 @@ def test_incremental_browser_overlay_reuses_shared_and_unmodified_private_bucket
 
     first_shared = next(bucket for bucket in first.layer(10).buckets if bucket.start == 10)
     second_shared = next(bucket for bucket in second.layer(10).buckets if bucket.start == 10)
-    first_b = next(
-        bucket for bucket in first.private_layer("browser:b", 10).buckets if bucket.start == 10
-    )
-    second_b = next(
-        bucket for bucket in second.private_layer("browser:b", 10).buckets if bucket.start == 10
-    )
-    second_a = next(
-        bucket for bucket in second.private_layer("browser:a", 10).buckets if bucket.start == 20
-    )
+    second_a = next(bucket for bucket in second.layer(10).buckets if bucket.start == 20)
 
     assert second_shared is first_shared
-    assert second_b is first_b
     assert {item.name for item in second_a.series} == {"browser_api_per_second"}
 
 
-def test_shifted_incremental_layers_match_full_build_with_private_overlays_and_cost():
+def test_shifted_incremental_layers_match_full_build_with_shared_browser_series_and_cost():
     old_cpu = _cpu(598.2, 5)
     new_cpu = _cpu(600.2, 7)
     old_browser_a = Observation(
@@ -303,16 +283,8 @@ def test_shifted_incremental_layers_match_full_build_with_private_overlays_and_c
     assert incremental == full
     old_shared = next(bucket for bucket in first.layer(1).buckets if bucket.start == 598)
     new_shared = next(bucket for bucket in incremental.layer(1).buckets if bucket.start == 598)
-    old_private = next(
-        bucket for bucket in first.private_layer("browser:b", 1).buckets
-        if bucket.start == 598
-    )
-    new_private = next(
-        bucket for bucket in incremental.private_layer("browser:b", 1).buckets
-        if bucket.start == 598
-    )
     assert new_shared is old_shared
-    assert new_private is old_private
+    assert incremental.private_source_ids == ()
 
 
 def test_usage_deletion_removes_agent_model_and_cost_from_materialized_layers():
@@ -410,15 +382,9 @@ def test_incremental_fold_work_is_bounded_by_dirty_and_new_edge_cells(monkeypatc
         observed_until=100_001.0,
     )
 
-    layer_sets = 1 + materializer.MAX_PRIVATE_BROWSER_CLIENTS
-    expected_fold_count = layer_sets * (len(RESOLUTIONS) + 1)
+    expected_fold_count = len(RESOLUTIONS) + 1
     total_bucket_count = sum(len(layer.buckets) for layer in updated.layers)
-    total_bucket_count += sum(
-        len(layer.buckets)
-        for overlay in updated.private_overlays
-        for layer in overlay.layers
-    )
-    assert len(folded) == expected_fold_count == 25
+    assert len(folded) == expected_fold_count == 5
     assert len(folded) * 10 < total_bucket_count
 
 

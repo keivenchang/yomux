@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,9 +19,16 @@ from yolomux_lib.stats_current import protocol, resolution as stats_resolution
 MAX_QUERY_BYTES = 2_048
 CLIENT_ID_HMAC_DOMAIN = b"yolomux-stats-client-v1\x00"
 MALFORMED_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+LOGGER = logging.getLogger(__name__)
 
 
 class SnapshotClient(Protocol):
+    def ensure_started(self) -> bool: ...
+
+    def retry(self) -> bool: ...
+
+    def status(self) -> dict[str, object]: ...
+
     def snapshot(
         self,
         request: protocol.SnapshotRequest | Mapping[str, object],
@@ -46,12 +54,19 @@ class DeltaStreamResult:
     body: bytes = b""
 
 
-def _unavailable() -> dict[str, object]:
-    return {
+def _unavailable(
+    reason: object = "statsd unavailable",
+    *,
+    terminal: bool = False,
+) -> dict[str, object]:
+    result: dict[str, object] = {
         "status": "unavailable",
         "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
-        "reason": "statsd unavailable",
+        "reason": str(reason or "statsd unavailable")[:256],
     }
+    if terminal:
+        result["terminal"] = True
+    return result
 
 
 def _unsupported(reason: str) -> protocol.UnsupportedWire:
@@ -108,16 +123,49 @@ class StatsHttpForwarder:
     def __init__(self, client: SnapshotClient, *, client_binding_secret: bytes):
         self.client = client
         self.client_binding_secret = client_binding_secret
+        self._logged_unavailable_reason = ""
 
     @staticmethod
     def capabilities() -> Mapping[str, object]:
         return stats_resolution.wire_capabilities()
+
+    def _startup_failure(self) -> Mapping[str, object] | None:
+        if self.client.ensure_started():
+            self._logged_unavailable_reason = ""
+            return None
+        status = self.client.status()
+        if status.get("status") == "upgrade_required" or status.get("error_code") == "upgrade_required":
+            return status
+        unavailable = _unavailable(
+            status.get("reason") or status.get("error"),
+            terminal=status.get("terminal") is True,
+        )
+        reason = str(unavailable["reason"])
+        if reason != self._logged_unavailable_reason:
+            LOGGER.warning("YO!stats unavailable: %s", reason)
+            self._logged_unavailable_reason = reason
+        return unavailable
+
+    def retry(self) -> Mapping[str, object]:
+        if self.client.retry():
+            self._logged_unavailable_reason = ""
+            return {"ok": True, "status": "ready"}
+        return dict(self._startup_failure() or {"ok": True, "status": "ready"})
 
     def snapshot(self, raw_query: str, *, authenticated_username: str) -> SnapshotHttpResult:
         try:
             requested = parse_http_snapshot_query(raw_query)
         except protocol.UnsupportedRequest as error:
             return SnapshotHttpResult(HTTPStatus.BAD_REQUEST, payload=error.response)
+        startup_failure = self._startup_failure()
+        if startup_failure is not None:
+            status = (
+                HTTPStatus.UPGRADE_REQUIRED
+                if startup_failure.get("status") == "upgrade_required"
+                or startup_failure.get("error_code") == "upgrade_required"
+                else HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            return SnapshotHttpResult(status, payload=startup_failure)
 
         request = protocol.SnapshotRequest(
             requested.range_seconds,
@@ -164,6 +212,15 @@ class StatsHttpForwarder:
             requested = parse_http_delta_query(raw_query)
         except protocol.UnsupportedRequest as error:
             return DeltaStreamResult(HTTPStatus.BAD_REQUEST, error.response)
+        startup_failure = self._startup_failure()
+        if startup_failure is not None:
+            status = (
+                HTTPStatus.UPGRADE_REQUIRED
+                if startup_failure.get("status") == "upgrade_required"
+                or startup_failure.get("error_code") == "upgrade_required"
+                else HTTPStatus.SERVICE_UNAVAILABLE
+            )
+            return DeltaStreamResult(status, startup_failure)
         request = protocol.DeltaRequest(
             requested.range_seconds,
             requested.resolution_seconds,

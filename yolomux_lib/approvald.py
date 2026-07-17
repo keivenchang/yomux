@@ -289,7 +289,14 @@ class ApprovalClient(LocalServiceClient):
     """Thin cross-port client for target-keyed approval workers."""
 
     def __init__(self, socket_path: Path | None = None):
-        super().__init__("approvald", "yolomux_lib.approvald", socket_path or default_socket_path(), APPROVALD_PROTOCOL_VERSION, idle_seconds=APPROVALD_DEFAULT_IDLE_SECONDS)
+        super().__init__(
+            "approvald",
+            "yolomux_lib.approvald",
+            socket_path or default_socket_path(),
+            APPROVALD_PROTOCOL_VERSION,
+            idle_seconds=APPROVALD_DEFAULT_IDLE_SECONDS,
+            service_dir=Path(socket_path).parent if socket_path is not None else common.STATE_DIR / "services",
+        )
 
     def start_worker(self, *, session: str, target: str, owner_extra: dict[str, Any], dangerously_yolo: bool) -> tuple[ApprovalWorkerHandle | None, dict[str, Any]]:
         if not self.ensure_started():

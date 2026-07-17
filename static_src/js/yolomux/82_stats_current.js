@@ -614,7 +614,7 @@
       if (!capabilitiesPromise) {
         onState('loading');
         capabilitiesPromise = fetchJson(fetchImpl, '/api/stats-capabilities').catch(error => {
-          onState(error.pending === true ? 'pending' : 'error');
+          onState(error.pending === true ? 'pending' : 'error', error);
           throw error;
         });
       }
@@ -631,7 +631,7 @@
           ['since_generation', request.since_generation],
         ]), true);
       } catch (error) {
-        onState(error.pending === true ? 'pending' : 'error');
+        onState(error.pending === true ? 'pending' : 'error', error);
         throw error;
       }
       if (value === SNAPSHOT_NOT_MODIFIED && !controller?.generation()) {
@@ -748,6 +748,24 @@
           controller.setVisible(visible);
           if (!running) controller.stop();
         }
+      },
+      async retry() {
+        onState('loading');
+        await fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'}).catch(error => {
+          onState('error', error);
+          throw error;
+        });
+        closeStream();
+        capabilitiesPromise = null;
+        if (!controller) {
+          running = true;
+          return activate();
+        }
+        running = true;
+        controller.setVisible(visible);
+        controller.start();
+        controller.handleReconnect();
+        return controller;
       },
       start,
       stop() {
@@ -1576,24 +1594,24 @@
     return `stats-${Date.now().toString(36)}-${nextRendererId}`;
   }
 
-  async function fetchJson(fetchImpl, url, allowNotModified = false) {
+  async function fetchJson(fetchImpl, url, allowNotModified = false, requestOptions = {}) {
     const response = await fetchImpl(url, Object.freeze({
-      method: 'GET',
+      method: requestOptions.method || 'GET',
       credentials: 'same-origin',
       cache: 'no-store',
       headers: Object.freeze({Accept: 'application/json'}),
     }));
     if (allowNotModified && response?.status === 304) return SNAPSHOT_NOT_MODIFIED;
+    let failurePayload = null;
     if (response?.status === 503 && typeof response.json === 'function') {
-      let payload = null;
       try {
-        payload = await response.json();
+        failurePayload = await response.json();
       } catch (_error) {
         // A malformed/unreadable 503 is an ordinary transport failure.
       }
-      const retryAfterSeconds = Number(payload?.retry_after_seconds);
+      const retryAfterSeconds = Number(failurePayload?.retry_after_seconds);
       if (
-        payload?.status === 'pending'
+        failurePayload?.status === 'pending'
         && Number.isSafeInteger(retryAfterSeconds)
         && retryAfterSeconds >= 1
         && retryAfterSeconds <= CURRENT_STATS_PENDING_RETRY_MAX_SECONDS
@@ -1606,8 +1624,11 @@
       }
     }
     if (!response || response.status !== 200 || typeof response.json !== 'function') {
-      const error = new Error(`stats request failed with HTTP ${response?.status ?? 'unknown'}`);
+      const reason = String(failurePayload?.reason || '').trim();
+      const error = new Error(reason || `stats request failed with HTTP ${response?.status ?? 'unknown'}`);
       error.status = response?.status ?? 0;
+      error.reason = reason;
+      error.terminal = failurePayload?.terminal === true;
       throw error;
     }
     return response.json();

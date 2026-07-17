@@ -217,6 +217,78 @@ def test_lower_priority_server_cannot_release_preferred_owner(monkeypatch, tmp_p
     owner.release_owner("test-cleanup")
 
 
+def test_newer_stats_writer_takes_over_incompatible_preferred_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    owner = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=100,
+        priority=100,
+        capabilities={"stats_writer_build": 2},
+        clock=lambda: 100.0,
+    )
+    follower = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=101,
+        priority=0,
+        capabilities={"stats_writer_build": 3},
+        clock=lambda: 100.0,
+    )
+    owner.started_at_ns = 10
+    follower.started_at_ns = 20
+    owner.publish_generation()
+    follower.publish_generation()
+    assert owner.attempt_takeover() is True
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_owner = owner
+    webapp.log_event = lambda *args, **kwargs: None
+
+    def release_owner(_current, request, timeout=2.0):
+        assert timeout == background_owner_module.BACKGROUND_RELEASE_TIMEOUT_SECONDS
+        return webapp.background_release_owner(request["requester"])
+
+    monkeypatch.setattr(background_owner_module, "send_yolomux_control_request", release_owner)
+
+    assert follower.attempt_required_capability_takeover("stats_writer_build", 3) is True
+    assert follower.is_owner() is True
+    assert follower.priority == 100
+    assert follower.read_owner_record()["capabilities"]["stats_writer_build"] == 3
+
+    owner.heartbeat_once()
+    assert owner.is_owner() is False
+    follower.release_owner("test-cleanup")
+
+
+def test_capable_owner_survives_incompatible_preferred_generation_heartbeat(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    capable = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=101,
+        priority=0,
+        capabilities={"stats_writer_build": 3},
+        clock=lambda: 100.0,
+    )
+    preferred = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=100,
+        priority=100,
+        capabilities={"stats_writer_build": 2},
+        clock=lambda: 100.0,
+    )
+    capable.started_at_ns = 20
+    preferred.started_at_ns = 10
+    capable.publish_generation()
+    assert capable.attempt_takeover() is True
+    preferred.publish_generation()
+
+    capable.heartbeat_once()
+
+    assert capable.is_owner() is True
+    assert capable.priority == 100
+    assert capable.is_latest_live_generation() is True
+    capable.release_owner("test-cleanup")
+
+
 def test_background_owner_reports_blocked_unreachable_owner(monkeypatch, tmp_path):
     registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
     registry.started_at_ns = 20

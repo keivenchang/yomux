@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from fnmatch import fnmatchcase
@@ -17,6 +18,7 @@ from ..common import is_generated_upload_name
 from ..settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from ..settings import settings_payload
 from . import paths
+from .errors import FilesystemError
 from .errors import raise_os_error
 from .git_ops import git_root_for_path
 from .listing import _directory_is_repo
@@ -28,6 +30,8 @@ INDEX_EXCLUDE_REGEX_PREFIX = "regex:"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+LOGGER = logging.getLogger(__name__)
+_LOGGED_BLOCKED_REINDEX_PATHS: set[str] = set()
 
 
 def _configured_search_skip_dirs(settings: dict[str, Any] | None = None) -> set[str]:
@@ -719,7 +723,17 @@ def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> 
 
 def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-change") -> list[str]:
     """Coalesce changed subtrees and hand one incremental refresh to the owner."""
-    normalized_paths = [paths._normalized_scope_path(paths._validated_path(raw_path)) for raw_path in raw_paths]
+    normalized_paths: list[Path] = []
+    for raw_path in raw_paths:
+        try:
+            normalized_paths.append(paths._normalized_scope_path(paths._validated_path(raw_path)))
+        except FilesystemError as error:
+            if error.message_key != "fs.error.credentialBlocked":
+                raise
+            blocked = str(raw_path)
+            if blocked not in _LOGGED_BLOCKED_REINDEX_PATHS:
+                _LOGGED_BLOCKED_REINDEX_PATHS.add(blocked)
+                LOGGER.warning("Skipping blocked filesystem watch path: %s", blocked)
     roots_by_path: dict[Path, set[Path]] = {}
     policies: dict[Path, dict[str, Any]] = {}
 

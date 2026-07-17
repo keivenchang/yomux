@@ -190,6 +190,9 @@ test('the established renderer consumes the protocol-v2 exact stream', () => {
   assert.match(source, /globalThis\.YOLOmuxStatsCurrent\.createBrowserClient/);
   assert.match(source, /onGeneration\(snapshot\)[\s\S]*applyJsDebugCurrentSnapshot\(snapshot/);
   assert.match(source, /client\.select\(selection\.rangeSeconds, selection\.resolution\)/);
+  assert.match(source, /onState\(state, error\)[\s\S]*requestedRangeSeconds: liveSelection\.rangeSeconds[\s\S]*error\?\.reason/);
+  assert.match(source, /initialHistoryOverlayOwnsLoading \|\| jsDebugHistoryReadiness\.phase === 'error'/);
+  assert.match(source, /function retryJsDebugHistory\(\)[\s\S]*client\.retry\(\)/);
   assert.match(source, /if \(jsDebugGraphExactResolutionEnabled\) return false;[\s\S]*function clearJsDebugGraphData/);
 });
 

@@ -249,11 +249,14 @@ class _CurrentTransport(LocalServiceClient):
             storage.MIN_WRITER_PROTOCOL,
             extra_args=("--database", str(database_path)),
             code_revision=revision.CURRENT_CODE_REVISION,
+            build_revision=storage.MIN_WRITER_BUILD,
         )
+        service_dir = self.registry.service_dir
         self.registry = _CurrentRegistry(
-            self.socket_path.parent,
+            service_dir,
             self.registry.spec,
             socket_path=self.socket_path,
+            service_dir=service_dir,
         )
 
     def dispatch(
@@ -321,6 +324,16 @@ class StatsCurrentClient:
     def ensure_started(self) -> bool:
         if self._upgrade_required is not None:
             return False
+        if self._transport.registry.recently_healthy() or self._transport.registry.healthy():
+            return True
+        upgrade = self._transport.registry._upgrade_required
+        if isinstance(upgrade, dict) and upgrade:
+            self._upgrade_required = {
+                "ok": False,
+                "error_code": "upgrade_required",
+                **upgrade,
+            }
+            return False
         try:
             storage.require_compatible_writer(self.database_path)
         except storage.SchemaTooNewError as error:
@@ -343,6 +356,12 @@ class StatsCurrentClient:
                     **upgrade,
                 }
         return started
+
+    def retry(self) -> bool:
+        if self._upgrade_required is not None:
+            return False
+        self._transport.registry.retry()
+        return self.ensure_started()
 
     def acquire_lease(self) -> dict[str, Any]:
         if not self.ensure_started():
@@ -374,7 +393,10 @@ class StatsCurrentClient:
         )
 
     def status(self) -> dict[str, Any]:
-        return self._call("status", timeout=STATUS_TIMEOUT_SECONDS)
+        response = self._call("status", timeout=STATUS_TIMEOUT_SECONDS)
+        if response.get("_transport_error"):
+            return self._transport.registry.failure_response()
+        return response
 
     def append(
         self,

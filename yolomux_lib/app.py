@@ -2359,9 +2359,17 @@ class TmuxWebtermApp:
             on_demote=self.demote_background_owner,
             on_acquire=self.handle_background_owner_acquired,
             priority=priority,
+            capabilities={
+                "stats_writer_build": stats_current_storage.MIN_WRITER_BUILD,
+            },
         )
         file_index.set_background_owner_checker(self.search_index_can_build)
         acquired = self.background_owner.start()
+        if not acquired:
+            acquired = self.background_owner.attempt_required_capability_takeover(
+                "stats_writer_build",
+                stats_current_storage.MIN_WRITER_BUILD,
+            )
         if not acquired and self.background_owner.status == "blocked_by_unreachable_owner":
             self.log_event(
                 None,

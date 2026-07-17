@@ -474,7 +474,14 @@ class JobClient(LocalServiceClient):
     """Thin cross-port client for the shared stateless CPU broker."""
 
     def __init__(self, socket_path: Path | None = None):
-        super().__init__("jobd", "yolomux_lib.jobd", socket_path or default_socket_path(), JOBD_PROTOCOL_VERSION, idle_seconds=JOBD_DEFAULT_IDLE_SECONDS)
+        super().__init__(
+            "jobd",
+            "yolomux_lib.jobd",
+            socket_path or default_socket_path(),
+            JOBD_PROTOCOL_VERSION,
+            idle_seconds=JOBD_DEFAULT_IDLE_SECONDS,
+            service_dir=Path(socket_path).parent if socket_path is not None else STATE_DIR / "services",
+        )
 
     def start_for_scheduler(self) -> bool:
         """Start jobd from a scheduler/owner path, never an HTTP submission path."""

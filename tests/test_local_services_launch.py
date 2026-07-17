@@ -76,8 +76,9 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert args[args.index("--idle-seconds") + 1] == "12.5"
     assert args[-2:] == ["--workers", "1"]
     assert kwargs["start_new_session"] is True
-    assert kwargs["stdout"] is subprocess.DEVNULL
-    assert kwargs["stderr"] is subprocess.DEVNULL
+    assert Path(kwargs["stdout"].name) == registry.stderr_path
+    assert kwargs["stdout"].closed is True
+    assert kwargs["stderr"] is subprocess.STDOUT
 
 
 def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
@@ -97,6 +98,67 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     assert registry._spawn() is not None
     args, _kwargs = starts[0]
     assert args[args.index("--idle-seconds") + 1] == "0.5"
+
+
+def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, monkeypatch):
+    state_dir = tmp_path / ("long-state-segment-" * 8)
+    monkeypatch.setattr(approvald.common, "STATE_DIR", state_dir)
+
+    client = approvald.ApprovalClient()
+
+    assert client.socket_path.parent == Path("/tmp")
+    assert client.registry.service_dir == state_dir / "services"
+    assert client.registry.lock_path.parent == state_dir / "services"
+
+
+def test_registry_captures_bounded_stderr_and_latches_repeated_start_exits(tmp_path):
+    starts = []
+    now = [100.0]
+
+    class FailedProcess:
+        def poll(self):
+            return 2
+
+    def failing_popen(args, **kwargs):
+        starts.append(args)
+        kwargs["stdout"].write(b"Traceback\nMigrationError: unsupported retired database\n")
+        kwargs["stdout"].flush()
+        return FailedProcess()
+
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "missing.module", "statsd.sock", 1),
+        popen=failing_popen,
+        clock=lambda: now[0],
+        sleep=lambda _seconds: None,
+    )
+
+    for expected in range(1, registry_mod.LOCAL_SERVICE_START_EXIT_LIMIT + 1):
+        assert registry.ensure_started() is False
+        status = registry.status()
+        assert status["start_exit_count"] == expected
+        assert status["last_exit_code"] == 2
+        assert status["failure_reason"] == (
+            "statsd exited (2): MigrationError: unsupported retired database"
+        )
+        now[0] = status["next_start_at"] + 0.001
+
+    assert registry.stderr_path.read_text(encoding="utf-8").splitlines() == [
+        "Traceback",
+        "MigrationError: unsupported retired database",
+    ]
+    assert registry.status()["terminal_failure"] is True
+    assert registry.failure_response()["terminal"] is True
+    assert registry.ensure_started() is False
+    assert len(starts) == registry_mod.LOCAL_SERVICE_START_EXIT_LIMIT
+
+    registry.retry()
+
+    assert registry.status()["terminal_failure"] is False
+    assert registry.status()["start_exit_count"] == 0
+    assert registry.status()["failure_reason"] == ""
+    assert registry.ensure_started() is False
+    assert len(starts) == registry_mod.LOCAL_SERVICE_START_EXIT_LIMIT + 1
 
 
 def test_parse_ps_cpu_seconds_covers_ps_time_shapes():
@@ -243,6 +305,33 @@ def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_pat
 
     assert actions == ["ping", "shutdown"]
     assert registry._upgrade_required is None
+
+
+def test_registry_does_not_retire_newer_same_protocol_build(tmp_path, monkeypatch):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec(
+            "statsd", "yolomux_lib.stats_current.service", "statsd.sock", 24,
+            code_revision="old-revision", build_revision=2,
+        ),
+    )
+    actions = []
+
+    def fake_request(method, payload=None, timeout=0.2):
+        actions.append(method)
+        return {
+            "ok": True,
+            "version": 24,
+            "build": 3,
+            "code_revision": "new-revision",
+            "pid": 4242,
+        }
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    registry._retire_incompatible_service()
+
+    assert actions == ["ping"]
 
 
 @pytest.mark.parametrize(

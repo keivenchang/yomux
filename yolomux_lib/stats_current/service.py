@@ -448,6 +448,7 @@ class StatsCurrentService:
             "unavailable_spans": 0,
             "issues": 0,
         }
+        self._migration_issue_kinds: tuple[str, ...] = ()
 
     def _start(self) -> None:
         started = self.monotonic()
@@ -489,6 +490,7 @@ class StatsCurrentService:
             "unavailable_spans": report.unavailable_spans,
             "issues": report.issue_count,
         }
+        self._migration_issue_kinds = tuple(sorted({issue.kind for issue in report.issues}))[:16]
         self.worker = threading.Thread(target=self._worker_loop, name="yolomux-stats-materializer", daemon=True)
         self.worker.start()
         self._next_reconcile_at = self.monotonic() + FULL_RECONCILE_SECONDS
@@ -1395,6 +1397,8 @@ class StatsCurrentService:
                 "failure": self._migration_failure,
                 "seconds": round(self._migration_seconds, 6),
                 **self._migration_counts,
+                "issue_kinds": self._migration_issue_kinds,
+                "skipped_history": "unsupported_legacy_database" in self._migration_issue_kinds,
             },
             "build": {
                 "full": self._full_builds,
@@ -1502,6 +1506,7 @@ class StatsCurrentService:
                     "ok": True,
                     "version": storage.MIN_WRITER_PROTOCOL,
                     "schema_generation": storage.SCHEMA_VERSION,
+                    "build": storage.MIN_WRITER_BUILD,
                     "code_revision": revision.CURRENT_CODE_REVISION,
                     "pid": os.getpid(),
                     "started_at": self.started_at,

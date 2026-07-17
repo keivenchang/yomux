@@ -626,6 +626,28 @@ def test_background_owner_starts_only_the_current_stats_runtime():
     assert calls == ["event", "job", "pricing", "current", "session-files", "tabber", "publish"]
 
 
+def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp_path):
+    captured = {}
+
+    class Owner:
+        status = "follower"
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            return True
+
+    monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", Owner)
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.control_server = SimpleNamespace(path=tmp_path / "control.sock")
+
+    assert webapp.start_background_owner(port=7771, priority=0) is True
+    assert captured["capabilities"] == {
+        "stats_writer_build": app_module.stats_current_storage.MIN_WRITER_BUILD,
+    }
+
+
 def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(monkeypatch):
     calls = []
     webapp = object.__new__(app_module.TmuxWebtermApp)

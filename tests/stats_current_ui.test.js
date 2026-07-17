@@ -1345,6 +1345,53 @@ test('an arbitrary 503 remains an offline error with bounded exponential retry',
   client.stop();
 });
 
+test('terminal 503 reason reaches state and explicit retry restarts snapshot and stream', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const fetches = [];
+  let healthy = false;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async (url, options) => {
+      fetches.push({url, options});
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      if (url === '/api/stats-retry') {
+        healthy = true;
+        return response(200, {ok: true, status: 'ready'});
+      }
+      if (!healthy) {
+        return response(503, {
+          status: 'unavailable',
+          reason: 'statsd exited (2): MigrationError: unsupported retired database',
+          terminal: true,
+        });
+      }
+      return response(200, snapshot({range: 7200, requested: 300, resolution: 300}));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'terminal-retry',
+    savedRange: 7200,
+    savedResolution: 300,
+    onState: (state, error) => states.push({state, error}),
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 250},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'error');
+  assert.equal(states.at(-1).error.message, 'statsd exited (2): MigrationError: unsupported retired database');
+  assert.equal(states.at(-1).error.terminal, true);
+
+  await client.retry();
+  await clock.advance(0);
+  await flushPromises();
+  assert.equal(fetches.find(item => item.url === '/api/stats-retry').options.method, 'POST');
+  assert.equal(states.at(-1).state, 'ready');
+  assert.equal(FakeEventSource.instances.length, 1);
+  client.stop();
+});
+
 test('invalid streamed JSON and protocol deltas share the controller bounded repair path', async () => {
   for (const [streamedValue, immediate] of [
     ['{', true],

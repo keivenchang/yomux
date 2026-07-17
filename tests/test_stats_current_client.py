@@ -55,6 +55,9 @@ def test_default_paths_are_schema_versioned_and_never_use_the_legacy_filename(tm
     assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL == 24
     assert client._transport.registry.spec.code_revision == revision.CURRENT_CODE_REVISION
     assert client._transport.registry.spec.extra_args == ("--database", str(client.database_path))
+    assert client._transport.registry.service_dir == tmp_path / "services"
+    assert client._transport.registry.lock_path.parent == tmp_path / "services"
+    assert "services/services" not in str(client._transport.registry.lock_path)
     source = Path(client_module.__file__).read_text(encoding="utf-8")
     assert "stats-history.sqlite3" not in source
 
@@ -317,6 +320,37 @@ def test_current_registry_rejects_same_protocol_stale_daemon(tmp_path, monkeypat
     assert registry.healthy() is True
 
 
+def test_current_registry_accepts_newer_same_protocol_daemon(tmp_path, monkeypatch):
+    client = client_module.StatsCurrentClient(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    registry = client._transport.registry
+    response = {
+        "ok": True,
+        "version": storage.MIN_WRITER_PROTOCOL,
+        "build": storage.MIN_WRITER_BUILD + 1,
+        "pid": 4242,
+        "code_revision": "newer-revision",
+    }
+    monkeypatch.setattr(registry, "_request", lambda *args, **kwargs: response)
+
+    assert registry.healthy() is True
+
+
+def test_running_newer_daemon_bypasses_local_future_writer_preflight(tmp_path, monkeypatch):
+    database = tmp_path / storage.DATABASE_FILENAME
+    client = client_module.StatsCurrentClient(tmp_path / "statsd.sock", database)
+    monkeypatch.setattr(client._transport.registry, "recently_healthy", lambda: False)
+    monkeypatch.setattr(client._transport.registry, "healthy", lambda: True)
+    monkeypatch.setattr(
+        storage,
+        "require_compatible_writer",
+        lambda _path: (_ for _ in ()).throw(AssertionError("RPC reader ran writer preflight")),
+    )
+
+    assert client.ensure_started() is True
+
+
 def test_offline_future_writer_fence_stops_spawn_and_retry_before_transport(tmp_path, monkeypatch):
     database = tmp_path / storage.DATABASE_FILENAME
     (tmp_path / storage.WRITER_FENCE_FILENAME).write_text(json.dumps({
@@ -341,7 +375,7 @@ def test_public_surface_has_only_shared_lifecycle_one_write_snapshot_and_delta()
     public = {name for name, value in client_module.StatsCurrentClient.__dict__.items() if not name.startswith("_") and callable(value)}
     assert public == {
         "ensure_started", "acquire_lease", "renew_lease", "release_lease",
-        "status", "append", "snapshot", "delta",
+        "status", "retry", "append", "snapshot", "delta",
     }
     source = Path(client_module.__file__).read_text(encoding="utf-8")
     for retired in ("fallback_legacy", "materialized_snapshot", "query_buckets", "claim_agent_token", "merge_records"):

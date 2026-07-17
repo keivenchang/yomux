@@ -20,6 +20,18 @@ class FakeClient:
         self.body = body
         self.requests: list[protocol.SnapshotRequest] = []
         self.delta_requests: list[protocol.DeltaRequest] = []
+        self.started = True
+        self.retry_calls = 0
+
+    def ensure_started(self):
+        return self.started
+
+    def status(self):
+        return self.metadata
+
+    def retry(self):
+        self.retry_calls += 1
+        return self.started
 
     def snapshot(self, request):
         self.requests.append(request)
@@ -230,6 +242,52 @@ def test_not_modified_has_no_body_and_transport_failures_are_sanitized():
     assert "/private/socket/path" not in str(failure.payload)
 
 
+def test_startup_failure_reason_and_terminal_state_reach_http_503():
+    adapter, client = forwarder({
+        "ok": False,
+        "status": "unavailable",
+        "reason": "statsd exited (2): MigrationError: unsupported retired database",
+        "terminal": True,
+    })
+    client.started = False
+
+    result = adapter.snapshot(
+        "range_seconds=300&resolution=1&client_id=browser-a",
+        authenticated_username="alice",
+    )
+
+    assert result.status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result.payload == {
+        "status": "unavailable",
+        "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+        "reason": "statsd exited (2): MigrationError: unsupported retired database",
+        "terminal": True,
+    }
+    assert client.requests == []
+
+
+def test_explicit_retry_clears_terminal_startup_failure_and_reports_result():
+    adapter, client = forwarder({
+        "ok": False,
+        "status": "unavailable",
+        "reason": "statsd exited (2): MigrationError",
+        "terminal": True,
+    })
+    client.started = False
+
+    assert adapter.retry() == {
+        "status": "unavailable",
+        "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+        "reason": "statsd exited (2): MigrationError",
+        "terminal": True,
+    }
+    assert client.retry_calls == 1
+
+    client.started = True
+    assert adapter.retry() == {"ok": True, "status": "ready"}
+    assert client.retry_calls == 2
+
+
 @pytest.mark.parametrize(
     "result",
     (
@@ -390,6 +448,23 @@ def test_capabilities_route_is_authenticated_and_uses_the_same_policy_owner():
     assert route.handler is http_routes.get_stats_capabilities
     assert route.role == "readonly"
     assert route.share_access == http_routes.SHARE_ACCESS_NONE
+
+
+def test_retry_route_is_authenticated_and_returns_the_forwarder_result():
+    writes = []
+    adapter = SimpleNamespace(retry=lambda: {"ok": True, "status": "ready"})
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=SimpleNamespace(stats_current_http=adapter)),
+        write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)),
+    )
+
+    http_routes.post_stats_retry(request, None, None)
+
+    assert writes == [(200, {"ok": True, "status": "ready"})]
+    route = http_routes.route_for_request("POST", "/api/stats-retry")
+    assert route is not None
+    assert route.handler is http_routes.post_stats_retry
+    assert route.role == "readonly"
 
 
 def test_http_access_log_redacts_the_raw_stats_client_identity():

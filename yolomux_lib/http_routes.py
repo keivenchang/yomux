@@ -352,6 +352,12 @@ def get_stats_capabilities(request: Any, parsed: Any, route: Route) -> None:
     request.write_json(request.server.app.stats_current_http.capabilities())
 
 
+def post_stats_retry(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    payload = request.server.app.stats_current_http.retry()
+    request.write_json(payload, status=200 if payload.get("ok") is True else 503)
+
+
 def get_pricing_catalog(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     # This status path is intentionally local/instant: it may initialize an
@@ -1343,6 +1349,7 @@ CORE_ROUTES = (
     Route("GET", "/api/stats-delta", "readonly", get_stats_delta, group="core"),
     Route("GET", "/api/stats-snapshot", "readonly", get_stats_snapshot, group="core"),
     Route("GET", "/api/stats-stream", "readonly", get_stats_stream, group="core"),
+    Route("POST", "/api/stats-retry", "readonly", post_stats_retry, group="core"),
     Route("GET", "/api/pricing-catalog", "readonly", get_pricing_catalog, group="core"),
     Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
     Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),

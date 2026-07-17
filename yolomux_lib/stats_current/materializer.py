@@ -374,24 +374,11 @@ def _build(
         )
         for resolution in RESOLUTIONS
     }
-    private_sources = _private_browser_sources(snapshot)
-    private_source_set = frozenset(private_sources)
     all_gaps = _coverage_gaps(snapshot, min(end - span for end, span in bounds.values()), observed_until)
-    shared_gaps = tuple(gap for gap in all_gaps if gap.family != "browser")
-    private_gaps = {
-        source_id: tuple(
-            gap for gap in all_gaps
-            if gap.family == "browser" and gap.source_id == source_id
-        )
-        for source_id in private_sources
-    }
+    shared_gaps = all_gaps
     previous_layers = {
         layer.resolution: layer
         for layer in (() if previous is None else previous.layers)
-    }
-    previous_private_layers = {
-        overlay.source_id: {layer.resolution: layer for layer in overlay.layers}
-        for overlay in (() if previous is None else previous.private_overlays)
     }
     shared_fold_starts = {
         resolution: _layer_fold_starts(
@@ -399,35 +386,13 @@ def _build(
         )
         for resolution, (end, span) in bounds.items()
     }
-    private_fold_starts = {
-        source_id: {
-            resolution: _layer_fold_starts(
-                previous_private_layers.get(source_id, {}).get(resolution),
-                resolution,
-                end - span,
-                end,
-                dirty,
-            )
-            for resolution, (end, span) in bounds.items()
-        }
-        for source_id in private_sources
-    }
     observation_cells: dict[tuple[int, int], list[Observation]] = {}
-    private_observation_cells: dict[tuple[str, int, int], list[Observation]] = {}
     usage_cells: dict[tuple[int, int], list[UsageAtom]] = {}
     for observation in snapshot.observations:
         for resolution in RESOLUTIONS:
             start = math.floor(observation.observed_at / resolution) * resolution
-            if observation.family != "browser":
-                if start in shared_fold_starts[resolution]:
-                    observation_cells.setdefault((resolution, start), []).append(observation)
-            elif (
-                observation.source_id in private_source_set
-                and start in private_fold_starts[observation.source_id][resolution]
-            ):
-                private_observation_cells.setdefault(
-                    (observation.source_id, resolution, start), [],
-                ).append(observation)
+            if start in shared_fold_starts[resolution]:
+                observation_cells.setdefault((resolution, start), []).append(observation)
     identities: set[tuple[str, str, str, str, str]] = set()
     for raw_atom in snapshot.usage_atoms:
         try:
@@ -443,7 +408,6 @@ def _build(
             if start in shared_fold_starts[resolution]:
                 usage_cells.setdefault((resolution, start), []).append(atom)
     layers = []
-    private_layers: dict[str, list[Layer]] = {source_id: [] for source_id in private_sources}
     for resolution in RESOLUTIONS:
         end, span = bounds[resolution]
         start = end - span
@@ -462,38 +426,13 @@ def _build(
         layers.append(Layer(
             resolution, start, end, buckets, _clip_gaps(shared_gaps, start, end),
         ))
-        for source_id in private_sources:
-            buckets = _updated_layer_buckets(
-                previous_private_layers.get(source_id, {}).get(resolution),
-                private_fold_starts[source_id][resolution],
-                dirty,
-                start,
-                end,
-                resolution,
-                private_observation_cells,
-                {},
-                observed_until,
-                None,
-                private_source_id=source_id,
-            )
-            private_layers[source_id].append(Layer(
-                resolution,
-                start,
-                end,
-                buckets,
-                _clip_gaps(private_gaps[source_id], start, end),
-            ))
-    overlays = tuple(
-        PrivateOverlay(source_id, tuple(private_layers[source_id]))
-        for source_id in private_sources
-    )
     return Generation(
         source_generation,
         cache_generation,
         generated_at,
         observed_until,
         tuple(layers),
-        overlays,
+        (),
     )
 
 
@@ -675,20 +614,30 @@ def _fold_bucket(
             result = max(values, key=lambda value: (value.observed_at, value.source_id)).value
         elif operation == "average":
             result = sum(value.value for value in values) / len(values)
+        elif operation == "average_sources":
+            source_values = _sample_values_by_source(values)
+            result = sum(sum(items) / len(items) for items in source_values.values()) / len(source_values)
         elif operation == "rate":
             result = sum(value.value for value in values) / duration
+        elif operation == "rate_average_sources":
+            source_values = _sample_values_by_source(values)
+            result = sum(sum(items) / duration for items in source_values.values()) / len(source_values)
         elif operation == "rate_per_minute":
             result = sum(value.value for value in values) * 60 / duration
         elif operation == "sum":
             result = sum(value.value for value in values)
+        elif operation == "sum_average_sources":
+            source_values = _sample_values_by_source(values)
+            result = sum(sum(items) for items in source_values.values()) / len(source_values)
         else:
             raise MaterializationError(f"unknown fold operation {operation!r}")
         if name == "cost_micro_usd" and (
             isinstance(result, bool) or not isinstance(result, int) or result > MAX_SAFE_INTEGER
         ):
             raise MaterializationError("cost projection must remain an exact JSON-safe integer")
+        source_count = len({value.source_id for value in values}) if operation.endswith("_sources") else len(values)
         series.append(SeriesValue(
-            name, result, len(values),
+            name, result, source_count,
             min(value.observed_at for value in values),
             max(value.observed_at for value in values),
         ))
@@ -703,6 +652,13 @@ def _fold_bucket(
         start + duration <= observed_until,
         _build_bucket_cost_detail(tuple(cost_atoms)),
     )
+
+
+def _sample_values_by_source(values: Iterable[_Sample]) -> dict[str, list[int | float]]:
+    grouped: dict[str, list[int | float]] = {}
+    for value in values:
+        grouped.setdefault(value.source_id, []).append(value.value)
+    return grouped
 
 
 def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
@@ -729,13 +685,13 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
         samples = []
         kind = payload["kind"]
         if kind in ("api", "sse"):
-            samples.append(_Sample(f"browser_{kind}_per_second", "rate", 1, at, source))
+            samples.append(_Sample(f"browser_{kind}_per_second", "rate_average_sources", 1, at, source))
         if "latency_ms" in payload:
-            samples.append(_Sample("browser_latency_ms", "average", _number(payload, "latency_ms"), at, source))
+            samples.append(_Sample("browser_latency_ms", "average_sources", _number(payload, "latency_ms"), at, source))
         if "bytes" in payload:
-            samples.append(_Sample("browser_bandwidth_bytes_per_second", "rate", _number(payload, "bytes"), at, source))
+            samples.append(_Sample("browser_bandwidth_bytes_per_second", "rate_average_sources", _number(payload, "bytes"), at, source))
         if kind == "disconnect" and "duration_ms" in payload:
-            samples.append(_Sample("browser_disconnected_ms", "sum", _number(payload, "duration_ms"), at, source))
+            samples.append(_Sample("browser_disconnected_ms", "sum_average_sources", _number(payload, "duration_ms"), at, source))
         return tuple(samples)
     fields: Mapping[str, str] | None = {
         "gpu": {

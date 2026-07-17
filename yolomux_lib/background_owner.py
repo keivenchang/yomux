@@ -117,6 +117,7 @@ class BackgroundOwnerRegistry:
         pid: int | None = None,
         hostname: str | None = None,
         priority: int = 0,
+        capabilities: dict[str, int] | None = None,
     ):
         self.owner_dir = owner_dir
         self.generations_dir = owner_dir / "generations"
@@ -132,6 +133,10 @@ class BackgroundOwnerRegistry:
         self.pid = os.getpid() if pid is None else int(pid)
         self.hostname = hostname or socket.gethostname()
         self.priority = int(priority)
+        self.capabilities = {
+            str(name): max(0, int(value))
+            for name, value in (capabilities or {}).items()
+        }
         self.started_at_ns = time.time_ns()
         self.nonce = uuid.uuid4().hex
         self.generation_id = f"{self.started_at_ns}-{self.pid}-{self.nonce[:12]}"
@@ -173,6 +178,7 @@ class BackgroundOwnerRegistry:
             "started_at_ns": self.started_at_ns,
             "nonce": self.nonce,
             "priority": self.priority,
+            "capabilities": dict(self.capabilities),
         }
 
     def generation_record(self) -> dict[str, Any]:
@@ -423,6 +429,65 @@ class BackgroundOwnerRegistry:
             return True
         return False
 
+    def attempt_required_capability_takeover(self, capability: str, required: int) -> bool:
+        """Replace an owner that cannot run a required shared background role."""
+
+        current = self.read_owner_record()
+        if not isinstance(current, dict) or current.get("generation_id") == self.generation_id:
+            return self.is_owner()
+        owner_value = self._record_capability(current, capability)
+        if owner_value >= required:
+            return False
+        try:
+            owner_priority = int(current.get("priority") or 0)
+        except (TypeError, ValueError):
+            owner_priority = 0
+        with self.lock:
+            self.priority = max(self.priority, owner_priority)
+            self.last_transition_details = {
+                "reason": "required_capability",
+                "capability": capability,
+                "required": required,
+                "owner_value": owner_value,
+            }
+            self.publish_generation()
+        return self.attempt_takeover()
+
+    @staticmethod
+    def _record_capability(record: dict[str, Any], capability: str) -> int:
+        raw_capabilities = record.get("capabilities")
+        capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
+        try:
+            return int(capabilities.get(capability) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _promote_over_incompatible_latest_generation(self) -> bool:
+        latest = self.latest_live_generation()
+        if not isinstance(latest, dict) or latest.get("generation_id") == self.generation_id:
+            return False
+        missing = []
+        for capability, required in self.capabilities.items():
+            available = self._record_capability(latest, capability)
+            if available < required:
+                missing.append((capability, required, available))
+        if not missing:
+            return False
+        try:
+            latest_priority = int(latest.get("priority") or 0)
+        except (TypeError, ValueError):
+            latest_priority = 0
+        self.priority = max(self.priority, latest_priority)
+        self.last_transition_details = {
+            "reason": "required_capability",
+            "missing": [
+                {"capability": capability, "required": required, "available": available}
+                for capability, required, available in missing
+            ],
+        }
+        self.publish_generation()
+        return True
+
     def release_owner(self, reason: str = "release") -> None:
         demote = False
         with self.lock:
@@ -442,6 +507,7 @@ class BackgroundOwnerRegistry:
     def heartbeat_once(self) -> None:
         with self.lock:
             self.publish_generation()
+            self._promote_over_incompatible_latest_generation()
             if self.owner:
                 if not self.is_latest_live_generation():
                     self.release_owner("newer_generation")

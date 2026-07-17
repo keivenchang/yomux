@@ -2794,8 +2794,8 @@ function debugGraphThisClientMetricBucket(bucket, metric) {
     const mapped = bucket.clients.get(jsDebugStatsClientIdForRequest());
     if (mapped) return mapped;
   }
-  // The server's top-level values belong to this requesting browser. They also preserve
-  // pre-client-map history when another retained client map has no row for this browser.
+  // Current wire values are statsd's fair all-client averages. The retained renderer
+  // still uses its original top-level client slot; no browser-side aggregation occurs.
   return metric.hasData(bucket) ? bucket : null;
 }
 
@@ -3114,7 +3114,7 @@ function debugGraphMetaHtml() {
     && jsDebugHistoryReadiness.overlayVisible === true;
   const metaHtml = items.length
     ? items.map(item => `<span class="js-debug-graph-meta-item"${debugGraphExplainAttrs(item.text, item.descKey, {attribute: 'data-js-debug-meta-desc'})}>${esc(item.text)}</span>`).join('<span aria-hidden="true"> | </span>')
-    : (initialHistoryOverlayOwnsLoading ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
+    : (initialHistoryOverlayOwnsLoading || jsDebugHistoryReadiness.phase === 'error' ? '' : textWithMovingEllipsisHtml(t('debug.waitingForServerStats')));
   return `<div class="js-debug-graph-meta" data-js-debug-uptime="${esc(Number.isFinite(jsDebugStatsServerUptimeSeconds) ? debugGraphUptimeText(jsDebugStatsServerUptimeSeconds) : '')}">${metaHtml}</div>`;
 }
 
@@ -5803,10 +5803,12 @@ function ensureJsDebugCurrentStatsClient() {
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,
-    onState(state) {
+    onState(state, error) {
       if (state !== 'error') return;
+      const liveSelection = jsDebugCurrentStatsSelection();
       setJsDebugHistoryReadiness('error', {
-        error: 'Current stats stream unavailable',
+        requestedRangeSeconds: liveSelection.rangeSeconds,
+        error: String(error?.reason || error?.message || 'Current stats stream unavailable'),
         nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,
       });
     },
@@ -7754,6 +7756,21 @@ function setDebugGraphChartLayout(value) {
 
 function retryJsDebugHistory() {
   if (jsDebugHistoryReadiness.phase !== 'error' || !jsDebugStatsPanelVisible()) return false;
+  if (jsDebugGraphExactResolutionEnabled) {
+    const client = ensureJsDebugCurrentStatsClient();
+    if (!client) return false;
+    const domain = debugGraphDomain();
+    beginJsDebugHistoryReadiness(Math.max(0, Math.floor(domain.startMs / 1000)), {retry: true});
+    void client.retry().catch(error => {
+      const selection = jsDebugCurrentStatsSelection();
+      setJsDebugHistoryReadiness('error', {
+        requestedRangeSeconds: selection.rangeSeconds,
+        error: String(error?.reason || error?.message || 'Current stats stream unavailable'),
+        nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,
+      });
+    });
+    return true;
+  }
   return requestJsDebugHistoryForCurrentDomain({retry: true});
 }
 

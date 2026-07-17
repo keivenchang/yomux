@@ -58,8 +58,6 @@ def _create_legacy_database(path: Path, *, unsupported_table: bool = False) -> P
     spool = path.parent / "services" / "statsd-agent-token-scan-test.atoms.sqlite3"
     _create_spool(spool)
     connection = sqlite3.connect(path)
-    connection.execute(f"PRAGMA application_id = {migration.LEGACY_APPLICATION_ID}")
-    connection.execute(f"PRAGMA user_version = {migration.LEGACY_SCHEMA_VERSION}")
     connection.executescript(
         """
         CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -87,6 +85,7 @@ def _create_legacy_database(path: Path, *, unsupported_table: bool = False) -> P
         "INSERT INTO schema_meta VALUES(?,?)",
         ("agent_token_atom_spool", json.dumps({"path": str(spool)})),
     )
+    connection.execute("INSERT INTO schema_meta VALUES('schema_version','4')")
     connection.execute("INSERT INTO schema_meta VALUES('raw_schema_version','1')")
     connection.execute(
         "INSERT INTO stats_coverage_intervals VALUES(?,?,?,?,?,?,?)",
@@ -138,6 +137,62 @@ def _create_legacy_database(path: Path, *, unsupported_table: bool = False) -> P
     return path
 
 
+def _create_live_schema2_database(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE stats_buckets (
+          start INTEGER NOT NULL, duration INTEGER NOT NULL, sequence INTEGER NOT NULL,
+          server_sequence INTEGER NOT NULL, bucket_json TEXT NOT NULL,
+          PRIMARY KEY(start,duration));
+        CREATE TABLE stats_clients (
+          start INTEGER, duration INTEGER, client_id TEXT, sequence INTEGER, values_json TEXT);
+        CREATE TABLE stats_processes (
+          start INTEGER, duration INTEGER, process_id TEXT, sequence INTEGER, values_json TEXT);
+        CREATE TABLE stats_agent_rates (
+          start INTEGER, duration INTEGER, rate_key TEXT, values_json TEXT);
+        CREATE TABLE stats_host_metrics (
+          start INTEGER, duration INTEGER, metric_key TEXT, values_json TEXT);
+        """
+    )
+    connection.executemany(
+        "INSERT INTO schema_meta VALUES(?,?)",
+        (
+            ("schema_version", "2"),
+            ("legacy_import_version", "1"),
+            ("agent_token_history_recovery_version", "1"),
+            ("agent_token_state", json.dumps({
+                "agent-a": {
+                    "identity": "codex:1:2:fixture",
+                    "label": "agent-a",
+                    "source": "transcript",
+                    "time": 100,
+                    "tokens": 25,
+                },
+            })),
+        ),
+    )
+    bucket = {
+        "start": 100,
+        "duration": 10,
+        "cpu_total_percent": 50,
+        "cpu_count": 10,
+        "system_cpu_total_percent": 200,
+        "system_cpu_count": 10,
+        "agent_token_samples": 1,
+        "agent_token_rates": {"agent-a": {"tokens": 5}},
+    }
+    connection.execute(
+        "INSERT INTO stats_buckets VALUES(?,?,?,?,?)",
+        (100, 10, 1, 1, json.dumps(bucket)),
+    )
+    connection.commit()
+    connection.close()
+    return path
+
+
 def _file_state(path: Path) -> tuple[bytes, int]:
     return path.read_bytes(), path.stat().st_mtime_ns
 
@@ -179,6 +234,39 @@ def test_schema4_database_migrates_exact_facts_and_marks_lost_aggregates(tmp_pat
     assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert connection.execute("PRAGMA freelist_count").fetchone()[0] == 0
     connection.close()
+
+
+def test_live_schema2_database_with_zero_sqlite_headers_migrates(tmp_path):
+    state = tmp_path / "state"
+    legacy = _create_live_schema2_database(
+        state / migration.RETIRED_DATABASE_FILENAME,
+    )
+    connection = sqlite3.connect(legacy)
+    assert connection.execute("PRAGMA application_id").fetchone()[0] == 0
+    assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+    connection.close()
+
+    report = migration.migrate(
+        migration.MigrationInputs(state), completed_at=200,
+    )
+
+    assert report.active_database.is_file()
+    assert not legacy.exists()
+    assert any(
+        issue.kind == "retired_schema" and issue.detail == "2"
+        for issue in report.issues
+    )
+    assert any(
+        issue.kind == "retired_marker" and issue.detail == "agent_token_state"
+        for issue in report.issues
+    )
+    with Store.open_reader(report.active_database) as reader:
+        snapshot = reader.read_snapshot()
+    assert any(
+        item.family == "agent_tokens"
+        and item.reason == "token aggregates are not source atoms"
+        for item in snapshot.unavailable_spans
+    )
 
 
 def test_fresh_install_activates_the_same_reconciled_current_schema(tmp_path):
@@ -439,14 +527,27 @@ def test_migration_does_not_follow_retired_source_symlinks(tmp_path, source_name
     assert not (state / DATABASE_FILENAME).exists()
 
 
-@pytest.mark.parametrize("bad_source", ["database", "json"])
-def test_corrupt_input_aborts_without_touching_source_or_activating(tmp_path, bad_source):
+def test_corrupt_retired_database_is_quarantined_and_empty_current_activates(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
-    if bad_source == "database":
-        source = state / migration.RETIRED_DATABASE_FILENAME
-    else:
-        source = state / "stats-client-history-v4.json"
+    source = state / migration.RETIRED_DATABASE_FILENAME
+    source.write_bytes(b"not valid")
+    before = _file_state(source)
+
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    assert not source.exists()
+    quarantined = list(state.glob(f"{migration.RETIRED_DATABASE_FILENAME}.unsupported-*"))
+    assert len(quarantined) == 1
+    assert _file_state(quarantined[0]) == before
+    assert report.active_database.is_file()
+    assert any(issue.kind == "unsupported_legacy_database" for issue in report.issues)
+
+
+def test_corrupt_retired_json_still_aborts_without_touching_source(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    source = state / "stats-client-history-v4.json"
     source.write_bytes(b"not valid")
     before = _file_state(source)
 
@@ -457,18 +558,25 @@ def test_corrupt_input_aborts_without_touching_source_or_activating(tmp_path, ba
     assert not (state / DATABASE_FILENAME).exists()
 
 
-def test_unknown_durable_table_aborts_instead_of_silently_losing_facts(tmp_path):
+def test_unknown_durable_table_quarantines_database_instead_of_losing_facts(tmp_path):
     state = tmp_path / "state"
     legacy = _create_legacy_database(
         state / migration.RETIRED_DATABASE_FILENAME, unsupported_table=True,
     )
     before = _file_state(legacy)
 
-    with pytest.raises(migration.MigrationError, match="unsupported retired database tables"):
-        migration.migrate(migration.MigrationInputs(state), completed_at=200)
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
 
-    assert _file_state(legacy) == before
-    assert not (state / DATABASE_FILENAME).exists()
+    assert not legacy.exists()
+    quarantined = list(state.glob(f"{migration.RETIRED_DATABASE_FILENAME}.unsupported-*"))
+    assert len(quarantined) == 1
+    assert _file_state(quarantined[0]) == before
+    assert report.active_database.is_file()
+    assert any(
+        issue.kind == "unsupported_legacy_database"
+        and "unsupported retired database tables" in issue.detail
+        for issue in report.issues
+    )
 
 
 def test_invalid_supplied_atom_aborts_before_activation(tmp_path):
@@ -595,11 +703,12 @@ def test_migration_retains_and_clips_exactly_at_24_hour_boundary(tmp_path):
     assert min(item.started_at for item in snapshot.unavailable_spans) == cutoff
 
 
-def test_unsafe_spool_pointer_aborts_without_following_path(tmp_path):
+def test_unsafe_spool_pointer_quarantines_database_without_following_path(tmp_path):
     state = tmp_path / "state"
     legacy = _create_legacy_database(state / migration.RETIRED_DATABASE_FILENAME)
     outside = tmp_path / "statsd-agent-token-scan-outside.atoms.sqlite3"
     _create_spool(outside)
+    outside_before = _file_state(outside)
     connection = sqlite3.connect(legacy)
     connection.execute(
         "UPDATE schema_meta SET value=? WHERE key='agent_token_atom_spool'",
@@ -608,10 +717,17 @@ def test_unsafe_spool_pointer_aborts_without_following_path(tmp_path):
     connection.commit()
     connection.close()
 
-    with pytest.raises(migration.MigrationError, match="expected state services directory"):
-        migration.migrate(migration.MigrationInputs(state), completed_at=200)
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
 
-    assert not (state / DATABASE_FILENAME).exists()
+    assert report.active_database.is_file()
+    assert _file_state(outside) == outside_before
+    quarantined = list(state.glob(f"{migration.RETIRED_DATABASE_FILENAME}.unsupported-*"))
+    assert len(quarantined) == 1
+    assert any(
+        issue.kind == "unsupported_legacy_database"
+        and "expected state services directory" in issue.detail
+        for issue in report.issues
+    )
 
 
 @pytest.mark.parametrize("failure_point", ["materialization", "activation"])
@@ -654,7 +770,7 @@ def test_final_retirement_failure_restores_every_source_and_deactivates_current_
     }), encoding="utf-8")
     old_fence = state / WRITER_FENCE_FILENAME
     old_fence.write_text(json.dumps({
-        "schema_version": migration.LEGACY_SCHEMA_VERSION,
+        "schema_version": max(migration.RETIRED_SCHEMA_VERSIONS),
         "minimum_writer_protocol": 22,
         "minimum_writer_build": "legacy-build",
     }), encoding="utf-8")
