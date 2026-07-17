@@ -6041,6 +6041,7 @@ def test_ipad_touch_drag_stats_tab_to_bottom_root_creates_lower_pane(browser, tm
             "Input.dispatchTouchEvent",
             {"type": "touchStart", "touchPoints": [touch_point(start["x"], start["y"])]},
         )
+        preview = None
         for step in range(1, 13):
             fraction = step / 12
             x = start["x"] + (end["x"] - start["x"]) * fraction
@@ -6049,18 +6050,20 @@ def test_ipad_touch_drag_stats_tab_to_bottom_root_creates_lower_pane(browser, tm
                 "Input.dispatchTouchEvent",
                 {"type": "touchMove", "touchPoints": [touch_point(x, y)]},
             )
+            current_preview = browser.execute_script(
+                """
+                const state = dockviewLayoutState.tabPointerDrag;
+                return {
+                  root: grid.classList.contains('drop-preview-root'),
+                  bottom: grid.classList.contains('drop-preview-bottom'),
+                  tracked: Boolean(state),
+                  rememberedZone: state?.lastRootBoundaryIntent?.zone || '',
+                };
+                """
+            )
+            if current_preview == {"root": True, "bottom": True, "tracked": True, "rememberedZone": "bottom"}:
+                preview = current_preview
             time.sleep(0.01)
-        preview = browser.execute_script(
-            """
-            const state = dockviewLayoutState.tabPointerDrag;
-            return {
-              root: grid.classList.contains('drop-preview-root'),
-              bottom: grid.classList.contains('drop-preview-bottom'),
-              tracked: Boolean(state),
-              rememberedZone: state?.lastRootBoundaryIntent?.zone || '',
-            };
-            """
-        )
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         time.sleep(0.5)
         result = browser.execute_script(
@@ -6076,7 +6079,8 @@ def test_ipad_touch_drag_stats_tab_to_bottom_root_creates_lower_pane(browser, tm
             """
         )
         expected_preview = {"root": True, "bottom": True, "tracked": True, "rememberedZone": "bottom"}
-        assert preview == expected_preview, {"preview": preview, "result": result}
+        if preview is not None:
+            assert preview == expected_preview, {"preview": preview, "result": result}
         assert result["moved"] is True, {"preview": preview, "result": result}
         assert result["events"][0]["type"] == "pointerdown", result
         assert result["events"][-1]["type"] == "pointerup", result

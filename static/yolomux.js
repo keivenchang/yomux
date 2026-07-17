@@ -1016,6 +1016,7 @@ function urlFlagEnabled(name) {
 }
 
 function browserUsesCoarsePointer() {
+  if (urlFlagEnabled('mobile')) return true;
   const media = typeof window.matchMedia === 'function' ? window.matchMedia('(pointer: coarse)') : null;
   if (media?.matches === true) return true;
   const navigatorValue = globalThis.navigator || {};

@@ -30,6 +30,7 @@ TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 # Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
 CLAUDE_TRANSCRIPT_SCAN_LIMIT = CODEX_TRANSCRIPT_SCAN_LIMIT
+CLAUDE_TRANSCRIPT_CWD_TAIL_LINES = 500
 CODEX_LSOF_TIMEOUT_SECONDS = 1.0
 CODEX_LSOF_CACHE_SECONDS = 15.0
 CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER = "0-999"
@@ -323,6 +324,47 @@ def find_transcript_by_session_id(base_dir: Path, session_id: str) -> Path | Non
     return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, None)
 
 
+def claude_transcript_record_cwd(line: str) -> str | None:
+    try:
+        record = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    value = record.get("cwd")
+    if isinstance(value, str) and value:
+        return value
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return None
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "tool_use":
+            continue
+        tool_input = item.get("input")
+        if not isinstance(tool_input, dict):
+            continue
+        for key in ("workdir", "cwd"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def claude_transcript_latest_cwd(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        tail = tail_file_lines(path, CLAUDE_TRANSCRIPT_CWD_TAIL_LINES)
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        cwd = claude_transcript_record_cwd(line)
+        if cwd:
+            return cwd
+    return None
+
+
 def claude_transcript_family_paths(path: Path) -> list[Path]:
     paths = [path]
     subagents_root = path.with_suffix("") / CLAUDE_SUBAGENTS_DIRNAME
@@ -463,6 +505,8 @@ def read_claude_agent(
     transcript_path = None
     if isinstance(session_id, str) and session_id:
         transcript_path = find_transcript_by_session_id(projects_root, session_id)
+    metadata_cwd = metadata.get("cwd") if isinstance(metadata.get("cwd"), str) else None
+    transcript_cwd = claude_transcript_latest_cwd(transcript_path)
 
     return AgentInfo(
         session=session,
@@ -470,7 +514,7 @@ def read_claude_agent(
         pid=process.pid,
         pane_target=pane.target,
         command=process.command,
-        cwd=metadata.get("cwd") if isinstance(metadata.get("cwd"), str) else None,
+        cwd=transcript_cwd or metadata_cwd,
         status=metadata.get("status") if isinstance(metadata.get("status"), str) else None,
         session_id=session_id if isinstance(session_id, str) else None,
         transcript=str(transcript_path) if transcript_path else None,

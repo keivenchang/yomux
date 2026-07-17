@@ -214,6 +214,50 @@ def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
     assert glob_calls == []
 
 
+def test_read_claude_agent_prefers_latest_transcript_cwd(tmp_path):
+    clear_transcript_lookup_cache()
+    claude_root = tmp_path / ".claude"
+    sessions_root = claude_root / "sessions"
+    projects_root = claude_root / "projects"
+    project_root = projects_root / "-home-user"
+    sessions_root.mkdir(parents=True)
+    project_root.mkdir(parents=True)
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir()
+    repo.mkdir()
+    transcript = project_root / "session-120.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"type": "user", "cwd": str(home), "sessionId": "session-120"}),
+            json.dumps({
+                "type": "assistant",
+                "cwd": str(repo),
+                "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}]},
+                "sessionId": "session-120",
+            }),
+        ]),
+        encoding="utf-8",
+    )
+    (sessions_root / "101.json").write_text(json.dumps({
+        "pid": 101,
+        "sessionId": "session-120",
+        "cwd": str(home),
+        "status": "busy",
+    }), encoding="utf-8")
+
+    agent = sessions.read_claude_agent(
+        "120",
+        _pane(101),
+        ProcessInfo(pid=101, ppid=100, command="claude"),
+        sessions_root=sessions_root,
+        projects_root=projects_root,
+    )
+
+    assert agent.transcript == str(transcript)
+    assert agent.cwd == str(repo)
+
+
 def test_select_claude_agent_follows_daemon_delegated_session(tmp_path):
     clear_transcript_lookup_cache()
     claude_root = tmp_path / ".claude"

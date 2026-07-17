@@ -807,6 +807,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   test('touch terminals provide one shared smart-key transport accessory', () => {
     const api = loadYolomux('', ['1', '2'], 'http:', 'iPad', 'admin', {coarsePointer: true});
     const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
     const css = fs.readFileSync('static_src/css/yolomux/50_terminal_file_tree.css', 'utf8');
     assert.ok(/const terminalMobileAccessoryKeyDefs[\s\S]*action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\\x7f'/.test(source), 'touch terminal key definitions retain one Backspace definition that sends DEL');
     assert.ok(/terminalMobileAccessoryModifierActions = Object\.freeze\(\['ctrl', 'alt', 'shift', 'cmd'\]\)[\s\S]*terminalMobileAccessoryPrimaryActions = Object\.freeze\(\['tab', 'tmux-prefix', 'backspace', 'more'\]\)[\s\S]*terminalMobileAccessoryCornerAction = 'escape'[\s\S]*terminalMobileAccessorySideActions = Object\.freeze\(\['ctrl', 'shift', 'command-v'\]\)[\s\S]*terminalMobileAccessoryDpadActions = Object\.freeze\([^\n]*'alt'/.test(source), 'the primary page keeps Esc in the corner, moves Paste into the left utility column, and keeps Alt in the navigation row beside Cmd');
@@ -924,6 +925,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-terminal-mobile-key="escape"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="tab"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="interrupt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="alt"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="shift"[^>]* disabled/.test(readOnlyTouchHtml) && /data-terminal-mobile-key="cmd"[^>]* disabled/.test(readOnlyTouchHtml), 'read-only mutating smart keys and modifiers remain disabled');
     const readOnlyDesktopApi = loadYolomux('', ['1'], 'http:', 'MacIntel', 'viewer');
     assert.equal(readOnlyDesktopApi.terminalMobileAccessoryHtmlForTest('1'), '', 'desktop-pointer read-only terminals do not render the touch launcher');
+    const desktopMobileOverrideApi = loadYolomux('?mobile=1', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      viewport: {width: 1200, height: 800},
+    });
+    assert.ok(desktopMobileOverrideApi.terminalMobileAccessoryHtmlForTest('1').includes('data-terminal-mobile-toggle="1"'), 'mobile=1 forces the shared coarse-pointer keyboard path on desktop browsers');
+    assert.equal(desktopMobileOverrideApi.mobileSinglePaneModeForTest(), false, 'mobile=1 alone does not fake a narrow phone viewport or collapse desktop panes');
+    assert.ok(/function browserUsesCoarsePointer\(\)[\s\S]*urlFlagEnabled\('mobile'\)[\s\S]*matchMedia\('\(pointer: coarse\)'/.test(bootstrapSource), 'mobile=1 is owned by the shared coarse-pointer predicate before media-query detection');
     assert.ok(source.includes("const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);") && source.includes("const terminalMobileAccessoryCornerAction = 'escape';") && source.includes("const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift', 'command-v']);") && source.includes("const interruptKey = key('interrupt');") && source.includes("const moreKey = key('more');"), 'both pages reuse the same More and Ctrl-C definitions while the primary utility column stays compact');
     assert.ok(/function installTerminalMobileAccessoryDismissal\(\)[\s\S]*pointerdown[\s\S]*data-terminal-mobile-keybar[\s\S]*data-terminal-mobile-toggle[\s\S]*dismissTerminalMobileAccessories\(\)[\s\S]*function bindTerminalContainerForSession[\s\S]*installTerminalMobileAccessoryDismissal\(\)[\s\S]*keydown[\s\S]*dismissTerminalMobileAccessory\(session\)/.test(source), 'the shared palette closes on outside app interaction and physical terminal input, while its own launcher and keys remain usable');
     assert.ok([

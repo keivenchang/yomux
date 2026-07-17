@@ -955,6 +955,35 @@ def associate_branch_pull_request(
             canonical_pr["linear_issue_ids"].append(linear_id)
 
 
+def associate_worktree_pull_request(
+    graph: dict[str, Any],
+    *,
+    hosted_repository_id: str,
+    worktree_id: str,
+    pull_request: dict[str, Any],
+    cache: MetadataCache,
+    allow_network: bool,
+) -> None:
+    number = pull_request.get("number")
+    if not isinstance(number, int):
+        return
+    pr_id = pull_request_graph_id(hosted_repository_id, number)
+    canonical_pr = graph["pull_requests"].setdefault(
+        pr_id,
+        {"id": pr_id, "hosted_repository_id": hosted_repository_id, **copy.deepcopy(pull_request), "local_branch_ids": [], "linear_issue_ids": []},
+    )
+    hosted_repository = graph["hosted_repositories"][hosted_repository_id]
+    if pr_id not in hosted_repository["pull_request_ids"]:
+        hosted_repository["pull_request_ids"].append(pr_id)
+    worktree = graph["git_worktrees"].get(worktree_id)
+    if isinstance(worktree, dict) and pr_id not in worktree["pull_request_ids"]:
+        worktree["pull_request_ids"].append(pr_id)
+    for linear_id in extract_linear_ids(canonical_pr.get("title"), canonical_pr.get("description"), " ".join(str(item) for item in canonical_pr.get("linear_ids", []))):
+        ensure_graph_linear_issue(graph, linear_id, cache, allow_network=allow_network)
+        if linear_id not in canonical_pr["linear_issue_ids"]:
+            canonical_pr["linear_issue_ids"].append(linear_id)
+
+
 def associate_branch_linear_issues(
     graph: dict[str, Any],
     *,
@@ -1193,12 +1222,15 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
                 "current_branch_id": None,
                 "branch_activity_ids": [],
                 "path_observation_ids": [],
+                "pull_request_ids": [],
                 # Ranking data belongs to the canonical worktree. Activity consumers can choose a
                 # compact summary without reviving an independent session.project owner.
                 "activity_priority": 999,
+                "has_actor_cwd": False,
                 "activity_ts": 0.0,
                 "activity_source": "",
                 "has_current_pull_request": False,
+                "has_ranked_pull_request": False,
                 "git": {},
             },
         )
@@ -1318,6 +1350,16 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
                         allow_network=allow_network,
                     )
             enrich_branch_pull_requests(git_data, cache, allow_network=allow_network)
+            worktree_pull_request = current_worktree_pull_request(git_data, cache, allow_network=allow_network)
+            if isinstance(worktree_pull_request, dict):
+                associate_worktree_pull_request(
+                    graph,
+                    hosted_repository_id=hosted_id,
+                    worktree_id=worktree_id,
+                    pull_request=worktree_pull_request,
+                    cache=cache,
+                    allow_network=allow_network,
+                )
             enrich_branch_linear_metadata(git_data, cache, allow_network=allow_network)
             for branch in git_data.get("other_branches", {}).get("branches", []):
                 if not isinstance(branch, dict) or not isinstance(branch.get("name"), str):
@@ -1396,6 +1438,7 @@ def annotate_worktree_activity(graph: dict[str, Any]) -> None:
             if observation_id in graph["path_observations"]
         ]
         worktree["activity_priority"] = min((int(observation["priority"]) for observation in observations), default=999)
+        worktree["has_actor_cwd"] = any(observation["source"] == "actor-cwd" for observation in observations)
         status_lines = worktree["git"].get("status")
         dirty_activity_ts = repo_dirty_activity_ts(worktree["root"], status_lines if isinstance(status_lines, list) else [])
         commit_activity_ts = repo_commit_activity_ts(worktree["root"])
@@ -1403,7 +1446,8 @@ def annotate_worktree_activity(graph: dict[str, Any]) -> None:
         worktree["activity_source"] = "dirty" if dirty_activity_ts >= commit_activity_ts and dirty_activity_ts > 0 else ("commit" if commit_activity_ts > 0 else "")
         current_branch_id = worktree.get("current_branch_id")
         current_branch = graph["local_branches"].get(current_branch_id) if isinstance(current_branch_id, str) else None
-        worktree["has_current_pull_request"] = bool(current_branch and current_branch["pull_request_ids"])
+        worktree["has_current_pull_request"] = bool(current_branch and current_branch["pull_request_ids"]) or bool(worktree["pull_request_ids"])
+        worktree["has_ranked_pull_request"] = bool(worktree["has_current_pull_request"] and worktree["activity_priority"] <= 10)
 
 
 def activity_work_summary_from_graph(graph: dict[str, Any]) -> dict[str, Any]:
@@ -1424,8 +1468,10 @@ def activity_work_summary_from_graph(graph: dict[str, Any]) -> dict[str, Any]:
         worktree for _index, worktree in sorted(
             enumerate(graph["git_worktrees"].values()),
             key=lambda item: (
+                -int(item[1].get("has_ranked_pull_request", False)),
                 int(item[1].get("activity_priority", 999)),
                 -int(item[1].get("has_current_pull_request", False)),
+                -int(item[1].get("has_actor_cwd", False)),
                 -float(item[1].get("activity_ts") or 0),
                 item[0],
             ),
@@ -1456,6 +1502,10 @@ def activity_work_summary_from_graph(graph: dict[str, Any]) -> dict[str, Any]:
                 for pr_id in branch["pull_request_ids"]:
                     current_pr = copy.deepcopy(graph["pull_requests"][pr_id])
                     break
+        if current_pr is None:
+            for pr_id in worktree["pull_request_ids"]:
+                current_pr = copy.deepcopy(graph["pull_requests"][pr_id])
+                break
         repos.append({"root": worktree["root"], "cwd": worktree["root"], "branch": git_data.get("branch"), "ahead": git_data.get("ahead"), "behind": git_data.get("behind"), "dirty_count": git_data.get("dirty_count", 0), "activity_ts": worktree["activity_ts"], "activity_source": worktree["activity_source"], "github_repo": git_data.get("github_repo"), "worktree": git_data.get("worktree"), "local_repository": git_data["local_repository"], "selected": index == 0, "git": git_data, "pull_request": current_pr})
     selected = repos[0]
     selected_pr = selected["pull_request"]
@@ -1861,6 +1911,26 @@ def current_branch_pull_request(git_data: dict[str, Any], cache: MetadataCache, 
             str(git_data.get("head") or branch),
         )
     return github_pull_request_by_branch(repo, branch, cache, allow_network=allow_network)
+
+
+def current_worktree_pull_request(git_data: dict[str, Any], cache: MetadataCache, allow_network: bool = True) -> dict[str, Any] | None:
+    repo = git_data.get("github_repo")
+    if not isinstance(repo, dict):
+        return None
+    cwd = git_data.get("root") or git_data.get("cwd")
+    head_sha = git_data.get("head_sha")
+    local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
+    if local_pr is None:
+        return None
+    return pull_request_by_number_or_fallback(
+        repo,
+        local_pr["number"],
+        cache,
+        allow_network,
+        "local-ref",
+        local_pr.get("title"),
+    )
+
 
 def local_pull_request_info(cwd: str, head_sha: str) -> dict[str, Any] | None:
     return local_pull_request_by_sha(cwd).get(head_sha)

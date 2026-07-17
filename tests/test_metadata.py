@@ -357,6 +357,104 @@ def test_activity_work_summary_prefers_current_branch_pr_within_same_signal(monk
     assert work["pull_request"]["number"] == 10853
 
 
+def test_activity_work_summary_prefers_actor_detached_pr_over_memory_edit(monkeypatch, tmp_path):
+    memory_repo = tmp_path / "ai-config"
+    pr_repo = tmp_path / "frontend-crates"
+    _init_repo(memory_repo)
+    _init_repo(pr_repo)
+    _git(pr_repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(pr_repo, "update-ref", "refs/remotes/origin/pull-request/120", "HEAD")
+    _git(pr_repo, "checkout", "--detach", "HEAD")
+
+    memory_file = memory_repo / "claude" / "memory" / "-home-user" / "MEMORY.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("remembered\n", encoding="utf-8")
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": str(memory_file)}},
+            ]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    home_like = tmp_path / "home"
+    home_like.mkdir()
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    monkeypatch.setattr(metadata, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
+
+    pane = _pane("120", 0, home_like)
+    agent = AgentInfo(
+        session="120", kind="claude", pid=1, pane_target="120:0.0", command="claude",
+        cwd=str(pr_repo), status="running", session_id=None, transcript=str(transcript), error=None,
+    )
+    info = SessionInfo(session="120", panes=[pane], selected_pane=pane, agents=[agent])
+
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
+
+    assert work["git"]["root"] == str(pr_repo.resolve())
+    assert work["pull_request"]["number"] == 120
+    roots = {entry["root"] for entry in work["repos"]}
+    assert str(memory_repo.resolve()) in roots
+
+
+def test_activity_work_summary_prefers_detached_pr_over_later_actor_memory_cwd(monkeypatch, tmp_path):
+    memory_repo = tmp_path / "ai-config"
+    pr_repo = tmp_path / "frontend-crates"
+    _init_repo(memory_repo)
+    _init_repo(pr_repo)
+    _git(pr_repo, "remote", "add", "origin", "git@github.com:ai-dynamo/frontend-crates.git")
+    _git(pr_repo, "update-ref", "refs/remotes/origin/pull-request/120", "HEAD")
+    _git(pr_repo, "checkout", "--detach", "HEAD")
+
+    memory_file = memory_repo / "claude" / "memory" / "-home-user" / "reference_slack_users_mapping.md"
+    memory_file.parent.mkdir(parents=True)
+    memory_file.write_text("remembered\n", encoding="utf-8")
+    pr_file = pr_repo / "parsers" / "v1" / "tests" / "scratch_inkling_review.rs"
+    pr_file.parent.mkdir(parents=True)
+    pr_file.write_text("review scratch\n", encoding="utf-8")
+    transcript = tmp_path / "claude.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": str(pr_file)}},
+                ]},
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "Edit", "input": {"file_path": str(memory_file)}},
+                ]},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    home_like = tmp_path / "home"
+    home_like.mkdir()
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    monkeypatch.setattr(metadata, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
+
+    pane = _pane("120", 0, home_like)
+    agent = AgentInfo(
+        session="120", kind="claude", pid=1, pane_target="120:0.0", command="claude",
+        cwd=str(memory_file.parent), status="running", session_id=None, transcript=str(transcript), error=None,
+    )
+    info = SessionInfo(session="120", panes=[pane], selected_pane=pane, agents=[agent])
+
+    work = metadata.activity_work_summary_from_graph(metadata.session_work_graph(info, MetadataCache(), allow_network=False))
+
+    assert work["git"]["root"] == str(pr_repo.resolve())
+    assert work["pull_request"]["number"] == 120
+    assert [entry["root"] for entry in work["repos"]][:2] == [str(pr_repo.resolve()), str(memory_repo.resolve())]
+
+
 def test_candidate_session_cwds_surfaces_transcript_touched_repo(monkeypatch, tmp_path):
     # A claude launched from a NON-repo cwd (e.g. $HOME) that edits files in a real repo must still
     # surface that repo: the transcript-touched dir is fed into candidate_session_cwds, so repo
@@ -1125,6 +1223,8 @@ def test_session_to_json_builds_one_canonical_graph_without_legacy_projection(tm
         command="claude", active=True, window_active=True, title="", pid=10, window_name="claude",
     )
     info = SessionInfo(session="3", panes=[pane], selected_pane=pane, agents=[])
+    home_like = tmp_path / "home"
+    home_like.mkdir()
     original_graph = metadata.session_work_graph
     original_inventory = metadata.git_inventory
     graph_builds = []
@@ -1139,6 +1239,9 @@ def test_session_to_json_builds_one_canonical_graph_without_legacy_projection(tm
         graph_builds.append(graph)
         return graph
 
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    monkeypatch.setattr(metadata, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
     monkeypatch.setattr(metadata, "git_inventory", counted_inventory)
     monkeypatch.setattr(metadata, "session_work_graph", counted_graph)
     payload = metadata.session_to_json(info, MetadataCache(), allow_network=False)
@@ -1754,6 +1857,8 @@ def test_session_work_graph_many_observations_reuse_one_git_inventory_and_compac
     pane = _pane("s-observation-pressure", 0, repo)
     agent = AgentInfo("s-observation-pressure", "codex", 101, pane.target, "codex", str(repo), "running", "a", None, None)
     info = SessionInfo(session="s-observation-pressure", panes=[pane], selected_pane=pane, agents=[agent])
+    home_like = tmp_path / "home"
+    home_like.mkdir()
     changed_paths = {str(repo / f"nested/{index}/file.py"): {"M"} for index in range(40)}
     for path in changed_paths:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -1766,6 +1871,9 @@ def test_session_work_graph_many_observations_reuse_one_git_inventory_and_compac
         return original_inventory(path, **kwargs)
 
     monkeypatch.setattr(metadata, "scan_agent_changes", lambda _agent: changed_paths)
+    monkeypatch.setattr(metadata, "session_workdir", lambda session: home_like)
+    monkeypatch.setattr(metadata, "numbered_session_workdir", lambda session: None)
+    monkeypatch.setattr(metadata, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
     monkeypatch.setattr(metadata, "git_inventory", counted_inventory)
     # Exercise the actual session-metadata API projection: repeated observed
     # files must not cause a fresh Git inventory or a repeated entity graph.

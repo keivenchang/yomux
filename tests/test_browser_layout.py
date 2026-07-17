@@ -4407,6 +4407,8 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
           key: '1:0', session: '1', window_index: '0', active: true,
           panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%11', pane_id: '%11', current_command: 'claude', active: true, alternate_on: true, pid: 1234, dead: false}],
         }]};
+        window.__terminalTouchOriginalPerformanceNow = performanceNow;
+        performanceNow = () => 1000;
         """
     )
     dispatch_gesture(1, 24, steps=3)
@@ -4421,6 +4423,7 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
             """
         )
     )
+    browser.execute_script("performanceNow = window.__terminalTouchOriginalPerformanceNow;")
     assert any(frame["data"] == "\x1b[A" for frame in alternate), alternate
     assert any(frame["data"] == "\x1b[5~" for frame in alternate), alternate
 
