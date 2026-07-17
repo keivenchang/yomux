@@ -101,15 +101,12 @@ def test_main_process_cpu_work_has_named_allowlist():
         "start_input_heartbeat_worker",
         "start_native_filesystem_watcher",
         "start_session_files_cache_refresh",
-        "start_stats_agent_token_work",
-        "start_stats_metric_scheduler",
         "start_tabber_activity_cache_refresh",
         "start_tabber_activity_cache_warmer",
         "start_transcripts_payload_refresh",
         "start_update_check_thread",
         "warm_metadata_cache_async",
         "request_session_files_disk_cache_prune",
-        "stats_cached_gpu_metrics",
     }
 
     retired_patterns = (
@@ -127,7 +124,8 @@ def test_main_process_cpu_work_has_named_allowlist():
 
     jobd_source = (root / "yolomux_lib" / "jobd.py").read_text(encoding="utf-8")
     assert '"transcript_view": _transcript_view' in jobd_source
-    assert "write_json_bytes(encoded)" in (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    routes_source = (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    assert routes_source.count("write_json_bytes(result.body, status=result.status)") == 2
 
 
 def test_positive_finite_number_normalizes_counter_inputs():

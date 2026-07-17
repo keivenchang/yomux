@@ -3710,7 +3710,15 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
       const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
-      assert.ok(/data-terminal-mobile-key="escape"[\s\S]*mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*mobile-terminal-keyrow-bottom[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"/.test(keyboardHtml) && !/mobile-terminal-keyrow--more[\s\S]*data-terminal-mobile-key="interrupt"/.test(keyboardHtml), 'the touch palette puts Esc alone in the top-left corner, Ctrl/Shift in the left side column, and direct Ctrl-C/Alt/Cmd in its primary bottom row');
+      const keyboardActions = ['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'backspace', 'copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down', 'shift', 'alt', 'cmd', 'command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'];
+      assert.equal(keyboardActions.every(action => keyboardHtml.includes(`data-terminal-mobile-key="${action}"`)), true, 'the touch palette exposes every primary and extra key in one surface');
+      const handleIndex = keyboardHtml.indexOf('mobile-terminal-key-grabber');
+      const closeIndex = keyboardHtml.indexOf('data-terminal-mobile-close="1"');
+      const contentIndex = keyboardHtml.indexOf('mobile-terminal-key-content');
+      assert.ok(/mobile-terminal-key-launcher"[\s\S]*aria-expanded="false"[\s\S]*>⌨<\/button>/.test(keyboardHtml) && handleIndex < closeIndex && closeIndex < contentIndex, `the closed launcher stays a keyboard button while the open keybar owns a first-child handle and top-right X (${handleIndex}/${closeIndex}/${contentIndex})`);
+      assert.ok(keyboardHtml.includes('data-terminal-mobile-page="primary"') && keyboardHtml.includes('data-terminal-mobile-page="more" hidden'), 'mobile keyboard renders one primary page and one initially hidden More page');
+      assert.equal((keyboardHtml.match(/data-terminal-mobile-key="interrupt"/g) || []).length, 2, 'both pages reuse the shared Ctrl-C definition');
+      assert.equal((keyboardHtml.match(/data-terminal-mobile-key="more"/g) || []).length, 2, 'both pages retain the More page toggle');
       assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 
@@ -3943,6 +3951,70 @@ async function runLayoutAsyncSuite() {
       assert.ok(src.includes('updateDryRun'), 'dryrun url flag wired');
       assert.ok(src.includes('data-update-badge'), 'topbar update badge selector wired');
       assert.ok(src.includes("'update_available'"), 'subscribes to the update_available client event');
+    });
+
+    test('YO!stats exact ranges offer only the server-supported resolution cells', () => {
+      const api = loadYolomux('', ['1']);
+      const expected = new Map([
+        [300, [1, 10]],
+        [900, [10, 60]],
+        [1800, [10, 60]],
+        [3600, [10, 60, 300]],
+        [7200, [60, 300]],
+        [14400, [60, 300]],
+        [28800, [60, 300]],
+        [57600, [300]],
+        [86400, [300]],
+      ]);
+      for (const [range, resolutions] of expected) {
+        assert.deepStrictEqual(
+          [...api.debugGraphExactResolutionChoicesForTest(range)],
+          resolutions,
+          `${range}s exposes its exact server cells`,
+        );
+      }
+    });
+
+    test('YO!stats source gaps do not overpaint exact family data', () => {
+      const api = loadYolomux('', ['1']);
+      const seriesValue = value => ({value, source_count: 1, first_timestamp: 0, last_timestamp: 0});
+      const snapshot = {
+        window_start: 0,
+        window_end: 40,
+        resolution_seconds: 10,
+        buckets: [
+          {start: 0, duration: 10, series: {'cpu_percent:retired': seriesValue(1)}},
+          {start: 10, duration: 10, series: {}},
+          {start: 20, duration: 10, series: {'cpu_percent:current': seriesValue(2)}},
+          {start: 30, duration: 10, series: {}},
+        ],
+        no_data: [
+          {family: 'cpu', start: 0, end: 10},
+          {family: 'cpu', start: 10, end: 20},
+          {family: 'cpu', start: 20, end: 30},
+        ],
+      };
+      assert.deepStrictEqual(
+        canonical(api.jsDebugCurrentCoverageIntervalsForTest(snapshot, 'cpu')),
+        [
+          {startSeconds: 0, endSeconds: 10, resolutionSeconds: 10, sourceResolutionSeconds: 10},
+          {startSeconds: 20, endSeconds: 40, resolutionSeconds: 10, sourceResolutionSeconds: 10},
+        ],
+        'only a source gap with no exact family value becomes a family-wide red band',
+      );
+    });
+
+    test('YO!stats exact server buckets are never re-aggregated by legacy tiers', () => {
+      const api = loadYolomux('', ['1']);
+      const now = Date.now();
+      api.clearJsDebugGraphDataForTest();
+      api.debugGraphApplyServerRecordForTest({start: (now - 16 * 60 * 60 * 1000) / 1000, duration: 300});
+      api.compactJsDebugGraphBucketsForTest(now);
+      assert.deepStrictEqual(
+        [...api.jsDebugGraphBucketDurationsForTest()],
+        [300],
+        'a 300s exact server cell stays 300s even in the old 600s age tier',
+      );
     });
 }
 

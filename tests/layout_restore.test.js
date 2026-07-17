@@ -2078,8 +2078,9 @@ async function runLayoutRestoreSuite() {
     assert.equal(summary.last.target, '1:1', 'tmux signal latency names the removed window key');
     assert.equal(summary.last.origin, 'pane-exited', 'tmux signal latency starts at the pane-exit event');
     assert.ok(summary.last.durationMs >= 0, 'tmux signal latency records elapsed time to client removal');
-    const text = api.jsDebugTextForClipboardForTest();
-    assert.ok(text.includes('removals=1') && text.includes('terminal_removal') && text.includes('window 1:1 removed'), 'YO!stats debug text surfaces removal latency');
+    const removalEvents = api.jsDebugEventsForTest().filter(event => event.type === 'terminal_removal');
+    assert.equal(removalEvents.length, 1, 'the current browser-observation source retains one removal event for private upload');
+    assert.equal(removalEvents[0].target, '1:1', 'the private removal observation names the removed window key');
 
     api.clearJsDebugEventsForTest();
     api.setTmuxSignalStateForTest({

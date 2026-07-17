@@ -232,10 +232,24 @@ def write_message(
         return
     if envelope is None:
         raise LocalRpcError("current RPC response requires an envelope")
-    encoded = json.dumps(envelope.to_dict(len(binary)), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = encode_metadata(envelope, binary_length=len(binary))
     if len(encoded) > LOCAL_RPC_MAX_METADATA_BYTES:
         raise LocalRpcError("metadata too large")
     connection.sendall(len(encoded).to_bytes(LOCAL_RPC_HEADER_BYTES, "big") + encoded + binary)
+
+
+def encode_metadata(
+    envelope: LocalRpcEnvelope,
+    *,
+    binary_length: int = 0,
+) -> bytes:
+    """Encode the exact bounded metadata frame shared by sizing and transport."""
+
+    return json.dumps(
+        envelope.to_dict(binary_length),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def request(

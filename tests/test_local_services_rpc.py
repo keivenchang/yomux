@@ -330,7 +330,7 @@ def test_local_service_transport_has_no_pickle_or_decompression_surface():
         "yolomux_lib/local_services/runtime.py",
         "yolomux_lib/local_services/registry.py",
         "yolomux_lib/jobd.py",
-        "yolomux_lib/statsd.py",
+        "yolomux_lib/stats_current/service.py",
         "yolomux_lib/approvald.py",
     ]
     combined = "\n".join(open(path, encoding="utf-8").read() for path in sources)

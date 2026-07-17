@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,10 @@ from .locales import language_preference_description
 SETTINGS_PATH = CONFIG_DIR / "settings.yaml"
 SETTINGS_DISPLAY_PATH = "~/.config/yolomux/settings.yaml"
 _SETTINGS_PAYLOAD_CACHE: dict[Path, tuple[int, int, dict[str, Any]]] = {}
+_PRICING_PROFILE_HISTORY_KEYS = {
+    "openai": "_openai_pricing_profile_history",
+    "anthropic": "_anthropic_pricing_profile_history",
+}
 UI_COLOR_CHOICES: tuple[str, ...] = ("green", "blue", "orange", "yellow", "purple", "white")
 DEFAULT_CURSOR_COLOR = "yellow"
 SEPARATOR_COLOR_CHOICES: tuple[str, ...] = ("theme", *UI_COLOR_CHOICES)
@@ -198,9 +204,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "server_background_file_event_poll_ms": 5000,
         "server_directory_event_poll_ms": 3000,
         "popover_show_delay_ms": 1000,
-        "popover_hide_delay_ms": 300,
+        "popover_hide_delay_ms": 175,
         "menu_hover_open_delay_ms": 800,
-        "tab_popover_show_delay_ms": 1000,
+        "tab_popover_show_delay_ms": 1300,
         "tab_popover_follow_delay_ms": 120,
         "remote_resize_delay_ms": 220,
         "session_files_max_workers": 2,
@@ -270,6 +276,14 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "read_only": True,
         "scheme": "http",
         "view_fit": "cover",
+    },
+    "cost": {
+        "openai_pricing_profile": "default",
+        "anthropic_pricing_profile": "default",
+        # These effective-dated entries are written in the same atomic settings
+        # update as the selected profile. They are internal history, not UI settings.
+        "_openai_pricing_profile_history": ["0|default"],
+        "_anthropic_pricing_profile_history": ["0|default"],
     },
     "summary": {
         "backend": "codex",
@@ -459,6 +473,8 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("file_explorer", "root_mode"): {"fixed", "sync"},
     ("file_explorer", "image_open_mode"): {"same-tab", "new-tab"},
     ("share", "scheme"): {"http", "https"},
+    ("cost", "openai_pricing_profile"): {"default", "subscription"},
+    ("cost", "anthropic_pricing_profile"): {"default", "subscription"},
     ("summary", "backend"): {"codex", "disabled"},
     ("summary", "codex_model"): set(YOAGENT_CODEX_MODEL_CHOICES),
     ("summary", "codex_effort"): set(YOAGENT_CODEX_EFFORT_CHOICES),
@@ -479,6 +495,8 @@ SETTING_PAYLOAD_CHOICE_ORDER: dict[tuple[str, str], tuple[str, ...]] = {
     ("appearance", "separator_color"): SEPARATOR_COLOR_CHOICES,
     ("appearance", "editor_cursor_color"): CURSOR_COLOR_CHOICES,
     ("share", "view_fit"): ("cover", "contain"),
+    ("cost", "openai_pricing_profile"): ("default", "subscription"),
+    ("cost", "anthropic_pricing_profile"): ("default", "subscription"),
     ("summary", "backend"): ("codex", "disabled"),
     ("summary", "codex_model"): YOAGENT_CODEX_MODEL_CHOICES,
     ("summary", "codex_effort"): YOAGENT_CODEX_EFFORT_CHOICES,
@@ -585,6 +603,8 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("share", "read_only"): "true/false. Default true. When false, the modal requests write access and must use https.",
     ("share", "scheme"): "http | https. Default http for read-only shares; write shares are forced to https.",
     ("share", "view_fit"): "cover | contain. Default cover. Share viewers scale the host viewport as a mirror frame.",
+    ("cost", "openai_pricing_profile"): "default | subscription. Billing profile stamped on new subscription-covered OpenAI CLI usage. Direct API and Images usage stays default/API-priced.",
+    ("cost", "anthropic_pricing_profile"): "default | subscription. Billing profile stamped on new subscription-covered Anthropic CLI usage. Direct API usage stays default/API-priced.",
     ("summary", "backend"): "codex | disabled. Controls the AI summary tab provider. Codex requires the local codex CLI to be installed and logged in.",
     ("summary", "codex_model"): "Codex model for the AI summary tab. Uses the same validated catalog as YO!agent Codex. The YOLOMUX_SUMMARY_MODEL env var only seeds the default when it names a valid catalog model.",
     ("summary", "codex_effort"): "Effort level for the AI summary tab Codex call: low, medium, high, xhigh. The YOLOMUX_SUMMARY_EFFORT env var only seeds a valid default.",
@@ -670,6 +690,8 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("share", "max_viewers"): "YO!share",
     ("share", "read_only"): "YO!share",
     ("share", "scheme"): "YO!share",
+    ("cost", "openai_pricing_profile"): "YO!cost",
+    ("cost", "anthropic_pricing_profile"): "YO!cost",
     ("performance", "server_event_poll_ms"): "Performance",
     ("performance", "server_background_file_event_poll_ms"): "Performance",
     ("performance", "server_directory_event_poll_ms"): "Performance",
@@ -712,6 +734,7 @@ SETTING_GUI_SECTION_LOCALE_KEYS = {
     "Uploads/Downloads": "pref.section.uploads",
     "YO!agent": "brand.tab.agent",
     "YO!chat": "brand.tab.chat",
+    "YO!cost": "pref.section.cost",
     "YO!share": "brand.share",
     "YOLO": "brand.yolo",
 }
@@ -757,6 +780,138 @@ def summary_settings(settings: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def default_settings() -> dict[str, Any]:
     return copy.deepcopy(DEFAULT_SETTINGS)
+
+
+def _pricing_profile_history(value: Any) -> list[tuple[float, str]]:
+    """Return an ordered billing-profile timeline with adjacent repeats removed."""
+
+    events: list[tuple[float, str]] = [(0.0, "default")]
+    if isinstance(value, list):
+        for item in value:
+            timestamp_text, separator, profile_text = str(item or "").partition("|")
+            if not separator:
+                continue
+            try:
+                timestamp = float(timestamp_text)
+            except ValueError:
+                continue
+            profile = profile_text.strip().lower()
+            if not math.isfinite(timestamp) or timestamp < 0 or profile not in {"default", "subscription"}:
+                continue
+            events.append((timestamp, profile))
+    by_timestamp: dict[float, str] = {}
+    for timestamp, profile in events:
+        by_timestamp[timestamp] = profile
+    collapsed: list[tuple[float, str]] = []
+    for timestamp, profile in sorted(by_timestamp.items()):
+        if not collapsed or collapsed[-1][1] != profile:
+            collapsed.append((timestamp, profile))
+    return collapsed
+
+
+def _pricing_profile_history_payload(value: Any) -> list[str]:
+    return [f"{format(timestamp, '.17g')}|{profile}" for timestamp, profile in _pricing_profile_history(value)]
+
+
+def _record_pricing_profile_changes(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    effective_at: float,
+) -> None:
+    """Record profile changes in the settings document that owns the selection."""
+
+    timestamp = float(effective_at)
+    if not math.isfinite(timestamp) or timestamp < 0:
+        timestamp = time.time()
+    previous_cost = previous.get("cost") if isinstance(previous.get("cost"), dict) else {}
+    current_cost = current.get("cost") if isinstance(current.get("cost"), dict) else {}
+    for provider, history_key in _PRICING_PROFILE_HISTORY_KEYS.items():
+        profile_key = f"{provider}_pricing_profile"
+        previous_profile = previous_cost.get(profile_key, "default")
+        current_profile = current_cost.get(profile_key, "default")
+        history = _pricing_profile_history(previous_cost.get(history_key))
+        if current_profile != previous_profile:
+            history.append((timestamp, current_profile))
+        current_cost[history_key] = _pricing_profile_history_payload([
+            f"{event_at}|{profile}" for event_at, profile in history
+        ])
+
+
+def _usage_pricing_profile_eligible(
+    settings: dict[str, Any] | None,
+    *,
+    provider: str,
+    execution_source: str,
+    endpoint: str,
+) -> bool:
+    provider_name = str(provider or "").strip().lower()
+    source_name = str(execution_source or "").strip().lower().replace("!", "")
+    endpoint_name = str(endpoint or "").strip().lower()
+    yoagent_settings = settings.get("yoagent") if isinstance(settings, dict) else None
+    yoagent_invocation = yoagent_settings.get("invocation", "cli") if isinstance(yoagent_settings, dict) else "cli"
+    yoagent_cli = source_name == "yoagent" and endpoint_name == "yoagent" and yoagent_invocation == "cli"
+    if provider_name == "openai":
+        return (
+            source_name == "codex"
+            or yoagent_cli
+            or (source_name in {"summary", "ai summary"} and endpoint_name in {"summary", "codex-exec"})
+        )
+    if provider_name == "anthropic":
+        return source_name == "claude" or yoagent_cli
+    return False
+
+
+def usage_pricing_profile(
+    settings: dict[str, Any] | None,
+    *,
+    provider: str,
+    execution_source: str,
+    endpoint: str = "",
+    observed_at: float | None = None,
+    requested_profile: str | None = None,
+) -> str:
+    """Return the effective profile for explicit subscription-eligible CLI usage."""
+
+    provider_name = str(provider or "").strip().lower()
+    if not _usage_pricing_profile_eligible(
+        settings,
+        provider=provider_name,
+        execution_source=execution_source,
+        endpoint=endpoint,
+    ):
+        return "default"
+    if requested_profile is not None:
+        requested = str(requested_profile or "").strip().lower()
+        return requested if requested in {"default", "subscription"} else "default"
+    cost_settings = settings.get("cost") if isinstance(settings, dict) else None
+    if not isinstance(cost_settings, dict):
+        return "default"
+    if observed_at is None:
+        value = cost_settings.get(f"{provider_name}_pricing_profile", "default")
+        return value if value in {"default", "subscription"} else "default"
+    try:
+        timestamp = float(observed_at)
+    except (TypeError, ValueError):
+        return "default"
+    if not math.isfinite(timestamp) or timestamp < 0:
+        return "default"
+    history_key = _PRICING_PROFILE_HISTORY_KEYS.get(provider_name)
+    if history_key is None:
+        return "default"
+    if history_key not in cost_settings:
+        # In-process callers and older test adapters may provide a minimal
+        # settings snapshot. Real persisted settings are reconciled with an
+        # effective boundary during read, so only the absent-key shape falls
+        # back to its validated current selection.
+        current = cost_settings.get(f"{provider_name}_pricing_profile", "default")
+        return current if current in {"default", "subscription"} else "default"
+    selected = "default"
+    for effective_at, profile in _pricing_profile_history(cost_settings.get(history_key)):
+        if effective_at > timestamp:
+            break
+        selected = profile
+    return selected
 
 
 def coerce_bool(value: Any, default: bool) -> bool:
@@ -930,6 +1085,8 @@ def sanitize_settings(raw: Any, coerced: list[str] | None = None) -> dict[str, A
             elif isinstance(default, list):
                 if (section, key) == ("uploads", "image_action_order"):
                     items = coerce_image_action_order(value, default)
+                elif section == "cost" and key in _PRICING_PROFILE_HISTORY_KEYS.values():
+                    items = _pricing_profile_history_payload(value)
                 else:
                     items = coerce_string_list(value, default)
                 if (section, key) == ("notifications", "notify_transitions"):
@@ -959,6 +1116,8 @@ def merge_settings(base: dict[str, Any], patch: Any, coerced: list[str] | None =
         for key, value in values.items():
             if section == "general" and key == "startup_helpers":
                 key = "startup_tips"
+            if section == "cost" and key in _PRICING_PROFILE_HISTORY_KEYS.values():
+                continue
             if key in merged[section]:
                 merged[section][key] = value
     return sanitize_settings(merged, coerced)
@@ -1012,7 +1171,15 @@ def _write_settings_file_unlocked(settings: dict[str, Any], path: Path = SETTING
 
 def write_settings_file(settings: dict[str, Any], path: Path = SETTINGS_PATH) -> None:
     with locked_settings_file(path):
-        _write_settings_file_unlocked(settings, path)
+        signature = _settings_payload_file_signature(path)
+        cached = _SETTINGS_PAYLOAD_CACHE.get(path)
+        if signature is not None and cached is not None and cached[:2] == signature:
+            previous = copy.deepcopy(cached[2]["settings"])
+        else:
+            previous, _ = _read_settings_file_unlocked(path)
+        current = sanitize_settings(settings)
+        _record_pricing_profile_changes(previous, current, effective_at=time.time())
+        _write_settings_file_unlocked(current, path)
         _settings_payload_cache_clear_unlocked(path)
 
 
@@ -1023,7 +1190,24 @@ def _read_settings_file_unlocked(path: Path = SETTINGS_PATH) -> tuple[dict[str, 
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         return default_settings(), str(exc)
-    return sanitize_settings(raw), ""
+    settings = sanitize_settings(raw)
+    represented = copy.deepcopy(settings)
+    represented_cost = represented["cost"]
+    for provider, history_key in _PRICING_PROFILE_HISTORY_KEYS.items():
+        represented_cost[f"{provider}_pricing_profile"] = _pricing_profile_history(
+            represented_cost.get(history_key)
+        )[-1][1]
+    previous_history = {
+        key: list(settings["cost"][key])
+        for key in _PRICING_PROFILE_HISTORY_KEYS.values()
+    }
+    effective_at = path.stat().st_mtime if path.exists() else time.time()
+    _record_pricing_profile_changes(represented, settings, effective_at=effective_at)
+    if any(settings["cost"][key] != previous_history[key] for key in previous_history):
+        # Hand edits are part of the supported settings contract. Persist the
+        # inferred boundary once so a restart classifies delayed scans identically.
+        _write_settings_file_unlocked(settings, path)
+    return settings, ""
 
 
 def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
@@ -1167,6 +1351,8 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
     catalog: dict[str, dict[str, Any]] = {}
     for section, values in defaults.items():
         for key, default in values.items():
+            if section == "cost" and key in _PRICING_PROFILE_HISTORY_KEYS.values():
+                continue
             path = f"{section}.{key}"
             lower_upper = SETTING_LIMITS.get((section, key))
             limits = {"min": lower_upper[0], "max": lower_upper[1]} if lower_upper else None
@@ -1220,6 +1406,7 @@ def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
         current, _ = _read_settings_file_unlocked(path)
         coerced: list[str] = []
         next_settings = merge_settings(current, patch, coerced)
+        _record_pricing_profile_changes(current, next_settings, effective_at=time.time())
         _write_settings_file_unlocked(next_settings, path)
         payload = _settings_payload_unlocked(path)
         _settings_payload_cache_store_unlocked(path, payload)

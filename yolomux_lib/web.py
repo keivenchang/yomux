@@ -33,6 +33,7 @@ from .locales import plural_category
 from .locales import resolve_locale_preference
 from .settings import save_settings
 from .settings import settings_payload
+from .stats_current import storage as stats_current_storage
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import agent_command
@@ -278,6 +279,12 @@ def html_page(
         "versionCommitTime": yolomux_commit_time_pt(),
         "versionCommitCount": yolomux_commit_count(),
         "settingsPayload": bootstrap_settings_payload(settings_data),
+        # This fence ships atomically with the cache-busted client bundle. An already-loaded older
+        # bundle keeps its old fence and is rejected before it can write into a newer stats store.
+        "statsWriterFence": {
+            "protocol_version": stats_current_storage.MIN_WRITER_PROTOCOL,
+            "schema_generation": stats_current_storage.SCHEMA_VERSION,
+        },
         # i18n: resolved active locale for first paint plus the canonical registry that every client
         # uses for normalization, system resolution, endonyms, and direction. The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at

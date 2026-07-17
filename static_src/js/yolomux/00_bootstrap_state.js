@@ -1,4 +1,12 @@
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
+const statsWriterFence = (() => {
+  const value = bootstrap.statsWriterFence;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const protocolVersion = Number(value.protocol_version);
+  const schemaGeneration = Number(value.schema_generation);
+  if (!Number.isSafeInteger(protocolVersion) || protocolVersion < 1 || !Number.isSafeInteger(schemaGeneration) || schemaGeneration < 1) return null;
+  return Object.freeze({protocolVersion, schemaGeneration});
+})();
 let sessions = bootstrap.sessions;
 const availableAgents = new Set(bootstrap.availableAgents);
 const terminalCommands = Array.isArray(bootstrap.terminalCommands) ? bootstrap.terminalCommands : [];
@@ -629,6 +637,7 @@ const PREFERENCE_SECTION_IDS = Object.freeze({
   fileExplorer: 'file_explorer',
   uploads: 'uploads',
   performance: 'performance',
+  cost: 'cost',
   github: 'github',
   yoagent: 'yoagent',
   share: 'share',
@@ -638,6 +647,7 @@ const DEFAULT_COLLAPSED_PREFERENCE_SECTION_IDS = Object.freeze([
   PREFERENCE_SECTION_IDS.general,
   PREFERENCE_SECTION_IDS.appearance,
   PREFERENCE_SECTION_IDS.performance,
+  PREFERENCE_SECTION_IDS.cost,
   PREFERENCE_SECTION_IDS.notifications,
   PREFERENCE_SECTION_IDS.terminalEditor,
   PREFERENCE_SECTION_IDS.fileExplorer,
@@ -647,6 +657,7 @@ const LEGACY_PREFERENCE_SECTION_IDS_BY_ENGLISH_TITLE = Object.freeze({
   General: PREFERENCE_SECTION_IDS.general,
   Appearance: PREFERENCE_SECTION_IDS.appearance,
   Performance: PREFERENCE_SECTION_IDS.performance,
+  'YO!cost': PREFERENCE_SECTION_IDS.cost,
   Notifications: PREFERENCE_SECTION_IDS.notifications,
   'Terminal / Editor': PREFERENCE_SECTION_IDS.terminalEditor,
   'File Explorer': PREFERENCE_SECTION_IDS.fileExplorer,

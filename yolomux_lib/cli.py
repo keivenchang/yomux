@@ -28,6 +28,8 @@ from .common import warn_unavailable_agent_commands_once
 from .control import send_yolomux_control_request
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
+from .server_logs import emit_server_log
+from .server_logs import install_server_log_handler
 
 
 def parse_args() -> argparse.Namespace:
@@ -282,6 +284,7 @@ def print_auth_setup_error() -> None:
 
 def main() -> int:
     args = parse_args()
+    install_server_log_handler()
     warn_unavailable_agent_commands_once()
     if args.print_background_owner:
         return print_background_owner_status()
@@ -321,6 +324,7 @@ def main() -> int:
         url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
         session_text = ", ".join(sessions) if sessions else "no tmux sessions"
         print(f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/ for {session_text}")
+        emit_server_log("info", "server", f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/", category="lifecycle")
         if tls_message:
             print(tls_message)
         if args.dangerously_yolo:

@@ -714,14 +714,13 @@ def test_browser_fixture_wait_loops_have_one_injected_owner():
     assert "description: 'renamed root index building'" in rename_test
 
 
-def test_yostats_history_browser_tests_use_shared_observable_waits():
+def test_current_yostats_diagnostics_browser_tests_use_shared_observable_waits():
     path = repo_path("tests/test_browser_layout.py")
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source)
     names = {
-        "test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll",
-        "test_debug_graph_history_error_retains_chart_and_explicit_range_retries",
-        "test_debug_graph_chrome_refocus_fetches_missed_history_and_redraws_immediately",
+        "test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narrow_layout",
+        "test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout",
     }
     function_sources = {
         node.name: ast.get_source_segment(source, node) or ""
@@ -734,9 +733,6 @@ def test_yostats_history_browser_tests_use_shared_observable_waits():
         assert "window.__yolomuxTestWaitFor" in function_source, name
         assert "const deadline = performance.now()" not in function_source, name
         assert "setTimeout(resolve, 650)" not in function_source, name
-    assert 'assert metrics["historyResolution"] == 1' in function_sources[
-        "test_debug_graph_wider_range_fetches_and_paints_older_history_after_inflight_poll"
-    ]
 
 
 def test_tokenized_component_base_rules_have_no_identical_light_restatements():

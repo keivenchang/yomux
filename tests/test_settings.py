@@ -15,6 +15,7 @@ from yolomux_lib.settings import save_settings
 from yolomux_lib.settings import sanitize_settings
 from yolomux_lib.settings import settings_catalog
 from yolomux_lib.settings import settings_payload
+from yolomux_lib.settings import usage_pricing_profile
 from yolomux_lib.settings import write_settings_file
 from yolomux_lib.activity_summary import deterministic_yoagent_reply
 from yolomux_lib.web import current_language_pref
@@ -39,6 +40,79 @@ def test_pane_spacing_default_is_3px():
     assert default_settings()["performance"]["agent_status_pulse_period_ms"] == 1550
     assert default_settings()["performance"]["workflow_transition_glow_seconds"] == 60
     assert "agent_window_cooldown_seconds" not in default_settings()["performance"]
+
+
+def test_usage_pricing_profiles_only_cover_provider_cli_sources():
+    configured = default_settings()
+    configured["cost"] = {
+        "openai_pricing_profile": "subscription",
+        "anthropic_pricing_profile": "subscription",
+    }
+
+    assert usage_pricing_profile(configured, provider="openai", execution_source="codex") == "subscription"
+    assert usage_pricing_profile(configured, provider="openai", execution_source="codex", observed_at=123.0) == "subscription"
+    assert usage_pricing_profile(configured, provider="anthropic", execution_source="claude") == "subscription"
+    assert usage_pricing_profile(configured, provider="openai", execution_source="YO!agent", endpoint="yoagent") == "subscription"
+    assert usage_pricing_profile(configured, provider="openai", execution_source="AI Summary", endpoint="codex-exec") == "subscription"
+    assert usage_pricing_profile(configured, provider="openai", execution_source="Image tool", endpoint="images") == "default"
+    assert usage_pricing_profile(configured, provider="openai", execution_source="Responses", endpoint="responses") == "default"
+    configured["yoagent"] = {"invocation": "api-key"}
+    assert usage_pricing_profile(configured, provider="openai", execution_source="YO!agent", endpoint="yoagent") == "default"
+    assert usage_pricing_profile(configured, provider="anthropic", execution_source="YO!agent", endpoint="yoagent") == "default"
+    assert usage_pricing_profile({"cost": {"openai_pricing_profile": "invalid"}}, provider="openai", execution_source="codex") == "default"
+
+
+def test_pricing_profile_history_is_effective_dated_and_survives_restart(monkeypatch, tmp_path):
+    path = tmp_path / "settings.yaml"
+    monkeypatch.setattr(settings_module.time, "time", lambda: 200.0)
+
+    saved = save_settings({"cost": {"openai_pricing_profile": "subscription"}}, path)
+    configured = saved["settings"]
+
+    assert usage_pricing_profile(configured, provider="openai", execution_source="codex", observed_at=199.0) == "default"
+    assert usage_pricing_profile(configured, provider="openai", execution_source="codex", observed_at=200.0) == "subscription"
+    assert usage_pricing_profile(
+        configured,
+        provider="openai",
+        execution_source="Responses",
+        endpoint="responses",
+        observed_at=201.0,
+        requested_profile="subscription",
+    ) == "default"
+
+    attempted_overwrite = save_settings({"cost": {"_openai_pricing_profile_history": ["0|subscription"]}}, path)
+    assert attempted_overwrite["settings"]["cost"]["_openai_pricing_profile_history"] == [
+        "0|default",
+        "200|subscription",
+    ]
+
+    settings_module._SETTINGS_PAYLOAD_CACHE.clear()
+    restarted, error = read_settings_file(path)
+    assert error == ""
+    assert usage_pricing_profile(restarted, provider="openai", execution_source="codex", observed_at=199.0) == "default"
+    assert usage_pricing_profile(restarted, provider="openai", execution_source="codex", observed_at=201.0) == "subscription"
+
+    edited = path.read_text(encoding="utf-8").replace(
+        "openai_pricing_profile: subscription",
+        "openai_pricing_profile: default",
+        1,
+    )
+    path.write_text(edited, encoding="utf-8")
+    os.utime(path, (300.0, 300.0))
+    hand_edited, error = read_settings_file(path)
+    assert error == ""
+    assert usage_pricing_profile(hand_edited, provider="openai", execution_source="codex", observed_at=250.0) == "subscription"
+    assert usage_pricing_profile(hand_edited, provider="openai", execution_source="codex", observed_at=300.0) == "default"
+
+    monkeypatch.setattr(settings_module.time, "time", lambda: 400.0)
+    reset = default_settings()
+    reset["cost"]["openai_pricing_profile"] = "subscription"
+    write_settings_file(reset, path)
+    settings_module._SETTINGS_PAYLOAD_CACHE.clear()
+    reset_reloaded, error = read_settings_file(path)
+    assert error == ""
+    assert usage_pricing_profile(reset_reloaded, provider="openai", execution_source="codex", observed_at=350.0) == "default"
+    assert usage_pricing_profile(reset_reloaded, provider="openai", execution_source="codex", observed_at=400.0) == "subscription"
 
 
 def test_stale_agent_window_cooldown_default_migrates_to_workflow_transition_glow():
@@ -310,7 +384,12 @@ def test_settings_round_trip_with_atomic_template(tmp_path):
 def test_settings_catalog_covers_defaults_and_gui_metadata():
     defaults = default_settings()
     catalog = settings_catalog(defaults)
-    expected_paths = {f"{section}.{key}" for section, values in defaults.items() for key in values}
+    expected_paths = {
+        f"{section}.{key}"
+        for section, values in defaults.items()
+        for key in values
+        if not key.startswith("_")
+    }
 
     assert set(catalog) == expected_paths
     for path, item in catalog.items():
@@ -370,6 +449,13 @@ def test_settings_catalog_covers_defaults_and_gui_metadata():
         "visible": True,
     }
     assert catalog["share.view_fit"]["gui"] == {"section": "", "section_locale_key": "", "visible": False}
+    assert catalog["cost.openai_pricing_profile"]["choices"] == ["default", "subscription"]
+    assert catalog["cost.openai_pricing_profile"]["gui"] == {
+        "section": "YO!cost",
+        "section_locale_key": "pref.section.cost",
+        "visible": True,
+    }
+    assert catalog["cost.anthropic_pricing_profile"]["choices"] == ["default", "subscription"]
 
 
 def test_stale_yoagent_model_settings_revert_to_valid_defaults():

@@ -67,10 +67,14 @@ def test_yoagent_usage_event_submits_structured_atoms_without_parsing_diagnostic
     assert submitted[0]["event_id"].startswith("yoagent:stream-cost:claude-thread:")
 
 
-def test_owned_usage_submission_normalizes_structured_components_for_statsd_wire():
+def test_owned_usage_submission_normalizes_structured_components_for_current_wire():
     webapp = app_module.TmuxWebtermApp(["5"])
     submitted = []
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, now: submitted.append((records, now)) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
+    webapp.settings_payload = lambda: {"settings": {"cost": {"openai_pricing_profile": "subscription"}}}
     try:
         assert webapp.record_owned_usage_atoms(
             provider="openai", model="gpt-5.6", usage={"input_tokens": 12, "cached_input_tokens": 4, "output_tokens": 7},
@@ -79,12 +83,13 @@ def test_owned_usage_submission_normalizes_structured_components_for_statsd_wire
     finally:
         webapp.control_server.stop()
 
-    atoms = submitted[0][0][0]["usage_atoms"]
-    assert {(atom["direction"], atom["cache_role"], atom["quantity"]) for atom in atoms} == {
+    atoms = submitted
+    assert {(atom.direction, atom.cache_role, atom.payload["quantity"]) for atom in atoms} == {
         ("input", "none", 8.0), ("input", "read", 4.0), ("output", "none", 7.0),
     }
-    assert {atom["source"] for atom in atoms} == {"AI Summary"}
-    assert {atom["effort"] for atom in atoms} == {"high"}
+    assert {atom.payload["agent_id"] for atom in atoms} == {"AI Summary"}
+    assert {atom.payload["effort"] for atom in atoms} == {"high"}
+    assert {atom.payload["pricing_profile"] for atom in atoms} == {"subscription"}
 
 
 def test_yoagent_stream_callback_separates_answer_from_auxiliary_events(monkeypatch):

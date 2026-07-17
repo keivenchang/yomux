@@ -41,7 +41,9 @@ from .filesystem.git_ops import normal_ref
 from .filesystem.git_ops import refs_requested
 from .locales import message_descriptor
 from .locales import user_message_payload
+from . import sessions as sessions_module
 from .sessions import claude_transcript_family_paths
+from .sessions import recent_claude_transcript_candidates
 from .sessions import codex_transcript_family_paths
 from .sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from .sessions import find_recent_codex_transcript
@@ -69,6 +71,7 @@ _TRANSCRIPT_SCAN_TAIL_BYTES = 512
 _TRANSCRIPT_REVERSE_SCAN_BYTES = 64 * 1024
 _CODEX_TRANSCRIPT_SCAN_VERSION = 7
 _CLAUDE_TRANSCRIPT_SCAN_VERSION = 5
+_STATS_CURRENT_TRANSCRIPT_SCAN_VERSION = 3
 _TRANSCRIPT_SCAN_STORE_VERSION = 2
 _TRANSCRIPT_SCAN_STORE_MAX_BYTES = 64 * 1024 * 1024
 _TRANSCRIPT_SCAN_STORE_PRUNE_SECONDS = 60.0
@@ -130,6 +133,29 @@ class TranscriptUsageAtom:
     pricing_profile: str = "default"
     service_tier: str = "default"
     telemetry_complete: bool = False
+
+
+@dataclass
+class ClaudeUsageAtomState:
+    """Incremental provider state for one Claude JSONL file."""
+
+    sequence: int = 0
+    previous_by_message: dict[str, dict[tuple[str, str, str, str], float]] = field(default_factory=dict)
+    occurrences_by_message: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class CodexUsageAtomState:
+    """Incremental provider state for one Codex JSONL file."""
+
+    sequence: int = 0
+    totals: dict[tuple[str, str, str, str], float] = field(default_factory=dict)
+    current_model: str = ""
+    current_model_evidence: str = "unknown"
+    current_effort: str = "unknown"
+    current_pricing_profile: str = "default"
+    current_service_tier: str = "default"
+    suppress_fork_history: bool = False
 
 
 @dataclass(frozen=True)
@@ -319,6 +345,118 @@ def serialized_transcript_marker_map(value: Any) -> dict[str, list[str]]:
     }
 
 
+def serialized_usage_components(value: Any) -> list[list[Any]]:
+    """Encode one bounded provider counter map without stringifying tuple keys."""
+
+    if not isinstance(value, dict):
+        return []
+    rows = []
+    for key, quantity in value.items():
+        if not isinstance(key, tuple) or len(key) != 4:
+            continue
+        normalized = positive_finite_number(quantity)
+        rows.append([*(str(part)[:64] for part in key), normalized])
+    return sorted(rows)
+
+
+def usage_components_from_payload(value: Any) -> dict[tuple[str, str, str, str], float]:
+    """Decode persisted provider counters; malformed cache rows are ignored."""
+
+    if not isinstance(value, list):
+        return {}
+    components: dict[tuple[str, str, str, str], float] = {}
+    for row in value:
+        if not isinstance(row, list) or len(row) != 5:
+            continue
+        key = tuple(str(part)[:64] for part in row[:4])
+        if any(not part for part in key):
+            continue
+        components[key] = positive_finite_number(row[4])
+    return components
+
+
+def usage_atom_parser_state_payload(value: Any) -> dict[str, Any]:
+    """Serialize the parser state owned by the shared transcript scan record."""
+
+    if isinstance(value, CodexUsageAtomState):
+        return {
+            "kind": "codex",
+            "sequence": max(0, int(value.sequence)),
+            "totals": serialized_usage_components(value.totals),
+            "current_model": transcript_model_name(value.current_model),
+            "current_model_evidence": str(value.current_model_evidence or "unknown")[:64],
+            "current_effort": transcript_effort(value.current_effort),
+            "current_pricing_profile": transcript_pricing_context(value.current_pricing_profile),
+            "current_service_tier": transcript_pricing_context(value.current_service_tier),
+            "suppress_fork_history": bool(value.suppress_fork_history),
+        }
+    if isinstance(value, ClaudeUsageAtomState):
+        message_ids = list(value.previous_by_message)[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:]
+        return {
+            "kind": "claude",
+            "sequence": max(0, int(value.sequence)),
+            "messages": [
+                {
+                    "id": message_id,
+                    "components": serialized_usage_components(value.previous_by_message[message_id]),
+                    "occurrences": max(0, int(value.occurrences_by_message.get(message_id, 0))),
+                }
+                for message_id in message_ids
+            ],
+        }
+    return {}
+
+
+def usage_atom_parser_state_from_payload(kind: str, value: Any) -> ClaudeUsageAtomState | CodexUsageAtomState:
+    """Restore a fail-safe parser state from the shared transcript scan cache."""
+
+    if kind == "codex":
+        state = CodexUsageAtomState()
+        if not isinstance(value, dict) or value.get("kind") != "codex":
+            return state
+        state.sequence = max(0, int(value.get("sequence") or 0))
+        state.totals = usage_components_from_payload(value.get("totals"))
+        state.current_model = transcript_model_name(value.get("current_model"))
+        state.current_model_evidence = str(value.get("current_model_evidence") or "unknown")[:64]
+        state.current_effort = transcript_effort(value.get("current_effort"))
+        state.current_pricing_profile = transcript_pricing_context(value.get("current_pricing_profile"))
+        state.current_service_tier = transcript_pricing_context(value.get("current_service_tier"))
+        state.suppress_fork_history = bool(value.get("suppress_fork_history"))
+        return state
+    state = ClaudeUsageAtomState()
+    if not isinstance(value, dict) or value.get("kind") != "claude":
+        return state
+    state.sequence = max(0, int(value.get("sequence") or 0))
+    messages = value.get("messages")
+    if not isinstance(messages, list):
+        return state
+    for row in messages[-_TRANSCRIPT_SCAN_MESSAGE_ID_MAX:]:
+        if not isinstance(row, dict):
+            continue
+        message_id = str(row.get("id") or "").strip()[:256]
+        if not message_id:
+            continue
+        state.previous_by_message[message_id] = usage_components_from_payload(row.get("components"))
+        state.occurrences_by_message[message_id] = max(0, int(row.get("occurrences") or 0))
+    return state
+
+
+def new_stats_current_transcript_scan_state(kind: str) -> dict[str, Any]:
+    """Create one usage scanner state inside the existing durable scan parent."""
+
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"claude", "codex"}:
+        raise ValueError("stats transcript kind must be claude or codex")
+    parser_state = ClaudeUsageAtomState() if normalized == "claude" else CodexUsageAtomState()
+    return {
+        "offset": 0,
+        "size": 0,
+        "prefix_digest": "",
+        "parsed_tail": b"",
+        "usage_parser_state": parser_state,
+    }
+
+
 def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, Any]) -> dict[str, Any]:
     provider = str(cache_key[0])
     payload: dict[str, Any] = {
@@ -346,6 +484,8 @@ def transcript_scan_state_payload(cache_key: tuple[Any, ...], state: dict[str, A
             "generated_tokens_by_model": transcript_usage_models(state.get("generated_tokens_by_model")),
             "model": transcript_model_name(state.get("model")),
         })
+    elif provider in {"stats-current-claude", "stats-current-codex"}:
+        payload["usage_parser_state"] = usage_atom_parser_state_payload(state.get("usage_parser_state"))
     return payload
 
 
@@ -379,6 +519,9 @@ def transcript_scan_state_from_payload(cache_key: tuple[Any, ...], payload: Any,
         state["summed_last_generated_tokens"] = positive_finite_number(payload.get("summed_last_generated_tokens"))
         state["generated_tokens_by_model"] = transcript_usage_models(payload.get("generated_tokens_by_model"))
         state["model"] = transcript_model_name(payload.get("model"))
+    elif provider in {"stats-current-claude", "stats-current-codex"}:
+        kind = provider.removeprefix("stats-current-")
+        state["usage_parser_state"] = usage_atom_parser_state_from_payload(kind, payload.get("usage_parser_state"))
     return state
 
 
@@ -422,10 +565,19 @@ def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, m
             logger.warning("failed to prune transcript scan cache %s: %s", path.name, exc)
 
 
-def persist_transcript_scan_state(cache_key: tuple[Any, ...], state: dict[str, Any]) -> bool:
+def persist_transcript_scan_state(
+    cache_key: tuple[Any, ...],
+    state: dict[str, Any],
+    *,
+    force: bool = False,
+) -> bool:
     global _TRANSCRIPT_SCAN_STORE_NEXT_PRUNE
     cache_path = transcript_scan_store_path(cache_key)
-    if int(state.get("size") or 0) < _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES and not cache_path.exists():
+    if (
+        not force
+        and int(state.get("size") or 0) < _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES
+        and not cache_path.exists()
+    ):
         return False
     record = {
         "schema_version": _TRANSCRIPT_SCAN_STORE_VERSION,
@@ -437,7 +589,13 @@ def persist_transcript_scan_state(cache_key: tuple[Any, ...], state: dict[str, A
             if cache_path.exists():
                 existing = json.loads(cache_path.read_text(encoding="utf-8"))
                 existing_state = existing.get("state") if isinstance(existing, dict) else None
-                if isinstance(existing, dict) and existing.get("identity") == list(cache_key) and isinstance(existing_state, dict) and int(existing_state.get("offset") or 0) > int(state.get("offset") or 0):
+                if (
+                    not state.get("_allow_offset_rewind")
+                    and isinstance(existing, dict)
+                    and existing.get("identity") == list(cache_key)
+                    and isinstance(existing_state, dict)
+                    and int(existing_state.get("offset") or 0) > int(state.get("offset") or 0)
+                ):
                     return False
             atomic_write_text(cache_path, json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True), mode=0o600)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -462,6 +620,7 @@ def maybe_persist_transcript_scan_record(record: TranscriptScanRecord, force: bo
     if persist_transcript_scan_state(record.identity, record.state):
         record.persisted_offset = offset
         record.persisted_at = now
+        record.state.pop("_allow_offset_rewind", None)
 
 
 def transcript_scan_memory_record(cache_key: tuple[Any, ...], path: Path, new_state: Callable[[], dict[str, Any]]) -> TranscriptScanRecord:
@@ -488,6 +647,32 @@ def transcript_scan_memory_record(cache_key: tuple[Any, ...], path: Path, new_st
                 _TRANSCRIPT_SCAN_CACHE.pop(oldest_key, None)
         _TRANSCRIPT_SCAN_CACHE[cache_key] = record
         return record
+
+
+def stats_current_transcript_scan_record(path: Path, kind: str) -> TranscriptScanRecord:
+    """Return the current usage scanner's record from the shared durable parent."""
+
+    normalized = str(kind or "").strip().lower()
+    if normalized not in {"claude", "codex"}:
+        raise ValueError("stats transcript kind must be claude or codex")
+    stat = path.stat()
+    cache_key = (
+        f"stats-current-{normalized}",
+        _STATS_CURRENT_TRANSCRIPT_SCAN_VERSION,
+        int(stat.st_dev),
+        int(stat.st_ino),
+        str(path.expanduser().resolve(strict=False)),
+    )
+    record = transcript_scan_memory_record(
+        cache_key,
+        path,
+        lambda: new_stats_current_transcript_scan_state(normalized),
+    )
+    with record.lock:
+        if transcript_scan_state_needs_reset(path, int(stat.st_size), record.state):
+            record.state = new_stats_current_transcript_scan_state(normalized)
+            record.state["_allow_offset_rewind"] = True
+    return record
 
 
 def incremental_transcript_scan_details(
@@ -518,6 +703,7 @@ def incremental_transcript_scan_details(
         reset = transcript_scan_state_needs_reset(path, current_size, record.state)
         if reset:
             record.state = new_state()
+            record.state["_allow_offset_rewind"] = True
         state = record.state
         prefix_digest = transcript_scan_prefix_digest(path)
         if not state.get("prefix_digest"):
@@ -568,6 +754,7 @@ def scan_transcript_append(path: Path, offset: int, update: Callable[[str], None
             update(raw_line.decode("utf-8", errors="replace"))
             update_transcript_scan_tail(state, raw_line)
             consumed += len(raw_line)
+    RUNTIME_COUNTS["append_bytes_parsed"] += consumed
     return consumed
 
 
@@ -1099,6 +1286,16 @@ def transcript_record_timestamp(record: dict[str, Any]) -> float | None:
     return parsed.timestamp()
 
 
+def transcript_json_record(raw_line: bytes | str) -> dict[str, Any] | None:
+    """Decode one complete JSONL record for full and incremental scanners."""
+
+    try:
+        record = json.loads(raw_line)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
 def transcript_json_records(path: Path, *, max_bytes: int | None = None) -> Iterator[dict[str, Any]]:
     """Yield complete JSONL records, optionally bounded by a captured offset.
 
@@ -1118,11 +1315,8 @@ def transcript_json_records(path: Path, *, max_bytes: int | None = None) -> Iter
                 raw_line = raw_line.rstrip(b"\r\n")
                 if not raw_line:
                     continue
-                try:
-                    record = json.loads(raw_line)
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-                if isinstance(record, dict):
+                record = transcript_json_record(raw_line)
+                if record is not None:
                     yield record
     except OSError:
         return
@@ -1278,42 +1472,79 @@ def claude_record_usage(usage: Any) -> dict[tuple[str, str, str, str], float | N
     return {key: value for key, value in totals.items()}
 
 
+def claude_usage_atoms_from_record(
+    record: dict[str, Any],
+    state: ClaudeUsageAtomState,
+    *,
+    source: str,
+    root_thread_id: str = "",
+    agent_thread_id: str = "",
+    parent_thread_id: str = "",
+    depth: int = 0,
+) -> list[TranscriptUsageAtom]:
+    """Advance one Claude file without losing repeated-message cumulative state."""
+
+    sequence = state.sequence
+    state.sequence += 1
+    if record.get("type") != "assistant":
+        return []
+    timestamp = transcript_record_timestamp(record)
+    message = record.get("message")
+    if timestamp is None or not isinstance(message, dict):
+        return []
+    components = claude_record_usage(message.get("usage"))
+    if not components:
+        return []
+    message_id = str(message.get("id") or f"line-{sequence}").strip()[:256]
+    previous = state.previous_by_message.get(message_id, {})
+    occurrence = state.occurrences_by_message.get(message_id, 0)
+    state.occurrences_by_message[message_id] = occurrence + 1
+    delta = usage_component_delta(components, previous)
+    state.previous_by_message[message_id] = {
+        key: float(value) for key, value in components.items() if value is not None
+    }
+    while len(state.previous_by_message) > _TRANSCRIPT_SCAN_MESSAGE_ID_MAX:
+        retired_message_id = next(iter(state.previous_by_message))
+        state.previous_by_message.pop(retired_message_id)
+        state.occurrences_by_message.pop(retired_message_id, None)
+    model = transcript_model_name(message.get("model"))
+    effort = message.get("effort") or record.get("effort")
+    return usage_component_atoms(
+        source=source,
+        timestamp=timestamp,
+        event_id=(
+            f"claude:{agent_thread_id or source}:{message_id}"
+            if occurrence == 0
+            else f"claude:{agent_thread_id or source}:{message_id}:revision-{occurrence}"
+        ),
+        provider="anthropic",
+        model=model,
+        model_evidence="assistant.message.model" if model else "unknown",
+        effort=effort,
+        components=delta,
+        root_thread_id=root_thread_id or source,
+        agent_thread_id=agent_thread_id or source,
+        parent_thread_id=parent_thread_id,
+        depth=depth,
+        endpoint="messages",
+        pricing_profile=message.get("pricing_profile") or message.get("profile") or record.get("pricing_profile") or record.get("profile"),
+        service_tier=message.get("service_tier") or message.get("serviceTier") or record.get("service_tier") or record.get("serviceTier"),
+        telemetry_complete=usage_telemetry_complete(components),
+    )
+
+
 def iter_claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None):
     source = str(path.expanduser().resolve(strict=False))
-    previous_by_message: dict[str, dict[tuple[str, str, str, str], float]] = {}
-    for sequence, record in enumerate(transcript_json_records(path, max_bytes=max_bytes)):
-        if record.get("type") != "assistant":
-            continue
-        timestamp = transcript_record_timestamp(record)
-        message = record.get("message")
-        if timestamp is None or not isinstance(message, dict):
-            continue
-        components = claude_record_usage(message.get("usage"))
-        if not components:
-            continue
-        message_id = str(message.get("id") or f"line-{sequence}").strip()[:256]
-        previous = previous_by_message.get(message_id, {})
-        delta = usage_component_delta(components, previous)
-        previous_by_message[message_id] = {key: float(value) for key, value in components.items() if value is not None}
-        model = transcript_model_name(message.get("model"))
-        effort = message.get("effort") or record.get("effort")
-        yield from usage_component_atoms(
+    state = ClaudeUsageAtomState()
+    for record in transcript_json_records(path, max_bytes=max_bytes):
+        yield from claude_usage_atoms_from_record(
+            record,
+            state,
             source=source,
-            timestamp=timestamp,
-            event_id=f"claude:{agent_thread_id or source}:{message_id}",
-            provider="anthropic",
-            model=model,
-            model_evidence="assistant.message.model" if model else "unknown",
-            effort=effort,
-            components=delta,
-            root_thread_id=root_thread_id or source,
-            agent_thread_id=agent_thread_id or source,
+            root_thread_id=root_thread_id,
+            agent_thread_id=agent_thread_id,
             parent_thread_id=parent_thread_id,
             depth=depth,
-            endpoint="messages",
-            pricing_profile=message.get("pricing_profile") or message.get("profile") or record.get("pricing_profile") or record.get("profile"),
-            service_tier=message.get("service_tier") or message.get("serviceTier") or record.get("service_tier") or record.get("serviceTier"),
-            telemetry_complete=usage_telemetry_complete(components),
         )
 
 
@@ -1324,54 +1555,157 @@ def claude_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent
     ))
 
 
+def apply_codex_usage_context(
+    state: CodexUsageAtomState,
+    payload: dict[str, Any],
+    *,
+    model_evidence: str,
+    effort_fields: tuple[str, ...] = ("effort",),
+) -> None:
+    """Apply only explicit provider context fields to the canonical Codex parser state."""
+
+    model = transcript_model_name(payload.get("model"))
+    if model:
+        state.current_model = model
+        state.current_model_evidence = model_evidence
+    for field_name in effort_fields:
+        if field_name in payload:
+            state.current_effort = transcript_effort(payload.get(field_name))
+            break
+    if "pricing_profile" in payload or "profile" in payload:
+        state.current_pricing_profile = transcript_pricing_context(
+            payload.get("pricing_profile") or payload.get("profile")
+        )
+    if "service_tier" in payload or "serviceTier" in payload:
+        state.current_service_tier = transcript_pricing_context(
+            payload.get("service_tier") or payload.get("serviceTier")
+        )
+
+
+def codex_usage_atoms_from_record(
+    record: dict[str, Any],
+    state: CodexUsageAtomState,
+    *,
+    source: str,
+    root_thread_id: str = "",
+    agent_thread_id: str = "",
+    parent_thread_id: str = "",
+    depth: int = 0,
+    suppressed_atoms: list[TranscriptUsageAtom] | None = None,
+) -> list[TranscriptUsageAtom]:
+    """Advance one Codex file while retaining cumulative counters and turn context."""
+
+    sequence = state.sequence
+    state.sequence += 1
+    record_type = record.get("type")
+    if record_type == "session_meta":
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            starts_fork_history = bool(
+                str(payload.get("forked_from_id") or "").strip()
+                and str(payload.get("thread_source") or "").strip().lower()
+                == "subagent"
+            )
+            # A real Codex fork writes child metadata first, then replays the
+            # parent's session metadata and history. The copied parent metadata
+            # must not cancel suppression that the child metadata established.
+            state.suppress_fork_history |= starts_fork_history
+            apply_codex_usage_context(
+                state,
+                payload,
+                model_evidence="session_meta.payload.model",
+            )
+        return []
+    if record_type == "turn_context":
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            apply_codex_usage_context(
+                state,
+                payload,
+                model_evidence="turn_context.payload.model",
+            )
+        return []
+    if record_type == "inter_agent_communication_metadata":
+        # This is the explicit handoff from the cloned parent history to the
+        # child's own task. Its real turn_context precedes the marker, while
+        # its first usage counter follows it.
+        state.suppress_fork_history = False
+        return []
+    payload = record.get("payload")
+    if (
+        record_type == "event_msg"
+        and isinstance(payload, dict)
+        and payload.get("type") == "thread_settings_applied"
+    ):
+        settings = payload.get("thread_settings")
+        if isinstance(settings, dict):
+            apply_codex_usage_context(
+                state,
+                settings,
+                model_evidence="thread_settings_applied.thread_settings.model",
+                effort_fields=("reasoning_effort", "effort"),
+            )
+        return []
+    timestamp = transcript_record_timestamp(record)
+    info = payload.get("info") if isinstance(payload, dict) else None
+    if timestamp is None or not isinstance(info, dict):
+        return []
+    cumulative = info.get("total_token_usage")
+    last = info.get("last_token_usage")
+    usage = cumulative if isinstance(cumulative, dict) else last if isinstance(last, dict) else None
+    if usage is None:
+        return []
+    components = codex_usage_components(usage)
+    is_cumulative = isinstance(cumulative, dict)
+    delta = usage_component_delta(components, state.totals) if is_cumulative else components
+    if is_cumulative:
+        state.totals = {
+            key: float(value) for key, value in components.items() if value is not None
+        }
+    atoms = usage_component_atoms(
+        source=source,
+        timestamp=timestamp,
+        event_id=f"codex:{agent_thread_id or source}:{sequence}",
+        provider="openai",
+        model=state.current_model,
+        model_evidence=state.current_model_evidence if state.current_model else "unknown",
+        effort=state.current_effort,
+        components=delta,
+        root_thread_id=root_thread_id or agent_thread_id or source,
+        agent_thread_id=agent_thread_id or source,
+        parent_thread_id=parent_thread_id,
+        depth=depth,
+        endpoint="responses",
+        pricing_profile=state.current_pricing_profile,
+        service_tier=state.current_service_tier,
+        telemetry_complete=usage_telemetry_complete(components),
+    )
+    if state.suppress_fork_history:
+        if suppressed_atoms is not None:
+            suppressed_atoms.extend(atoms)
+        return []
+    return atoms
+
+
+def resume_codex_usage_atom_state(state: CodexUsageAtomState) -> None:
+    """Mark inherited context honestly before parsing a later durable segment."""
+
+    if state.current_model:
+        state.current_model_evidence = "scan_state.resumed_model"
+
+
 def iter_codex_transcript_usage_atoms(path: Path, *, root_thread_id: str = "", agent_thread_id: str = "", parent_thread_id: str = "", depth: int = 0, max_bytes: int | None = None):
     source = str(path.expanduser().resolve(strict=False))
-    totals: dict[tuple[str, str, str, str], float] = {}
-    current_model = ""
-    current_effort = "unknown"
-    current_pricing_profile = "default"
-    current_service_tier = "default"
-    for sequence, record in enumerate(transcript_json_records(path, max_bytes=max_bytes)):
-        if record.get("type") == "turn_context":
-            payload = record.get("payload")
-            if isinstance(payload, dict):
-                current_model = transcript_model_name(payload.get("model")) or current_model
-                current_effort = transcript_effort(payload.get("effort"))
-                current_pricing_profile = transcript_pricing_context(payload.get("pricing_profile") or payload.get("profile"))
-                current_service_tier = transcript_pricing_context(payload.get("service_tier") or payload.get("serviceTier"))
-            continue
-        timestamp = transcript_record_timestamp(record)
-        payload = record.get("payload")
-        info = payload.get("info") if isinstance(payload, dict) else None
-        if timestamp is None or not isinstance(info, dict):
-            continue
-        cumulative = info.get("total_token_usage")
-        last = info.get("last_token_usage")
-        usage = cumulative if isinstance(cumulative, dict) else last if isinstance(last, dict) else None
-        if usage is None:
-            continue
-        components = codex_usage_components(usage)
-        is_cumulative = isinstance(cumulative, dict)
-        delta = usage_component_delta(components, totals) if is_cumulative else components
-        if is_cumulative:
-            totals = {key: float(value) for key, value in components.items() if value is not None}
-        yield from usage_component_atoms(
+    state = CodexUsageAtomState()
+    for record in transcript_json_records(path, max_bytes=max_bytes):
+        yield from codex_usage_atoms_from_record(
+            record,
+            state,
             source=source,
-            timestamp=timestamp,
-            event_id=f"codex:{agent_thread_id or source}:{sequence}",
-            provider="openai",
-            model=current_model,
-            model_evidence="turn_context.payload.model" if current_model else "unknown",
-            effort=current_effort,
-            components=delta,
-            root_thread_id=root_thread_id or agent_thread_id or source,
-            agent_thread_id=agent_thread_id or source,
+            root_thread_id=root_thread_id,
+            agent_thread_id=agent_thread_id,
             parent_thread_id=parent_thread_id,
             depth=depth,
-            endpoint="responses",
-            pricing_profile=current_pricing_profile,
-            service_tier=current_service_tier,
-            telemetry_complete=usage_telemetry_complete(components),
         )
 
 
@@ -2077,16 +2411,63 @@ def record_session_files_phase(
     recorder(phase, max(0.0, (time.perf_counter() - started) * 1000), dict(details or {}))
 
 
+# Untracked-file line counts keyed by file identity: repeated payload assembly was
+# re-reading every unchanged untracked file (up to 2 MB each) on every refresh, and
+# os.stat/read dominated the web process's hot thread during session-files bursts.
+# One stat still runs per lookup (it IS the identity check); the read is skipped
+# while (dev, inode, size, mtime_ns) is unchanged. Bounded FIFO so a huge repo
+# cannot grow it without limit.
+_UNTRACKED_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int, int], int | None]] = {}
+_UNTRACKED_LINE_COUNT_CACHE_MAX = 4096
+
+# Cumulative session-files work accounting (DOIT.optimize-backends): monotonic
+# counters sampled through the existing performance owner, so per-build deltas
+# are derivable without a cross-thread reset race.
+RUNTIME_COUNTS = {
+    "append_bytes_parsed": 0,
+    "untracked_line_count_hits": 0,
+    "untracked_line_count_reads": 0,
+}
+
+
+def session_files_runtime_counters() -> dict[str, Any]:
+    """One bounded snapshot of the cumulative work counters for accounting."""
+    return {
+        **RUNTIME_COUNTS,
+        "git_commands": dict(common.GIT_COMMAND_COUNTS),
+        "transcript_catalog": dict(sessions_module.TRANSCRIPT_CATALOG_COUNTS),
+    }
+
+
 def untracked_added_line_count(path: Path) -> int | None:
     try:
-        if path.stat().st_size > 2 * 1024 * 1024:
-            return None
-        raw = path.read_bytes()
+        stat = path.stat()
     except OSError:
         return None
-    if b"\x00" in raw[:8192]:
-        return None
-    return raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    key = str(path)
+    cached = _UNTRACKED_LINE_COUNT_CACHE.get(key)
+    if cached is not None and cached[0] == identity:
+        RUNTIME_COUNTS["untracked_line_count_hits"] += 1
+        return cached[1]
+    RUNTIME_COUNTS["untracked_line_count_reads"] += 1
+    if stat.st_size > 2 * 1024 * 1024:
+        count = None
+    else:
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        if b"\x00" in raw[:8192]:
+            count = None
+        else:
+            count = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
+    if len(_UNTRACKED_LINE_COUNT_CACHE) >= _UNTRACKED_LINE_COUNT_CACHE_MAX:
+        # Evict the oldest half in insertion order; simple, bounded, allocation-light.
+        for stale_key in list(_UNTRACKED_LINE_COUNT_CACHE)[: _UNTRACKED_LINE_COUNT_CACHE_MAX // 2]:
+            del _UNTRACKED_LINE_COUNT_CACHE[stale_key]
+    _UNTRACKED_LINE_COUNT_CACHE[key] = (identity, count)
+    return count
 
 
 def repo_relative_path(path: Path, repo: Path) -> str | None:

@@ -167,11 +167,14 @@ print_launch_command() {
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    local launcher
+    local launcher socket_name session_name
     launcher="$(yolomux_macos_server_launcher)"
+    socket_name="$(yolomux_macos_server_tmux_socket)"
+    session_name="$(yolomux_macos_server_tmux_session "$port")"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
-    printf 'launchctl submit -l %q -o %q -e %q -- /bin/bash -c %q bash %q %q %q %q %q %q' \
-      "local.yolomux.$port" "$log_path" "$log_path" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$background_owner_primary_port"
+    printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
+    printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q' \
+      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$background_owner_primary_port" "$log_path"
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done

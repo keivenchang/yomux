@@ -149,6 +149,7 @@ const terminalMobileAccessoryPaneObservers = new Map();
 const terminalMobileAccessoryModifierTapTimes = new Map();
 let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
+let terminalMobileAccessorySurfaceObserver = null;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
 // terminal context menu opens after the long-press delay, when Safari may reject a new read.
 // Keep only availability (never clipboard contents) so that menu can truthfully offer Paste.
@@ -223,22 +224,19 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-// Overflow refers to shared definitions instead of creating parallel key definitions that could
-// drift from their terminal-byte behavior.
 const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-// Esc renders alone in the top-left corner (see terminalMobileAccessoryHtml); Ctrl/Shift
-// keep the left side column directly below it.
+// Esc renders alone in the top-left corner. Paste fills the left utility column after Ctrl/Shift,
+// leaving the bottom navigation row available for the adjacent Alt/Cmd pair.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift']);
-const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);
+const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift', 'command-v']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
-const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
+const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -476,25 +474,16 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
       side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
     }
   }
-  let anchor = Number(previous?.anchor);
-  if (!Number.isFinite(anchor)) {
-    anchor = side === 'above' ? top - gap
-      : side === 'below' ? bottom + gap
-        : side === 'left' ? left - gap
-          : right + gap;
-  }
-  let x = right - width;
-  let y = anchor - height;
-  if (side === 'below') {
-    x = left;
-    y = anchor;
-  } else if (side === 'left') {
-    x = anchor - width;
-    y = top;
-  } else if (side === 'right') {
-    x = anchor;
-    y = top;
-  }
+  // The launcher disappears when the palette opens, so replace it at the same pane-facing corner
+  // instead of leaving a visually detached gap. Preserve that exact corner across page-size changes.
+  const inlineEdge = previous?.inlineEdge || ((left + right) / 2 >= paneWidth / 2 ? 'end' : 'start');
+  const blockEdge = previous?.blockEdge || ((top + bottom) / 2 >= paneHeight / 2 ? 'end' : 'start');
+  // Coordinates are surface-local: one session can have more than one rendered pane during a
+  // Dockview/replay transition, so caching the first surface's pixel anchor misplaces later copies.
+  const anchorX = inlineEdge === 'end' ? right : left;
+  const anchorY = blockEdge === 'end' ? bottom : top;
+  const x = inlineEdge === 'end' ? anchorX - width : anchorX;
+  const y = blockEdge === 'end' ? anchorY - height : anchorY;
   const placement = {
     side,
     x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
@@ -503,10 +492,8 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
   if (state) {
     state.palettePlacement = {
       side,
-      anchor: side === 'above' ? placement.y + height
-        : side === 'below' ? placement.y
-          : side === 'left' ? placement.x + width
-            : placement.x,
+      inlineEdge,
+      blockEdge,
     };
   }
   return placement;
@@ -525,88 +512,108 @@ function terminalMobileAccessoryHtml(session) {
   if (!isTmuxSession(session) || !terminalMobileAccessoryEnabled()) return '';
   const state = terminalMobileAccessoryState(session, {create: true});
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
-  const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  const primaryKeys = terminalMobileAccessoryPrimaryActions.map(key).join('');
   const cornerKey = key(terminalMobileAccessoryCornerAction);
   const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
-  const bottomKeys = terminalMobileAccessoryBottomActions.map(key).join('');
-  // The overflow button remains the rightmost control in both palette states. Keeping the return
-  // target in one physical corner avoids a touch user hunting for it after the content switches.
-  const moreKeys = [...terminalMobileAccessoryMoreActions.map(key), key('more')].join('');
-  const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
-  return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
+  const moreKeys = terminalMobileAccessoryMoreActions.map(key).join('');
+  const interruptKey = key('interrupt');
+  const commandKey = key('cmd');
+  const moreKey = key('more');
+  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}"${state.open ? ' hidden' : ''}${terminalMobileAccessoryPositionStyle(state)}>⌨</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
-      <div class="mobile-terminal-key-grabber" aria-hidden="true"></div>
-      ${cornerKey}
-      <div class="mobile-terminal-key-side">
-        ${sideKeys}
+      <div class="mobile-terminal-key-grabber" role="button" aria-label="Drag keyboard"></div>
+      <button type="button" class="mobile-terminal-key mobile-terminal-key--close" data-terminal-mobile-close="${esc(session)}" aria-label="${esc(t('shortcuts.close'))}">×</button>
+      <div class="mobile-terminal-key-content" data-terminal-mobile-page="primary"${state.more ? ' hidden' : ''}>
+        ${cornerKey}
+        <div class="mobile-terminal-key-side">${sideKeys}</div>
+        <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div></div>
+        <div class="mobile-terminal-key-dpad">
+          ${terminalMobileAccessoryDpadActions.map(key).join('')}
+          ${commandKey}
+          ${interruptKey}
+        </div>
       </div>
-      <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
-      <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
-      <div class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom">${bottomKeys}</div>
-      <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
+      <div class="mobile-terminal-key-content mobile-terminal-key-content--more" data-terminal-mobile-page="more"${state.more ? '' : ' hidden'}>
+        ${moreKeys}
+        ${moreKey}
+        ${interruptKey}
+      </div>
     </div>`;
+}
+
+function terminalMobileAccessorySurfaces(session) {
+  const key = cssEscape(session);
+  return {
+    bars: [...document.querySelectorAll(`[data-terminal-mobile-keybar="${key}"]`)],
+    launchers: [...document.querySelectorAll(`[data-terminal-mobile-toggle="${key}"]`)],
+  };
 }
 
 function syncTerminalMobileAccessoryState(session) {
   const state = terminalMobileAccessoryState(session);
-  const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
-  const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
-  if (!state || !bar) return false;
-  const pane = launcher?.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
-  terminalMobileAccessoryObservePane(session, pane);
-  if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
-  for (const modifier of terminalMobileAccessoryModifierActions) {
-    const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
-    if (!button) continue;
-    const active = state[modifier] === true;
-    const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
-    button.classList.toggle(CLS.active, active);
-    button.classList.toggle('locked', locked);
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  const {bars, launchers} = terminalMobileAccessorySurfaces(session);
+  if (!state || (!bars.length && !launchers.length)) return false;
+  const open = state.open === true;
+  // Placement still derives from launcher geometry. Reveal every copy only during this synchronous
+  // measurement; the final pass returns all rendered surfaces to one XOR visibility state.
+  for (const launcher of launchers) launcher.hidden = false;
+  for (const bar of bars) {
+    const pane = bar.closest?.('.tab-pane') || null;
+    const launcher = launchers.find(item => item.closest?.('.tab-pane') === pane) || launchers[0] || null;
+    terminalMobileAccessoryObservePane(session, pane);
+    if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
+    for (const modifier of terminalMobileAccessoryModifierActions) {
+      for (const button of bar.querySelectorAll(`[data-terminal-mobile-key="${modifier}"]`)) {
+        const active = state[modifier] === true;
+        const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
+        button.classList.toggle(CLS.active, active);
+        button.classList.toggle('locked', locked);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+    }
+    for (const page of bar.querySelectorAll('[data-terminal-mobile-page]')) {
+      page.hidden = page.dataset.terminalMobilePage === 'more' ? !state.more : state.more;
+    }
+    for (const button of bar.querySelectorAll('[data-terminal-mobile-key="more"]')) {
+      button.setAttribute('aria-expanded', state.more ? 'true' : 'false');
+    }
+    bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+    bar.hidden = !open;
+    const positionedInline = Number.isFinite(state.x);
+    const positionedBlock = Number.isFinite(state.y);
+    if (open && launcher) {
+      const paneRect = pane?.getBoundingClientRect?.();
+      const launcherRect = launcher.getBoundingClientRect();
+      if (paneRect) {
+        const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
+        bar.style.insetInlineStart = `${placement.x}px`;
+        bar.style.insetInlineEnd = 'auto';
+        bar.style.insetBlockStart = `${placement.y}px`;
+        bar.style.insetBlockEnd = 'auto';
+        bar.style.transform = 'none';
+        bar.dataset.terminalMobilePlacement = placement.side;
+      }
+    } else {
+      bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+      bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+      bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+      bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+      bar.style.transform = positionedBlock ? 'none' : '';
+      delete bar.dataset.terminalMobilePlacement;
+    }
   }
-  const more = bar.querySelector('.mobile-terminal-keyrow--more');
-  const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
-  bar.hidden = state.open !== true;
-  bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
-  // Set both visibility levers before measuring. Measuring after only the class change observes a
-  // hybrid primary/overflow layout and creates a second corrective placement on the next sync.
-  if (more) more.hidden = state.more !== true;
-  if (launcher) {
-    const open = state.open === true;
+  for (const launcher of launchers) {
     launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
-    launcher.setAttribute('aria-label', open ? t('shortcuts.close') : t('common.keyboardShortcuts'));
-    launcher.textContent = open ? '×' : '⌨';
-    launcher.classList.toggle('mobile-terminal-key-launcher--open', open);
+    launcher.setAttribute('aria-label', t('common.keyboardShortcuts'));
+    launcher.textContent = '⌨';
     const position = terminalMobileAccessoryLauncherPosition(state);
     launcher.style.insetInlineStart = position.insetInlineStart;
     launcher.style.insetInlineEnd = position.insetInlineEnd;
     launcher.style.insetBlockStart = position.insetBlockStart;
     launcher.style.insetBlockEnd = position.insetBlockEnd;
     launcher.style.transform = position.transform;
+    launcher.hidden = open;
   }
-  const positionedInline = Number.isFinite(state.x);
-  const positionedBlock = Number.isFinite(state.y);
-  if (state.open === true && launcher) {
-    const paneRect = pane?.getBoundingClientRect?.();
-    const launcherRect = launcher.getBoundingClientRect();
-    if (paneRect) {
-      const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
-      bar.style.insetInlineStart = `${placement.x}px`;
-      bar.style.insetInlineEnd = 'auto';
-      bar.style.insetBlockStart = `${placement.y}px`;
-      bar.style.insetBlockEnd = 'auto';
-      bar.style.transform = 'none';
-      bar.dataset.terminalMobilePlacement = placement.side;
-    }
-  } else {
-    bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
-    bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
-    bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
-    bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
-    bar.style.transform = positionedBlock ? 'none' : '';
-    delete bar.dataset.terminalMobilePlacement;
-  }
-  for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
   return true;
 }
@@ -618,8 +625,10 @@ function toggleTerminalMobileAccessoryState(session, key) {
   if (key === 'open' && state.open !== true) {
     dismissTerminalMobileAccessories(session);
     state.palettePlacement = null;
+    state.more = false;
   }
   state[key] = !state[key];
+  if (key === 'open' && state.open !== true) state.more = false;
   syncTerminalMobileAccessoryState(session);
   return state[key];
 }
@@ -664,6 +673,29 @@ function installTerminalMobileAccessoryResizeSync() {
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
+}
+
+function installTerminalMobileAccessorySurfaceSync() {
+  if (terminalMobileAccessorySurfaceObserver || typeof MutationObserver !== 'function' || !document.body) return;
+  terminalMobileAccessorySurfaceObserver = new MutationObserver(records => {
+    const sessions = new Set();
+    const collect = node => {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+      const surfaces = node.matches?.('[data-terminal-mobile-toggle], [data-terminal-mobile-keybar]')
+        ? [node]
+        : [];
+      surfaces.push(...(node.querySelectorAll?.('[data-terminal-mobile-toggle], [data-terminal-mobile-keybar]') || []));
+      for (const surface of surfaces) {
+        const session = String(surface.dataset?.terminalMobileToggle || surface.dataset?.terminalMobileKeybar || '');
+        if (session && terminalMobileAccessoryState(session)) sessions.add(session);
+      }
+    };
+    for (const record of records) {
+      for (const node of record.addedNodes || []) collect(node);
+    }
+    for (const session of sessions) syncTerminalMobileAccessoryState(session);
+  });
+  terminalMobileAccessorySurfaceObserver.observe(document.body, {childList: true, subtree: true});
 }
 
 const terminalMobileAccessoryLongPressMs = 450;
@@ -807,11 +839,17 @@ function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const pane = bar?.closest?.('.tab-pane');
   if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
-  if (event.target?.closest?.('[data-terminal-mobile-key]')) return false;
+  const grabber = event.target?.closest?.('.mobile-terminal-key-grabber');
+  if (!grabber || !bar.contains(grabber)) return false;
   const paneRect = pane.getBoundingClientRect();
   const launcher = pane.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
   if (!launcher) return false;
+  const launcherWasHidden = launcher.hidden === true;
+  if (launcherWasHidden) launcher.hidden = false;
   const launcherRect = launcher?.getBoundingClientRect?.();
+  const launcherWidth = launcher?.offsetWidth || 0;
+  const launcherHeight = launcher?.offsetHeight || 0;
+  if (launcherWasHidden) launcher.hidden = true;
   const startX = Number.isFinite(state.x) ? state.x : (Number(launcherRect?.left) || 0) - paneRect.left;
   const startY = Number.isFinite(state.y) ? state.y : (Number(launcherRect?.top) || 0) - paneRect.top;
   const press = {
@@ -823,8 +861,8 @@ function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
     startY,
     paneWidth: pane.clientWidth,
     paneHeight: pane.clientHeight,
-    launcherWidth: launcher?.offsetWidth || 0,
-    launcherHeight: launcher?.offsetHeight || 0,
+    launcherWidth,
+    launcherHeight,
   };
   state.palettePress = press;
   bar.setPointerCapture?.(event.pointerId);
@@ -3592,6 +3630,11 @@ function bindPanelControls(panel, session) {
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
   });
+  delegate(panel, 'click', '[data-terminal-mobile-close]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    sendTerminalMobileAccessoryInput(button.dataset.terminalMobileClose || session, 'open');
+  });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
     beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
   });
@@ -5218,6 +5261,7 @@ function bindTerminalContainerForSession(session, term, container) {
   if (container.dataset) container.dataset.terminalHandlersBound = session;
   installTerminalMobileAccessoryDismissal();
   installTerminalMobileAccessoryResizeSync();
+  installTerminalMobileAccessorySurfaceSync();
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);

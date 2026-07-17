@@ -3049,7 +3049,170 @@ let dispatchingSyntheticWheel = false;
 // Per-session fractional remainder so small touchpad deltas still accumulate into whole lines.
 const altScreenWheelRemainder = new Map();
 
+const terminalTouchGestureSlopPx = 8;
+const terminalTouchSendIntervalMs = 30;
+const terminalTouchFastFlickMinDistancePx = 32;
+const terminalTouchFastFlickMinVelocityPxPerMs = 0.8;
+const terminalTouchSyntheticMouseSuppressMs = 350;
+
+function terminalTouchGestureDecision(deltaX, deltaY, slopPx = terminalTouchGestureSlopPx) {
+  const x = Math.abs(Number(deltaX) || 0);
+  const y = Math.abs(Number(deltaY) || 0);
+  if (Math.max(x, y) < Math.max(0, Number(slopPx) || 0)) return 'pending';
+  return y > x ? 'vertical' : 'horizontal';
+}
+
+function terminalTouchSignedRows(deltaY, rowHeight) {
+  const height = Number(rowHeight);
+  const distance = Number(deltaY);
+  if (!Number.isFinite(distance) || !Number.isFinite(height) || height <= 0) return 0;
+  // A downward finger movement reveals older content, which is tmux/app scroll-up (negative).
+  return -distance / height;
+}
+
+function terminalTouchIsFastFlick(distanceY, elapsedMs) {
+  const distance = Math.abs(Number(distanceY) || 0);
+  const elapsed = Math.max(1, Number(elapsedMs) || 0);
+  return distance >= terminalTouchFastFlickMinDistancePx
+    && distance / elapsed >= terminalTouchFastFlickMinVelocityPxPerMs;
+}
+
+function terminalTouchAlternateCommand(signedLines, fastFlick = false) {
+  const signed = Number(signedLines) || 0;
+  if (!signed) return null;
+  return {
+    action: fastFlick ? (signed < 0 ? 'page-up' : 'page-down') : (signed < 0 ? 'arrow-up' : 'arrow-down'),
+    repeat: fastFlick ? 1 : Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signed)))),
+  };
+}
+
 function enableTerminalScroll(session, term, container) {
+  let touchState = null;
+  let suppressSyntheticMouseUntil = 0;
+
+  const clearTouchTimer = state => {
+    if (!state?.timer) return;
+    clearTimeout(state.timer);
+    state.timer = 0;
+  };
+  const flushTouchLines = state => {
+    if (!state) return false;
+    clearTouchTimer(state);
+    if (state.cancelled || state.flickSent) return false;
+    const whole = Math.trunc(state.pendingLines);
+    if (!whole) return false;
+    state.pendingLines -= whole;
+    return routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
+  };
+  const queueTouchLines = (state, signedLines) => {
+    if (state.flickSent) return;
+    state.pendingLines += signedLines;
+    if (Math.abs(state.pendingLines) < 1 || state.timer) return;
+    state.timer = setTimeout(() => {
+      state.timer = 0;
+      flushTouchLines(state);
+    }, terminalTouchSendIntervalMs);
+  };
+  const cancelTouch = state => {
+    if (!state) return;
+    state.cancelled = true;
+    state.pendingLines = 0;
+    clearTouchTimer(state);
+  };
+  const touchForIdentifier = (event, identifier) => {
+    const touches = [...(event?.touches || []), ...(event?.changedTouches || [])];
+    return touches.find(touch => touch.identifier === identifier) || null;
+  };
+
+  container.addEventListener('touchstart', event => {
+    if (event.touches?.length !== 1) {
+      cancelTouch(touchState);
+      touchState = null;
+      return;
+    }
+    const touch = event.touches[0];
+    touchState = {
+      identifier: touch.identifier,
+      startX: touch.clientX,
+      startY: touch.clientY,
+      lastY: touch.clientY,
+      startAt: performanceNow(),
+      claimed: false,
+      cancelled: false,
+      flickSent: false,
+      pendingLines: 0,
+      timer: 0,
+    };
+  }, {passive: true});
+
+  container.addEventListener('touchmove', event => {
+    const state = touchState;
+    if (!state || state.cancelled) return;
+    if (event.touches?.length !== 1) {
+      cancelTouch(state);
+      touchState = null;
+      return;
+    }
+    const touch = touchForIdentifier(event, state.identifier);
+    if (!touch) return;
+    if (!state.claimed) {
+      const decision = terminalTouchGestureDecision(touch.clientX - state.startX, touch.clientY - state.startY);
+      if (decision === 'pending') return;
+      if (decision === 'horizontal') {
+        cancelTouch(state);
+        touchState = null;
+        return;
+      }
+      state.claimed = true;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const deltaY = touch.clientY - state.lastY;
+    state.lastY = touch.clientY;
+    const rowHeight = terminalCellDimensions(term, container).height;
+    const signedLines = terminalTouchSignedRows(deltaY, rowHeight);
+    if (!signedLines) return;
+    if (sessionPaneIsAlternateScreen(session)
+      && terminalTouchIsFastFlick(touch.clientY - state.startY, performanceNow() - state.startAt)) {
+      clearTouchTimer(state);
+      state.pendingLines = 0;
+      const flickLines = terminalTouchSignedRows(touch.clientY - state.startY, rowHeight);
+      state.flickSent = routeTerminalScrollLines(session, term, container, flickLines, {source: 'touch', fastFlick: true});
+      return;
+    }
+    queueTouchLines(state, signedLines);
+  }, {capture: true, passive: false});
+
+  const finishTouch = (event, cancelled = false) => {
+    const state = touchState;
+    if (!state) return;
+    const touch = touchForIdentifier(event, state.identifier);
+    if (!touch && event.touches?.length) return;
+    touchState = null;
+    if (state.claimed) {
+      suppressSyntheticMouseUntil = performanceNow() + terminalTouchSyntheticMouseSuppressMs;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if (cancelled) cancelTouch(state);
+    else flushTouchLines(state);
+  };
+  container.addEventListener('touchend', event => finishTouch(event), {capture: true, passive: false});
+  container.addEventListener('touchcancel', event => finishTouch(event, true), {capture: true, passive: false});
+
+  // iPadOS may synthesize a complete mouse chain after touchend even when touchmove was prevented.
+  // Swallow only that short post-pan window; an unclaimed tap never arms the latch and still focuses.
+  const suppressSyntheticMouse = event => {
+    if (performanceNow() > suppressSyntheticMouseUntil) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+    if (event.type === 'click') suppressSyntheticMouseUntil = 0;
+  };
+  for (const type of ['mousedown', 'mouseup', 'click']) {
+    container.addEventListener(type, suppressSyntheticMouse, {capture: true, passive: false});
+  }
+
   container.addEventListener('wheel', event => {
     if (dispatchingSyntheticWheel) return;
     if (event.ctrlKey && event.deltaY !== 0) {
@@ -3059,27 +3222,37 @@ function enableTerminalScroll(session, term, container) {
     }
     const signedLines = terminalWheelSignedLines(event, term.rows);
     if (!signedLines) return;
-    // Alt-screen TUIs (claude, codex, vim, less) own the mouse and keep their own scroll view,
-    // and their tmux pane has no scrollback, so hijacking the wheel into tmux copy-mode scrolls
-    // nothing. Forward the wheel to the app instead — but xterm emits only ONE mouse-wheel report
-    // per accumulated cell regardless of delta magnitude, which feels like "several scrolls per
-    // line". Drive it ourselves with the same line count the tmux path uses for consistent speed.
-    if (sessionPaneIsAlternateScreen(session)) {
-      event.preventDefault();
-      event.stopPropagation();
-      forwardAltScreenWheel(session, container, signedLines);
-      return;
-    }
-    altScreenWheelRemainder.delete(session);
     event.preventDefault();
     event.stopPropagation();
-    const item = terminals.get(session);
-    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
-      queueTmuxScroll(item, signedLines);
-      return;
-    }
-    queueLocalTerminalScroll(term, signedLines);
+    routeTerminalScrollLines(session, term, container, signedLines, {source: 'wheel'});
   }, {capture: true, passive: false});
+}
+
+function routeTerminalScrollLines(session, term, container, signedLines, options = {}) {
+  if (!signedLines) return false;
+  if (sessionPaneIsAlternateScreen(session)) {
+    if (options.source !== 'touch') {
+      forwardAltScreenWheel(session, container, signedLines);
+      return true;
+    }
+    const command = terminalTouchAlternateCommand(signedLines, options.fastFlick === true);
+    if (!command) return false;
+    const data = command.action === 'page-up'
+      ? '\x1b[5~'
+      : (command.action === 'page-down'
+        ? '\x1b[6~'
+        : terminalMobileAccessoryCursorData(session, command.action).repeat(command.repeat));
+    noteTerminalExplicitInput(session);
+    return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
+  }
+  altScreenWheelRemainder.delete(session);
+  const item = terminals.get(session);
+  if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
+    queueTmuxScroll(item, signedLines);
+    return true;
+  }
+  queueLocalTerminalScroll(term, signedLines);
+  return true;
 }
 
 // Re-emit `lines` worth of single-line wheel events at xterm's screen element. xterm encodes each

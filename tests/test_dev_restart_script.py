@@ -40,7 +40,7 @@ def test_boot_print_command_uses_any_configured_primary_port():
     assert "MALLOC_ARENA_MAX=2" in command
     if platform.system() == "Darwin":
         assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT" in command
-        assert "48123 --host 127.0.0.1" in command
+        assert "48123 /tmp/yolomux-48123.log --host 127.0.0.1" in command
     else:
         assert "YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=48123" in command
     clears_tmux_inline = "TMUX= TMUX_PANE=" in command
@@ -52,6 +52,9 @@ def test_boot_print_command_uses_any_configured_primary_port():
     assert clears_tmux_inline or clears_tmux_in_detacher or clears_tmux_in_macos_launcher
     if platform.system() == "Darwin":
         assert "/bin/bash -c" in command
+        assert "tmux -L yolomux-services new-session" in command
+        assert "yolomux-48123" in command
+        assert "launchctl submit" not in command
         assert "cd" in command
         assert str(ROOT) in command
         assert "yolomux-48123.log" in command
@@ -106,6 +109,9 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
     assert 'yolomux_bootout_macos_server "$port"\n  fi\n  stop_port_listener "$port"' in source
     assert "yolomux_submit_macos_server" in source
     assert "yolomux_macos_server_launcher" in source
+    assert "yolomux_macos_server_tmux_socket" in startup_common
+    assert 'tmux -L "$socket_name" new-session' in startup_common
+    assert "launchctl submit" not in startup_common
     assert 'cd "$repo"' in startup_common
 
 
@@ -188,6 +194,52 @@ def test_startup_capacity_uses_portable_eight_cpu_macos_ceiling():
 
     assert result.returncode in {0, 1}
     assert f"cpu_budget={expected}" in result.stdout
+
+
+def test_startup_capacity_accepts_bounded_operator_load_discount():
+    expected = min(os.cpu_count() or 1, 8) if platform.system() == "Darwin" else max(1, os.cpu_count() or 1)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; YOLOMUX_START_LOAD_DISCOUNT_CORES="$3" yolomux_system_load_snapshot "$2"',
+            "startup-capacity-discount",
+            str(STARTUP_COMMON),
+            sys.executable,
+            str(expected + 100),
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode in {0, 1}, result.stdout + result.stderr
+    assert f"discount={expected:.2f}" in result.stdout
+    fields = [part.split("=", 1) for part in result.stdout.split() if "=" in part]
+    raw_loads = [float(value) for key, value in fields if key in {"load1", "load5"}]
+    effective_loads = [float(value.split("/", 1)[0]) for key, value in fields if key == "effective"]
+    assert len(raw_loads) == len(effective_loads) == 2
+    assert all(
+        abs(effective - max(0.0, raw - expected)) <= 0.02
+        for raw, effective in zip(raw_loads, effective_loads)
+    )
+
+
+def test_startup_capacity_rejects_invalid_operator_load_discount():
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; YOLOMUX_START_LOAD_DISCOUNT_CORES=invalid yolomux_system_load_snapshot "$2"',
+            "startup-capacity-invalid-discount",
+            str(STARTUP_COMMON),
+            sys.executable,
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "invalid YOLOMUX_START_LOAD_DISCOUNT_CORES" in result.stdout
 
 
 def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):

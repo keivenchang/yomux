@@ -260,6 +260,30 @@
 .js-debug-system-state--bad {
   color: var(--bad);
 }
+.js-debug-usage-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  margin-block: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+.js-debug-usage-health strong {
+  color: var(--text);
+}
+.js-debug-usage-health > :last-child {
+  margin-inline-start: auto;
+  font-family: var(--mono-font);
+}
+.js-debug-usage-health--warning {
+  border-color: var(--warning-border-strong);
+  color: var(--text);
+}
+.js-debug-usage-health--warning strong {
+  color: var(--warning-border-strong);
+}
 .js-debug-system-fixed-table {
   --js-debug-system-first-column-width: 10rem;
   --js-debug-system-table-min-width: 46rem;
@@ -899,7 +923,7 @@
    sizing parent for both tables. */
 .js-debug-cost-usage-table-section .js-debug-cost-table {
   inline-size: max-content;
-  max-inline-size: 100%;
+  max-inline-size: none;
   min-inline-size: auto;
 }
 .js-debug-cost-unpriced-disclosure {
@@ -979,6 +1003,13 @@
 }
 .js-debug-cost-table-metric small {
   color: var(--muted);
+}
+.js-debug-cost-price-pair {
+  display: inline-grid;
+  gap: var(--space-1);
+  color: var(--muted);
+  font: 500 var(--ui-font-size-2xs)/1.2 var(--mono-font);
+  white-space: nowrap;
 }
 .js-debug-cost-model-identity {
   display: inline-flex;
@@ -1100,6 +1131,10 @@
 .js-debug-cost-report-range {
   min-width: 0;
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
+.js-debug-cost-report-basis {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 /* Compact catalog status line: field groups wrap as units on a narrow pane and
    never stretch four scalar facts to opposite edges of a wide screen. */
@@ -1342,11 +1377,9 @@
   height: 100%;
   min-height: 104px;
   border-block-end: 1px solid var(--line);
-  /* The chart plot is a drag-to-zoom / tap-to-read surface. Without this, a touch
-     drag is claimed by the browser's native scroll gesture before the app's pointer
-     handlers can treat it as a selection, so zoom never fires on mobile. Scoped to
-     the plot SVG only; the surrounding panel stays touch-scrollable. */
-  touch-action: none;
+  /* Vertical motion belongs to page scrolling; the shared gesture policy arms chart
+     zoom only after touch movement proves horizontal or becomes a short hold. */
+  touch-action: pan-y;
 }
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-line-chart,
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-y-axis {

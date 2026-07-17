@@ -117,7 +117,7 @@ def test_request_query_is_request_scoped_and_routes_use_the_shared_accessor(monk
     assert first == {"session": ["one", "two"]}
     assert calls == ["session=one&session=two"]
     source = inspect.getsource(http_routes)
-    assert source.count("request_query(request, parsed)") == 36
+    assert source.count("request_query(request, parsed)") == 35
     assert source.count("parse_qs(parsed.query)") == 1
 
 
@@ -316,109 +316,6 @@ def test_generic_route_profile_uses_this_request_dispatch_timer(monkeypatch):
     assert kwargs["compute_ms"] == pytest.approx(25.0)
     assert kwargs["details"]["accept_to_route_ms"] == pytest.approx(10.0)
     assert kwargs["details"]["request_total_ms"] == pytest.approx(35.0)
-
-
-def test_get_stats_sample_writes_statsd_encoded_payload_without_reencoding():
-    writes = []
-    calls = []
-    encoded = b'{"ok":true,"cpu_percent":12.5,"pid":123}'
-    app = SimpleNamespace(stats_sample_encoded_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0, include_history=True, exact_resolution=False: (calls.append((since, client_id, token_consumer, token_since, token_resolution_seconds, token_history_start, token_history_end, history_start, history_end, history_resolution_seconds, history_max_points, include_history)) or {}, encoded))
-    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json=lambda payload, status=HTTPStatus.OK: writes.append(("json", status, payload)), write_json_bytes=lambda payload, status=HTTPStatus.OK: writes.append(("bytes", status, payload)))
-
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=9&client_id=client-a"), None)
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=10&client_id=client-a&token_consumer=1&token_since=7&token_resolution=120&token_history_start=800&token_history_end=1300&history_start=900&history_end=1200&history_resolution=10&history_max_points=60"), None)
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=11&client_id=client-a&history=0"), None)
-
-    assert calls == [
-        (9, "client-a", False, 0, 0, None, None, 0, 0, 0, 0, True),
-        (10, "client-a", True, 7, 120, 800, 1300, 900, 1200, 10, 60, True),
-        (11, "client-a", False, 0, 0, None, None, 0, 0, 0, 0, False),
-    ]
-    assert writes == [
-        ("bytes", HTTPStatus.OK, encoded),
-        ("bytes", HTTPStatus.OK, encoded),
-        ("bytes", HTTPStatus.OK, encoded),
-    ]
-
-
-def test_get_stats_sample_promotes_backend_phase_profile_without_exposing_private_payload(monkeypatch):
-    writes = []
-    clock = iter([100.0, 100.025])
-    monkeypatch.setattr(http_routes.time, "perf_counter", lambda: next(clock))
-    encoded = b'{"ok":true,"history":{"records":[]}}'
-    app = SimpleNamespace(stats_sample_encoded_payload=lambda **_kwargs: ({"stats_history_encode_ms": 7.5, "stats_history_compact_ms": 1.25}, encoded))
-    request = SimpleNamespace(server=SimpleNamespace(app=app), write_json_bytes=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)))
-
-    http_routes.get_stats_sample(request, SimpleNamespace(query="history_start=900&history_end=1200"), None)
-
-    assert writes == [(HTTPStatus.OK, encoded)]
-    assert request._http_response_compute_ms == pytest.approx(25.0)
-    assert request._http_response_performance_details == {
-        "stats_build_ms": 25.0,
-        "stats_history_encode_ms": 7.5,
-        "stats_history_compact_ms": 1.25,
-    }
-
-
-@pytest.mark.parametrize("failure", [RuntimeError("statsd socket unavailable"), TimeoutError("statsd RPC timed out")])
-def test_get_stats_sample_returns_one_bounded_503_without_legacy_history_replay(failure):
-    calls = []
-    writes = []
-
-    def unavailable(**kwargs):
-        calls.append(kwargs)
-        raise failure
-
-    request = SimpleNamespace(
-        server=SimpleNamespace(app=SimpleNamespace(stats_sample_encoded_payload=unavailable)),
-        write_json=lambda payload, status=HTTPStatus.OK: writes.append((status, payload)),
-        write_json_bytes=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unavailable statsd must not emit a stale history payload")),
-    )
-
-    http_routes.get_stats_sample(request, SimpleNamespace(query="since=7&client_id=browser-a&history_start=100&history_end=200"), None)
-
-    assert len(calls) == 1, "the failed statsd request must not fall back to an in-process or replay path"
-    assert writes == [(
-        HTTPStatus.SERVICE_UNAVAILABLE,
-        {
-            "error": "statsd unavailable",
-            "user_message": {
-                "key": "stats.error.unavailable",
-                "params": {"error": "statsd unavailable"},
-                "fallback": "statsd unavailable",
-            },
-            "diagnostic": str(failure),
-            "status": 503,
-        },
-    )]
-
-
-def test_do_post_stats_history_rejects_oversized_body_before_app_dispatch():
-    app_calls = []
-    handler, calls, writes = route_handler(
-        "/api/stats-history",
-        SimpleNamespace(record_stats_history_payload=lambda payload: app_calls.append(payload) or ("unexpected", HTTPStatus.OK)),
-    )
-    handler.headers = {"Content-Length": str((128 * 1024) + 1)}
-    handler.rfile = io.BytesIO(b"")
-
-    Handler.do_POST(handler)
-
-    assert calls == [("require_auth", "readonly")]
-    assert app_calls == []
-    assert writes == [(
-        "json",
-        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-        {
-            "error": "content too large",
-            "user_message": {
-                "key": "request.error.contentTooLarge",
-                "params": {"max": 128 * 1024},
-                "fallback": "content too large",
-            },
-            "status": 413,
-        },
-    )]
 
 
 class FakeShareConnection:
@@ -995,13 +892,12 @@ def test_http_route_registry_groups_dispatch_and_keeps_verbs_thin():
     assert "if parsed.path" not in post_body
     assert set(http_routes.ROUTE_GROUPS) == {"core", "share", "yoagent", "chat", "filesystem", "tmux"}
     assert route_by_path("GET", "/api/activity-summary").group == "core"
-    assert route_by_path("GET", "/api/stats-sample").handler is http_routes.get_stats_sample
+    assert http_routes.route_for_request("GET", "/api/stats-sample") is None
     assert route_by_path("GET", "/api/system-status").handler is http_routes.get_system_status
     assert route_by_path("GET", "/api/system-status").role == "readonly"
     assert route_by_path("GET", "/api/logs").handler is http_routes.get_server_logs
     assert route_by_path("GET", "/pane-popout").handler is http_routes.get_pane_popout
-    assert route_by_path("POST", "/api/stats-history").role == "readonly"
-    assert route_by_path("POST", "/api/stats-history").body_limit == 128 * 1024
+    assert http_routes.route_for_request("POST", "/api/stats-history") is None
     assert route_by_path("GET", "/ws/share-ui").handler is http_routes.get_share_ui_websocket
     assert route_by_path("POST", "/api/share/extend").body_limit == 4096
     assert route_by_path("POST", "/api/yoagent/jobs/cancel-session").handler is http_routes.post_yoagent_jobs_cancel_session
@@ -1073,16 +969,8 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
         session_metadata_payload=lambda force=False: {"sessions": {}, "force": force},
         activity_summary_payload=lambda force=False, locale="en", session_scope="configured", hours="24": {"force": force, "locale": locale},
         activity_payload=lambda hours=24.0, visible=True: ({"hours": hours, "visible": visible}, HTTPStatus.OK),
-        stats_sample_encoded_payload=lambda since=0, client_id="", token_consumer=False, token_since=0, token_resolution_seconds=0, token_history_start=0, token_history_end=0, history_start=0, history_end=0, history_resolution_seconds=0, history_max_points=0, include_history=True, exact_resolution=False: ({}, json.dumps({"ok": True, "cpu_percent": 1.25, "since": since, "client_id": client_id, "token_consumer": token_consumer, "token_since": token_since, "token_resolution_seconds": token_resolution_seconds, "token_history_start": token_history_start, "token_history_end": token_history_end, "history_start": history_start, "history_end": history_end, "history_resolution_seconds": history_resolution_seconds, "history_max_points": history_max_points, "include_history": include_history}, separators=(",", ":")).encode("utf-8")),
         tmux_session_exists_payload=lambda session: ({"session": session, "exists": session == "2"}, HTTPStatus.OK),
     )
-
-    # request-shape-exempt: deliberately NON-standard params to exercise the route parser
-    # itself (legacy `tokens=1`, missing history params); this is not a client-shape probe.
-    handler, calls, writes = route_handler("/api/stats-sample?since=2&client_id=client-a&tokens=1&token_since=3&token_resolution=120", app)
-    Handler.do_GET(handler)
-    assert calls == [("require_auth", "readonly")]
-    assert writes == [("json_bytes", HTTPStatus.OK, b'{"ok":true,"cpu_percent":1.25,"since":2,"client_id":"client-a","token_consumer":true,"token_since":3,"token_resolution_seconds":120,"token_history_start":null,"token_history_end":null,"history_start":0,"history_end":0,"history_resolution_seconds":0,"history_max_points":0,"include_history":true}')]
 
     handler, calls, writes = route_handler("/api/session-metadata?force=1", app)
     Handler.do_GET(handler)
@@ -1221,22 +1109,6 @@ def test_do_get_fs_watch_diff_uses_client_since_token_without_tracking_clients()
 
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"since": "old-token", "force_full": False})]
-
-
-def test_do_post_stats_history_records_browser_deltas():
-    app_calls = []
-    app = SimpleNamespace(
-        record_stats_history_payload=lambda payload: app_calls.append(payload) or ({"ok": True, "history": {"sequence": 3}}, HTTPStatus.OK),
-    )
-    handler, calls, writes = route_handler("/api/stats-history", app)
-    handler.headers = {"Content-Length": "64"}
-    handler.read_json_body = lambda limit: {"since": 2, "records": [{"start": 10, "api_count": 1}]}
-
-    Handler.do_POST(handler)
-
-    assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "history": {"sequence": 3}})]
-    assert app_calls == [{"since": 2, "records": [{"start": 10, "api_count": 1}]}]
 
 
 def test_share_scoped_transcripts_payload_filters_to_shared_sessions():

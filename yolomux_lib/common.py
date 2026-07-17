@@ -44,7 +44,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.6.1"
+YOLOMUX_VERSION = "0.6.2"
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -528,7 +528,15 @@ def next_numbered_session_name(existing_sessions: list[str]) -> str | None:
     return None
 
 
+# Cumulative per-verb git spawn counts (bounded by the small git verb set).
+# Monotonic so readers can diff without a cross-thread reset race; sampled into
+# session-files performance accounting (DOIT.optimize-backends).
+GIT_COMMAND_COUNTS: dict[str, int] = {}
+
+
 def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
+    verb = args[0] if args else ""
+    GIT_COMMAND_COUNTS[verb] = GIT_COMMAND_COUNTS.get(verb, 0) + 1
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
 
 

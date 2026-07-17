@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
+from ..background_owner import pid_is_alive
 from .rpc import LocalRpcEnvelope
 from .rpc import LocalRpcError
 from .rpc import read_message
@@ -29,6 +30,19 @@ SignalHandlers = list[tuple[int, signal.Handlers]]
 LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS = 0.5
 LOCAL_SERVICE_MAX_CLIENT_LEASES = 64
 LOCAL_SERVICE_SECRET_MARKERS = ("token", "secret", "password", "cookie", "authorization", "api_key", "apikey", "bearer")
+
+
+def reap_dead_client_leases(leases: dict[str, int]) -> int:
+    """Discard leases whose owning local process no longer exists."""
+
+    dead = tuple(
+        lease_id
+        for lease_id, pid in leases.items()
+        if pid <= 0 or not pid_is_alive(pid)
+    )
+    for lease_id in dead:
+        leases.pop(lease_id, None)
+    return len(dead)
 
 
 def apply_service_process_priority(increment: int = 5) -> bool:
@@ -79,14 +93,22 @@ def redact_local_service_text(value: object) -> str:
     return text[:256]
 
 
-def acquire_client_lease(leases: dict[str, int], client_pid: object) -> dict[str, object]:
+def acquire_client_lease(
+    leases: dict[str, int],
+    client_pid: object,
+    existing_lease_id: object = None,
+) -> dict[str, object]:
     """Bound the shared local-service lease table for every daemon."""
-    if len(leases) >= LOCAL_SERVICE_MAX_CLIENT_LEASES:
-        return {"ok": False, "error": "too many clients", "leases": len(leases)}
     try:
         pid = max(0, int(client_pid or 0))
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid client pid", "leases": len(leases)}
+    reap_dead_client_leases(leases)
+    lease_id = str(existing_lease_id or "")
+    if lease_id and leases.get(lease_id) == pid:
+        return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}
+    if len(leases) >= LOCAL_SERVICE_MAX_CLIENT_LEASES:
+        return {"ok": False, "error": "too many clients", "leases": len(leases)}
     lease_id = f"{os.getpid()}-{time.time_ns()}-{len(leases)}"
     leases[lease_id] = pid
     return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}

@@ -19,8 +19,6 @@ from yolomux_lib import app as app_module
 from yolomux_lib import common
 from yolomux_lib import metadata
 from yolomux_lib import state_services
-from yolomux_lib import statsd
-from yolomux_lib.statsd import StatsClient
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
 from yolomux_lib.common import AgentInfo
@@ -28,7 +26,6 @@ from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
 from yolomux_lib import server_logs
-from yolomux_lib.local_services import stats_store
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
 from yolomux_lib.yoagent import transports as transport_module
@@ -63,7 +60,11 @@ class StatsRoleOwner:
 def test_record_owned_direct_image_usage_preserves_structured_image_token_classes():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
+    webapp.settings_payload = lambda: {"settings": {"cost": {"openai_pricing_profile": "subscription"}}}
 
     assert webapp.record_owned_usage_atoms(
         provider="openai",
@@ -76,11 +77,17 @@ def test_record_owned_direct_image_usage_preserves_structured_image_token_classe
         timestamp=1_000,
     ) is True
 
-    atoms = submitted[0]["usage_atoms"]
-    assert {(atom["direction"], atom["modality"], atom["quantity"]) for atom in atoms} == {
+    atoms = submitted
+    assert {(atom.direction, atom.modality, atom.payload["quantity"]) for atom in atoms} == {
         ("input", "text", 11.0), ("input", "image", 22.0), ("output", "image", 33.0),
     }
-    assert all(atom["model"] == "gpt-image-2" and atom["endpoint"] == "images" and atom["root_thread_id"] == "root-thread" for atom in atoms)
+    assert all(
+        atom.payload["model"] == "gpt-image-2"
+        and atom.payload["execution_source"] == "images"
+        and atom.payload["thread_id"] == "root-thread"
+        and atom.payload["pricing_profile"] == "default"
+        for atom in atoms
+    )
 
 
 def test_stats_agent_token_rows_preserve_tmux_window_identity_for_cost_attribution():
@@ -109,7 +116,10 @@ def test_stats_agent_token_rows_preserve_tmux_window_identity_for_cost_attributi
 def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_usage():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
 
     # A partial image stream result carries no completed provider usage.  It
     # cannot be priced from image bytes, a provisional total, or prose.
@@ -123,7 +133,7 @@ def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_
         usage={"input_tokens_details": {"text_tokens": 3, "image_tokens": 7}, "output_tokens": 11},
         source="Image stream", event_id="request-2", endpoint="images", timestamp=1_001,
     ) is True
-    assert {(atom["direction"], atom["modality"], atom["quantity"]) for atom in submitted[0]["usage_atoms"]} == {
+    assert {(atom.direction, atom.modality, atom.payload["quantity"]) for atom in submitted} == {
         ("input", "text", 3.0), ("input", "image", 7.0), ("output", "image", 11.0),
     }
 
@@ -131,19 +141,24 @@ def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_
 def test_record_owned_responses_image_tool_keeps_mainline_and_opaque_child_separate():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
+    webapp.settings_payload = lambda: {"settings": {"cost": {"openai_pricing_profile": "subscription"}}}
 
     assert webapp.record_owned_usage_atoms(
         provider="openai", model="gpt-5.6", usage={"input_tokens": 10, "output_tokens": 5}, source="Responses",
-        event_id="response-1", endpoint="responses", opaque_image_tool=True, timestamp=1_000,
+        event_id="response-1", endpoint="responses", opaque_image_tool=True, pricing_profile="subscription", timestamp=1_000,
     ) is True
 
-    atoms = submitted[0]["usage_atoms"]
-    assert {(atom["model"], atom["modality"], atom["unit"], atom["quantity"]) for atom in atoms} == {
+    atoms = submitted
+    assert {(atom.payload["model"], atom.modality, atom.unit, atom.payload["quantity"]) for atom in atoms} == {
         ("gpt-5.6", "text", "tokens", 10.0), ("gpt-5.6", "text", "tokens", 5.0), ("unknown", "image", "requests", 1.0),
     }
-    opaque = next(atom for atom in atoms if atom["model"] == "unknown")
-    assert opaque["tool_name"] == "image_generation_call" and opaque["telemetry_complete"] is False
+    assert {atom.payload["pricing_profile"] for atom in atoms} == {"default"}
+    opaque = next(atom for atom in atoms if atom.payload["model"] == "unknown")
+    assert opaque.payload["telemetry_complete"] is False
 
 
 def test_state_services_own_independent_cache_and_watcher_records_without_app():
@@ -153,20 +168,37 @@ def test_state_services_own_independent_cache_and_watcher_records_without_app():
     activity = state_services.ActivityTranscriptService()
     activity.activity_summary_cache[("configured", "en")] = {"sessions": []}
     watch = state_services.ClientWatchService(context_items=[{"id": "context"}], session_files=[{"session": "1"}], activity_summary={"ok": True})
-    stats = state_services.StatsHistoryService()
+    stats = state_services.StatsCollectionState()
 
     assert first_owner is True and second_owner is False and second is first
     assert activity.activity_summary_cache[("configured", "en")]["sessions"] == []
     assert watch.snapshot() == ([{"id": "context"}], [{"session": "1"}], {"ok": True})
     assert stats.sample_record.cached_payload is None
-    assert stats.agent_token_state == {} and stats.agent_activity_state == {}
+    assert stats.agent_activity_state == {}
+
+
+def test_session_files_owner_demotion_fences_reserved_work():
+    session_files = state_services.SessionFilesService()
+    record = session_files.reserve_work(("payload", "old"), "stable-view")
+
+    assert record is not None
+    assert session_files.stable_generation_is_current(record) is True
+    session_files.cancel_all_work()
+
+    assert session_files.work_records == {}
+    assert session_files.latest_stable_generations == {}
+    assert session_files.stable_generation_is_current(record) is False
 
 
 def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "leased": False,
+            "families": {},
+            "service": {"ok": True, "version": 23, "pid": 0, "migration": {"state": "ready"}},
+        })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()
@@ -185,7 +217,10 @@ def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch)
         now = time.time()
         # A running service reports a started_at; an idle one has no pid.
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "started_at": now - 42.0, "resources": {"cpu_percent": 1.0, "rss_bytes": 2048}})
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "started_at": 0.0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "service": {"ok": True, "pid": 0, "started_at": 0.0, "migration": {"state": "ready"}},
+            "families": {},
+        })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()["services"]
@@ -200,36 +235,65 @@ def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch)
     assert by_name["statsd"]["uptime_seconds"] is None
 
 
-def test_record_service_load_records_every_known_service_including_idle(monkeypatch):
+def test_stats_usage_health_warns_only_for_committed_growth_without_fresh_atoms():
+    warning = app_module.stats_current_usage_health(
+        {"last_accepted_at": 800.0},
+        {"last_visible_append_at": 995.0},
+        10.0,
+        now=1000.0,
+    )
+    resumed = app_module.stats_current_usage_health(
+        {"last_accepted_at": 999.0},
+        {"last_visible_append_at": 995.0},
+        10.0,
+        now=1000.0,
+    )
+    idle = app_module.stats_current_usage_health(
+        {"last_accepted_at": 800.0},
+        {"last_visible_append_at": 700.0},
+        10.0,
+        now=1000.0,
+    )
+
+    assert warning["state"] == "warning"
+    assert warning["stale_bound_seconds"] == 120.0
+    assert resumed["state"] == "ok"
+    assert idle["state"] == "idle"
+
+
+def test_runtime_local_services_exposes_bounded_stats_usage_health(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
-        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "resources": {"cpu_percent": 12.0, "rss_bytes": 2048}})
-        # A running service whose first-sample CPU delta is not yet known.
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 4322, "resources": {"cpu_percent": None, "rss_bytes": 4096}})
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "families": {"agent_tokens": {"cadence_seconds": 10}},
+            "service": {
+                "ok": True,
+                "pid": 0,
+                "migration": {"state": "ready"},
+                "usage": {"last_accepted_at": 1.0, "quarantined_conflict_count": 2},
+            },
+        })
+        monkeypatch.setattr(webapp.stats_current_transcript_usage, "status", lambda: {
+            "committed_appended_bytes": 14,
+            "last_visible_append_at": time.time(),
+            "visible_append_age_seconds": 0.0,
+            "legacy_fork_repair": {"active": True, "remaining_files": 2},
+        })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
-        monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {"time": 100.0, "pid": 999, "cpu_percent": 5.0, "rss_bytes": 8192})
-        monkeypatch.setattr(webapp, "stats_metric_scheduled_time", lambda: 100.0)
-        captured = {}
-        monkeypatch.setattr(webapp, "merge_stats_family_record", lambda family, record, sample: captured.update(family=family, record=record))
-        webapp.record_stats_service_load_sample()
+        statsd = next(row for row in webapp.runtime_local_services()["services"] if row["service"] == "statsd")
     finally:
         webapp.control_server.stop()
 
-    assert captured["family"] == "service_load"
-    services = captured["record"]["host_metrics"]["service_load"]
-    # Every known service — running or idle — plus the web process is present so
-    # the Servers Load chart shows all series instead of only web. stats-reader
-    # is retired (merged into the web process), so it is no longer a known series.
-    assert set(services) == {"indexd", "statsd", "jobd", "approvald", "web"}
-    # Idle spawn-on-demand services read as an honest zero with no RSS series.
-    assert services["jobd"]["cpu_total_percent"] == 0.0 and "rss_total_bytes" not in services["jobd"]
-    # A running service contributes real CPU%/RSS.
-    assert services["indexd"]["cpu_total_percent"] == 12.0 and services["indexd"]["rss_total_bytes"] == 2048.0
-    # First-sample-unknown CPU still yields a present series (0) with real RSS.
-    assert services["statsd"]["cpu_total_percent"] == 0.0 and services["statsd"]["rss_total_bytes"] == 4096.0
-    # The web process is always recorded from the primary sample.
-    assert services["web"]["cpu_total_percent"] == 5.0 and services["web"]["rss_total_bytes"] == 8192.0
+    assert statsd["usage"]["health"]["state"] == "warning"
+    assert statsd["usage"]["quarantined_conflict_count"] == 2
+    assert set(statsd["usage"]["transcripts"]) == {
+        "committed_appended_bytes",
+        "last_visible_append_at",
+        "visible_append_age_seconds",
+        "legacy_fork_repair",
+    }
 
 
 def test_session_http_guards_use_shared_decorator():
@@ -263,106 +327,6 @@ def test_yoagent_controller_facade_allows_only_declared_dependencies(monkeypatch
     assert "self.poll_yoagent_jobs_once()" not in app_source
     assert "request.server.app.yoagent_chat(" not in route_source
     assert "request.server.app.yoagent_controller.yoagent_chat(" in route_source
-
-
-def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0, 1002.0])
-    monotonic_times = iter([50.0, 52.0])
-    process_times = iter([10.0, 10.5])
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    try:
-        webapp.record_stats_cpu_sample()
-        first = webapp.stats_sample_payload()
-        webapp.record_stats_cpu_sample()
-        second = webapp.stats_sample_payload()
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["ok"] is True
-    assert first["cpu_percent"] == 0.0
-    assert first["system_cpu_percent"] == 0.0
-    assert first["uptime_seconds"] == 10.0
-    assert second["time"] == 1002.0
-    assert second["pid"] == os.getpid()
-    assert second["cpu_percent"] == 25.0
-    assert second["system_cpu_percent"] == 50.0
-    assert second["uptime_seconds"] == 12.0
-    assert second["rss_bytes"] == 123456
-    assert second["history"]["sequence"] >= 2
-    assert second["history"]["records"]
-    assert any(record["system_cpu_count"] for record in second["history"]["records"])
-    assert {
-        "statsd_history_prepare_ms",
-        "stats_token_consumer_ms",
-        "stats_sample_ms",
-        "stats_history_compact_ms",
-        "stats_history_encode_ms",
-        "stats_app_build_ms",
-    } <= set(second["_endpoint_profile"])
-
-
-def test_stats_host_resource_metrics_uses_only_aggregate_host_data(monkeypatch):
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1024 * 1024, 512 * 1024))
-    monkeypatch.setattr(app_module, "stats_cached_gpu_metrics", lambda *_args: {"devices": {"gpu:0": {"label": "GPU 0", "util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1024}}})
-
-    metrics = app_module.stats_host_resource_metrics()
-
-    assert metrics["system_memory_used_bytes"] == 512 * 1024
-    assert metrics["system_memory_capacity_bytes"] == 1024 * 1024
-    assert metrics["cpu_processes"] == {}
-    assert metrics["memory_processes"] == {}
-    assert metrics["gpu_util_processes"] == {}
-    assert metrics["gpu_memory_processes"] == {}
-
-
-def test_stats_host_resource_metrics_common_path_uses_cached_gpu_and_native_memory_without_subprocess(monkeypatch):
-    calls = []
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "stats_host_hardware_metadata", lambda: {"gpu_label": "Apple M4 Pro"})
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (16 * 1024, 8 * 1024))
-    monkeypatch.setattr(app_module, "stats_cached_gpu_metrics", lambda label: calls.append(label) or {"devices": {"gpu:0": {}}})
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("host sampler must not fork on its common path"))
-
-    metrics = app_module.stats_host_resource_metrics()
-
-    assert calls == ["Apple M4 Pro"]
-    assert metrics["system_memory_capacity_bytes"] == 16 * 1024
-    assert metrics["gpu_devices"] == {"gpu:0": {}}
-
-
-def test_stats_cached_gpu_metrics_starts_only_one_cadence_limited_background_refresh(monkeypatch):
-    starts = []
-
-    class DeferredThread:
-        def __init__(self, *, target, args, **_kwargs):
-            self.target = target
-            self.args = args
-
-        def start(self):
-            starts.append((self.target, self.args))
-
-    monkeypatch.setattr(app_module.threading, "Thread", DeferredThread)
-    monkeypatch.setattr(app_module.time, "perf_counter", lambda: 100.0)
-    monkeypatch.setattr(app_module, "_stats_gpu_metrics_cache", {"devices": {"gpu:0": {"util_percent": 21}}})
-    monkeypatch.setattr(app_module, "_stats_gpu_metrics_refreshed_monotonic", 90.0)
-    monkeypatch.setattr(app_module, "_stats_gpu_metrics_refreshing", False)
-
-    first = app_module.stats_cached_gpu_metrics("GPU")
-    second = app_module.stats_cached_gpu_metrics("GPU")
-
-    assert first == second == {"devices": {"gpu:0": {"util_percent": 21}}}
-    assert len(starts) == 1
-    assert starts[0][1] == ("GPU",)
 
 
 def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
@@ -415,6 +379,30 @@ def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypa
     assert metrics == {"devices": metrics["devices"]}
 
 
+def test_stats_macos_gpu_metrics_reads_current_device_utilization_key(monkeypatch):
+    payload = app_module.plistlib.dumps([{
+        "PerformanceStatistics": {"Device Utilization %": 8, "In use system memory": 2 * 1024 * 1024},
+    }])
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+
+    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
+
+    assert metrics["devices"]["gpu:0"]["util_percent"] == 8.0
+
+
+def test_stats_macos_gpu_metrics_drops_records_without_utilization(monkeypatch):
+    payload = app_module.plistlib.dumps([{
+        "PerformanceStatistics": {"In use system memory": 2 * 1024 * 1024},
+    }])
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+
+    assert app_module.stats_macos_gpu_metrics("Apple M4 Pro") == {}
+
+
 def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
     payload = json.dumps({
         "SPHardwareDataType": [{"chip_type": "Apple M4 Pro", "number_processors": "proc 14:10:4:0"}],
@@ -428,43 +416,6 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
         "gpu_label": "Apple M4 Pro",
         "system_memory_label": "LPDDR5 unified memory",
     }
-
-
-def test_stats_sample_payload_reuses_short_window_sample(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    # Isolate the history cursor from the intentionally independent live
-    # samplers running in other gate lanes.
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0, 1000.2, 1002.0])
-    monotonic_times = iter([50.0, 50.2, 52.0])
-    process_times = iter([10.0, 10.5])
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    try:
-        webapp.record_stats_cpu_sample()
-        first = webapp.stats_sample_payload()
-        webapp.record_stats_cpu_sample()
-        duplicate = webapp.stats_sample_payload()
-        webapp.record_stats_cpu_sample()
-        third = webapp.stats_sample_payload()
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert duplicate["time"] == first["time"]
-    assert duplicate["cpu_percent"] == first["cpu_percent"]
-    assert duplicate["system_cpu_percent"] == first["system_cpu_percent"]
-    assert duplicate["history"]["sequence"] == first["history"]["sequence"]
-    assert third["time"] == 1002.0
-    assert third["cpu_percent"] == 25.0
-    assert third["system_cpu_percent"] == 50.0
-    assert third["history"]["sequence"] > duplicate["history"]["sequence"]
 
 
 def test_stats_sample_parallel_scalars_are_retired():
@@ -490,778 +441,10 @@ def test_stats_history_sampler_parallel_state_is_retired():
     assert "def start_stats_history_sampler" not in source
 
 
-def test_stats_history_payload_limits_records_to_requested_visible_range(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    try:
-        for sample_time in (900.0, 960.0, 1000.0):
-            assert stats_client.merge_server_records(
-                [{
-                    "time": sample_time,
-                    "cpu_total_percent": 1.0,
-                    "cpu_count": 1.0,
-                }],
-                now=1000.0,
-            )["ok"] is True
-        history = stats_client.history(start=950)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    assert [record["start"] for record in history["records"]] == [960, 1000]
-
-
 def test_system_cpu_percent_from_times_clamps_to_single_100_percent_scale():
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 22.0)) == 50.0
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 200.0)) == 100.0
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (100.0, 21.0)) == 0.0
-
-
-def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatch, tmp_path):
-    # This test owns only browser-upload fields; an asynchronously elected
-    # sampler would add legitimate server CPU rows while time.time is frozen.
-    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: False)
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    monkeypatch.setattr(app_module.time, "time", lambda: now)
-    records = [{
-        "start": age_start + i,
-        "duration": 1,
-        "api_count": 1,
-        "sse_count": 1 if i % 2 == 0 else 0,
-        "latency_total_ms": 10 + i,
-        "latency_count": 1,
-        "bandwidth_bytes": 100 + i,
-        "system_cpu_total_percent": 5,
-        "system_cpu_count": 1,
-    } for age_start in (
-        now - (90 * 60),
-        now - (3 * 60 * 60),
-        now - (6 * 60 * 60),
-        now - (10 * 60 * 60),
-        now - (18 * 60 * 60),
-    ) for i in range(20)]
-    try:
-        payload, status = webapp.record_stats_history_payload({"records": records})
-        incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["history"]["raw_window_seconds"] == app_module.STATS_HISTORY_RAW_WINDOW_SECONDS
-    assert payload["history"]["middle_window_seconds"] == app_module.STATS_HISTORY_MIDDLE_WINDOW_SECONDS
-    assert payload["history"]["middle_bucket_seconds"] == app_module.STATS_HISTORY_MIDDLE_BUCKET_SECONDS
-    assert payload["history"]["rollup_bucket_seconds"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS
-    assert payload["history"]["tiers"] == [
-        {"max_age_seconds": 30 * 60, "bucket_seconds": 1},
-        {"max_age_seconds": 2 * 60 * 60, "bucket_seconds": 10},
-        {"max_age_seconds": 4 * 60 * 60, "bucket_seconds": 60},
-        {"max_age_seconds": 8 * 60 * 60, "bucket_seconds": 2 * 60},
-        {"max_age_seconds": 12 * 60 * 60, "bucket_seconds": 5 * 60},
-        {"max_age_seconds": 24 * 60 * 60, "bucket_seconds": 10 * 60},
-    ]
-    assert sum(
-        (tier["max_age_seconds"] - (payload["history"]["tiers"][index - 1]["max_age_seconds"] if index else 0))
-        // tier["bucket_seconds"]
-        for index, tier in enumerate(payload["history"]["tiers"])
-    ) == 2700
-    assert len(payload["history"]["records"]) <= 10
-    assert sum(record["api_count"] for record in payload["history"]["records"]) == 100
-    assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 0
-    assert sum(record["agent_activity_samples"] for record in payload["history"]["records"]) == 0
-    assert {record["duration"] for record in payload["history"]["records"]} == {600}
-    assert incremental["history"]["records"] == []
-
-
-def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
-    webapp = app_module.TmuxWebtermApp([])
-    now = time.time()
-    records = [{"start": now + index, "api_count": 1} for index in range(20)]
-    webapp.stats_client.merge_and_history = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ack-only upload queried history"))
-    try:
-        payload, status = webapp.record_stats_history_payload({"ack_only": True, "records": records})
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["history"]["records"] == []
-    assert payload["history"]["sequence"] >= 20
-
-
-def test_stats_history_empty_legacy_post_uses_bounded_cursor_acknowledgement():
-    webapp = app_module.TmuxWebtermApp([])
-    calls = []
-    webapp.stats_client = SimpleNamespace(
-        history=lambda **kwargs: calls.append(kwargs) or {"ok": True, "sequence": 7, "latest_sequence": 9, "records": []},
-        merge_and_history=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("empty legacy acknowledgement must not serialize retained history")),
-    )
-    try:
-        payload, status = webapp.record_stats_history_payload({"client_id": "triage", "since": 0, "records": []})
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert calls == [{"include_history": False, "since": 0, "client_id": "triage"}]
-    assert payload == {"ok": True, "history": {"records": [], "sequence": 9}}
-
-
-def test_stats_history_wide_token_history_is_server_aggregated(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    try:
-        for offset in range(0, 60 * 60, 60):
-            assert stats_client.merge_server_records(
-                [{
-                    "start": now - (2 * 60 * 60) + offset,
-                    "tokens_per_agent_total": 10,
-                    "agent_token_samples": 1,
-                    "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 10, "samples": 1, "tokens": 100, "seconds": 60, "source": "transcript"}],
-                }],
-                now=now,
-            )["ok"] is True
-        history = stats_client.history(token_since=0, token_resolution_seconds=300)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    token_history = history["agent_token_history"]
-    assert token_history["snapshot"] is True
-    assert token_history["resolution_seconds"] == 300
-    assert len(token_history["records"]) < 20
-    assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 6000
-    assert all(record["duration"] == 300 for record in token_history["records"])
-
-
-def test_stats_history_bounded_older_window_returns_only_missing_records_with_safe_cursor(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    start = int(now) - 30
-    try:
-        for offset in range(30):
-            assert stats_client.merge_records(
-                [
-                    {"start": start + offset, "api_count": 1},
-                ],
-                client_id="client-a",
-                now=now,
-            )["ok"] is True
-        latest_sequence = stats_client.history()["latest_sequence"]
-        older = stats_client.history(
-            since=0,
-            client_id="client-a",
-            token_since=0,
-            token_resolution_seconds=60,
-            start=start,
-            end=start + 15,
-        )
-        live = stats_client.history(since=0, client_id="client-a", start=start + 15)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    assert len(older["records"]) == 15
-    assert all(start <= record["start"] < start + 15 for record in older["records"])
-    assert older["sequence"] == 0
-    # The independent sampler may append a bucket between these reads.  A
-    # bounded older response must keep its replay cursor at zero while
-    # reporting the writer generation observed by that response.
-    assert older["latest_sequence"] >= latest_sequence
-    coverage = dict(older["coverage"])
-    intervals = coverage.pop("intervals")
-    stores = coverage.pop("stores")
-    store_intervals = coverage.pop("store_intervals")
-    epochs = coverage.pop("epochs")
-    assert coverage.pop("epochs_truncated") is False
-    assert coverage == {
-        "mode": "older",
-        "requested_start": start,
-        "requested_end": start + 15,
-        "available_start": start,
-        "available_end": start + 15,
-        "covered_start": start,
-        "covered_end": start + 15,
-        "complete": True,
-        "has_more_older": False,
-        "next_older_end": 0,
-        "resolution_seconds": 1,
-        "source_resolution_seconds": 1,
-        "max_points": 0,
-        "source_records": 15,
-        "returned_records": 15,
-        "cursor": 0,
-        "latest_cursor": older["latest_sequence"],
-    }
-    assert [(item["start"], item["end"]) for item in intervals] == [(start, start + 15)]
-    assert store_intervals["raw"] == intervals
-    assert stores["raw"]["interval_count"] == 1
-    assert epochs
-    assert older["agent_token_history"]["sequence"] == 0
-    assert older["agent_token_history"]["snapshot"] is False
-    assert len(live["records"]) == 15
-    assert live["sequence"] == live["latest_sequence"]
-    assert live["sequence"] >= older["latest_sequence"]
-
-
-def test_stats_history_compact_tokens_ignore_a_bounded_normal_history_window(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    start = int(now) - 30
-    try:
-        for offset in range(30):
-            assert stats_client.merge_server_records(
-                [
-                    {
-                        "start": start + offset,
-                        "tokens_per_agent_total": 1,
-                        "agent_token_samples": 1,
-                        "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 1, "samples": 1, "tokens": 1, "seconds": 1, "source": "transcript"}],
-                    },
-                ],
-                now=now,
-            )["ok"] is True
-        payload = stats_client.history(
-            since=0,
-            client_id="client-a",
-            token_since=0,
-            token_resolution_seconds=60,
-            token_history_start=start,
-            token_history_end=0,
-            start=start,
-            end=start + 15,
-        )
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    assert len(payload["records"]) == 15
-    token_history = payload["agent_token_history"]
-    assert token_history["snapshot"] is True
-    assert token_history["coverage"]["mode"] == "live"
-    assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 30
-
-
-def test_stats_history_display_encoder_honors_point_budget_and_preserves_metric_semantics(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200003.0
-    start = int(now) - 120
-    try:
-        for offset in range(120):
-            sample_time = start + offset
-            assert stats_client.merge_server_records(
-                [
-                    {
-                        "start": sample_time,
-                        "cpu_total_percent": 20,
-                        "cpu_count": 1,
-                        "system_cpu_total_percent": 30,
-                        "system_cpu_count": 1,
-                        "run_agent_total": 1,
-                        "active_agent_total": 1,
-                        "agent_activity_samples": 1,
-                        "tokens_per_agent_total": 2,
-                        "agent_token_samples": 1,
-                        "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "tokens": 2, "seconds": 1, "samples": 1}],
-                        "process": {
-                            "id": "port:9101",
-                            "label": "yolomux.py :9101",
-                            "port": 9101,
-                            "cpu_percent": 25,
-                            "cpu_count": 1,
-                        },
-                    },
-                ],
-                now=now,
-            )["ok"] is True
-            assert stats_client.merge_records(
-                [
-                    {
-                        "start": sample_time,
-                        "api_count": 1,
-                        "sse_count": 2,
-                        "latency_total_ms": 10,
-                        "latency_count": 1,
-                        "bandwidth_bytes": 100,
-                    },
-                ],
-                    client_id="client-a",
-                    now=now,
-            )["ok"] is True
-        history = stats_client.history(
-            since=0,
-            client_id="client-a",
-            token_resolution_seconds=60,
-            start=start,
-            end=start + 120,
-            resolution_seconds=5,
-            max_points=6,
-        )
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    records = history["records"]
-    assert len(records) <= 6
-    assert history["coverage"]["resolution_seconds"] == 20
-    assert all(record["duration"] == 20 for record in records)
-    assert sum(record["api_count"] for record in records) == 120
-    assert sum(record["sse_count"] for record in records) == 240
-    assert sum(record["latency_total_ms"] for record in records) == 1200
-    assert sum(record["latency_count"] for record in records) == 120
-    assert sum(record["bandwidth_bytes"] for record in records) == 12000
-    assert sum(record["cpu_total_percent"] for record in records) == 2400
-    assert sum(record["cpu_count"] for record in records) == 120
-    assert sum(record["run_agent_total"] for record in records) == 120
-    assert sum(record["agent_activity_samples"] for record in records) == 120
-    assert sum(record["clients"]["client-a"]["api_count"] for record in records) == 120
-    assert sum(record["servers"]["port:9101"]["cpu_total_percent"] for record in records) == 3000
-    assert all("tokens_per_agent_total" not in record and "agent_token_rates" not in record for record in records)
-    token_records = history["agent_token_history"]["records"]
-    assert sum(item["tokens"] for record in token_records for item in record["agent_token_rates"]) == 240
-
-
-def test_stats_history_display_encoder_sends_wide_mixed_duration_input_at_the_coarsest_retained_resolution(tmp_path):
-    end = 1_036_800
-    start = end - (24 * 60 * 60)
-    tier_specs = (
-        (start, 1320, 60),
-        (start + (22 * 60 * 60), 360, 10),
-        (start + (23 * 60 * 60), 3600, 1),
-    )
-    sequence = 0
-    buckets = []
-    try:
-        for tier_start, count, duration in tier_specs:
-            for index in range(count):
-                sequence += 1
-                bucket_start = tier_start + (index * duration)
-                bucket = stats_store.empty_bucket(bucket_start, duration)
-                bucket.update({
-                    "sequence": sequence,
-                    "server_sequence": sequence,
-                    "cpu_total_percent": 20.0,
-                    "cpu_count": 1.0,
-                    "system_cpu_total_percent": 30.0,
-                    "system_cpu_count": 1.0,
-                    "run_agent_total": 1.0,
-                    "active_agent_total": 1.0,
-                    "agent_activity_samples": 1.0,
-                    "tokens_per_agent_total": 2.0,
-                    "agent_token_samples": 1.0,
-                    "agent_token_rates": {"1|0|codex": {"label": "1:0:codex", "total": 2.0, "samples": 1.0, "tokens": 2.0, "seconds": float(duration), "source": "transcript"}},
-                })
-                client = stats_store.empty_client_bucket()
-                client.update({"sequence": sequence, "api_count": 1.0, "sse_count": 2.0, "latency_total_ms": 10.0, "latency_count": 1.0, "bandwidth_bytes": 100.0})
-                bucket["clients"]["client-a"] = client
-                process = stats_store.empty_process_bucket()
-                process.update({"sequence": sequence, "label": "yolomux.py :9101", "port": 9101, "cpu_total_percent": 25.0, "cpu_count": 1.0})
-                bucket["servers"]["port:9101"] = process
-                buckets.append(bucket)
-        service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-        service.store.replace_buckets(buckets)
-        preserved = service.handle({
-            "action": "history",
-            "client_id": "client-a",
-            "start": start,
-            "end": end,
-            "resolution_seconds": 1,
-            "max_points": 6000,
-        })
-        coarsened = service.handle({
-            "action": "history",
-            "client_id": "client-a",
-            "start": start,
-            "end": end,
-            "resolution_seconds": 1,
-            "max_points": 500,
-        })
-    finally:
-        service.store.close()
-
-    assert len(preserved["records"]) == 1440
-    assert preserved["coverage"]["resolution_seconds"] == 60
-    assert preserved["coverage"]["returned_records"] == 1440
-    assert {record["duration"] for record in preserved["records"]} == {60}
-    records = coarsened["records"]
-    assert len(records) <= 500
-    assert coarsened["coverage"]["resolution_seconds"] > 60
-    assert sum(record["api_count"] for record in records) == 5280
-    assert sum(record["sse_count"] for record in records) == 10560
-    assert sum(record["latency_total_ms"] for record in records) == 52800
-    assert sum(record["latency_count"] for record in records) == 5280
-    assert sum(record["bandwidth_bytes"] for record in records) == 528000
-    assert sum(record["cpu_total_percent"] for record in records) == 105600
-    assert sum(record["cpu_count"] for record in records) == 5280
-    assert sum(record["run_agent_total"] for record in records) == 5280
-    assert sum(record["agent_activity_samples"] for record in records) == 5280
-    assert sum(record["clients"]["client-a"]["api_count"] for record in records) == 5280
-    assert sum(record["servers"]["port:9101"]["cpu_total_percent"] for record in records) == 132000
-    assert sum(item["tokens"] for record in records for item in record["agent_token_rates"]) == 10560
-
-
-def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    monkeypatch.setattr(app_module.time, "time", lambda: now)
-    try:
-        webapp.stats_client.merge_server_records([{
-            "time": now,
-            "cpu_total_percent": 25,
-            "cpu_count": 1,
-            "system_cpu_total_percent": 40,
-            "system_cpu_count": 1,
-            "ask_agent_total": 1,
-            "run_agent_total": 1,
-            "idle_agent_total": 2,
-            "active_agent_total": 2,
-            "inactive_agent_total": 2,
-            "agent_activity_samples": 1,
-        }], now=now)
-        client_a, status_a = webapp.record_stats_history_payload({
-            "client_id": "client-a",
-            "records": [{"start": now, "api_count": 2, "latency_total_ms": 30, "latency_count": 2, "bandwidth_bytes": 1000, "heartbeat_count": 1}],
-        })
-        client_b, status_b = webapp.record_stats_history_payload({
-            "client_id": "client-b",
-            "records": [{"start": now, "api_count": 7, "sse_count": 3, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
-        })
-        history_a = webapp.stats_client.history(client_id="client-a")
-        history_b = webapp.stats_client.history(client_id="client-b")
-        history_a_after_b = webapp.stats_client.history(since=client_a["history"]["sequence"], client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert status_a == HTTPStatus.OK
-    assert status_b == HTTPStatus.OK
-    assert sum(record["api_count"] for record in history_a["records"]) == 2
-    assert sum(record["sse_count"] for record in history_a["records"]) == 0
-    assert sum(record["latency_count"] for record in history_a["records"]) == 2
-    assert sum(record["bandwidth_bytes"] for record in history_a["records"]) == 1000
-    assert sum(record["heartbeat_count"] for record in history_a["records"]) == 1
-    assert sum(record["api_count"] for record in history_b["records"]) == 7
-    assert sum(record["sse_count"] for record in history_b["records"]) == 3
-    assert sum(record["latency_count"] for record in history_b["records"]) == 3
-    assert sum(record["bandwidth_bytes"] for record in history_b["records"]) == 3000
-    assert sum(record["cpu_count"] for record in history_a["records"]) == 1
-    assert sum(record["cpu_count"] for record in history_b["records"]) == 1
-    assert sum(record["agent_activity_samples"] for record in history_a["records"]) == 1
-    assert sum(record["agent_activity_samples"] for record in history_b["records"]) == 1
-    clients = history_a["records"][0]["clients"]
-    assert clients["client-a"]["api_count"] == 2
-    assert clients["client-a"]["heartbeat_count"] == 1
-    assert clients["client-b"]["api_count"] == 7
-    assert clients["client-b"]["bandwidth_bytes"] == 3000
-    assert history_a_after_b["sequence"] == client_b["history"]["sequence"]
-    assert len(history_a_after_b["records"]) == 1
-    assert history_a_after_b["records"][0]["api_count"] == 2
-    assert history_a_after_b["records"][0]["clients"]["client-b"]["api_count"] == 7
-
-
-def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    clock = {"wall": 1000.0, "monotonic": 50.0, "process": 10.0}
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: clock["wall"])
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock["monotonic"])
-    monkeypatch.setattr(app_module.time, "process_time", lambda: clock["process"])
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    try:
-        first = webapp.record_stats_global_sample()
-        clock.update({"wall": 1002.0, "monotonic": 52.0, "process": 10.5})
-        second = webapp.record_stats_global_sample()
-        history = webapp.stats_client.history(client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["cpu_percent"] == 0.0
-    assert second["cpu_percent"] == 25.0
-    assert history["ok"] is True
-    assert sum(record["cpu_count"] for record in history["records"]) == 2
-    assert sum(record["system_cpu_count"] for record in history["records"]) == 2
-    assert sum(record["api_count"] for record in history["records"]) == 0
-    with webapp.performance_record_lock:
-        samples = [record for record in webapp.performance_records if record["role"] == app_module.BACKGROUND_ROLE_STATS_SAMPLER]
-    assert samples
-    assert {"sample_ms", "agent_activity_ms", "history_merge_ms"} <= set(samples[-1]["details"])
-
-
-def test_statsd_sample_pushes_its_durable_one_second_delta_to_stats_sse(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.background_owner = StatsRoleOwner(owner=True, port=9991)
-    sample = {
-        "time": 1_000.25,
-        "pid": 123,
-        "started_at": 900.0,
-        "uptime_seconds": 100.25,
-        "cpu_percent": 12.5,
-        "system_cpu_percent": 33.0,
-        "rss_bytes": 456,
-    }
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: (dict(sample), True))
-    subscriber_id, subscriber_queue = webapp.client_events.subscribe(channels={"stats"})
-    try:
-        webapp.record_stats_cpu_sample()
-        event = subscriber_queue.get_nowait()
-    finally:
-        webapp.client_events.unsubscribe(subscriber_id)
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert event["type"] == "stats_sample"
-    payload = event["payload"]
-    assert payload["sample"] == sample
-    assert payload["record"]["start"] == 1_000
-    assert payload["record"]["duration"] == 1
-    assert payload["record"]["cpu_total_percent"] == 12.5
-    assert payload["record"]["system_cpu_total_percent"] == 33.0
-    assert "ask_agent_total" not in payload["record"]
-    assert "host_metrics" not in payload["record"]
-    assert payload["record"]["sequence"] == payload["sequence"] > 0
-
-
-def test_stats_family_publish_serialization_follows_aggregate_stats_demand(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(
-        webapp.stats_client,
-        "merge_server_records",
-        lambda *_args, **_kwargs: {"ok": True, "sequence": 7},
-    )
-    serialized = []
-    original_publish = webapp.publish_client_event
-    monkeypatch.setattr(
-        webapp,
-        "publish_client_event",
-        lambda event_type, payload, **kwargs: (
-            serialized.append((event_type, payload))
-            or original_publish(event_type, payload, **kwargs)
-        ),
-    )
-    sample = {"time": 1_000.25, "pid": 123, "cpu_percent": 12.5}
-    record = {"time": 1_000.25, "cpu_total_percent": 12.5, "cpu_count": 1}
-    coarse_id, _coarse_queue = webapp.client_events.subscribe(channels={"core"})
-    try:
-        webapp.merge_stats_family_record("cpu", record, sample)
-        assert serialized == [], "a sole coarse-range subscriber causes no stats JSON publication"
-        assert webapp.client_events.snapshot()["published_by_type"].get("stats_sample") is None
-
-        live_id, live_queue = webapp.client_events.subscribe(channels={"stats"})
-        try:
-            webapp.merge_stats_family_record("cpu", {**record, "time": 1_001.25}, {**sample, "time": 1_001.25})
-            event = live_queue.get_nowait()
-        finally:
-            webapp.client_events.unsubscribe(live_id)
-    finally:
-        webapp.client_events.unsubscribe(coarse_id)
-        webapp.control_server.stop()
-
-    assert [item[0] for item in serialized] == ["stats_sample"]
-    assert event["type"] == "stats_sample"
-    assert webapp.client_events.snapshot()["published_by_type"]["stats_sample"]["events"] == 1
-
-
-def test_cpu_durable_times_keep_one_second_phase_across_wall_clock_jitter(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    samples = iter((1000.9, 1002.0, 1002.99))
-    records = []
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({
-        "time": next(samples), "pid": 1, "started_at": 900.0,
-        "uptime_seconds": 100.0, "cpu_percent": 1.0,
-        "system_cpu_percent": 2.0, "rss_bytes": 3,
-    }, True))
-    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda _family, record, _sample: records.append(record) or {"ok": True})
-    scheduled_times = (1000.9, 1001.9, 1002.9)
-    try:
-        for scheduled_time in scheduled_times:
-            webapp.stats_metric_thread_context.scheduled_time = scheduled_time
-            webapp.record_stats_cpu_sample()
-    finally:
-        webapp.stats_metric_thread_context.scheduled_time = None
-        webapp.control_server.stop()
-
-    assert [record["time"] for record in records] == pytest.approx(scheduled_times)
-    assert [int(record["time"]) for record in records] == [1000, 1001, 1002]
-
-
-def test_cpu_scheduler_deadline_never_turns_into_cached_success(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    wall_times = iter((1000.0, 1000.2))
-    monotonic_times = iter((50.0, 50.2))
-    process_times = iter((10.0, 10.1))
-    records = []
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: (100.0, 20.0))
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 3)
-    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda _family, record, _sample: records.append(record) or {"ok": True})
-    try:
-        for scheduled_time in (1000.0, 1001.0):
-            webapp.stats_metric_thread_context.scheduled_time = scheduled_time
-            webapp.record_stats_cpu_sample()
-    finally:
-        webapp.stats_metric_thread_context.scheduled_time = None
-        webapp.control_server.stop()
-
-    assert [record["time"] for record in records] == [1000.0, 1001.0]
-
-
-def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    owner = app_module.TmuxWebtermApp(["1"])
-    follower = app_module.TmuxWebtermApp(["1"])
-    owner.stats_client = stats_client
-    follower.stats_client = stats_client
-    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
-    sample_time = time.time()
-    sample = {
-        "time": sample_time,
-        "pid": 8003,
-        "started_at": sample_time - 20.0,
-        "uptime_seconds": 20.0,
-        "cpu_percent": 12.5,
-        "system_cpu_percent": 33.0,
-        "rss_bytes": 456789,
-    }
-    monkeypatch.setattr(owner, "current_stats_sample", lambda: (dict(sample), True))
-    monkeypatch.setattr(owner, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(owner, "stats_agent_activity_record_from_rows", lambda _rows, _sample_time, include_token_rates=False: {
-        "ask_agent_total": 1,
-        "run_agent_total": 2,
-        "transition_agent_total": 3,
-        "idle_agent_total": 4,
-        "active_agent_total": 6,
-        "inactive_agent_total": 4,
-        "agent_activity_samples": 1,
-    })
-    with follower.stats_history_service.sample_lock:
-        follower.stats_history_service.sample_record.cached_payload = {
-            "time": sample_time + 1, "pid": 8002, "started_at": sample_time - 5,
-            "uptime_seconds": 6.0, "cpu_percent": 1.0, "system_cpu_percent": 2.0, "rss_bytes": 123,
-        }
-    try:
-        owner.record_stats_cpu_sample()
-        owner.record_stats_agent_status_sample()
-        stats_client.update_sampler_family("cpu", {"last_success_at": sample_time, "alive": True})
-        payload = follower.stats_sample_payload(client_id="client-a")
-    finally:
-        stats_client.request({"action": "shutdown"})
-        owner.control_server.stop()
-        follower.control_server.stop()
-
-    assert payload["pid"] == 8002
-    assert payload["shared_stats"]["role"] == "statsd"
-    assert payload["shared_stats"]["fresh"] is True
-    records = payload["history"]["records"]
-    assert sum(record["cpu_count"] for record in records) == 1
-    assert sum(record["system_cpu_count"] for record in records) == 1
-    assert sum(record["ask_agent_total"] for record in records) == 1
-    assert sum(record["run_agent_total"] for record in records) == 2
-    assert sum(record["transition_agent_total"] for record in records) == 3
-    assert sum(record["idle_agent_total"] for record in records) == 4
-
-
-def test_statsd_history_survives_other_server_writes_and_restart(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    owner = app_module.TmuxWebtermApp([])
-    follower = app_module.TmuxWebtermApp([])
-    restarted = app_module.TmuxWebtermApp([])
-    owner.stats_client = stats_client
-    follower.stats_client = stats_client
-    restarted.stats_client = stats_client
-    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
-    restarted.background_owner = StatsRoleOwner(owner=False, port=8001)
-    sample_time = time.time()
-    sample = {"time": sample_time, "pid": 8003, "cpu_percent": 12.0, "system_cpu_percent": 24.0}
-    monkeypatch.setattr(owner, "current_stats_sample", lambda: (dict(sample), True))
-    monkeypatch.setattr(owner, "stats_agent_activity_record", lambda _sample_time, include_token_rates=True: None)
-    try:
-        owner.record_stats_cpu_sample()
-        follower.record_stats_history_payload({
-            "client_id": "client-b",
-            "records": [{"start": sample_time, "api_count": 7, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
-        })
-        owner.record_stats_cpu_sample()
-        payload = restarted.stats_sample_payload(client_id="client-a")
-    finally:
-        stats_client.request({"action": "shutdown"})
-        owner.control_server.stop()
-        follower.control_server.stop()
-        restarted.control_server.stop()
-
-    records = payload["history"]["records"]
-    clients = next(record["clients"] for record in records if "client-b" in record["clients"])
-    assert clients["client-b"]["api_count"] == 7
-    assert clients["client-b"]["latency_total_ms"] == 90
-    assert clients["client-b"]["bandwidth_bytes"] == 3000
-    process_key = f"port:{owner.background_owner.port}"
-    servers = next(record["servers"] for record in records if process_key in record["servers"])
-    assert servers[process_key]["cpu_total_percent"] == 24.0
-
-
-def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    owner = app_module.TmuxWebtermApp(["1"])
-    follower = app_module.TmuxWebtermApp(["1"])
-    owner.stats_client = stats_client
-    follower.stats_client = stats_client
-    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
-    sample_time = time.time() + 1.0
-    previous_time = sample_time - 60.0
-    monkeypatch.setattr(follower, "current_stats_sample", lambda: ({
-        "time": sample_time - 1.0,
-        "pid": 8002,
-        "started_at": sample_time - 10.0,
-        "uptime_seconds": 9.0,
-        "cpu_percent": 1.0,
-        "system_cpu_percent": 2.0,
-        "rss_bytes": 123,
-    }, True))
-    monkeypatch.setattr(owner, "current_stats_sample", lambda: ({
-        "time": sample_time,
-        "pid": 8003,
-        "started_at": sample_time - 20.0,
-        "uptime_seconds": 20.0,
-        "cpu_percent": 3.0,
-        "system_cpu_percent": 4.0,
-        "rss_bytes": 456,
-    }, True))
-    transcript = tmp_path / "codex.jsonl"
-    transcript.write_text(json.dumps({"timestamp": sample_time, "payload": {"info": {"total_token_usage": {"output_tokens": 250}}}}) + "\n", encoding="utf-8")
-    monkeypatch.setattr(owner, "stats_agent_window_rows", lambda: [{
-        "session": "1",
-        "kind": "codex",
-        "state": "working",
-        "window_index": 0,
-        "window_label": "0:codex",
-        "transcript": str(transcript),
-    }])
-    try:
-        follower.stats_sample_payload(token_consumer=True)
-        with owner.stats_history_service.agent_token_lock:
-            owner.stats_history_service.agent_token_state = {
-                "1|0|codex": {"tokens": 100.0, "time": previous_time, "label": "1:0:codex", "source": "transcript", "identity": app_module.session_files.transcript_usage_identity(transcript, "codex")}
-            }
-            owner.stats_history_service.agent_token_next_sample_at = 0.0
-        owner.record_stats_agent_token_sample()
-        history = stats_client.history(client_id="client-a")
-    finally:
-        stats_client.request({"action": "shutdown"})
-        owner.control_server.stop()
-        follower.control_server.stop()
-
-    token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
-    assert follower.background_owner.refresh_requests == [(
-        app_module.BACKGROUND_ROLE_STATS_SAMPLER,
-        {"family": "agent_tokens", "reason": "stats-token-consumer", "cache_key": "agent-tokens"},
-    )]
-    assert sum(item["tokens"] for item in token_records) >= 250.0
-    assert sum(record["agent_token_samples"] for record in history["records"]) >= 1
 
 
 def test_background_status_includes_performance_summary():
@@ -1551,8 +734,9 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
             "record": {},
             "resources": {"cpu_percent": None, "rss_bytes": None},
         })
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
-            "service": "statsd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "service": {"ok": True, "pid": 0, "migration": {"state": "ready"}},
+            "families": {},
         })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
             "service": "jobd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
@@ -1646,621 +830,11 @@ def test_background_refresh_control_uses_nested_payload(monkeypatch):
     assert calls == [(app_module.BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same", "reason": "follower"})]
 
 
-def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1", "2"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0, 1060.0])
-    monotonic_times = iter([50.0, 110.0])
-    process_times = iter([10.0, 10.5])
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    claude_transcript = tmp_path / "claude.jsonl"
-    codex_transcript = tmp_path / "codex.jsonl"
-    previous_claude_tokens = [0]
-
-    def write_usage_transcripts(claude_tokens: int, codex_tokens: int, mtime: float) -> None:
-        claude_delta = claude_tokens - previous_claude_tokens[0]
-        previous_claude_tokens[0] = claude_tokens
-        with claude_transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "assistant", "message": {"id": f"msg-{claude_tokens}", "usage": {"output_tokens": claude_delta}, "content": []}}) + "\n")
-        with codex_transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "response_item", "payload": {"info": {"total_token_usage": {"output_tokens": codex_tokens}}}}) + "\n")
-        os.utime(claude_transcript, (mtime, mtime))
-        os.utime(codex_transcript, (mtime, mtime))
-
-    usage_samples = [(100, 200), (1600, 2600)]
-
-    def fake_agent_rows():
-        claude_tokens, codex_tokens = usage_samples.pop(0)
-        write_usage_transcripts(claude_tokens, codex_tokens, 1000.0 + len(usage_samples))
-        return [
-            {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(claude_transcript)},
-            {"session": "1", "kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex"},
-            {"session": "2", "kind": "codex", "state": "needs-input", "window_index": 0, "window_label": "0:codex", "transcript": str(codex_transcript)},
-        ]
-
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", fake_agent_rows)
-    try:
-        first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        history = webapp.stats_client.history(client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["time"] == 1000.0
-    assert second["time"] == 1060.0
-    records = history["records"]
-    assert sum(record["active_agent_total"] for record in records) == 4
-    assert sum(record["inactive_agent_total"] for record in records) == 2
-    assert sum(record["ask_agent_total"] for record in records) == 2
-    assert sum(record["run_agent_total"] for record in records) == 2
-    assert sum(record["transition_agent_total"] for record in records) == 0
-    assert sum(record["idle_agent_total"] for record in records) == 2
-    assert sum(record["ask_agent_total"] + record["run_agent_total"] + record["transition_agent_total"] + record["idle_agent_total"] for record in records) == 6
-    assert sum(record["agent_activity_samples"] for record in records) == 2
-    token_records = [item for record in records for item in record["agent_token_rates"]]
-    tokens_by_key: dict[str, float] = {}
-    labels_by_key: dict[str, str] = {}
-    sources_by_key: dict[str, set[str]] = {}
-    for record in token_records:
-        key = record["key"]
-        labels_by_key[key] = record["label"]
-        tokens_by_key[key] = tokens_by_key.get(key, 0.0) + float(record.get("tokens") or 0.0)
-        sources_by_key.setdefault(key, set()).add(record.get("source") or "")
-    assert labels_by_key["1|0|claude"] == "1:0:claude"
-    assert tokens_by_key["1|0|claude"] == pytest.approx(1500.0)
-    assert sources_by_key["1|0|claude"] == {"transcript"}
-    assert labels_by_key["2|0|codex"] == "2:0:codex"
-    assert tokens_by_key["2|0|codex"] == pytest.approx(2400.0)
-    assert sources_by_key["2|0|codex"] == {"transcript"}
-    assert sum(record["agent_token_samples"] for record in records) == 4
-
-
-def test_stats_agent_token_rate_tracks_claude_subagent_appends(monkeypatch, tmp_path):
-    app_module.session_files._TRANSCRIPT_SCAN_CACHE.clear()
-    webapp = app_module.TmuxWebtermApp(["1"])
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.stats_client = stats_client
-    transcript = tmp_path / "session-id.jsonl"
-    subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
-    subagent.parent.mkdir(parents=True)
-
-    def line(message_id: str, output_tokens: int) -> str:
-        return json.dumps({
-            "type": "assistant",
-            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
-        }) + "\n"
-
-    transcript.write_text(line("parent", 100), encoding="utf-8")
-    subagent.write_text(line("child-first", 50), encoding="utf-8")
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{
-        "session": "1",
-        "kind": "claude",
-        "state": "working",
-        "window_index": 0,
-        "window_label": "0:claude",
-        "transcript": str(transcript),
-    }])
-    try:
-        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
-        with subagent.open("a", encoding="utf-8") as handle:
-            handle.write(line("child-second", 120))
-        second = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert "_agent_token_records" not in first
-    assert "_agent_token_records" not in second
-    assert sum(
-        rate["tokens"]
-        for record in history["agent_token_history"]["records"]
-        for rate in record["agent_token_rates"]
-        if rate["key"] == "1|0|claude"
-    ) == pytest.approx(120.0)
-
-
-def test_stats_sampler_bootstraps_token_scan_without_consumer(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0])
-    monotonic_times = iter([50.0])
-    process_times = iter([10.0])
-    system_cpu_times = iter([(100.0, 20.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/rollout.jsonl"}])
-    try:
-        payload = webapp.record_stats_global_sample(trigger="sampler")
-        history = webapp.stats_client.history(client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert payload["time"] == 1000.0
-    assert sum(record["agent_activity_samples"] for record in history["records"]) == 1
-    assert sum(record["agent_token_samples"] for record in history["records"]) == 0
-
-
-def test_stats_token_sampling_uses_idle_cadence_and_accelerates_for_consumer():
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        with webapp.stats_history_service.agent_token_lock:
-            webapp.stats_history_service.agent_token_bootstrap_pending = False
-            webapp.stats_history_service.agent_token_next_sample_at = 0.0
-            webapp.stats_history_service.agent_token_consumer_until = 0.0
-        assert webapp.stats_agent_token_sampling_due(1000.0) is True
-        assert webapp.stats_history_service.agent_token_next_sample_at == 1000.0 + app_module.STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
-        assert webapp.stats_agent_token_sampling_due(1001.0) is False
-        assert webapp.stats_agent_token_sampling_due(1001.0, token_consumer=True) is True
-        assert webapp.stats_history_service.agent_token_next_sample_at == 1001.0 + app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS
-    finally:
-        webapp.control_server.stop()
-
-
-def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    calls = []
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}])
-
-    def slow_claim(*_args, **_kwargs):
-        calls.append(time.monotonic())
-        time.sleep(0.15)
-        return {"ok": True, "records": [], "state": {}}
-
-    monkeypatch.setattr(webapp.stats_client, "claim_agent_token_deltas_from_rows", slow_claim)
-    try:
-        # Process launch has its own statsd coverage and is highly sensitive to
-        # concurrent browser/compiler lanes. Warm this isolated daemon so this
-        # timer measures only the request-path contract named by the test.
-        assert webapp.stats_client.ensure_started() is True
-        assert webapp.stats_client.healthy() is True
-        started = time.monotonic()
-        payload = webapp.stats_sample_payload(token_consumer=True)
-        response_elapsed = time.monotonic() - started
-        calls_before_sampler = len(calls)
-        webapp.stats_history_service.sample_record.cached_monotonic = None
-        webapp.record_stats_global_sample(trigger="sampler")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert payload["pid"] == os.getpid()
-    assert payload["uptime_seconds"] >= 0
-    # The warmed request must defer the slow token claim until the sampler path.
-    # Cold daemon startup is intentionally outside this latency assertion.
-    assert response_elapsed < 1.25
-    assert calls_before_sampler == 0
-    assert len(calls) == 1
-
-
-def test_stats_token_sampling_bootstraps_rate_before_steady_consumer_cadence(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    sample_times = iter([1000.0, 1001.0])
-    claim_responses = iter([
-        {"ok": True, "records": [], "state": {"1|0|codex": {"tokens": 100.0, "time": 1000.0, "label": "1:0:codex", "source": "transcript", "identity": "stable"}}},
-        {"ok": True, "records": [{
-            "time": 960.0,
-            "tokens_per_agent_total": 400.0,
-            "agent_token_samples": 1.0,
-            "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 400.0, "samples": 1.0, "tokens": 400.0, "seconds": 1.0, "source": "transcript"}],
-        }], "state": {"1|0|codex": {"tokens": 500.0, "time": 1001.0, "label": "1:0:codex", "source": "transcript", "identity": "stable"}}},
-    ])
-
-    def current_sample():
-        sample_time = next(sample_times)
-        return {
-            "time": sample_time,
-            "pid": os.getpid(),
-            "started_at": 990.0,
-            "uptime_seconds": max(0.0, sample_time - 990.0),
-            "cpu_percent": 1.0,
-            "system_cpu_percent": 2.0,
-            "rss_bytes": 123456,
-        }, True
-
-    monkeypatch.setattr(webapp, "current_stats_sample", current_sample)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/rollout.jsonl"}])
-    monkeypatch.setattr(webapp.stats_client, "claim_agent_token_deltas_from_rows", lambda *_args, **_kwargs: next(claim_responses))
-    try:
-        first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-    finally:
-        history = webapp.stats_client.history(client_id="client-a")
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["time"] == 1000.0
-    assert second["time"] == 1001.0
-    assert webapp.stats_history_service.agent_token_next_sample_at == 1011.0
-    token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
-    assert len(token_records) == 1
-    assert token_records[-1]["tokens"] == pytest.approx(400.0)
-    assert token_records[-1]["source"] == "transcript"
-
-
-def test_statsd_agent_token_delta_is_claimed_once_across_owner_handoff(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    first_owner = app_module.TmuxWebtermApp(["1"])
-    replacement_owner = app_module.TmuxWebtermApp(["1"])
-    first_owner.stats_client = stats_client
-    replacement_owner.stats_client = stats_client
-    first_owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    replacement_owner.background_owner = StatsRoleOwner(owner=True, port=8002)
-    transcript = tmp_path / "codex.jsonl"
-    transcript.write_text(json.dumps({"timestamp": 1000.0, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n", encoding="utf-8")
-
-    def rows():
-        return [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": str(transcript)}]
-
-    monkeypatch.setattr(first_owner, "stats_agent_window_rows", rows)
-    monkeypatch.setattr(replacement_owner, "stats_agent_window_rows", rows)
-    try:
-        baseline = first_owner.stats_agent_activity_record(1000.0, include_token_rates=True)
-        with transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"timestamp": 1060.0, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n")
-        claimed = replacement_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
-        duplicate = first_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        first_owner.control_server.stop()
-        replacement_owner.control_server.stop()
-
-    assert baseline.get("_agent_token_records", []) == []
-    assert claimed.get("_agent_token_records", []) == []
-    assert duplicate.get("_agent_token_records", []) == []
-    assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
-    assert sum(
-        item["tokens"]
-        for record in history["agent_token_history"]["records"]
-        for item in record["agent_token_rates"]
-        if item["key"] == "1|0|codex"
-    ) >= 120.0
-
-
-def test_statsd_import_migrates_legacy_agent_token_intervals_without_dropping_history(tmp_path):
-    legacy_rates = {
-        "1|0|codex": {"label": "1:0:codex", "total": 1200.0, "samples": 4.0, "tokens": 1200.0, "seconds": 240.0, "source": "transcript"},
-    }
-    status = {"version": 1, "rev": 0, "stats_history": {
-        "agent_token_schema_version": 2,
-        "raw_buckets": [],
-        "rollup_buckets": [[
-            960,
-            60,
-            1,
-            1,
-            *(1200.0 if field == "tokens_per_agent_total" else 4.0 if field == "agent_token_samples" else 0.0 for field in stats_store.SERVER_FIELDS),
-            legacy_rates,
-            stats_store.empty_host_metrics(),
-        ]],
-    }}
-    (tmp_path / "tmux-AI-status.json").write_text(json.dumps(status), encoding="utf-8")
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    try:
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    item = next(item for record in history["agent_token_history"]["records"] for item in record["agent_token_rates"] if item["key"] == "1|0|codex")
-    assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
-    assert item["tokens"] == pytest.approx(300.0)
-    assert item["seconds"] == pytest.approx(60.0)
-    assert item["samples"] == pytest.approx(1.0)
-
-
-def test_statsd_recovers_missing_agent_token_history_from_transcript_without_overwriting_fresh_rows(tmp_path):
-    transcript = tmp_path / "rollout.jsonl"
-    now = 200_040.0
-    transcript.write_text(
-        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-terra"}}) + "\n"
-        + json.dumps({"timestamp": now - 180, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n"
-        + json.dumps({"timestamp": now - 60, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n"
-        + json.dumps({"timestamp": now, "payload": {"info": {"total_token_usage": {"output_tokens": 340}}}}) + "\n",
-        encoding="utf-8",
-    )
-    webapp = app_module.TmuxWebtermApp(["1"])
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.stats_client = stats_client
-    webapp.background_owner = StatsRoleOwner(owner=True, port=8003)
-    fresh_start = int(now - 60)
-    rows = [{"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(transcript)}]
-    try:
-        assert stats_client.merge_server_records([{
-            "time": fresh_start,
-            "tokens_per_agent_total": 9.0,
-            "agent_token_samples": 1.0,
-            "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 9.0, "samples": 1.0, "tokens": 9.0, "seconds": 1.0, "source": "transcript"}],
-        }], now=now)["ok"] is True
-        assert webapp.statsd_recover_agent_token_history(rows, now) is True
-        recovered = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    raw = {
-        (record["start"], record["duration"]): record
-        for record in recovered["agent_token_history"]["records"]
-    }
-    fresh_rates = raw[(fresh_start, 60)]["agent_token_rates"]
-    assert fresh_rates[0]["tokens"] == pytest.approx(9.0)
-    assert fresh_rates[0]["model_rates"]["gpt-5.6-terra"]["tokens"] > 0
-    assert any(
-        item["tokens"] == pytest.approx(100.0)
-        for snapshot in raw.values()
-        for item in snapshot["agent_token_rates"]
-        if item["key"] == "1|0|codex"
-    )
-
-
-def test_statsd_recovery_waits_for_every_active_agent_transcript(tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    calls = []
-    webapp.stats_client = SimpleNamespace(
-        recover_agent_token_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True}
-    )
-    rows = [
-        {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
-        {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
-    ]
-    try:
-        assert webapp.statsd_recover_agent_token_history(rows, 1_000.0) is False
-        assert calls == []
-        rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
-        assert webapp.statsd_recover_agent_token_history(rows, 1_001.0) is True
-        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
-    finally:
-        webapp.control_server.stop()
-
-
-def test_statsd_usage_atom_migration_enriches_available_rows_without_claiming_a_complete_roster(tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    calls = []
-    webapp.stats_client = SimpleNamespace(
-        migrate_usage_atom_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True, "complete": all(row.get("transcript") for row in rows)}
-    )
-    rows = [
-        {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
-        {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
-    ]
-    try:
-        assert webapp.statsd_migrate_usage_atom_history(rows, 1_000.0) is True
-        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
-        assert next(row for row in calls[0][0] if row["key"] == "1|1|claude")["transcript"] == ""
-        rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
-        assert webapp.statsd_migrate_usage_atom_history(rows, 1_001.0) is True
-        assert {row["key"] for row in calls[1][0]} == {"1|0|codex", "1|1|claude"}
-    finally:
-        webapp.control_server.stop()
-
-
-def test_statsd_sampler_not_api_path_triggers_usage_atom_migration(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = [{"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")}]
-    migrated = []
-    try:
-        monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({"time": 1_000.0, "pid": 1, "started_at": 1.0, "cpu_percent": 0.0, "system_cpu_percent": 0.0}, True))
-        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
-        monkeypatch.setattr(webapp, "stats_agent_token_sampling_due", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(
-            webapp,
-            "stats_agent_activity_record",
-            lambda *_args, **_kwargs: {"time": 1_000.0},
-        )
-        monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: rows)
-        monkeypatch.setattr(
-            webapp,
-            "stats_agent_activity_record_from_rows",
-            lambda *_args, **_kwargs: {"time": 1_000.0, "agent_activity_samples": 1},
-        )
-        monkeypatch.setattr(webapp, "record_performance_sample", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {})
-        webapp.stats_client = SimpleNamespace(
-            merge_server_records=lambda *_args, **_kwargs: {"ok": True},
-            migrate_usage_atom_history_from_rows=lambda records, now: migrated.append((records, now)) or {"ok": True},
-        )
-        monkeypatch.setattr(
-            webapp,
-            "start_stats_agent_token_work",
-            lambda records, now: webapp.statsd_migrate_usage_atom_history(records, now),
-        )
-
-        webapp.record_stats_global_sample(trigger="api", defer_token_scan=True)
-        assert migrated == []
-        webapp.record_stats_global_sample(trigger="statsd")
-
-        assert {row["key"] for row in migrated[0][0]} == {"1|0|codex"}
-        assert migrated[0][1] == 1_000.0
-    finally:
-        webapp.control_server.stop()
-
-
-def test_statsd_agent_token_delta_records_accumulate_actual_overlap_seconds(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    try:
-        records = [
-            *statsd.PersistentStatsService._agent_token_delta_records("1|0|codex", "1:0:codex", 1000.0, 1010.0, 100.0),
-            *statsd.PersistentStatsService._agent_token_delta_records("1|0|codex", "1:0:codex", 1010.0, 1020.0, 100.0),
-        ]
-        assert stats_client.merge_server_records(records, now=1020.0)["ok"] is True
-        history = stats_client.history()
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    token_item = next(item for record in history["records"] for item in record["agent_token_rates"])
-    assert token_item["tokens"] == pytest.approx(200.0)
-    assert token_item["seconds"] == pytest.approx(20.0)
-    assert token_item["tokens"] / token_item["seconds"] * 60 == pytest.approx(600.0)
-
-
-def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.stats_client = stats_client
-    transcript = tmp_path / "claude.jsonl"
-    transcript.write_text(json.dumps({"type": "assistant", "message": {"id": "first", "usage": {"output_tokens": 1000}, "content": []}}) + "\n", encoding="utf-8")
-    rows = iter([
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(transcript), "status_tokens": 80}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(transcript), "status_tokens": 8000}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(transcript), "status_tokens": 14000}],
-    ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    try:
-        first = webapp.stats_agent_activity_record(1020.0, include_token_rates=True)
-        unchanged = webapp.stats_agent_activity_record(1080.0, include_token_rates=True)
-        with transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "assistant", "message": {"id": "second", "usage": {"output_tokens": 60}, "content": []}}) + "\n")
-        transcript_delta = webapp.stats_agent_activity_record(1140.0, include_token_rates=True)
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert "_agent_token_records" not in first
-    assert "_agent_token_records" not in unchanged
-    assert "_agent_token_records" not in transcript_delta
-    assert sum(
-        rate["tokens"]
-        for record in history["agent_token_history"]["records"]
-        for rate in record["agent_token_rates"]
-        if rate["key"] == "1|0|claude"
-    ) == pytest.approx(60.0)
-
-
-def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = iter([
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"}],
-        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
-        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
-    ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
-    try:
-        running = webapp.stats_agent_activity_record(1000.0)
-        transition = webapp.stats_agent_activity_record(1010.0)
-        idle = webapp.stats_agent_activity_record(1071.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert running["run_agent_total"] == 1
-    assert running["transition_agent_total"] == 0
-    assert transition["run_agent_total"] == 0
-    assert transition["transition_agent_total"] == 1
-    assert transition["inactive_agent_total"] == 0
-    assert idle["transition_agent_total"] == 0
-    assert idle["idle_agent_total"] == 1
-    assert idle["inactive_agent_total"] == 1
-
-
-def test_stats_agent_activity_record_counts_each_logical_window_once(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["8001"])
-    monkeypatch.setattr(
-        webapp,
-        "stats_agent_window_rows",
-        lambda: [
-            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 101},
-            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 102},
-            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 103},
-        ],
-    )
-    try:
-        record = webapp.stats_agent_activity_record(1000.0, include_token_rates=False)
-    finally:
-        webapp.control_server.stop()
-
-    assert record["run_agent_total"] == 1
-    assert record["idle_agent_total"] == 0
-    assert record["active_agent_total"] == 1
-    assert sum(record[key] for key in ("ask_agent_total", "run_agent_total", "transition_agent_total", "idle_agent_total")) == 1
-
-
-def test_stats_agent_activity_record_counts_sticky_cooldown_as_transition(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    monkeypatch.setattr(
-        webapp,
-        "stats_agent_window_rows",
-        lambda: [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0}],
-    )
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
-    try:
-        record = webapp.stats_agent_activity_record(1000.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert record["transition_agent_total"] == 1
-    assert record["idle_agent_total"] == 0
-    assert record["inactive_agent_total"] == 0
-    assert record["active_agent_total"] == 1
-
-
-def test_stats_agent_activity_record_keeps_zero_timeout_run_to_idle_transition(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = iter([
-        [{"session": "1", "kind": "codex", "state": "working", "window_index": 2, "window_label": "2:codex"}],
-        [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex"}],
-        [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex"}],
-    ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 0.0)
-    try:
-        running = webapp.stats_agent_activity_record(1000.0)
-        first_idle = webapp.stats_agent_activity_record(1010.0)
-        later_idle = webapp.stats_agent_activity_record(1120.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert running["run_agent_total"] == 1
-    assert first_idle["transition_agent_total"] == 1
-    assert first_idle["idle_agent_total"] == 0
-    assert later_idle["transition_agent_total"] == 1
-    assert later_idle["idle_agent_total"] == 0
-
-
-def test_stats_agent_activity_record_drops_acknowledged_attention_and_cooldown(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    monkeypatch.setattr(
-        webapp,
-        "stats_agent_window_rows",
-        lambda: [
-            {"session": "1", "kind": "claude", "state": "needs-input", "window_index": 1, "window_label": "1:claude", "attention_acknowledged": True},
-            {"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0, "cooldown_acknowledged": True},
-        ],
-    )
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 0.0)
-    try:
-        record = webapp.stats_agent_activity_record(1000.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert record["ask_agent_total"] == 0
-    assert record["transition_agent_total"] == 0
-    assert record["idle_agent_total"] == 2
-    assert record["inactive_agent_total"] == 2
-    assert record["active_agent_total"] == 0
-
-
 def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
     try:
-        with webapp.stats_history_service.agent_token_lock:
+        with webapp.stats_collection_state.agent_activity_lock:
             active_kind = webapp.stats_agent_activity_kind_locked({"state": "active"}, "active-agent", 1000.0, 60.0)
             settled_kind = webapp.stats_agent_activity_kind_locked({"state": "settled"}, "settled-agent", 1000.0, 60.0)
             ask_kind = webapp.stats_agent_activity_kind_locked({"state": "needs-input"}, "ask-agent", 1000.0, 60.0)
@@ -2641,264 +1215,6 @@ def test_stats_agent_window_rows_holds_very_stale_state_while_refreshing(monkeyp
 
     assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "session": "1"}]
     assert refreshes == [True]
-
-
-def test_statsd_fast_status_samples_continue_while_one_token_worker_is_blocked(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    assert webapp.stats_client.ensure_started() is True
-    webapp.background_owner = StatsRoleOwner(owner=True, port=8881)
-    sample_index = {"value": 0}
-    token_started = threading.Event()
-    token_release = threading.Event()
-    token_calls = []
-
-    def current_sample():
-        sample_time = 1000.0 + sample_index["value"]
-        sample_index["value"] += 1
-        return {
-            "time": sample_time,
-            "pid": 8881,
-            "started_at": 990.0,
-            "uptime_seconds": sample_time - 990.0,
-            "cpu_percent": 1.0,
-            "system_cpu_percent": 2.0,
-            "rss_bytes": 1234,
-        }, True
-
-    def blocked_tokens(rows, sample_time):
-        token_calls.append((rows, sample_time))
-        token_started.set()
-        assert token_release.wait(2.0) is True
-        return []
-
-    monkeypatch.setattr(webapp, "current_stats_sample", current_sample)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "transcript": "/tmp/rollout.jsonl"}])
-    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", blocked_tokens)
-    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(webapp, "stats_metric_family_specs", lambda: {
-        "cpu": (webapp.record_stats_cpu_sample, lambda: 0.1),
-        "agent_tokens": (webapp.record_stats_agent_token_sample, lambda: 0.1),
-    })
-    try:
-        assert webapp.start_stats_metric_scheduler() is True
-        assert token_started.wait(1.0) is True
-        deadline = time.monotonic() + 1.0
-        while sample_index["value"] < 4 and time.monotonic() < deadline:
-            time.sleep(0.02)
-        history = webapp.stats_client.history(client_id="client-a")
-        status = webapp.stats_client.runtime_status()
-    finally:
-        token_release.set()
-        webapp.stop_stats_metric_scheduler()
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert len(token_calls) == 1
-    assert sum(record["cpu_count"] for record in history["records"]) >= 4
-    assert status["sampler_families"]["cpu"]["successes"] >= 4
-
-
-def test_stats_metric_families_have_independent_named_cadences():
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        specs = webapp.stats_metric_family_specs()
-        assert specs["cpu"][1]() == 1.0
-        assert specs["service_load"][1]() == 10.0
-        assert specs["agent_status"][1]() == 10.0
-        assert specs["gpu"][1]() == 10.0
-        assert specs["system_memory"][1]() == 60.0
-        assert specs["agent_tokens"][1]() == 60.0
-        webapp.stats_history_service.agent_token_consumer_until = time.time() + 30.0
-        assert specs["agent_tokens"][1]() == 10.0
-    finally:
-        webapp.control_server.stop()
-
-
-def test_stats_sampler_wall_discontinuity_splits_forward_and_backward_epochs():
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=8 * 3600 + 1010, scheduled_at=1010, cadence=10, attempts=2
-    ) is True
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=900, scheduled_at=1010, cadence=10, attempts=2
-    ) is True
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=1011, scheduled_at=1010, cadence=10, attempts=2
-    ) is False
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=8 * 3600 + 1010, scheduled_at=1010, cadence=10, attempts=1
-    ) is False
-
-
-def test_agent_token_scheduler_persists_zero_sample_with_epoch_coverage(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    submitted = []
-    webapp.stats_history_service.scheduler_generation = 4
-    webapp.stats_metric_thread_context.generation = 4
-    webapp.stats_metric_thread_context.scheduled_time = 1000.0
-    webapp.stats_metric_thread_context.coverage_family = "agent_tokens"
-    webapp.stats_metric_thread_context.coverage_epoch_id = "pid:4:agent_tokens:2"
-    webapp.stats_metric_thread_context.coverage_cadence_seconds = 60.0
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", lambda *_args: [])
-    monkeypatch.setattr(
-        webapp.stats_client,
-        "merge_server_records",
-        lambda records, **_kwargs: submitted.extend(records) or {"ok": True},
-    )
-    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args: None)
-    try:
-        webapp.record_stats_agent_token_sample()
-    finally:
-        webapp.control_server.stop()
-
-    assert submitted == [{
-        "time": 1000.0,
-        "_stats_coverage": {
-            "family": "agent_tokens",
-            "epoch_id": "pid:4:agent_tokens:2",
-            "cadence_seconds": 60.0,
-            "owner_generation": 4,
-        },
-    }]
-
-
-def test_token_consumer_wakes_only_idle_token_family_while_cpu_keeps_ticking(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.background_owner = StatsRoleOwner(owner=True, port=8881)
-    token_attempts = []
-    cpu_attempts = []
-    first_token = threading.Event()
-    second_token = threading.Event()
-    second_token_release = threading.Event()
-    consumer = {"until": 0.0}
-
-    class StatsClientStub:
-        def runtime_status(self):
-            return {"agent_token_consumer_until": consumer["until"], "sampler_families": {}}
-
-        def set_token_consumer_until(self, until):
-            consumer["until"] = until
-            return {"ok": True}
-
-        def update_sampler_family(self, _family, _status):
-            return {"ok": True}
-
-    def token_collector():
-        token_attempts.append(time.monotonic())
-        (first_token if len(token_attempts) == 1 else second_token).set()
-        if len(token_attempts) == 2:
-            assert second_token_release.wait(1.0) is True
-
-    monkeypatch.setattr(webapp, "stats_client", StatsClientStub())
-    monkeypatch.setattr(webapp, "stats_metric_family_specs", lambda: {
-        "cpu": (lambda: cpu_attempts.append(time.monotonic()), lambda: 0.1),
-        "agent_tokens": (token_collector, webapp.stats_agent_token_scheduler_seconds),
-    })
-    try:
-        assert webapp.start_stats_metric_scheduler() is True
-        assert first_token.wait(1.0) is True
-        time.sleep(0.2)
-        assert len(token_attempts) == 1  # worker is holding its 60-second idle deadline
-        cpu_before_demand = len(cpu_attempts)
-        with webapp.stats_history_service.scheduler_lock:
-            webapp.stats_history_service.scheduler_diagnostics["agent_tokens"]["last_attempt_at"] = (
-                time.time() - app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS - 1.0
-            )
-
-        webapp.stats_sample_context(token_consumer=True)
-
-        assert second_token.wait(1.0) is True
-        cpu_during_token = len(cpu_attempts)
-        webapp.stats_sample_context(token_consumer=True)  # running scan already satisfies this wake
-        second_token_release.set()
-        deadline = time.monotonic() + 1.0
-        while webapp.stats_history_service.scheduler_diagnostics.get("agent_tokens", {}).get("running") and time.monotonic() < deadline:
-            time.sleep(0.01)
-        webapp.stats_sample_context(token_consumer=True)  # a completed scan still owns the next ten-second deadline
-        time.sleep(0.2)
-    finally:
-        second_token_release.set()
-        webapp.stop_stats_metric_scheduler()
-        webapp.control_server.stop()
-
-    assert token_attempts[1] - token_attempts[0] < 1.0
-    assert len(token_attempts) == 2
-    assert len(cpu_attempts) > cpu_before_demand
-    assert len(cpu_attempts) > cpu_during_token
-
-
-def test_agent_status_scheduler_persists_an_observed_empty_roster(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    records = []
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda family, record, sample: records.append((family, record)))
-    try:
-        webapp.record_stats_agent_status_sample()
-    finally:
-        webapp.control_server.stop()
-
-    assert records[0][0] == "agent_status"
-    assert records[0][1]["agent_activity_samples"] == 1
-    assert records[0][1]["active_agent_total"] == 0
-
-
-def test_stats_metric_stale_generation_cannot_persist_partial_or_token_records(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    persisted = []
-    monkeypatch.setattr(webapp.stats_client, "merge_server_records", lambda *_args, **_kwargs: persisted.append("merge") or {"ok": True})
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", lambda *_args: [])
-    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args: persisted.append("migrate"))
-    webapp.stats_history_service.scheduler_generation = 2
-    webapp.stats_metric_thread_context.generation = 1
-    try:
-        with pytest.raises(RuntimeError, match="generation ended"):
-            webapp.merge_stats_family_record("gpu", {"time": 1000.0}, webapp.latest_stats_sample())
-        with pytest.raises(RuntimeError, match="generation ended"):
-            webapp.record_stats_agent_token_sample()
-    finally:
-        webapp.control_server.stop()
-
-    assert persisted == []
-
-
-def test_stats_api_freshness_uses_cpu_family_not_newer_gpu_success(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    now = time.time()
-    monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
-        "last_sampler_success_at": now,
-        "sampler_families": {
-            "cpu": {"last_success_at": now - 30.0},
-            "gpu": {"last_success_at": now},
-        },
-    })
-    try:
-        _sample, shared, _profile, _started = webapp.stats_sample_context()
-    finally:
-        webapp.control_server.stop()
-
-    assert shared["fresh"] is False
-    assert shared["updated_at"] == pytest.approx(now - 30.0)
-
-
-def test_stats_api_reads_cached_cpu_without_invoking_any_collector(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    with webapp.stats_history_service.sample_lock:
-        webapp.stats_history_service.sample_record.cached_payload = {
-            "time": 1000.0, "pid": 123, "started_at": 900.0, "uptime_seconds": 100.0,
-            "cpu_percent": 2.0, "system_cpu_percent": 3.0, "rss_bytes": 4,
-        }
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: pytest.fail("API must not sample CPU"))
-    monkeypatch.setattr(webapp, "record_stats_global_sample", lambda *_args, **_kwargs: pytest.fail("API must not run collectors"))
-    monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"sampler_families": {}})
-    try:
-        sample, _shared, _profile, _started = webapp.stats_sample_context()
-    finally:
-        webapp.control_server.stop()
-
-    assert sample["time"] == 1000.0
-    assert sample["cpu_percent"] == 2.0
 
 
 def test_auto_approve_session_status_skips_roster_cache(monkeypatch):
@@ -3638,7 +1954,6 @@ def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
     webapp.refresh_sessions = lambda maintenance=False: []
     try:
         failures = [
-            webapp.record_stats_history_payload("invalid"),
             webapp.client_event({"session": "missing", "type": "test", "message": "message"}),
             webapp.acknowledge_attention({}),
             webapp.build_auto_approve_status("missing"),
@@ -3650,11 +1965,6 @@ def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
 
     assert all(status != HTTPStatus.OK for _payload, status in failures)
     assert all(payload.get("user_message", {}).get("key") for payload, _status in failures)
-    assert failures[0][0]["user_message"] == {
-        "key": "request.error.object",
-        "params": {"field": "payload"},
-        "fallback": "payload must be an object",
-    }
     assert failures[-1][0]["diagnostic"] == "tmux discovery failed"
     command_failure = app_module.tmux_command_failure_payload("1", "raw tmux stderr")
     assert command_failure["diagnostic"] == "raw tmux stderr"
@@ -6623,35 +4933,60 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
     assert webapp.activity_transcript_service.tabber_warmer_record.running is False
 
 
-def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch):
+def test_tabber_activity_cache_warmer_parks_without_visible_consumer(monkeypatch):
+    """Expired consumer demand must PARK the warmer (no recurring idle work),
+    and a returning consumer must unpark it via mark_tabber_activity_consumer."""
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
     refreshes = []
     sleeps = []
 
-    def stop_after_sleep(seconds):
+    def forbid_sleep(seconds):
         sleeps.append(seconds)
-        raise RuntimeError(f"stop after sleeping {seconds}")
+        raise RuntimeError(f"unexpected sleep {seconds}")
 
     try:
         record = webapp.activity_transcript_service.tabber_warmer_record
         record.running = True
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
         monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
-        monkeypatch.setattr(app_module.time, "sleep", stop_after_sleep)
+        monkeypatch.setattr(app_module.time, "sleep", forbid_sleep)
 
-        with pytest.raises(RuntimeError, match="stop after sleeping"):
+        # No consumer: the loop parks on the wake event (no sleep, no refresh).
+        waits = []
+
+        def wake_then_stop():
+            waits.append(True)
+            record.running = False  # unparked by teardown -> loop exits
+
+        monkeypatch.setattr(record.wake, "wait", wake_then_stop)
+        webapp.tabber_activity_cache_warmer_loop(record)
+        assert refreshes == []
+        assert sleeps == []
+        assert waits == [True]
+        recent = webapp.performance_metrics_payload()["recent"]
+        assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
+        assert recent[-1]["cache_status"] == "skipped:no-consumer"
+
+        # A returning consumer unparks the warmer (event set), never starts a thread.
+        record.wake.clear()
+        assert webapp.mark_tabber_activity_consumer() is True
+        assert record.wake.is_set()
+
+        # A consumer arriving between the demand check and the park decision is
+        # never missed: the loop skips the wait and refreshes on the next pass.
+        record.running = True
+        record.consumer_until = 0.0
+
+        def record_and_extend(*args, **kwargs):
+            webapp.mark_tabber_activity_consumer()
+
+        monkeypatch.setattr(webapp, "record_performance_sample", record_and_extend)
+        with pytest.raises(RuntimeError, match="unexpected sleep"):
             webapp.tabber_activity_cache_warmer_loop(record)
+        assert refreshes == ["refresh"]  # continued and refreshed for the new consumer
     finally:
         webapp.control_server.stop()
-
-    assert refreshes == []
-    assert len(sleeps) == 1
-    assert 59.9 <= sleeps[0] <= 60.0
-    recent = webapp.performance_metrics_payload()["recent"]
-    assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
-    assert recent[-1]["cache_status"] == "skipped:no-consumer"
-    assert webapp.activity_transcript_service.tabber_warmer_record.running is False
 
 
 def test_tabber_activity_warmer_record_reuses_worker_and_protects_replacement(monkeypatch):
@@ -7248,7 +5583,8 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     webapp.client_event_payload_signature = fake_signature
     webapp.merge_shared_attention_acks = fake_merge_attention_acks
     try:
-        _path, disk_signature = webapp.session_files_disk_cache_path(("payload", {"session": "5"}))
+        cache_key = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "5", 24.0, "", "", (), ("infos-sig",), ("repo-sigs",))
+        _path, disk_signature = webapp.session_files_disk_cache_path(cache_key)
         payload_signature = webapp.session_files_payload_signature({"files": [{"path": "same.py"}]})
         tabber_signature = webapp.tabber_activity_source_signature()
     finally:
@@ -7257,7 +5593,9 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     assert disk_signature == hashlib.sha256(b"encoded-1").hexdigest()
     assert payload_signature == hashlib.sha256(b"encoded-2").hexdigest()
     assert tabber_signature == hashlib.sha256(b"encoded-4").hexdigest()
-    assert calls[0] == ("payload", {"session": "5"})
+    # The durable path hashes ONLY the stable logical view key; the volatile
+    # info/repo signatures (last two elements) are the replaceable generation.
+    assert calls[0] == cache_key[:-2]
     assert calls[1] == {"files": [{"path": "same.py"}]}
     assert calls[3] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 7, "tmux_signature": "encoded-3"}
 
@@ -13335,28 +11673,123 @@ def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(
     assert len(webapp.job_client.submissions) == 1
 
 
-def test_stats_coverage_integrity_self_check_surfaces_violation_to_logs(monkeypatch, tmp_path):
-    database = tmp_path / "stats.sqlite3"
-    store = stats_store.StatsStore(database)
-    connection = store._connection()
-    with connection:
-        for epoch_id, start, end in (("o1", 1000, 1300), ("o2", 1290, 1600)):
-            connection.execute(
-                "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
-                " VALUES('cpu',?,?,?,10,1,'sampler')",
-                (epoch_id, start, end),
-            )
-    store.close()
-    # Point the read-only check at the corrupt fixture DB (no repair on read-only open).
-    monkeypatch.setattr(statsd, "default_database_path", lambda: database)
-    server_logs.SERVER_LOGS.clear()
+def test_session_files_index_updates_append_a_journal_instead_of_rewriting_the_base(tmp_path, monkeypatch):
+    """A durable cache write must not read and rewrite the whole O(historical
+    entries) JSON index; it appends one journal line, reads merge base+journal,
+    and a full rewrite folds the journal in and truncates it."""
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    report = webapp.check_stats_coverage_integrity()
-    assert report is not None and report["ok"] is False and report["overlapping_pairs"] == 1, report
-    coverage_errors = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage" and entry["level"] == "error"]
-    assert coverage_errors, server_logs.server_logs_payload()
-    assert "coverage integrity violated" in coverage_errors[0]["message"]
-    # Deduped: a second immediate check must not emit a second line.
-    webapp.check_stats_coverage_integrity()
-    coverage_errors_after = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage"]
-    assert len(coverage_errors_after) == 1, coverage_errors_after
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "cache")
+
+    base = webapp.session_files_disk_cache_index_path()
+    journal = webapp.session_files_disk_cache_index_journal_path()
+    webapp.update_session_files_disk_cache_index("sig-a", size=10, mtime=1.0)
+    webapp.update_session_files_disk_cache_index("sig-b", size=20, mtime=2.0)
+    webapp.update_session_files_disk_cache_index("sig-a", size=30, mtime=3.0)  # later wins
+
+    assert not base.exists()  # the base was never rewritten per write
+    assert len(journal.read_text(encoding="utf-8").splitlines()) == 3
+    merged = webapp.read_session_files_disk_cache_index_unlocked()
+    assert merged["entries"]["sig-a"] == {"size": 30, "mtime": 3.0}
+    assert merged["entries"]["sig-b"] == {"size": 20, "mtime": 2.0}
+
+    # A full rewrite (the prune path) folds the merged view into the base and
+    # truncates the journal; the merged view is unchanged afterwards.
+    webapp.write_session_files_disk_cache_index_unlocked(merged)
+    assert base.exists() and not journal.exists()
+    assert webapp.read_session_files_disk_cache_index_unlocked()["entries"] == merged["entries"]
+
+
+def test_session_files_durable_cache_replaces_one_file_per_logical_view(tmp_path, monkeypatch):
+    """The durable filename derives ONLY from the stable logical view key
+    (kind, version, session, hours, refs, per-repo ref overrides); the volatile
+    info/repo signatures are a replaceable source generation INSIDE the record.
+    Frequent agent-status/transcript changes must replace the same file, never
+    mint key-per-generation filenames; an older generation serves only as a
+    stale last-known-good and never as a fresh hit."""
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "cache")
+    stable = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 24.0, "", "", ())
+    payload_one = {"files": [{"path": "one.py"}], "repos": [], "errors": []}
+    payload_two = {"files": [{"path": "two.py"}], "repos": [], "errors": []}
+    try:
+        # Ten source generations of the same logical view: agent status flips.
+        for index in range(10):
+            key = (*stable, (("1", f"info-sig-{index}"),), (("~/repo", ("id", index)),))
+            webapp.write_session_files_disk_cache(key, payload_one if index % 2 else payload_two, HTTPStatus.OK)
+        cache_files = sorted(path.name for path in (tmp_path / "cache").glob("*.json"))
+        payload_files = [name for name in cache_files if not name.endswith(("manifest.json",)) and name != app_module.SESSION_FILES_DISK_CACHE_INDEX_FILENAME and not name.endswith(".journal")]
+        assert len(payload_files) == 1  # one durable file, replaced ten times
+
+        newest = (*stable, (("1", "info-sig-9"),), (("~/repo", ("id", 9)),))
+        older = (*stable, (("1", "info-sig-0"),), (("~/repo", ("id", 0)),))
+        fresh = webapp.read_session_files_disk_cache(newest, max_age_seconds=60.0)
+        assert fresh is not None and fresh[2] is True and fresh[0]["files"] == payload_one["files"]
+
+        # Older generation: no fresh hit; stale last-known-good only.
+        assert webapp.read_session_files_disk_cache(older, max_age_seconds=60.0) is None
+        stale = webapp.read_session_files_disk_cache(older, allow_stale=True)
+        assert stale is not None and stale[2] is False and stale[0]["files"] == payload_one["files"]
+        # The stale serve must not have poisoned the memory cache for `older`.
+        assert older not in webapp.session_files_service.cache
+
+        # Different logical views (other hours; pane switch to another session)
+        # each get their own single file.
+        other_view = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 8.0, "", "", (), (("1", "info-sig-9"),), ())
+        webapp.write_session_files_disk_cache(other_view, payload_two, HTTPStatus.OK)
+        pane_switch = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "2", 24.0, "", "", (), (("2", "info-sig-9"),), ())
+        webapp.write_session_files_disk_cache(pane_switch, payload_two, HTTPStatus.OK)
+        payload_files = [name for name in sorted(path.name for path in (tmp_path / "cache").glob("*.json")) if not name.endswith("manifest.json") and name != app_module.SESSION_FILES_DISK_CACHE_INDEX_FILENAME]
+        assert len(payload_files) == 3
+
+        # An old-format key-per-generation file is never imported into active
+        # serving: it does not match any stable-name lookup and is left on disk
+        # for the existing prune (never deleted here).
+        legacy = tmp_path / "cache" / (hashlib.sha256(b"old-full-key-hash").hexdigest() + ".json")
+        legacy.write_text(json.dumps({"version": 1, "payload": {"files": [{"path": "legacy.py"}]}}), encoding="utf-8")
+        fresh_again = webapp.read_session_files_disk_cache(newest, max_age_seconds=60.0)
+        assert fresh_again is not None and fresh_again[0]["files"] == payload_one["files"]
+        assert legacy.exists()
+    finally:
+        webapp.control_server.stop()
+
+
+def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkeypatch):
+    """Last-known-good through refresh errors: a stale populated payload is
+    served immediately, the failing background refresh replaces nothing, and a
+    later read still returns the populated payload — never an empty placeholder."""
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["1"])
+    try:
+        info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+        key = webapp.session_files_cache_key("payload", {"1": info}, "1", 24.0, None, None, None)
+        populated = {"files": [{"path": "keep.py"}], "repos": [], "errors": []}
+        webapp.set_session_files_memory_cache(key, populated, HTTPStatus.OK, stored_at=app_module.time.monotonic() - 999.0)
+
+        compute_calls = []
+
+        def failing_compute(*args, **kwargs):
+            compute_calls.append(True)
+            raise RuntimeError("refresh blew up")
+
+        # The refresh WORKER fails; the request-side stale serve must not care.
+        monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", failing_compute)
+
+        payload = webapp.cached_session_files_payload_for_info(info)
+        assert payload["files"] == populated["files"]
+
+        # Let the background refresh worker run (and fail).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with webapp.session_files_service.cache_lock:
+                busy = bool(webapp.session_files_service.work_records)
+            if not busy and compute_calls:
+                break
+            time.sleep(0.02)
+        assert compute_calls, "the stale hit must have scheduled one background refresh"
+
+        # The populated stale entry is still there; nothing replaced it with empty.
+        cached = webapp.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
+        assert cached is not None and cached[0]["files"] == populated["files"]
+    finally:
+        webapp.control_server.stop()

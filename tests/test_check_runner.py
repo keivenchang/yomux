@@ -277,9 +277,7 @@ def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():
     for path in paths:
         source = path.read_text(encoding="utf-8")
         direct_uses.extend((path.name, line) for line in source.splitlines() if "ActionChains(browser)" in line)
-    assert direct_uses == [
-        ("test_browser_layout.py", "    ActionChains(browser).move_to_element(slider).click_and_hold().move_by_offset("),
-    ]
+    assert direct_uses == []
 
 
 def test_active_yolomux_server_records_uses_generation_heartbeats(monkeypatch, tmp_path):

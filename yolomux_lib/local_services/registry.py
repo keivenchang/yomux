@@ -104,6 +104,7 @@ class LocalServiceRegistry:
         self.next_start_at = 0.0
         self._healthy_until = 0.0
         self._last_resource_sample: tuple[float, float] | None = None
+        self._upgrade_required: dict[str, Any] | None = None
 
     @property
     def service_dir(self) -> Path:
@@ -153,10 +154,25 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_pid = int(response.get("pid") or 0)
         service_version = int(response.get("version") or 0)
+        if service_version > self.spec.protocol_version:
+            self._upgrade_required = {
+                "required_protocol_version": service_version,
+                "current_protocol_version": self.spec.protocol_version,
+                "pid": service_pid,
+            }
+            return
         compatible = service_version == self.spec.protocol_version and (
             not self.spec.code_revision or str(response.get("code_revision") or "") == self.spec.code_revision
         )
-        if not response.get("ok") or not service_pid or compatible:
+        older_upgrade = (
+            service_version > 0
+            and service_version < self.spec.protocol_version
+            and (
+                response.get("error_code") == "upgrade_required"
+                or response.get("status") == "upgrade_required"
+            )
+        )
+        if (not response.get("ok") and not older_upgrade) or not service_pid or compatible:
             return
         record = self._read_record()
         record_pid = int(record.get("pid") or 0)
@@ -194,9 +210,19 @@ class LocalServiceRegistry:
 
     def healthy(self) -> bool:
         response = self._request("ping", timeout=0.15)
+        service_version = int(response.get("version") or response.get("required_protocol_version") or 0)
+        if service_version > self.spec.protocol_version:
+            self._upgrade_required = {
+                **response,
+                "required_protocol_version": service_version,
+                "current_protocol_version": self.spec.protocol_version,
+                "pid": int(response.get("pid") or 0),
+            }
+            self.note_rpc_failure()
+            return False
         healthy = (
             bool(response.get("ok"))
-            and int(response.get("version") or 0) == self.spec.protocol_version
+            and service_version == self.spec.protocol_version
             and int(response.get("pid") or 0) > 0
         )
         if healthy and self.spec.code_revision:
@@ -204,6 +230,7 @@ class LocalServiceRegistry:
             # mismatch too (respawning is idempotent and safe; never a hang).
             healthy = str(response.get("code_revision") or "") == self.spec.code_revision
         if healthy:
+            self._upgrade_required = None
             self.note_rpc_success()
         else:
             self.note_rpc_failure()
@@ -267,21 +294,29 @@ class LocalServiceRegistry:
             return None
 
     def ensure_started(self) -> bool:
+        if self._upgrade_required is not None:
+            return False
         if self.recently_healthy():
             return True
         if self.healthy():
             self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
             return True
+        if self._upgrade_required is not None:
+            return False
         with self.lock:
             if self.healthy():
                 self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
                 return True
+            if self._upgrade_required is not None:
+                return False
             if self.clock() < self.next_start_at:
                 return False
             with file_lock(self.lock_path, dir_mode=0o700):
                 if self.healthy():
                     self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
                     return True
+                if self._upgrade_required is not None:
+                    return False
                 self._retire_incompatible_service()
                 self._remove_stale_record()
                 process = self._spawn()
@@ -305,6 +340,13 @@ class LocalServiceRegistry:
 
     def acquire_lease(self) -> dict[str, Any]:
         if not self.ensure_started():
+            if self._upgrade_required is not None:
+                return {
+                    "ok": False,
+                    "error": f"{self.spec.name} client upgrade required",
+                    "error_code": "upgrade_required",
+                    **self._upgrade_required,
+                }
             return {"ok": False, "error": f"{self.spec.name} unavailable"}
         response = self._request("lease", {"client_pid": os.getpid()}, timeout=0.25)
         if response.get("ok"):
@@ -315,7 +357,17 @@ class LocalServiceRegistry:
         return self._request("release", {"lease_id": lease_id}, timeout=0.25)
 
     def status(self) -> dict[str, Any]:
-        status = self._request("status", timeout=0.25)
+        status = (
+            {
+                "ok": False,
+                "error": f"{self.spec.name} client upgrade required",
+                "error_code": "upgrade_required",
+                "version": int(self._upgrade_required.get("required_protocol_version") or 0),
+                "pid": int(self._upgrade_required.get("pid") or 0),
+            }
+            if self._upgrade_required is not None
+            else self._request("status", timeout=0.25)
+        )
         return {
             "service": self.spec.name,
             "socket": str(self.socket_path),
@@ -324,6 +376,7 @@ class LocalServiceRegistry:
             "next_start_at": self.next_start_at,
             "record": self._read_record(),
             "status": status,
+            "upgrade_required": dict(self._upgrade_required or {}),
         }
 
     def resources(self, pid: int) -> dict[str, float | int | None]:

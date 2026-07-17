@@ -91,6 +91,8 @@ class TabberActivityCacheRecord:
 class SessionFilesWorkRecord:
     future: Future[tuple[SessionFilesPayload, HTTPStatus, bool, float]] = field(default_factory=Future)
     owner_thread_id: int | None = None
+    stable_signature: str = ""
+    stable_generation: int = 0
 
 
 @dataclass
@@ -112,29 +114,21 @@ class TabberActivityWarmerRecord:
     thread: threading.Thread | None = None
     running: bool = False
     consumer_until: float = 0.0
+    # Set by a returning consumer (or teardown) to unpark a warmer that idled
+    # out of demand; parking instead of exiting keeps one thread and zero
+    # recurring work with no request-path thread creation.
+    wake: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
-class StatsHistoryService:
-    """Own the elected HTTP-process metric scheduler and sample caches."""
+class StatsCollectionState:
+    """Own shared in-process state used by the current stats collectors."""
 
     sample_lock: threading.Lock = field(default_factory=threading.Lock)
     sample_record: StatsSampleRecord = field(default_factory=StatsSampleRecord)
     cpu_budget_record: CpuBudgetRecord = field(default_factory=CpuBudgetRecord)
-    agent_token_lock: threading.Lock = field(default_factory=threading.Lock)
-    agent_token_state: dict[str, dict[str, Any]] = field(default_factory=dict)
+    agent_activity_lock: threading.Lock = field(default_factory=threading.Lock)
     agent_activity_state: dict[str, dict[str, Any]] = field(default_factory=dict)
-    agent_token_next_sample_at: float = 0.0
-    agent_token_consumer_until: float = 0.0
-    agent_token_bootstrap_pending: bool = True
-    agent_token_worker: threading.Thread | None = None
-    scheduler_lock: threading.RLock = field(default_factory=threading.RLock)
-    scheduler_stop_event: threading.Event = field(default_factory=threading.Event)
-    scheduler_threads: dict[str, threading.Thread] = field(default_factory=dict)
-    scheduler_family_locks: dict[str, threading.Lock] = field(default_factory=dict)
-    scheduler_wake_events: dict[str, threading.Event] = field(default_factory=dict)
-    scheduler_generation: int = 0
-    scheduler_diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -147,21 +141,84 @@ class SessionFilesService:
     peak_compute_slots: int = 0
     cache: dict[tuple[Any, ...], tuple[float, tuple[SessionFilesPayload, HTTPStatus]]] = field(default_factory=dict)
     work_records: dict[tuple[Any, ...], SessionFilesWorkRecord] = field(default_factory=dict)
+    next_stable_generation: int = 0
+    latest_stable_generations: dict[str, int] = field(default_factory=dict)
     git_snapshot_records: dict[tuple[Any, ...], SessionFilesGitSnapshotRecord] = field(default_factory=dict)
+    # In-flight single-flight for git_snapshot_identity: the signature (a full
+    # `git status --untracked-files=all` + index/refs read) ran once per caller
+    # BEFORE the snapshot single-flight it protects, so a burst of concurrent
+    # session/range/ref views paid it N times. Concurrent callers share ONE
+    # computation via a future; the entry is removed when it completes, so
+    # sequential calls still recompute and freshness is never delayed.
+    git_identity_futures: dict[tuple[Any, ...], Future] = field(default_factory=dict)
+    # Repository-state record (keyed by canonical Git root / identity key):
+    # the native filesystem watcher bumps a repo's dirty generation on worktree
+    # or Git-metadata events, and a warm request whose cached identity carries
+    # the current generation reuses it WITHOUT running any Git command. Entries
+    # also carry their compute time so a slow safety reconciliation bound
+    # recomputes even if an event was missed.
+    repo_dirty_generations: dict[str, int] = field(default_factory=dict)
+    repo_identity_cache: dict[tuple[Any, ...], tuple[int, float, tuple[Any, ...]]] = field(default_factory=dict)
     disk_prune_lock: threading.Lock = field(default_factory=threading.Lock)
     disk_prune_record: SessionFilesDiskPruneRecord = field(default_factory=SessionFilesDiskPruneRecord)
 
-    def claim_work(self, key: tuple[Any, ...], thread_id: int | None, *, reserved: bool = False) -> tuple[SessionFilesWorkRecord, bool]:
+    def reserve_work(self, key: tuple[Any, ...], stable_signature: str) -> SessionFilesWorkRecord | None:
+        """Reserve background work without letting worker start order redefine freshness."""
+        with self.cache_lock:
+            if key in self.work_records:
+                return None
+            record = SessionFilesWorkRecord(owner_thread_id=None)
+            self.assign_stable_generation(record, stable_signature)
+            self.work_records[key] = record
+            return record
+
+    def claim_work(self, key: tuple[Any, ...], thread_id: int | None, *, reserved: bool = False, stable_signature: str = "") -> tuple[SessionFilesWorkRecord, bool]:
         with self.cache_lock:
             record = self.work_records.get(key)
             if record is None:
                 record = SessionFilesWorkRecord(owner_thread_id=thread_id)
+                self.assign_stable_generation(record, stable_signature)
                 self.work_records[key] = record
                 return record, True
             if reserved and record.owner_thread_id is None:
                 record.owner_thread_id = thread_id
                 return record, True
             return record, record.owner_thread_id == thread_id
+
+    def assign_stable_generation(self, record: SessionFilesWorkRecord, signature: str) -> None:
+        if not signature or record.stable_generation:
+            return
+        self.next_stable_generation += 1
+        record.stable_signature = signature
+        record.stable_generation = self.next_stable_generation
+        self.latest_stable_generations[signature] = record.stable_generation
+
+    def stable_generation_is_current(self, record: SessionFilesWorkRecord) -> bool:
+        with self.cache_lock:
+            return (
+                not record.stable_signature
+                or self.latest_stable_generations.get(record.stable_signature) == record.stable_generation
+            )
+
+    def release_stable_generation(self, record: SessionFilesWorkRecord) -> None:
+        with self.cache_lock:
+            if (
+                record.stable_signature
+                and self.latest_stable_generations.get(record.stable_signature) == record.stable_generation
+            ):
+                self.latest_stable_generations.pop(record.stable_signature, None)
+
+    def finish_work(self, key: tuple[Any, ...], record: SessionFilesWorkRecord) -> None:
+        with self.cache_lock:
+            if self.work_records.get(key) is record:
+                self.work_records.pop(key, None)
+            self.release_stable_generation(record)
+
+    def cancel_all_work(self) -> None:
+        """Fence former-owner workers before dropping their single-flight records."""
+        with self.cache_lock:
+            self.work_records.clear()
+            self.latest_stable_generations.clear()
 
     def acquire_compute_slot(self, limit: int) -> None:
         """Queue distinct cold rebuilds without defeating per-key single-flight."""

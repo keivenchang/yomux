@@ -29,6 +29,7 @@ from .server_logs import emit_server_log
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
 # Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
+CLAUDE_TRANSCRIPT_SCAN_LIMIT = CODEX_TRANSCRIPT_SCAN_LIMIT
 CODEX_LSOF_TIMEOUT_SECONDS = 1.0
 CODEX_LSOF_CACHE_SECONDS = 15.0
 CODEX_LSOF_TRANSCRIPT_DESCRIPTOR_FILTER = "0-999"
@@ -315,8 +316,10 @@ def find_transcript_by_session_id(base_dir: Path, session_id: str) -> Path | Non
     cached = cached_transcript_lookup("claude-session-id", base_dir, session_id)
     if cached is not _CACHE_MISS:
         return cached
-    for path in base_dir.glob(f"**/{session_id}.jsonl"):
-        return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, path)
+    wanted = f"{session_id}.jsonl"
+    for path in _cataloged_jsonl_files(base_dir):
+        if path.name == wanted:
+            return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, path)
     return set_cached_transcript_lookup("claude-session-id", base_dir, session_id, None)
 
 
@@ -324,13 +327,41 @@ def claude_transcript_family_paths(path: Path) -> list[Path]:
     paths = [path]
     subagents_root = path.with_suffix("") / CLAUDE_SUBAGENTS_DIRNAME
     if subagents_root.is_dir():
-        paths.extend(sorted(subagents_root.rglob("*.jsonl")))
+        paths.extend(sorted(_cataloged_jsonl_files(subagents_root)))
     return paths
+
+
+# A rollout's session_meta (thread id + spawning parent) is written once at file
+# creation and never changes, so it is cached by file identity forever: the one
+# stat IS the freshness check, and appends never invalidate it.
+_CODEX_TRANSCRIPT_META_CACHE: dict[tuple[int, int], tuple[str, str]] = {}
+_CODEX_TRANSCRIPT_META_CACHE_MAX = 4096
 
 
 def codex_transcript_meta(path: Path) -> tuple[str, str]:
     """Return a rollout's thread id and immediate spawning parent, if transcript metadata has them."""
 
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return "", ""
+    identity = (stat_result.st_dev, stat_result.st_ino)
+    cached = _CODEX_TRANSCRIPT_META_CACHE.get(identity)
+    if cached is not None:
+        return cached
+    meta = _read_codex_transcript_meta(path)
+    if not meta[0]:
+        # A rollout scanned before its session_meta line lands must not pin an
+        # empty result forever; re-read it until the thread id appears.
+        return meta
+    if len(_CODEX_TRANSCRIPT_META_CACHE) >= _CODEX_TRANSCRIPT_META_CACHE_MAX:
+        for key in list(_CODEX_TRANSCRIPT_META_CACHE)[: _CODEX_TRANSCRIPT_META_CACHE_MAX // 2]:
+            _CODEX_TRANSCRIPT_META_CACHE.pop(key, None)
+    _CODEX_TRANSCRIPT_META_CACHE[identity] = meta
+    return meta
+
+
+def _read_codex_transcript_meta(path: Path) -> tuple[str, str]:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for index, line in enumerate(handle):
@@ -529,6 +560,100 @@ def codex_transcript_header_cwd(path: Path) -> str | None:
     return None
 
 
+
+# Per-directory transcript catalog: recursive `glob("**/...jsonl")` re-walked an
+# entire provider tree (hundreds of files) on every uncached lookup, and the
+# lookup cache expires after two seconds. A directory's mtime changes when a
+# direct child is created/renamed/removed, so each directory's listing can be
+# reused until ITS mtime moves — a warm call stats the directories (a handful)
+# instead of listing every file, and only changed directories (normally just
+# today's) are re-listed. File mtimes are deliberately NOT cached here: resumed
+# sessions append to old-named files without touching any directory mtime, and
+# the mtime ordering used by callers must see that. One shared parent serves the
+# Codex rollout tree and the Claude projects tree (keyed by prefix).
+_TRANSCRIPT_DIR_CATALOG: dict[tuple[str, str], tuple[int, tuple[str, ...], tuple[str, ...]]] = {}
+_TRANSCRIPT_DIR_CATALOG_MAX = 4096  # deleted directories orphan entries; bound like the other identity caches
+# Cumulative traversal accounting: calls, directories statted, directories
+# actually re-listed (cache misses). Monotonic; sampled by session-files accounting.
+TRANSCRIPT_CATALOG_COUNTS = {"calls": 0, "dirs_statted": 0, "dirs_listed": 0}
+
+
+def _cataloged_jsonl_files(root: Path, prefix: str = "") -> list[Path]:
+    """Every [prefix]*.jsonl under root, via per-directory mtime-cached listings."""
+    files: list[Path] = []
+    pending = [root]
+    TRANSCRIPT_CATALOG_COUNTS["calls"] += 1
+    while pending:
+        directory = pending.pop()
+        key = (str(directory), prefix)
+        TRANSCRIPT_CATALOG_COUNTS["dirs_statted"] += 1
+        try:
+            mtime_ns = directory.stat().st_mtime_ns
+        except OSError:
+            _TRANSCRIPT_DIR_CATALOG.pop(key, None)
+            continue
+        cached = _TRANSCRIPT_DIR_CATALOG.get(key)
+        if cached is not None and cached[0] == mtime_ns:
+            _, cached_files, cached_dirs = cached
+        else:
+            direct_files: list[str] = []
+            subdirs: list[str] = []
+            TRANSCRIPT_CATALOG_COUNTS["dirs_listed"] += 1
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            subdirs.append(entry.path)
+                        elif entry.name.startswith(prefix) and entry.name.endswith(".jsonl"):
+                            direct_files.append(entry.path)
+            except OSError:
+                continue
+            cached_files, cached_dirs = tuple(direct_files), tuple(subdirs)
+            if len(_TRANSCRIPT_DIR_CATALOG) >= _TRANSCRIPT_DIR_CATALOG_MAX:
+                for stale_key in list(_TRANSCRIPT_DIR_CATALOG)[: _TRANSCRIPT_DIR_CATALOG_MAX // 2]:
+                    del _TRANSCRIPT_DIR_CATALOG[stale_key]
+            _TRANSCRIPT_DIR_CATALOG[key] = (mtime_ns, cached_files, cached_dirs)
+        files.extend(Path(item) for item in cached_files)
+        pending.extend(Path(item) for item in cached_dirs)
+    return files
+
+
+def _codex_rollout_files(root: Path) -> list[Path]:
+    return _cataloged_jsonl_files(root, prefix="rollout-")
+
+
+def _recent_cataloged_jsonl_candidates(
+    root: Path,
+    *,
+    prefix: str,
+    limit: int,
+    direct_only: bool = False,
+) -> list[Path]:
+    if not root.exists():
+        return []
+    all_files = _cataloged_jsonl_files(root, prefix=prefix)
+    if direct_only:
+        resolved_root = root.expanduser().resolve(strict=False)
+        all_files = [
+            path for path in all_files
+            if path.parent.expanduser().resolve(strict=False) == resolved_root
+        ]
+    # Filename order catches ordinary Codex rollouts without stat ordering;
+    # mtime order catches resumed old-name Codex and UUID-named Claude sessions.
+    candidates = [
+        *sorted(all_files, key=lambda path: path.name, reverse=True)[:limit],
+        *sorted(all_files, key=path_mtime, reverse=True)[:limit],
+    ]
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+    return unique
+
+
 def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> Path | None:
     root = root or Path.home() / ".codex" / "sessions"
     if not root.exists():
@@ -538,7 +663,7 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     cached = cached_transcript_lookup("codex-cwd", root, cwd)
     if cached is not _CACHE_MISS:
         return cached
-    all_files = list(root.glob("**/rollout-*.jsonl"))
+    all_files = _codex_rollout_files(root)
     files = sorted(all_files, key=lambda path: path.name, reverse=True)[:CODEX_TRANSCRIPT_SCAN_LIMIT]
     found = find_codex_transcript_in_candidates(files, cwd)
     if found is not None:
@@ -554,23 +679,25 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
 
 def recent_codex_transcript_candidates(root: Path | None = None, limit: int = CODEX_TRANSCRIPT_SCAN_LIMIT) -> list[Path]:
     root = root or Path.home() / ".codex" / "sessions"
-    if not root.exists():
-        return []
-    all_files = list(root.glob("**/rollout-*.jsonl"))
-    # Filename order is cheap and catches ordinary new sessions. Mtime order catches resumed sessions whose
-    # old rollout filename is still being appended to today.
-    candidates = [
-        *sorted(all_files, key=lambda path: path.name, reverse=True)[:limit],
-        *sorted(all_files, key=path_mtime, reverse=True)[:limit],
-    ]
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for path in candidates:
-        if path in seen:
-            continue
-        seen.add(path)
-        unique.append(path)
-    return unique
+    return _recent_cataloged_jsonl_candidates(
+        root,
+        prefix="rollout-",
+        limit=limit,
+    )
+
+
+def recent_claude_transcript_candidates(
+    project_root: Path,
+    limit: int = CLAUDE_TRANSCRIPT_SCAN_LIMIT,
+) -> list[Path]:
+    """Return bounded top-level Claude sessions; subagents stay in their root family."""
+
+    return _recent_cataloged_jsonl_candidates(
+        project_root,
+        prefix="",
+        limit=limit,
+        direct_only=True,
+    )
 
 
 path_mtime = path_mtime_or_zero

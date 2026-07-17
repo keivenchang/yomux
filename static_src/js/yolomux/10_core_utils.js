@@ -579,7 +579,18 @@ function clearJsDebugEvents() {
   }
   jsDebugRenderForce = false;
   jsDebugRenderDragDeferred = false;
-  if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true});
+  if (typeof renderDebugPanels === 'function') renderDebugPanels({force: true, scrollLogToBottom: true});
+}
+
+function runJsDebugPanelRefresh() {
+  jsDebugRenderTimer = null;
+  if (dragState.item != null) {
+    jsDebugRenderDragDeferred = true;
+    return;
+  }
+  const force = jsDebugRenderForce;
+  jsDebugRenderForce = false;
+  refreshDebugPanelsFromEvents({force});
 }
 
 function scheduleJsDebugPanelRefresh(options = {}) {
@@ -589,17 +600,13 @@ function scheduleJsDebugPanelRefresh(options = {}) {
     jsDebugRenderDragDeferred = true;
     return;
   }
+  if (options.immediate === true) {
+    if (jsDebugRenderTimer) clearTimeout(jsDebugRenderTimer);
+    runJsDebugPanelRefresh();
+    return;
+  }
   if (jsDebugRenderTimer) return;
-  jsDebugRenderTimer = setTimeout(() => {
-    jsDebugRenderTimer = null;
-    if (dragState.item != null) {
-      jsDebugRenderDragDeferred = true;
-      return;
-    }
-    const force = jsDebugRenderForce;
-    jsDebugRenderForce = false;
-    refreshDebugPanelsFromEvents({force});
-  }, jsDebugRenderDebounceMs);
+  jsDebugRenderTimer = setTimeout(runJsDebugPanelRefresh, jsDebugRenderDebounceMs);
 }
 
 function flushDeferredJsDebugPanelRefresh() {

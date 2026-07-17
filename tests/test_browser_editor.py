@@ -3131,9 +3131,13 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             };
             setFileEditorViewMode(path, 'edit', item);
             renderFileEditorPanel(panel, item);
+            let stableEditorMax = -1;
             for (let attempt = 0; attempt < 120; attempt += 1) {
-              if (panel._cmView?.scrollDOM) break;
               await frame();
+              const candidateScroller = panel._cmView?.scrollDOM;
+              const candidateMax = maxScrollTop(candidateScroller);
+              if (candidateScroller?.isConnected && candidateMax > 0 && candidateMax === stableEditorMax) break;
+              stableEditorMax = candidateMax;
             }
             const editorScroller = panel._cmView?.scrollDOM;
             popupScroller().scrollTop = maxScrollTop(popupScroller());

@@ -1,9 +1,11 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from yolomux_lib import http_routes
 from yolomux_lib.server_logs import SERVER_LOGS
+from yolomux_lib.server_logs import install_server_log_handler
 from yolomux_lib.server_logs import ServerLogRing
 
 
@@ -51,3 +53,21 @@ def test_logs_route_reads_the_shared_bounded_ring():
     route = next(route for route in http_routes.CORE_ROUTES if route.path == "/api/logs")
     assert route.method == "GET" and route.role == "readonly"
     SERVER_LOGS.clear()
+
+
+def test_installed_handler_captures_process_warnings_once():
+    SERVER_LOGS.clear()
+    root = logging.getLogger()
+    handler = install_server_log_handler()
+    try:
+        assert install_server_log_handler() is handler
+        logging.getLogger("yolomux_lib.test").warning("collector unavailable")
+
+        payload = SERVER_LOGS.payload()
+        assert len(payload["logs"]) == 1
+        assert payload["logs"][0]["level"] == "warning"
+        assert payload["logs"][0]["source"] == "yolomux_lib.test"
+        assert payload["logs"][0]["message"] == "collector unavailable"
+    finally:
+        root.removeHandler(handler)
+        SERVER_LOGS.clear()

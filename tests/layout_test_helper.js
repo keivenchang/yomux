@@ -138,6 +138,17 @@ function canonicalWorkGraphFixture(session, info = {}) {
   return {...info, work_graph: graph, project: undefined, window_metadata: (info.window_metadata || []).map(({git, ...row}) => row)};
 }
 
+function serverDefaultSettings(...keys) {
+  // Numeric defaults come from the ONE owner, yolomux_lib/settings.py
+  // DEFAULT_SETTINGS; the fixture inherits instead of keeping a drifting copy.
+  const source = fs.readFileSync(require('path').join(__dirname, '..', 'yolomux_lib', 'settings.py'), 'utf8');
+  return Object.fromEntries(keys.map(key => {
+    const match = source.match(new RegExp(`"${key}": ([0-9.]+),`));
+    if (!match) throw new Error(`layout_test_helper: default "${key}" not found in yolomux_lib/settings.py DEFAULT_SETTINGS`);
+    return [key, Number(match[1])];
+  }));
+}
+
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({}),
   editor: Object.freeze({
@@ -151,19 +162,23 @@ const DEFAULT_TEST_SETTINGS = Object.freeze({
   notifications: Object.freeze({
     toast_duration_ms: 10000,
   }),
-  performance: Object.freeze({
-    latency_refresh_ms: 3000,
-    event_log_refresh_ms: 5000,
-    tabber_activity_refresh_ms: 15000,
-    agent_status_pulse_period_ms: 1550,
-    workflow_transition_glow_seconds: 60,
-    popover_show_delay_ms: 1000,
-    popover_hide_delay_ms: 300,
-    menu_hover_open_delay_ms: 800,
-    tab_popover_show_delay_ms: 1000,
-    tab_popover_follow_delay_ms: 120,
-    remote_resize_delay_ms: 220,
-  }),
+  // Performance defaults are READ from the single owner (yolomux_lib/settings.py
+  // DEFAULT_SETTINGS) instead of hand-copied here: this block previously drifted in
+  // lockstep-edit fashion whenever a default changed. A missing key throws so a
+  // renamed setting fails loudly rather than silently diverging.
+  performance: Object.freeze(serverDefaultSettings(
+    'latency_refresh_ms',
+    'event_log_refresh_ms',
+    'tabber_activity_refresh_ms',
+    'agent_status_pulse_period_ms',
+    'workflow_transition_glow_seconds',
+    'popover_show_delay_ms',
+    'popover_hide_delay_ms',
+    'menu_hover_open_delay_ms',
+    'tab_popover_show_delay_ms',
+    'tab_popover_follow_delay_ms',
+    'remote_resize_delay_ms',
+  )),
 });
 
 class TestClassList {
@@ -1230,174 +1245,14 @@ globalThis.__layoutTestApi = {
   debugModeExplicitUrlEnabledForTest() { return debugModeExplicitUrlEnabled; },
   debugPaneItemId,
   yocostItemId,
-  debugPanelHtmlForTest: debugPanelHtml,
-  jsDebugGraphChartGroupsForTest() { return jsDebugGraphChartGroups.map(group => ({...group})); },
-  jsDebugStatsFamilyManifestForTest() {
-    return Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest).map(([family, entry]) => [family, {
-      ...entry,
-      legacyAliases: [...entry.legacyAliases],
-      chartGroups: [...entry.chartGroups],
-      series: [...entry.series],
-    }]));
-  },
-  jsDebugHistoryCoverageFamilyForGroupForTest: jsDebugHistoryCoverageFamilyForGroup,
-  jsDebugGraphDescriptionKeyByLabelKeyForTest() { return {...jsDebugGraphDescriptionKeyByLabelKey}; },
-  debugGraphMetaHtmlForTest: debugGraphMetaHtml,
-  debugGraphBucketSummaryForTest: debugGraphBucketSummary,
-  debugGraphDisplayResolutionMsForTest: debugGraphDisplayResolutionMs,
-  debugGraphAvailableResolutionChoicesForTest: nowMs => debugGraphAvailableResolutionChoices(debugGraphDomain(nowMs), nowMs),
-  jsDebugGraphRangeOptionsForTest: () => jsDebugGraphRangeOptions.map(option => ({...option})),
-  debugGraphResolutionOverrideForTest() { return jsDebugGraphResolutionOverrideSeconds; },
-  debugGraphEventRecordsForTest() {
-    return [...jsDebugGraphEventRecords.entries()].map(([id, record]) => ({
-      id,
-      bucketStartMs: Number(record?.bucket?.startMs || 0),
-      responseBytes: Number(record?.responseBytes || 0),
-      lastSeenAt: Number(record?.lastSeenAt || 0),
-    }));
-  },
-  compactJsDebugGraphBucketsForTest: compactJsDebugGraphBuckets,
-  recordApiDebugResponseBytesForGraphForTest: recordApiDebugResponseBytesForGraph,
-  debugGraphAgentTokenDisplayBucketsForTest: debugGraphAgentTokenDisplayBuckets,
-  debugGraphDisplayBucketsForTest: debugGraphDisplayBuckets,
-  debugGraphApplyServerHistoryForTest: debugGraphApplyServerHistory,
-  debugGraphTokenSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphAgentTokenDisplayBuckets(nowMs)),
-  setDebugGraphModelTokenDimensionForTest(value) {
-    const selected = String(value || '');
-    jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected) ? selected : 'output';
-  },
-  debugGraphModelTokenDimensionForTest() { return jsDebugGraphModelTokenDimension; },
-  debugGraphTokenAxisDescriptorForTest: nowMs => debugGraphTokenAxisDescriptor(debugGraphAgentTokenDisplayBuckets(nowMs)),
-  debugGraphMovingAverageValuesForTest: debugGraphMovingAverageValues,
-  debugGraphSeriesDataForTest: nowMs => debugGraphSeriesData(debugGraphDisplayBuckets(nowMs)),
-  debugGraphPolylineSegmentCountForTest(values, times, hasDataValues, durations, noDataRanges) {
-    return debugGraphPolylinePointSegments(values, times, 100, {startMs: Math.min(...times) - 1000, endMs: Math.max(...times) + 1000}, hasDataValues, durations || [], 0, false, noDataRanges || null).length;
-  },
-  setJsDebugHistoryCoverageForTest(family, intervals, requestedIntervals) {
-    jsDebugHistoryReadiness.storeCoverageIntervals = jsDebugHistoryReadiness.storeCoverageIntervals || {};
-    jsDebugHistoryReadiness.storeCoverageIntervals[family] = (intervals || []).map(interval => ({startSeconds: interval[0], endSeconds: interval[1], resolutionSeconds: interval[2] || 1}));
-    jsDebugHistoryReadiness.requestCoverageIntervals = (requestedIntervals || []).map(interval => ({startSeconds: interval[0], endSeconds: interval[1], resolutionSeconds: interval[2] || 1}));
-  },
-  debugGraphNoDataRunsForTest: debugGraphNoDataRuns,
-  debugGraphHistoryCoverageGapRunsForTest: debugGraphHistoryCoverageGapRuns,
-  debugGraphHistoryCoverageGapRectsHtmlForTest: debugGraphHistoryCoverageGapRectsHtml,
-  debugGraphLivePulseHtmlForTest: debugGraphLivePulseHtml,
-  debugGraphSlidingAxisActiveForTest: () => debugGraphSlidingAxisActive(),
-  debugGraphChartAxisMaxForTest: debugGraphChartAxisMax,
-  debugGraphHeldProvenanceTextForTest: debugGraphHeldProvenanceText,
-  debugGraphMergeTimeRangesForTest: debugGraphMergeTimeRanges,
-  debugGraphComplementTimeRangesForTest: debugGraphComplementTimeRanges,
-  debugGraphInnerHtmlForTest: debugGraphInnerHtml,
-  debugGraphCostSummaryForTest: debugGraphCostSummaryForBuckets,
-  debugGraphCostReportHtmlForTest: debugGraphCostReportHtml,
-  debugCostAgeLabelTextForTest(...args) {
-    return typeof debugCostAgeLabelText === 'function' ? debugCostAgeLabelText(...args) : '';
-  },
-  debugGraphGeometryForTest() { return {...jsDebugGraphGeometry}; },
-  debugGraphPlotYForValueForTest: debugGraphPlotYForValue,
-  debugGraphGridLineYForTest: debugGraphGridLineY,
-  debugGraphPlotOverlayRectHtmlForTest: debugGraphPlotOverlayRectHtml,
-  debugGraphBarVerticalGeometryForTest: debugGraphBarVerticalGeometry,
-  debugGraphBarRectsHtmlForTest: debugGraphBarRectsHtml,
-  debugGraphAgentStatusNoDataRunsForTest: debugGraphAgentStatusNoDataRuns,
-  debugGraphAgentStatusNoDataRectsHtmlForTest: debugGraphAgentStatusNoDataRectsHtml,
-  jsDebugHistoryRetryDelayMsForTest: jsDebugHistoryRetryDelayMs,
-  debugGraphCostTmuxBreakdownHtmlForTest: debugGraphCostTmuxBreakdownHtml,
-  debugGraphCostModelUsageChartHtmlForTest: debugGraphCostModelUsageChartHtml,
-  debugGraphCostSourceTreeHtmlForTest: debugGraphCostSourceTreeHtml,
-  debugSystemStatsSamplerCardHtmlForTest: debugSystemStatsSamplerCardHtml,
-  debugSystemCpuBudgetCardHtmlForTest: debugSystemCpuBudgetCardHtml,
-  jsDebugStatsPanelVisibleForTest: jsDebugStatsPanelVisible,
-  jsDebugStatsLayoutItemsVisibleForTest: jsDebugStatsLayoutItemsVisible,
-  jsDebugStatsLivePushEnabledForTest(...args) {
-    return typeof jsDebugStatsLivePushEnabled === 'function' ? jsDebugStatsLivePushEnabled(...args) : false;
-  },
-  jsDebugStatsPollIntervalMsForTest(...args) {
-    return typeof jsDebugStatsPollIntervalMs === 'function' ? jsDebugStatsPollIntervalMs(...args) : 0;
-  },
-  jsDebugStatsPollingStateForTest() {
-    return {
-      firstSampleReceived: jsDebugStatsPollState.firstSampleReceived,
-      inFlight: jsDebugStatsPollState.inFlight,
-      pending: jsDebugStatsPollState.pending,
-      pendingForceGraphRefresh: jsDebugStatsPollState.pendingForceGraphRefresh,
-      historyStartSeconds: jsDebugHistoryReadiness.loadedStartSeconds,
-      historyReadiness: jsDebugHistoryReadinessSnapshot(),
-    };
-  },
-  jsDebugHistoryReadinessForTest: jsDebugHistoryReadinessSnapshot,
-  normalizedJsDebugHistoryCoverageForTest: normalizedJsDebugHistoryCoverage,
-  setJsDebugHistoryReadinessForTest: setJsDebugHistoryReadiness,
-  applyJsDebugHistoryCoverageForTest: applyJsDebugHistoryCoverage,
-  jsDebugHistoryCoverageNeedsRefreshForTest: jsDebugHistoryCoverageNeedsRefresh,
-  jsDebugHistoryCoverageResolutionSecondsForTest: jsDebugHistoryCoverageResolutionSeconds,
-  jsDebugHistoryRequestWindowForTest: jsDebugHistoryRequestWindow,
-  debugGraphRemoveCoarserServerBucketsForTest: debugGraphRemoveCoarserServerBuckets,
-  resetJsDebugHistoryReadinessForTest: resetJsDebugHistoryReadiness,
-  clearJsDebugGraphDataForTest: clearJsDebugGraphData,
-  setDateNowForTest(nowMs) { Date.now = () => Number(nowMs); },
-  retryJsDebugHistoryForTest: retryJsDebugHistory,
-  initializeJsDebugStatsBeforeStreamsForTest: initializeJsDebugStatsBeforeStreams,
-  pollJsDebugStatsOnIntervalForTest: pollJsDebugStatsOnInterval,
-  startJsDebugStatsPollingForTest: startJsDebugStatsPolling,
-  syncJsDebugStatsPollingForTest: syncJsDebugStatsPolling,
-  stopJsDebugStatsPollingForTest: stopJsDebugStatsPolling,
-  flushJsDebugStatsHistoryForTest: flushJsDebugStatsHistory,
-  jsDebugStatsHistoryTimeoutMsForTest: jsDebugStatsHistoryTimeoutMs,
-  jsDebugStatsHistoryUploadRequestForTest: jsDebugStatsHistoryUploadRequest,
-  clearJsDebugServerHistoryForTest: clearJsDebugServerHistory,
-  jsDebugStatsUploadStateForTest() {
-    return {
-      timer: jsDebugStatsUploadState.timer,
-      worker: Boolean(jsDebugStatsUploadState.worker),
-      generation: jsDebugStatsUploadState.generation,
-      pendingBuckets: jsDebugGraphPendingServerBuckets.size,
-    };
-  },
-  pollJsDebugStatsSampleForTest: pollJsDebugStatsSample,
-  jsDebugStatsSampleQueryForTest: jsDebugStatsSampleQuery,
-  prefetchJsDebugHistoryFullRetentionForTest: prefetchJsDebugHistoryFullRetention,
-  maybePrefetchJsDebugHistoryForTest: maybePrefetchJsDebugHistory,
-  jsDebugHistoryPrefetchStateForTest() {
-    return {
-      inFlight: jsDebugHistoryPrefetchState.inFlight,
-      didInitial: jsDebugHistoryPrefetchState.didInitial,
-      lastFullPrefetchAtMs: jsDebugHistoryPrefetchState.lastFullPrefetchAtMs,
-    };
-  },
-  setJsDebugStatsFirstSampleReceivedForTest(value) { jsDebugStatsPollState.firstSampleReceived = Boolean(value); },
-  pollJsDebugClientHealthForTest: pollJsDebugClientHealth,
-  jsDebugStatsClientIdForRequestForTest: jsDebugStatsClientIdForRequest,
-  recordJsDebugClientEventsConnectionStateForTest: recordJsDebugClientEventsConnectionState,
-  recordJsDebugDisconnectedSpanForTest: recordJsDebugDisconnectedSpan,
-  recordJsDebugStatsSampleForTest: recordJsDebugStatsSample,
-  bindDebugPanelForTest: bindDebugPanel,
-  setDebugSubTabForTest: setDebugSubTab,
-  debugLogsInnerHtmlForTest: debugLogsInnerHtml,
-  debugLogsTextForClipboardForTest: debugLogsTextForClipboard,
-  debugMergedLogRecordsForTest: debugMergedLogRecords,
-  pollDebugLogsForTest: pollDebugLogs,
-  setJsDebugLogsPayloadForTest(logs) {
-    jsDebugLogsState.payload = Array.isArray(logs) ? logs.map(entry => ({...entry})) : [];
-    jsDebugLogsState.error = '';
-    jsDebugLogsState.updatedAt = Date.now();
-    jsDebugLogsState.clearedAt = 0;
-  },
-  setJsDebugLogLevelsForTest(levels) {
-    loadJsDebugStatsUiPreferences();
-    jsDebugLogsState.levels = new Set((levels || []).filter(level => jsDebugLogLevels.includes(level)));
-    saveJsDebugStatsUiPreferences();
-  },
-  setDebugGraphRangeForTest: setDebugGraphRange,
-  setDebugGraphResolutionOverrideForTest: setDebugGraphResolutionOverride,
-  setDebugGraphExactResolutionForTest: setDebugGraphExactResolutionEnabled,
-  jsDebugRequestedHistoryResolutionSecondsForTest: jsDebugRequestedHistoryResolutionSeconds,
-  jsDebugStatsSampleQueryForTest: jsDebugStatsSampleQuery,
-  setDebugGraphZoomDomainForTest(startMs, endMs) { jsDebugGraphZoomDomain = {startMs, endMs}; },
-  setDebugGraphChartVisibleForTest: setDebugGraphChartVisible,
-  clearDebugGraphZoomForTest: clearDebugGraphZoom,
   clearJsDebugEventsForTest: clearJsDebugEvents,
   jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
+  debugGraphExactResolutionChoicesForTest: debugGraphExactResolutionChoices,
+  jsDebugCurrentCoverageIntervalsForTest: jsDebugCurrentCoverageIntervals,
+  clearJsDebugGraphDataForTest: clearJsDebugGraphData,
+  debugGraphApplyServerRecordForTest: debugGraphApplyServerRecord,
+  compactJsDebugGraphBucketsForTest: compactJsDebugGraphBuckets,
+  jsDebugGraphBucketDurationsForTest() { return [...jsDebugGraphBuckets.values()].map(bucket => Number(bucket.durationMs) / 1000); },
   terminalRemovalLatencySummaryForTest: terminalRemovalLatencySummary,
   jsDebugTextForClipboardForTest: jsDebugTextForClipboard,
   recordSseDebugEventForTest: recordSseDebugEvent,
@@ -1528,9 +1383,6 @@ globalThis.__layoutTestApi = {
   chatMessageTimestampForTest: chatMessageTimestamp,
   chatPreciseRelativeTimeFormatForTest: chatPreciseRelativeTimeFormat,
   setDateTimeHourCycleForTest(value) { dateTimeHourCycle = normalizeDateTimeHourCycle(value); },
-  debugGraphTimeLabelForTest: debugGraphTimeLabel,
-  debugGraphXAxisHtmlForTest: debugGraphXAxisHtml,
-  debugGraphExactTimeLabelForTest: debugGraphExactTimeLabel,
   chatEmojiSearchTextForTest: chatEmojiSearchText,
   chatRecentEmojiForTest: chatRecentEmoji,
   rememberChatEmojiForTest: rememberChatEmoji,
@@ -2445,6 +2297,10 @@ globalThis.__layoutTestApi = {
   shareLayoutSeed,
   shareSlotDigestSnapshot,
   terminalWheelSignedLines,
+  terminalTouchGestureDecision,
+  terminalTouchSignedRows,
+  terminalTouchIsFastFlick,
+  terminalTouchAlternateCommand,
   sessionPaneIsAlternateScreen,
   terminalWrappedLineLinks,
   terminalWrappedLineReferences,

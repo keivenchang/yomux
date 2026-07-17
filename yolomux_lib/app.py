@@ -33,6 +33,7 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Mapping
 from urllib.parse import unquote
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
@@ -46,7 +47,7 @@ from . import common
 from . import file_index
 from . import filesystem
 from . import session_files
-from . import stats_resolution
+from .stats_current import resolution as stats_resolution
 from . import yolo_rules
 from .approvals import blank_prompt_state
 from .approvals import hybrid_approval_prompt_state
@@ -119,9 +120,17 @@ from .search_indexer import SearchIndexerClient
 from .jobd import JobClient
 from .pricing_catalog import PricingCatalog
 from .pricing_catalog import PricingRefreshCoordinator
-from . import statsd
-from .statsd import StatsClient
-from .statsd import normalized_usage_atom
+from .stats_current.client import StatsCurrentClient
+from .stats_current.client import iter_append_batches as stats_current_append_batches
+from .stats_current import collectors as stats_current_collectors
+from .stats_current.http import StatsHttpForwarder
+from .stats_current import observations as stats_current_observations
+from .stats_current import protocol as stats_current_protocol
+from .stats_current import revision as stats_current_revision
+from .stats_current.runtime import StatsCurrentRuntime
+from .stats_current import storage as stats_current_storage
+from .stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from .stats_current import usage as stats_current_usage
 from .drop_actions import run_drop_action
 from .events import EventLog
 from .events import RunHistoryStore
@@ -156,6 +165,7 @@ from .settings import save_settings
 from .settings import SETTINGS_PATH
 from .settings import settings_payload
 from .settings import summary_settings as normalized_summary_settings
+from .settings import usage_pricing_profile as configured_usage_pricing_profile
 from .transcripts import codex_summary_prompt
 from .transcripts import codex_event_text
 from .transcripts import compact_summary_lines
@@ -197,7 +207,7 @@ from .state_services import SessionFilesDiskPruneRecord
 from .state_services import SessionFilesGitSnapshotRecord
 from .state_services import SessionFilesService
 from .state_services import SessionFilesWorkRecord
-from .state_services import StatsHistoryService
+from .state_services import StatsCollectionState
 from .state_services import TabberActivityWarmerRecord
 from .uploads import sanitize_upload_filename
 from .uploads import central_upload_target
@@ -269,12 +279,6 @@ from .yoagent.session_summaries import YoagentSummaryWorkerRecord
 
 
 logger = logging.getLogger(__name__)
-
-
-def stats_sampler_wall_discontinuity(*, attempt_at: float, scheduled_at: float, cadence: float, attempts: int) -> bool:
-    """Classify suspend/wake or a wall-clock correction as an epoch split."""
-
-    return attempts > 1 and abs(float(attempt_at) - float(scheduled_at)) > max(2.0, float(cadence) * 2.0)
 
 
 ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS = {"manual", "refresh", "force"}
@@ -370,7 +374,7 @@ ATTENTION_INSTANCE_MAX_ENTRIES = 2048
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
 SESSION_FILES_CACHE_VERSION = 1
-SESSION_FILES_CACHE_KEY_VERSION = 3
+SESSION_FILES_CACHE_KEY_VERSION = 4
 SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
 SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
@@ -381,7 +385,6 @@ SESSION_FILES_DISK_CACHE_INDEX_VERSION = 1
 TABBER_ACTIVITY_CACHE_VERSION = 1
 TABBER_ACTIVITY_CACHE_DIR = common.STATE_DIR / "activity-cache"
 TABBER_ACTIVITY_CONSUMER_TTL_SECONDS = 30.0
-TABBER_ACTIVITY_IDLE_REFRESH_SECONDS = 60.0
 # Session-files cold rebuilds parse transcripts and run Git at the same time.  Two
 # workers was the best p95 on the captured eight-session shape; more workers only
 # increase disk/GIL/subprocess contention.  Preferences may reduce or raise this
@@ -405,66 +408,59 @@ SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
 # Stats can safely use the last agent-status snapshot while the existing asynchronous refresher
-# collects the next one. This keeps the one-second sampler from synchronously recapturing every
-# tmux pane when the UI cache ages out.
+# collects the next one. This keeps collection from synchronously recapturing every tmux pane.
 AUTO_APPROVE_STATS_CACHE_MAX_AGE_SECONDS = 15.0
 SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
-STATS_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
-STATS_HISTORY_RAW_WINDOW_SECONDS = 30 * 60
-STATS_HISTORY_MIDDLE_WINDOW_SECONDS = 2 * 60 * 60
-STATS_HISTORY_MINUTE_WINDOW_SECONDS = 4 * 60 * 60
-STATS_HISTORY_TWO_MINUTE_WINDOW_SECONDS = 8 * 60 * 60
-STATS_HISTORY_FIVE_MINUTE_WINDOW_SECONDS = 12 * 60 * 60
-STATS_HISTORY_RAW_BUCKET_SECONDS = 1
-STATS_HISTORY_MIDDLE_BUCKET_SECONDS = 10
-STATS_HISTORY_ROLLUP_BUCKET_SECONDS = 60
-STATS_HISTORY_TWO_MINUTE_BUCKET_SECONDS = 2 * 60
-STATS_HISTORY_FIVE_MINUTE_BUCKET_SECONDS = 5 * 60
-STATS_HISTORY_TEN_MINUTE_BUCKET_SECONDS = 10 * 60
-STATS_HISTORY_TIERS = (
-    (STATS_HISTORY_RAW_WINDOW_SECONDS, STATS_HISTORY_RAW_BUCKET_SECONDS),
-    (STATS_HISTORY_MIDDLE_WINDOW_SECONDS, STATS_HISTORY_MIDDLE_BUCKET_SECONDS),
-    (STATS_HISTORY_MINUTE_WINDOW_SECONDS, STATS_HISTORY_ROLLUP_BUCKET_SECONDS),
-    (STATS_HISTORY_TWO_MINUTE_WINDOW_SECONDS, STATS_HISTORY_TWO_MINUTE_BUCKET_SECONDS),
-    (STATS_HISTORY_FIVE_MINUTE_WINDOW_SECONDS, STATS_HISTORY_FIVE_MINUTE_BUCKET_SECONDS),
-    (STATS_HISTORY_RETENTION_SECONDS, STATS_HISTORY_TEN_MINUTE_BUCKET_SECONDS),
-)
-STATS_HISTORY_LEGACY_MAX_EVENTS_PER_SECOND = 10_000
-STATS_HISTORY_LEGACY_MAX_BANDWIDTH_BYTES_PER_SECOND = 1 << 30
-STATS_HISTORY_LEGACY_MAX_LATENCY_MS = 5 * 60 * 1000
-STATS_HISTORY_LEGACY_MAX_SAMPLES_PER_SECOND = 100
-STATS_HISTORY_POST_MAX_RECORDS = 1000
 STATS_SAMPLE_CACHE_SECONDS = 0.95
-STATS_HISTORY_SAMPLER_SECONDS = 1.0
-STATS_AGENT_STATUS_SAMPLE_SECONDS = 10.0
-STATS_SERVICE_LOAD_SAMPLE_SECONDS = 10.0
-STATS_GPU_SAMPLE_SECONDS = 10.0
-STATS_SYSTEM_MEMORY_SAMPLE_SECONDS = 60.0
-# Per-server CPU history shares one durable 24-hour snapshot with every browser client. Coalesce
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
 STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS = 60.0
-STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS = STATS_HISTORY_SAMPLER_SECONDS
-STATS_AGENT_TOKEN_BUCKET_SECONDS = 60.0
-STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS = 45.0
-STATS_AGENT_TOKEN_MAX_ATTRIBUTION_GAP_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS * 3
-STATS_AGENT_TOKEN_SCHEMA_VERSION = 5
-# Versioned separately from the token-rate schema: this one-time repair reconstructs the history
-# erased by the first schema-3 writer from the transcript counters that remain on disk.
-STATS_SHARED_FRESH_SECONDS = 3.0
+
+
+def stats_current_usage_health(
+    service_usage: Mapping[str, object],
+    transcript_usage: Mapping[str, object],
+    cadence_seconds: float,
+    *,
+    now: float | None = None,
+) -> dict[str, object]:
+    """Compare committed transcript growth with accepted usage atoms."""
+
+    checked_at = time.time() if now is None else float(now)
+    cadence = max(0.0, float(cadence_seconds))
+    stale_bound = max(120.0, cadence * 3.0)
+    last_visible = max(0.0, float(transcript_usage.get("last_visible_append_at") or 0.0))
+    last_accepted = max(0.0, float(service_usage.get("last_accepted_at") or 0.0))
+    visible_age = max(0.0, checked_at - last_visible) if last_visible > 0 else None
+    accepted_age = max(0.0, checked_at - last_accepted) if last_accepted > 0 else None
+    visibly_appending = visible_age is not None and visible_age <= stale_bound
+    warning = visibly_appending and (
+        last_accepted <= 0
+        or (
+            last_visible > last_accepted
+            and accepted_age is not None
+            and accepted_age > stale_bound
+        )
+    )
+    return {
+        "state": "warning" if warning else ("ok" if visibly_appending else "idle"),
+        "reason": (
+            "transcripts are advancing but usage atoms are stale"
+            if warning
+            else ("transcripts and usage atoms are advancing" if visibly_appending else "no recent transcript growth")
+        ),
+        "stale_bound_seconds": stale_bound,
+        "visibly_appending": visibly_appending,
+        "last_visible_append_age_seconds": visible_age,
+        "last_accepted_atom_age_seconds": accepted_age,
+    }
 TMUX_AI_STATUS_VERSION = 1
-STATS_HISTORY_CLIENT_ID_MAX_LENGTH = 96
-STATS_HISTORY_CLIENT_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
 STATS_HOST_RESOURCE_TIMEOUT_SECONDS = 0.75
-# GPU driver CLIs and IORegistry queries are materially slower than the one-second
-# sampler.  Keep their last aggregate value between asynchronous refreshes.
-STATS_GPU_REFRESH_SECONDS = STATS_GPU_SAMPLE_SECONDS
 _stats_host_fallback_warning_emitted = False
 STATS_AGENT_ASK_STATES = frozenset({"approval", "needs-approval", "needs-input", "attention", "interrupted"})
 STATS_AGENT_RUN_STATES = frozenset({"working"})
 STATS_AGENT_TRANSITION_STATES = frozenset({"cooldown", "transition"})
-STATS_AGENT_ACTIVE_STATES = STATS_AGENT_ASK_STATES | STATS_AGENT_RUN_STATES | STATS_AGENT_TRANSITION_STATES
 # A terminal can briefly render an idle prompt while an agent is still producing its next update.
 # Do not make that flicker a completed/yellow transition or a notification.
 AGENT_WORKING_IDLE_CONFIRM_SECONDS = 5.0
@@ -663,13 +659,6 @@ def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
         return None
 
 
-def current_system_memory_percent() -> float | None:
-    memory = current_system_memory_bytes()
-    if memory is None or memory[0] <= 0:
-        return None
-    return clamp_cpu_percent((memory[1] / memory[0]) * 100.0)
-
-
 def stats_GPU_gpu_metrics() -> dict[str, Any]:
     """Collect aggregate GPU device facts through the installed driver CLI, if present."""
     try:
@@ -733,8 +722,15 @@ def stats_macos_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
         stats = record.get("PerformanceStatistics")
         if not isinstance(stats, dict):
             continue
-        util = stats.get("GPU Activity(%)", stats.get("GPU Activity", 0))
+        # Current Apple-silicon drivers expose Device Utilization %; older
+        # releases used GPU Activity(%). Missing telemetry is not a zero sample.
+        util = stats.get(
+            "Device Utilization %",
+            stats.get("GPU Activity(%)", stats.get("GPU Activity")),
+        )
         used = stats.get("In use system memory", stats.get("In use video memory", 0))
+        if util is None:
+            continue
         try:
             util_percent = clamp_cpu_percent(float(util))
             memory_used_bytes = max(0, int(used))
@@ -752,10 +748,6 @@ def stats_macos_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
 _stats_hardware_metadata_lock = threading.RLock()
 _stats_hardware_metadata_cache: dict[str, str] = {}
 _stats_hardware_metadata_initialized = False
-_stats_gpu_metrics_lock = threading.RLock()
-_stats_gpu_metrics_cache: dict[str, Any] = {}
-_stats_gpu_metrics_refreshed_monotonic: float | None = None
-_stats_gpu_metrics_refreshing = False
 
 
 def stats_macos_hardware_metadata() -> dict[str, str]:
@@ -802,65 +794,6 @@ def stats_host_hardware_metadata() -> dict[str, str]:
         return dict(_stats_hardware_metadata_cache)
 
 
-def _refresh_stats_gpu_metrics(gpu_name: str) -> None:
-    global _stats_gpu_metrics_refreshing, _stats_gpu_metrics_refreshed_monotonic
-    try:
-        metrics = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(gpu_name)
-        with _stats_gpu_metrics_lock:
-            _stats_gpu_metrics_cache.clear()
-            _stats_gpu_metrics_cache.update(metrics if isinstance(metrics, dict) else {})
-        _stats_gpu_metrics_refreshed_monotonic = time.perf_counter()
-    finally:
-        with _stats_gpu_metrics_lock:
-            _stats_gpu_metrics_refreshing = False
-
-
-def stats_cached_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
-    """Return the last aggregate GPU reading and refresh it off the sampler turn."""
-    global _stats_gpu_metrics_refreshing
-    now = time.perf_counter()
-    with _stats_gpu_metrics_lock:
-        stale = _stats_gpu_metrics_refreshed_monotonic is None or now - _stats_gpu_metrics_refreshed_monotonic >= STATS_GPU_REFRESH_SECONDS
-        cached = copy.deepcopy(_stats_gpu_metrics_cache)
-        if stale and not _stats_gpu_metrics_refreshing:
-            _stats_gpu_metrics_refreshing = True
-            worker = threading.Thread(target=_refresh_stats_gpu_metrics, args=(gpu_name,), name="stats-gpu-refresh", daemon=True)
-            common.start_thread_with_rollback(worker, lambda: _set_stats_gpu_refreshing(False))
-    return cached
-
-
-def _set_stats_gpu_refreshing(value: bool) -> None:
-    global _stats_gpu_metrics_refreshing
-    with _stats_gpu_metrics_lock:
-        _stats_gpu_metrics_refreshing = value
-
-
-def stats_host_resource_metrics() -> dict[str, Any]:
-    """Compatibility aggregate assembled from independently collectible families."""
-    memory = stats_system_memory_metrics()
-    hardware = stats_host_hardware_metadata()
-    gpu = stats_cached_gpu_metrics(hardware.get("gpu_label", ""))
-    return {
-        **memory,
-        "gpu_devices": gpu.get("devices", {}) if isinstance(gpu, dict) else {},
-        "gpu_util_processes": {},
-        "gpu_memory_processes": {},
-    }
-
-
-def stats_system_memory_metrics() -> dict[str, Any]:
-    hardware = stats_host_hardware_metadata()
-    memory = current_system_memory_bytes()
-    return {
-        "system_memory_used_bytes": memory[1] if memory is not None else None,
-        "system_memory_capacity_bytes": memory[0] if memory is not None else None,
-        "cpu_label": hardware.get("cpu_label", ""),
-        "system_memory_label": hardware.get("system_memory_label", ""),
-        "cpu_processes": {},
-        "memory_processes": {},
-    }
-
-
 def stats_gpu_metrics() -> dict[str, Any]:
     hardware = stats_host_hardware_metadata()
     gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(hardware.get("gpu_label", ""))
@@ -869,64 +802,6 @@ def stats_gpu_metrics() -> dict[str, Any]:
         "gpu_util_processes": {},
         "gpu_memory_processes": {},
     }
-
-
-def stats_history_client_id(value: Any = "") -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    cleaned = STATS_HISTORY_CLIENT_ID_RE.sub("-", raw)
-    return cleaned[:STATS_HISTORY_CLIENT_ID_MAX_LENGTH]
-
-
-def stats_history_agent_token_rate_records(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, dict):
-        source = [{"key": key, **item} if isinstance(item, dict) else {"key": key, "total": item} for key, item in value.items()]
-    elif isinstance(value, list):
-        source = value
-    else:
-        return []
-    records: list[dict[str, Any]] = []
-    for item in source:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("key") or "").strip()
-        if not key:
-            continue
-        label = str(item.get("label") or key).strip() or key
-        total = positive_finite_number(item.get("total", item.get("rate", item.get("value"))))
-        samples = positive_finite_number(item.get("samples"))
-        tokens = positive_finite_number(item.get("tokens", item.get("token_total")))
-        seconds = positive_finite_number(item.get("seconds", item.get("duration_seconds")))
-        source_label = str(item.get("source") or "").strip()
-        if tokens and not total:
-            total = tokens
-        if total and not samples:
-            samples = 1.0
-        if not total and not samples and not tokens:
-            continue
-        record = {"key": key, "label": label, "total": total, "samples": samples}
-        if tokens:
-            record["tokens"] = tokens
-        if seconds:
-            record["seconds"] = seconds
-        if source_label:
-            record["source"] = source_label
-        raw_model_rates = item.get("model_rates")
-        if isinstance(raw_model_rates, dict):
-            model_rates: dict[str, dict[str, float]] = {}
-            for raw_model, raw_rate in raw_model_rates.items():
-                if not isinstance(raw_rate, dict):
-                    continue
-                model = str(raw_model or "unknown").strip()[:256] or "unknown"
-                model_rates[model] = {
-                    field: positive_finite_number(raw_rate.get(field))
-                    for field in ("total", "samples", "tokens", "seconds")
-                }
-            if model_rates:
-                record["model_rates"] = model_rates
-        records.append(record)
-    return records
 
 
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
@@ -1792,8 +1667,8 @@ class TmuxWebtermApp:
         self.metadata_warm_record = MetadataWarmRecord()
         self.metadata_badge_lock = threading.Lock()
         self.metadata_badge_records: dict[str, MetadataBadgeRecord] = {}
-        self.stats_history_service = StatsHistoryService()
-        self.stats_metric_thread_context = threading.local()
+        self.stats_collection_state = StatsCollectionState()
+        self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
         self.job_client = JobClient()
         self.upload_retention_sweeper = UploadRetentionSweeper()
         self.approval_client = ApprovalClient()
@@ -1858,9 +1733,24 @@ class TmuxWebtermApp:
         self.control_server.start()
         self.background_owner: BackgroundOwnerRegistry | DisabledBackgroundOwner = DisabledBackgroundOwner()
         self.search_indexer = SearchIndexerClient()
-        # P4 establishes this shared lifecycle/client path. P6 switches the public
-        # endpoint and sampler to it after the legacy JSON importer is in place.
-        self.stats_client = StatsClient()
+        self.stats_current_client = StatsCurrentClient()
+        self.stats_current_http = StatsHttpForwarder(
+            self.stats_current_client,
+            client_binding_secret=common.AUTH_COOKIE_SECRET,
+        )
+        self.stats_current_runtime = StatsCurrentRuntime(
+            self.stats_current_client,
+            {
+                "cpu": self.collect_current_stats_cpu,
+                "agent_status": self.collect_current_stats_agent_status,
+                "gpu": self.collect_current_stats_gpu,
+                "service_load": self.collect_current_stats_service_load,
+                "system_memory": self.collect_current_stats_system_memory,
+                "agent_tokens": self.collect_current_stats_agent_tokens,
+            },
+            owner_generation=self.stats_current_owner_generation,
+            token_cadence_seconds=self.stats_current_token_cadence_seconds,
+        )
         # A persistent child owns all Quick Open builds and SQLite writes.
         # HTTP/WebSocket processes remain read-only index consumers.
         file_index.set_background_owner_checker(self.search_index_can_build)
@@ -1877,7 +1767,7 @@ class TmuxWebtermApp:
             return user_message_payload("status.sessionEnded", diagnostic, session=session), HTTPStatus.NOT_FOUND
         return None
 
-    def stats_history_process_identity(self) -> tuple[str, str, int]:
+    def stats_current_process_identity(self) -> tuple[str, str, int]:
         owner = self.background_owner.owner_payload()
         try:
             port = max(0, int(owner.get("port") or 0))
@@ -1895,20 +1785,6 @@ class TmuxWebtermApp:
             "updated_at": 0.0,
             "attention_acks": {"rev": 0, "updated_at": 0.0, "keys": {}},
             "attention_instances": {"updated_at": 0.0, "instances": {}},
-            "stats_history": {
-                "rev": 0,
-                "updated_at": 0.0,
-                "sequence": 0,
-                "agent_token_schema_version": STATS_AGENT_TOKEN_SCHEMA_VERSION,
-                "sample": {},
-                "raw_buckets": [],
-                "rollup_buckets": [],
-                "agent_token_state": {},
-                "agent_activity_state": {},
-                "agent_token_next_sample_at": 0.0,
-                "agent_token_consumer_until": 0.0,
-                "writer": {},
-            },
         }
 
     def _read_shared_tmux_ai_status_locked(self) -> dict[str, Any]:
@@ -1969,8 +1845,6 @@ class TmuxWebtermApp:
         status["attention_acks"] = attention if isinstance(attention, dict) else {}
         attention_instances = data.get("attention_instances") if isinstance(data.get("attention_instances"), dict) else {}
         status["attention_instances"] = attention_instances
-        stats_history = data.get("stats_history") if isinstance(data.get("stats_history"), dict) else {}
-        status["stats_history"] = stats_history if isinstance(stats_history, dict) else {}
         return status
 
     def _write_shared_tmux_ai_status_locked(self, status: dict[str, Any]) -> int:
@@ -1989,106 +1863,6 @@ class TmuxWebtermApp:
             mode=0o600,
         )
         return rev
-
-    def stats_history_uses_shared_status(self) -> bool:
-        return not isinstance(self.background_owner, DisabledBackgroundOwner)
-
-    def stats_history_shared_agent_state_snapshot(self, value: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        snapshot: dict[str, dict[str, Any]] = {}
-        for raw_key, raw_item in value.items():
-            key = str(raw_key or "").strip()
-            if not key or not isinstance(raw_item, dict):
-                continue
-            item: dict[str, Any] = {}
-            for field in ("tokens", "time", "transition_started"):
-                try:
-                    item[field] = float(raw_item.get(field) or 0.0)
-                except (TypeError, ValueError):
-                    item[field] = 0.0
-            for field in ("label", "source", "identity", "state", "kind"):
-                text = str(raw_item.get(field) or "").strip()
-                if text:
-                    item[field] = text
-            raw_models = raw_item.get("models")
-            if isinstance(raw_models, dict):
-                item["models"] = {
-                    str(model or "unknown").strip()[:256] or "unknown": positive_finite_number(total)
-                    for model, total in raw_models.items()
-                    if positive_finite_number(total) > 0
-                }
-            snapshot[key] = item
-        return snapshot
-
-    def record_stats_history_payload(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
-        if not isinstance(payload, dict):
-            return user_message_payload("request.error.object", "payload must be an object", field="payload"), HTTPStatus.BAD_REQUEST
-        now = time.time()
-        client_id = stats_history_client_id(payload.get("client_id", payload.get("client", "")))
-        records = payload.get("records", [])
-        if records is None:
-            records = []
-        if not isinstance(records, list):
-            return user_message_payload("request.error.list", "records must be a list", field="records"), HTTPStatus.BAD_REQUEST
-        if len(records) > STATS_HISTORY_POST_MAX_RECORDS:
-            diagnostic = f"records limit is {STATS_HISTORY_POST_MAX_RECORDS}"
-            return user_message_payload(
-                "request.error.tooManyItems",
-                diagnostic,
-                field="records",
-                max=STATS_HISTORY_POST_MAX_RECORDS,
-            ), HTTPStatus.BAD_REQUEST
-        try:
-            since = int(payload.get("since") or 0)
-        except (TypeError, ValueError):
-            since = 0
-
-        if not records and payload.get("ack_only") is not True:
-            # Older callers omitted ack_only for an empty follow-up POST. Do
-            # not ask the RPC metadata frame to carry the entire retained
-            # history just to acknowledge that cursor: its response stays
-            # bounded and keeps the legacy response shape.
-            history = self.stats_client.history(
-                include_history=False,
-                since=max(0, since),
-                client_id=client_id,
-            )
-            if not history.get("ok"):
-                return user_message_payload("stats.error.unavailable", str(history.get("error") or "statsd unavailable")), HTTPStatus.SERVICE_UNAVAILABLE
-            return {
-                "ok": True,
-                "history": {
-                    "records": [],
-                    "sequence": int(history.get("latest_sequence", history.get("sequence", 0)) or 0),
-                },
-            }, HTTPStatus.OK
-
-        if payload.get("ack_only") is True:
-            merged = self.stats_client.merge_records(
-                [record for record in records if isinstance(record, dict)],
-                client_id=client_id,
-                now=now,
-                clear=payload.get("clear") is True,
-            )
-            if not merged.get("ok"):
-                return user_message_payload("stats.error.unavailable", str(merged.get("error") or "statsd unavailable")), HTTPStatus.SERVICE_UNAVAILABLE
-            # Upload acknowledgements need only advance the durable cursor.
-            # Asking statsd to serialize the entire retained history here can
-            # exceed the bounded RPC metadata frame before the app discards it.
-            return {"ok": True, "history": {"records": [], "sequence": int(merged.get("sequence") or 0)}}, HTTPStatus.OK
-
-        response_since = max(0, since)
-        response = self.stats_client.merge_and_history(
-            [record for record in records if isinstance(record, dict)],
-            client_id=client_id,
-            query={"since": response_since, "client_id": client_id},
-            now=now,
-            clear=payload.get("clear") is True,
-        )
-        if not response.get("ok"):
-            return user_message_payload("stats.error.unavailable", str(response.get("error") or "statsd unavailable")), HTTPStatus.SERVICE_UNAVAILABLE
-        merged = response.get("merged") if isinstance(response.get("merged"), dict) else {}
-        history = response.get("history") if isinstance(response.get("history"), dict) else {}
-        return {"ok": True, "history": history}, HTTPStatus.OK
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
         # The stats sampler deliberately joins the roster owner.  Falling back to its own
@@ -2169,10 +1943,6 @@ class TmuxWebtermApp:
                 rows.append(item)
         return rows
 
-    def stats_agent_is_active(self, row: dict[str, Any]) -> bool:
-        state = str(row.get("state") or "").strip().lower()
-        return state in STATS_AGENT_ACTIVE_STATES
-
     def notification_transition_seconds(self) -> float:
         return self.performance_setting_seconds("workflow_transition_glow_seconds", 0.0, 300.0)
 
@@ -2184,27 +1954,9 @@ class TmuxWebtermApp:
             return False
         return True
 
-    def stats_agent_token_sample_seconds(self) -> float:
-        return STATS_AGENT_TOKEN_SAMPLE_SECONDS
-
-    def stats_agent_token_sampling_due(self, sample_time: float, token_consumer: bool = False) -> bool:
-        with self.stats_history_service.agent_token_lock:
-            if token_consumer:
-                self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, sample_time + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS)
-            consumer_active = sample_time <= self.stats_history_service.agent_token_consumer_until
-            sample_seconds = self.stats_agent_token_sample_seconds() if consumer_active else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
-            if self.stats_history_service.agent_token_bootstrap_pending:
-                sample_seconds = STATS_AGENT_TOKEN_BOOTSTRAP_SAMPLE_SECONDS
-            elif sample_time < self.stats_history_service.agent_token_next_sample_at:
-                if not consumer_active or self.stats_history_service.agent_token_next_sample_at - sample_time <= sample_seconds:
-                    return False
-            self.stats_history_service.agent_token_next_sample_at = sample_time + sample_seconds
-            self.stats_history_service.agent_token_bootstrap_pending = False
-            return True
-
     def stats_agent_activity_kind_locked(self, row: dict[str, Any], key: str, sample_time: float, transition_seconds: float) -> str:
         state = str(row.get("state") or "").strip().lower()
-        previous = self.stats_history_service.agent_activity_state.get(key) if key else None
+        previous = self.stats_collection_state.agent_activity_state.get(key) if key else None
         previous_kind = str(previous.get("kind") or "") if isinstance(previous, dict) else ""
         previous_transition_started = self.float_value(previous.get("transition_started") if isinstance(previous, dict) else 0.0, 0.0)
         transition_started = 0.0
@@ -2232,7 +1984,7 @@ class TmuxWebtermApp:
             else:
                 transition_started = 0.0
         if key:
-            self.stats_history_service.agent_activity_state[key] = {
+            self.stats_collection_state.agent_activity_state[key] = {
                 "state": state,
                 "kind": kind,
                 "time": sample_time,
@@ -2255,35 +2007,6 @@ class TmuxWebtermApp:
         window_label = str(row.get("window_label") or row.get("label") or row.get("window") or "").strip()
         kind = str(row.get("kind") or "agent").strip() or "agent"
         return ":".join(part for part in (session, window_label or kind) if part) or kind
-
-    def statsd_recover_agent_token_history(self, rows: list[dict[str, Any]], now: float) -> bool:
-        token_rows = self.stats_agent_token_rows(rows)
-        expected_keys = {self.stats_agent_token_key(row, index) for index, row in enumerate(rows)}
-        recovered_keys = {str(row.get("key") or "") for row in token_rows}
-        if not expected_keys or recovered_keys != expected_keys:
-            # Agent and transcript discovery settle independently at startup.
-            # A partial roster must not consume statsd's one-time generation.
-            return False
-        response = self.stats_client.recover_agent_token_history_from_rows(token_rows, now=now)
-        if not response.get("ok"):
-            # Recovery is a cold-start optimization. A transient daemon spawn
-            # failure must not prevent the sampler from establishing its next
-            # live token baseline.
-            return False
-        return bool(response.get("changed"))
-
-    def statsd_migrate_usage_atom_history(self, rows: list[dict[str, Any]], now: float) -> bool:
-        """Give the background statsd owner a complete transcript roster once.
-
-        This is deliberately reached only from the elected sampler's token
-        scan.  Browser/API history reads never parse transcripts or initiate a
-        retained-history migration.
-        """
-        token_rows = self.stats_agent_token_rows(rows, include_missing=True)
-        if not token_rows:
-            return False
-        response = self.stats_client.migrate_usage_atom_history_from_rows(token_rows, now=now)
-        return bool(response.get("ok"))
 
     def stats_agent_token_rows(self, rows: list[dict[str, Any]], *, include_missing: bool = False) -> list[dict[str, Any]]:
         token_rows: list[dict[str, Any]] = []
@@ -2308,343 +2031,271 @@ class TmuxWebtermApp:
             })
         return token_rows
 
-    def stats_agent_token_claim_durable_delta_records_locked(
-        self,
-        token_rows: list[dict[str, Any]],
-        seen_keys: set[str],
-        sample_time: float,
-    ) -> list[dict[str, Any]]:
-        """Atomically claim transcript deltas so two server generations cannot count one interval twice."""
-
-        response = self.stats_client.claim_agent_token_deltas_from_rows(
-            token_rows,
-            seen_keys=seen_keys,
-            sample_time=sample_time,
-            fallback_state=self.stats_history_service.agent_token_state,
-        )
-        if not response.get("ok"):
-            raise RuntimeError(str(response.get("error") or "statsd unavailable"))
-        state = response.get("state") if isinstance(response.get("state"), dict) else {}
-        self.stats_history_service.agent_token_state = self.stats_history_shared_agent_state_snapshot(state)
-        records = response.get("records") if isinstance(response.get("records"), list) else []
-        return [record for record in records if isinstance(record, dict)]
-
-    def stats_agent_activity_record(self, sample_time: float, include_token_rates: bool = True) -> dict[str, Any] | None:
-        rows = self.stats_agent_window_rows()
-        return self.stats_agent_activity_record_from_rows(rows, sample_time, include_token_rates=include_token_rates)
-
-    def stats_agent_token_records_for_rows(self, rows: list[dict[str, Any]], sample_time: float) -> list[dict[str, Any]]:
-        self.statsd_recover_agent_token_history(rows, sample_time)
-        token_rows = self.stats_agent_token_rows(rows)
-        seen_keys = {self.stats_agent_token_key(row, index) for index, row in enumerate(rows)}
-        with self.stats_history_service.agent_token_lock:
-            return self.stats_agent_token_claim_durable_delta_records_locked(token_rows, seen_keys, sample_time) if token_rows else []
-
-    def stats_agent_activity_record_from_rows(
-        self,
-        rows: list[dict[str, Any]],
-        sample_time: float,
-        *,
-        include_token_rates: bool = True,
-    ) -> dict[str, Any] | None:
-        if not rows:
-            with self.stats_history_service.agent_token_lock:
-                self.stats_history_service.agent_token_state.clear()
-                self.stats_history_service.agent_activity_state.clear()
-                self.stats_history_service.agent_token_next_sample_at = 0.0
-                self.stats_history_service.agent_token_consumer_until = 0.0
-                self.stats_history_service.agent_token_bootstrap_pending = True
+    def stats_current_owner_generation(self) -> int | None:
+        if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
             return None
-        ask_agents = 0
-        run_agents = 0
-        transition_agents = 0
-        idle_agents = 0
-        inactive_agents = 0
-        agent_token_records: list[dict[str, Any]] = []
+        started_at_ns = self.background_owner.owner_payload().get("started_at_ns")
+        if isinstance(started_at_ns, bool) or not isinstance(started_at_ns, int):
+            return None
+        return started_at_ns if started_at_ns >= 0 else None
+
+    def stats_current_token_cadence_seconds(self) -> float:
+        return STATS_AGENT_TOKEN_SAMPLE_SECONDS if self.client_events.has_demand("stats") else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+
+    def record_current_browser_observations(
+        self,
+        payload: object,
+        *,
+        authenticated_username: str,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Validate and append one bounded batch of original browser facts."""
+
+        try:
+            observations = stats_current_observations.parse_browser_observations(
+                payload,
+                client_binding_secret=common.AUTH_COOKIE_SECRET,
+                authenticated_username=authenticated_username,
+            )
+        except stats_current_observations.BrowserObservationUpgradeRequired:
+            return stats_current_protocol.upgrade_required_response(
+                stats_current_storage.MIN_WRITER_PROTOCOL,
+                stats_current_storage.SCHEMA_VERSION,
+                stats_current_revision.CURRENT_CODE_REVISION,
+            ), HTTPStatus.UPGRADE_REQUIRED
+        except stats_current_observations.BrowserObservationError as error:
+            return {
+                "ok": False,
+                "status": "unsupported",
+                "reason": str(error)[:256],
+            }, HTTPStatus.BAD_REQUEST
+        if not self.stats_current_client.ensure_started():
+            status = self.stats_current_client.status()
+            if (
+                status.get("status") == "upgrade_required"
+                or status.get("error_code") == "upgrade_required"
+            ):
+                return status, HTTPStatus.UPGRADE_REQUIRED
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "reason": "statsd unavailable",
+            }, HTTPStatus.SERVICE_UNAVAILABLE
+        response = self.stats_current_client.append(observations=observations)
+        if response.get("ok") is not True:
+            if (
+                response.get("status") == "upgrade_required"
+                or response.get("error_code") == "upgrade_required"
+            ):
+                return response, HTTPStatus.UPGRADE_REQUIRED
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "reason": "statsd unavailable",
+            }, HTTPStatus.SERVICE_UNAVAILABLE
+        return {
+            "ok": True,
+            "source_generation": response.get("source_generation", 0),
+            "accepted": response.get("accepted", 0),
+            "duplicates": response.get("duplicates", 0),
+        }, HTTPStatus.OK
+
+    def collect_current_stats_cpu(
+        self,
+        attempt: Any,
+    ) -> stats_current_collectors.CollectorFacts:
+        sample, _recorded = self.current_stats_sample(force=True)
+        self.update_server_cpu_budget(sample)
+        process_id, _label, _port = self.stats_current_process_identity()
+        return stats_current_collectors.cpu_success(
+            epoch_id=attempt.epoch_id,
+            epoch_started_at=attempt.epoch_started_at,
+            observed_at=attempt.scheduled_at,
+            cadence_seconds=attempt.cadence_seconds,
+            owner_generation=attempt.owner_generation,
+            source_id=process_id,
+            process_percent=float(sample["cpu_percent"]),
+            system_percent=float(sample["system_cpu_percent"]),
+        )
+
+    def collect_current_stats_agent_status(
+        self,
+        attempt: Any,
+    ) -> stats_current_collectors.CollectorFacts:
+        rows = self.stats_agent_window_rows()
+        states: dict[str, str] = {}
         seen_keys: set[str] = set()
         transition_seconds = self.notification_transition_seconds()
-        with self.stats_history_service.agent_token_lock:
+        with self.stats_collection_state.agent_activity_lock:
             for index, row in enumerate(rows):
                 key = self.stats_agent_token_key(row, index)
                 if key in seen_keys:
                     continue
                 seen_keys.add(key)
-                activity_kind = self.stats_agent_activity_kind_locked(row, key, sample_time, transition_seconds)
-                if activity_kind == "ask":
-                    ask_agents += 1
-                elif activity_kind == "run":
-                    run_agents += 1
-                elif activity_kind == "transition":
-                    transition_agents += 1
-                else:
-                    idle_agents += 1
-                    inactive_agents += 1
-            for key in list(self.stats_history_service.agent_activity_state):
+                states[key] = self.stats_agent_activity_kind_locked(
+                    row,
+                    key,
+                    attempt.scheduled_at,
+                    transition_seconds,
+                )
+            for key in list(self.stats_collection_state.agent_activity_state):
                 if key not in seen_keys:
-                    self.stats_history_service.agent_activity_state.pop(key, None)
-        if include_token_rates:
-            agent_token_records = self.stats_agent_token_records_for_rows(rows, sample_time)
-        active_agents = max(0, len(seen_keys) - inactive_agents)
-        record: dict[str, Any] = {
-            "time": sample_time,
-            "ask_agent_total": ask_agents,
-            "run_agent_total": run_agents,
-            "transition_agent_total": transition_agents,
-            "idle_agent_total": idle_agents,
-            "active_agent_total": active_agents,
-            "inactive_agent_total": inactive_agents,
-            "agent_activity_samples": 1,
-        }
-        if agent_token_records:
-            record["_agent_token_records"] = agent_token_records
-        if include_token_rates:
-            # Preserve the full roster (including a temporarily missing
-            # transcript) so the one-time migration cannot mark itself done
-            # from a partial agent discovery snapshot.
-            record["_usage_atom_migration_rows"] = rows
-        return record
+                    self.stats_collection_state.agent_activity_state.pop(key, None)
+        process_id, _label, _port = self.stats_current_process_identity()
+        return stats_current_collectors.agent_status_success(
+            epoch_id=attempt.epoch_id,
+            epoch_started_at=attempt.epoch_started_at,
+            observed_at=attempt.scheduled_at,
+            cadence_seconds=attempt.cadence_seconds,
+            owner_generation=attempt.owner_generation,
+            source_id=process_id,
+            states=states,
+        )
 
-    def run_stats_agent_token_work(self, rows: list[dict[str, Any]], sample_time: float, worker: threading.Thread) -> None:
-        try:
-            token_records = self.stats_agent_token_records_for_rows(rows, sample_time)
-            if token_records:
-                merged = self.stats_client.merge_server_records(token_records, now=sample_time)
-                if not merged.get("ok"):
-                    raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
-            self.statsd_migrate_usage_atom_history(rows, sample_time)
-        except (OSError, RuntimeError, ValueError):
-            logger.exception("stats agent-token background sample failed")
-        finally:
-            with self.stats_history_service.agent_token_lock:
-                if self.stats_history_service.agent_token_worker is worker:
-                    self.stats_history_service.agent_token_worker = None
-
-    def start_stats_agent_token_work(self, rows: list[dict[str, Any]], sample_time: float) -> bool:
-        with self.stats_history_service.agent_token_lock:
-            if self.stats_history_service.agent_token_worker is not None:
-                return False
-            worker: threading.Thread
-
-            def run() -> None:
-                self.run_stats_agent_token_work(rows, sample_time, worker)
-
-            worker = threading.Thread(target=run, name="stats-agent-token", daemon=True)
-            self.stats_history_service.agent_token_worker = worker
-
-        def rollback() -> None:
-            with self.stats_history_service.agent_token_lock:
-                if self.stats_history_service.agent_token_worker is worker:
-                    self.stats_history_service.agent_token_worker = None
-
-        common.start_thread_with_rollback(worker, rollback)
-        return True
-
-    def stats_metric_family_specs(self) -> dict[str, tuple[Callable[[], None], Callable[[], float]]]:
-        """Return independently scheduled collectors owned by the elected server."""
-
-        return {
-            "cpu": (self.record_stats_cpu_sample, lambda: STATS_HISTORY_SAMPLER_SECONDS),
-            "service_load": (self.record_stats_service_load_sample, lambda: STATS_SERVICE_LOAD_SAMPLE_SECONDS),
-            "agent_status": (self.record_stats_agent_status_sample, lambda: STATS_AGENT_STATUS_SAMPLE_SECONDS),
-            "gpu": (self.record_stats_gpu_sample, lambda: STATS_GPU_SAMPLE_SECONDS),
-            "system_memory": (self.record_stats_system_memory_sample, lambda: STATS_SYSTEM_MEMORY_SAMPLE_SECONDS),
-            "agent_tokens": (self.record_stats_agent_token_sample, self.stats_agent_token_scheduler_seconds),
-        }
-
-    def stats_agent_token_scheduler_seconds(self) -> float:
-        statsd_status = self.stats_client.runtime_status()
-        shared_consumer_until = float(statsd_status.get("agent_token_consumer_until") or 0.0)
-        with self.stats_history_service.agent_token_lock:
-            consumer_until = max(self.stats_history_service.agent_token_consumer_until, shared_consumer_until)
-            if time.time() <= consumer_until:
-                return STATS_AGENT_TOKEN_SAMPLE_SECONDS
-        return STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
-
-    def start_stats_metric_scheduler(self) -> bool:
-        service = self.stats_history_service
-        with service.scheduler_lock:
-            if any(worker.is_alive() for worker in service.scheduler_threads.values()):
-                return False
-            service.scheduler_generation += 1
-            generation = service.scheduler_generation
-            service.scheduler_stop_event = threading.Event()
-            service.scheduler_threads = {}
-            for family, (collector, cadence) in self.stats_metric_family_specs().items():
-                service.scheduler_family_locks.setdefault(family, threading.Lock())
-                wake_event = service.scheduler_wake_events.setdefault(family, threading.Event())
-                wake_event.clear()
-                worker = threading.Thread(
-                    target=self.stats_metric_family_loop,
-                    args=(family, collector, cadence, generation, service.scheduler_stop_event),
-                    name=f"stats-{family.replace('_', '-')}",
-                    daemon=True,
-                )
-                service.scheduler_threads[family] = worker
-                common.start_thread_with_rollback(worker, lambda family=family: service.scheduler_threads.pop(family, None))
-        return True
-
-    def stop_stats_metric_scheduler(self) -> None:
-        service = self.stats_history_service
-        with service.scheduler_lock:
-            service.scheduler_generation += 1
-            service.scheduler_stop_event.set()
-            for wake_event in service.scheduler_wake_events.values():
-                wake_event.set()
-            service.scheduler_threads = {}
-
-    def wake_stats_metric_family(self, family: str) -> bool:
-        """Wake one metric deadline without disturbing any other family."""
-
-        with self.stats_history_service.scheduler_lock:
-            wake_event = self.stats_history_service.scheduler_wake_events.get(family)
-            worker = self.stats_history_service.scheduler_threads.get(family)
-            if wake_event is None or worker is None or not worker.is_alive():
-                return False
-            status = self.stats_history_service.scheduler_diagnostics.get(family, {})
-            if status.get("running") is True:
-                return True
-            wake_event.set()
-            return True
-
-    def wake_stats_agent_tokens_if_due(self) -> bool:
-        """Shorten an idle token deadline without defeating its active cadence."""
-
-        with self.stats_history_service.scheduler_lock:
-            status = self.stats_history_service.scheduler_diagnostics.get("agent_tokens", {})
-            last_attempt_at = float(status.get("last_attempt_at") or 0.0)
-        if last_attempt_at and time.time() - last_attempt_at < STATS_AGENT_TOKEN_SAMPLE_SECONDS:
-            return True
-        return self.wake_stats_metric_family("agent_tokens")
-
-    def stats_metric_family_status(self, family: str, **updates: Any) -> dict[str, Any]:
-        service = self.stats_history_service
-        with service.scheduler_lock:
-            status = service.scheduler_diagnostics.setdefault(family, {
-                "attempts": 0, "successes": 0, "failures": 0,
-                "late_cycles": 0, "missed_cycles": 0,
-            })
-            status.update(updates)
-            return dict(status)
-
-    def stats_metric_family_loop(
+    def collect_current_stats_gpu(
         self,
-        family: str,
-        collector: Callable[[], None],
-        cadence: Callable[[], float],
-        generation: int,
-        stop_event: threading.Event,
-    ) -> None:
-        next_deadline = time.monotonic()
-        schedule_anchor_monotonic = next_deadline
-        schedule_anchor_wall = time.time()
-        epoch_number = 1
-        wake_event = self.stats_history_service.scheduler_wake_events[family]
-        while not stop_event.is_set() and generation == self.stats_history_service.scheduler_generation:
-            wait_seconds = max(0.0, next_deadline - time.monotonic())
-            woke = wake_event.wait(wait_seconds)
-            if woke:
-                wake_event.clear()
-            if stop_event.is_set() or generation != self.stats_history_service.scheduler_generation:
-                break
-            if woke:
-                next_deadline = time.monotonic()
-            interval = max(0.1, float(cadence()))
-            attempt_at = time.time()
-            started = time.monotonic()
-            with self.stats_history_service.scheduler_lock:
-                previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
-                attempts = int(previous.get("attempts") or 0) + 1
-            self.stats_metric_family_status(
-                family, cadence_seconds=interval, attempts=attempts,
-                last_attempt_at=attempt_at, running=True, alive=True,
-            )
-            error = ""
-            family_lock = self.stats_history_service.scheduler_family_locks[family]
-            if not family_lock.acquire(blocking=False):
-                with self.stats_history_service.scheduler_lock:
-                    previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
-                self.stats_metric_family_status(
-                    family, running=False,
-                    late_cycles=int(previous.get("late_cycles") or 0) + 1,
-                    missed_cycles=int(previous.get("missed_cycles") or 0) + 1,
-                )
-                next_deadline += interval
+        attempt: Any,
+    ) -> stats_current_collectors.CollectorFacts:
+        devices = stats_gpu_metrics().get("gpu_devices")
+        if not isinstance(devices, dict):
+            return stats_current_collectors.CollectorFacts()
+        samples = []
+        for source_id, row in devices.items():
+            if not isinstance(row, dict):
                 continue
-            try:
-                if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
-                    break
-                self.stats_metric_thread_context.generation = generation
-                scheduled_wall = schedule_anchor_wall + next_deadline - schedule_anchor_monotonic
-                # A suspend or wall-clock correction is an epoch boundary,
-                # not one enormous continuously-covered sample. Re-anchor the
-                # post-wake deadline so neither timestamps nor held values
-                # bridge the discontinuity.
-                if stats_sampler_wall_discontinuity(
-                    attempt_at=attempt_at,
-                    scheduled_at=scheduled_wall,
-                    cadence=interval,
-                    attempts=attempts,
-                ):
-                    epoch_number += 1
-                    next_deadline = started
-                    schedule_anchor_monotonic = started
-                    schedule_anchor_wall = attempt_at
-                    scheduled_wall = attempt_at
-                self.stats_metric_thread_context.coverage_family = family
-                self.stats_metric_thread_context.coverage_epoch_id = (
-                    f"{os.getpid()}:{generation}:{family}:{epoch_number}"
+            util = row.get("util_percent")
+            used = row.get("memory_used_bytes")
+            capacity = row.get("memory_capacity_bytes")
+            if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (util, used, capacity)):
+                continue
+            samples.append(stats_current_collectors.GpuDeviceSample(
+                str(source_id),
+                float(util),
+                float(used),
+                float(capacity),
+                str(row.get("label") or source_id),
+            ))
+        return stats_current_collectors.gpu_devices_success(
+            samples,
+            epoch_id=attempt.epoch_id,
+            epoch_started_at=attempt.epoch_started_at,
+            observed_at=attempt.scheduled_at,
+            cadence_seconds=attempt.cadence_seconds,
+            owner_generation=attempt.owner_generation,
+        )
+
+    def collect_current_stats_service_load(
+        self,
+        attempt: Any,
+    ) -> stats_current_collectors.CollectorFacts:
+        latest = self.latest_stats_sample()
+        rows = list(self.runtime_local_services().get("services") or [])
+        rows.append({
+            "service": "web",
+            "pid": int(latest.get("pid") or os.getpid()),
+            "resources": {
+                "cpu_percent": latest.get("cpu_percent"),
+                "rss_bytes": latest.get("rss_bytes"),
+            },
+        })
+        samples = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            source_id = str(row.get("service") or "").strip()
+            if not source_id:
+                continue
+            resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
+            cpu = resources.get("cpu_percent")
+            rss = resources.get("rss_bytes")
+            running = isinstance(row.get("pid"), int) and row["pid"] > 0
+            samples.append(stats_current_collectors.ServiceLoadSample(
+                source_id,
+                running,
+                max(0.0, float(cpu)) if isinstance(cpu, (int, float)) and not isinstance(cpu, bool) else 0.0,
+                max(0.0, float(rss)) if running and isinstance(rss, (int, float)) and not isinstance(rss, bool) else None,
+            ))
+        return stats_current_collectors.service_load_success(
+            samples,
+            epoch_id=attempt.epoch_id,
+            epoch_started_at=attempt.epoch_started_at,
+            observed_at=attempt.scheduled_at,
+            cadence_seconds=attempt.cadence_seconds,
+            owner_generation=attempt.owner_generation,
+        )
+
+    def collect_current_stats_system_memory(
+        self,
+        attempt: Any,
+    ) -> stats_current_collectors.CollectorFacts:
+        memory = current_system_memory_bytes()
+        if memory is None:
+            raise RuntimeError("system memory metrics unavailable")
+        return stats_current_collectors.system_memory_success(
+            epoch_id=attempt.epoch_id,
+            epoch_started_at=attempt.epoch_started_at,
+            observed_at=attempt.scheduled_at,
+            cadence_seconds=attempt.cadence_seconds,
+            owner_generation=attempt.owner_generation,
+            source_id="host",
+            used_bytes=float(memory[1]),
+            capacity_bytes=float(memory[0]),
+        )
+
+    def collect_current_stats_agent_tokens(
+        self,
+        attempt: Any,
+    ) -> stats_current_collectors.CollectorFacts:
+        rows = self.stats_agent_window_rows()
+        if self.sessions and not rows:
+            raise RuntimeError("agent roster unavailable")
+        atoms = []
+        tombstones = []
+        scan = self.stats_current_transcript_usage.scan(self.stats_agent_token_rows(rows))
+        current_settings = self.settings_payload().get("settings", {})
+        for item in scan.items:
+            fields = dict(vars(item.atom))
+            fields["tmux_key"] = item.tmux_key
+            fields["agent_kind"] = item.agent_kind
+            if fields.get("pricing_profile", "default") == "default":
+                fields["pricing_profile"] = configured_usage_pricing_profile(
+                    current_settings,
+                    provider=str(fields.get("provider") or ""),
+                    execution_source=item.agent_kind,
+                    endpoint=str(fields.get("endpoint") or ""),
+                    observed_at=item.atom.timestamp,
                 )
-                self.stats_metric_thread_context.coverage_cadence_seconds = interval
-                # Tie persisted timestamps to the monotonic deadline phase.
-                # Actual wall-clock attempt times can jitter across integer
-                # boundaries even when deadlines are exactly one second apart,
-                # producing a false gap followed by a double-sample bucket.
-                self.stats_metric_thread_context.scheduled_time = scheduled_wall
-                collector()
-            except Exception as exc:  # each family survives and reports its own failure
-                error = str(exc)[:500]
-                logger.exception("stats %s sample failed", family)
-            finally:
-                family_lock.release()
-            runtime = max(0.0, time.monotonic() - started)
-            self.stats_metric_thread_context.generation = None
-            self.stats_metric_thread_context.scheduled_time = None
-            self.stats_metric_thread_context.coverage_family = None
-            self.stats_metric_thread_context.coverage_epoch_id = None
-            self.stats_metric_thread_context.coverage_cadence_seconds = None
-            with self.stats_history_service.scheduler_lock:
-                previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
-                successes = int(previous.get("successes") or 0) + (0 if error else 1)
-                failures = int(previous.get("failures") or 0) + (1 if error else 0)
-            status = self.stats_metric_family_status(
-                family, successes=successes, failures=failures, running=False,
-                last_runtime_seconds=runtime, last_failure=error,
-                last_success_at=float(previous.get("last_success_at") or 0.0) if error else time.time(),
+            try:
+                atoms.append(stats_current_usage.usage_atom_from_source(fields))
+            except stats_current_usage.UsageValidationError:
+                continue
+        for item in scan.tombstones:
+            tombstones.append(
+                stats_current_usage.legacy_fork_usage_tombstone_from_source(
+                    vars(item.atom)
+                )
             )
-            try:
-                self.stats_client.update_sampler_family(family, status)
-            except (OSError, RuntimeError, ValueError):
-                logger.exception("stats %s diagnostics update failed", family)
-            schedule_interval = max(0.1, float(cadence()))
-            next_deadline += schedule_interval
-            now = time.monotonic()
-            if now >= next_deadline:
-                skipped = int((now - next_deadline) // schedule_interval) + 1
-                next_deadline += skipped * schedule_interval
-                with self.stats_history_service.scheduler_lock:
-                    previous = self.stats_history_service.scheduler_diagnostics.get(family, {})
-                self.stats_metric_family_status(
-                    family,
-                    late_cycles=int(previous.get("late_cycles") or 0) + 1,
-                    missed_cycles=int(previous.get("missed_cycles") or 0) + skipped,
-                )
-        self.stats_metric_family_status(family, running=False, alive=False)
+        process_id, _label, _port = self.stats_current_process_identity()
+        return stats_current_collectors.usage_scan_success(
+            atoms,
+            tombstones,
+            stats_current_collectors.CollectorReceipt(
+                lambda: self.stats_current_transcript_usage.commit(scan.receipt_id),
+                lambda: self.stats_current_transcript_usage.rollback(scan.receipt_id),
+            ),
+            epoch_id=attempt.epoch_id,
+            epoch_started_at=attempt.epoch_started_at,
+            observed_at=attempt.scheduled_at,
+            cadence_seconds=attempt.cadence_seconds,
+            owner_generation=attempt.owner_generation,
+            source_id=process_id,
+            budget_exhausted_follow_up=scan.budget_exhausted,
+        )
 
     def latest_stats_sample(self) -> dict[str, Any]:
         """Read the last scheduler-owned CPU sample without collecting in an API thread."""
 
-        with self.stats_history_service.sample_lock:
-            cached = self.stats_history_service.sample_record.cached_payload
+        with self.stats_collection_state.sample_lock:
+            cached = self.stats_collection_state.sample_record.cached_payload
             if cached is not None:
                 return dict(cached)
         now = time.time()
@@ -2654,175 +2305,15 @@ class TmuxWebtermApp:
             "system_cpu_percent": 0.0, "rss_bytes": 0,
         }
 
-    def merge_stats_family_record(self, family: str, record: dict[str, Any], sample: dict[str, Any]) -> dict[str, Any]:
-        self.assert_stats_metric_write_allowed()
-        record = self.stats_record_with_sampler_coverage(family, record)
-        now = float(record.get("time") or sample.get("time") or time.time())
-        merged = self.stats_client.merge_server_records(
-            [record], now=now, compact=False,
-            timeout=0.9 if family == "cpu" else 3.0,
-        )
-        if not merged.get("ok"):
-            raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
-        sequence = max(0, int(merged.get("sequence") or 0))
-        live_record = {**record, "start": int(now), "duration": 1, "sequence": sequence, "server_sequence": sequence}
-        if self.client_events.has_demand("stats"):
-            self.publish_client_event(
-                "stats_sample", {"sample": dict(sample), "record": live_record, "sequence": sequence},
-                trigger=f"stats-{family}", cache="ready",
-            )
-        return merged
-
-    def stats_record_with_sampler_coverage(self, family: str, record: dict[str, Any]) -> dict[str, Any]:
-        """Attach the current independent scheduler epoch to one durable delta."""
-
-        epoch_id = getattr(self.stats_metric_thread_context, "coverage_epoch_id", None)
-        context_family = getattr(self.stats_metric_thread_context, "coverage_family", None)
-        cadence = getattr(self.stats_metric_thread_context, "coverage_cadence_seconds", None)
-        generation = getattr(self.stats_metric_thread_context, "generation", None)
-        if context_family != family or not epoch_id or not cadence or generation is None:
-            return record
-        return {
-            **record,
-            "_stats_coverage": {
-                "family": family,
-                "epoch_id": str(epoch_id),
-                "cadence_seconds": float(cadence),
-                "owner_generation": int(generation),
-            },
-        }
-
-    def stats_metric_scheduled_time(self) -> float:
-        scheduled = getattr(self.stats_metric_thread_context, "scheduled_time", None)
-        return float(scheduled) if scheduled is not None else time.time()
-
-    def assert_stats_metric_write_allowed(self) -> None:
-        """Reject a slow collector result after its elected-owner generation ended."""
-
-        generation = getattr(self.stats_metric_thread_context, "generation", None)
-        if generation is None:
-            return
-        if generation != self.stats_history_service.scheduler_generation or not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
-            raise RuntimeError("stats owner generation ended before durable write")
-
-    def record_stats_cpu_sample(self) -> None:
-        sample, record_cpu_sample = self.current_stats_sample()
-        if not record_cpu_sample:
-            return
-        self.update_server_cpu_budget(sample)
-        scheduled_time = getattr(self.stats_metric_thread_context, "scheduled_time", None)
-        if scheduled_time is not None:
-            sample = {**sample, "time": float(scheduled_time)}
-        process_id, label, port = self.stats_history_process_identity()
-        record = {
-            "time": sample["time"], "cpu_total_percent": sample["cpu_percent"], "cpu_count": 1,
-            "system_cpu_total_percent": sample["system_cpu_percent"], "system_cpu_count": 1,
-            "process": {
-                "id": process_id, "label": label, "pid": int(sample.get("pid") or os.getpid()),
-                "port": port, "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
-                "cpu_percent": sample["cpu_percent"], "cpu_count": 1,
-            },
-        }
-        self.merge_stats_family_record("cpu", record, sample)
-
-    def record_stats_agent_status_sample(self) -> None:
-        sample_time = self.stats_metric_scheduled_time()
-        rows = self.stats_agent_window_rows()
-        record = self.stats_agent_activity_record_from_rows(rows, sample_time, include_token_rates=False)
-        if record is None:
-            record = {
-                "time": sample_time, "ask_agent_total": 0, "run_agent_total": 0,
-                "transition_agent_total": 0, "idle_agent_total": 0,
-                "active_agent_total": 0, "inactive_agent_total": 0,
-                "agent_activity_samples": 1,
-            }
-        record.pop("_agent_token_records", None)
-        record.pop("_usage_atom_migration_rows", None)
-        self.merge_stats_family_record("agent_status", record, self.latest_stats_sample())
-
-    def record_stats_service_load_sample(self) -> None:
-        """Persist one already-exposed local-service resource snapshot."""
-
-        sample = self.latest_stats_sample()
-        rows = list(self.runtime_local_services().get("services") or [])
-        rows.append({
-            "service": "web", "pid": int(sample.get("pid") or os.getpid()),
-            "resources": {"cpu_percent": sample.get("cpu_percent"), "rss_bytes": sample.get("rss_bytes")},
-        })
-        services: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            key = str(row.get("service") or "").strip()[:128]
-            if not key:
-                continue
-            running = int(row.get("pid") or 0) > 0
-            resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
-            cpu_percent = resources.get("cpu_percent")
-            rss_bytes = resources.get("rss_bytes")
-            # Every known service reports each tick so its Servers Load series
-            # always exists and reads honestly: a running service contributes its
-            # real CPU%/RSS, and an idle/not-running spawn-on-demand service an
-            # explicit zero (rather than a missing series that looks like a broken
-            # chart). A service that was never registered simply never appears in
-            # `rows`, so it stays absent.
-            cpu = max(0.0, float(cpu_percent)) if isinstance(cpu_percent, (int, float)) else 0.0
-            item: dict[str, Any] = {
-                "label": key,
-                "cpu_total_percent": cpu, "cpu_min_percent": cpu, "cpu_max_percent": cpu, "cpu_samples": 1,
-            }
-            if running and isinstance(rss_bytes, (int, float)):
-                rss = max(0.0, float(rss_bytes))
-                item.update({"rss_total_bytes": rss, "rss_min_bytes": rss, "rss_max_bytes": rss, "rss_samples": 1})
-            services[key] = item
-        self.merge_stats_family_record(
-            "service_load",
-            {"time": self.stats_metric_scheduled_time(), "host_metrics": {"service_load": services}},
-            sample,
-        )
-
-    def record_stats_gpu_sample(self) -> None:
-        sample_time = self.stats_metric_scheduled_time()
-        self.merge_stats_family_record(
-            "gpu", {"time": sample_time, "host_metrics": stats_gpu_metrics()}, self.latest_stats_sample()
-        )
-
-    def record_stats_system_memory_sample(self) -> None:
-        sample_time = self.stats_metric_scheduled_time()
-        self.merge_stats_family_record(
-            "system_memory", {"time": sample_time, "host_metrics": stats_system_memory_metrics()}, self.latest_stats_sample()
-        )
-
-    def record_stats_agent_token_sample(self) -> None:
-        sample_time = self.stats_metric_scheduled_time()
-        rows = self.stats_agent_window_rows()
-        records = self.stats_agent_token_records_for_rows(rows, sample_time)
-        self.assert_stats_metric_write_allowed()
-        # Token deltas may contain recovered historical timestamps. Keep those
-        # data writes untouched and append exactly one current sampler marker;
-        # otherwise recovery could backdate the new epoch across an old gap.
-        records = list(records)
-        records.append(self.stats_record_with_sampler_coverage("agent_tokens", {"time": sample_time}))
-        merged = self.stats_client.merge_server_records(records, now=sample_time)
-        if not merged.get("ok"):
-            raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
-        self.assert_stats_metric_write_allowed()
-        self.statsd_migrate_usage_atom_history(rows, sample_time)
-
-    def current_stats_sample(self) -> tuple[dict[str, Any], bool]:
+    def current_stats_sample(self, *, force: bool = False) -> tuple[dict[str, Any], bool]:
         now = time.time()
         monotonic_now = time.monotonic()
-        with self.stats_history_service.sample_lock:
-            record = self.stats_history_service.sample_record
+        with self.stats_collection_state.sample_lock:
+            record = self.stats_collection_state.sample_record
             cached = record.cached_payload
             cached_monotonic = record.cached_monotonic
-            scheduler_sample = getattr(self.stats_metric_thread_context, "scheduled_time", None) is not None
-            # The cache remains useful to legacy/direct callers, but a real
-            # scheduler deadline is itself the authority to take a new CPU
-            # observation. Treating that tick as cached records a diagnostic
-            # "success" without a durable second.
             use_cached = (
-                not scheduler_sample
+                not force
                 and cached is not None
                 and cached_monotonic is not None
                 and monotonic_now - cached_monotonic < STATS_SAMPLE_CACHE_SECONDS
@@ -2859,290 +2350,6 @@ class TmuxWebtermApp:
                 record.cached_payload = dict(sample)
                 record_cpu_sample = True
         return sample, record_cpu_sample
-
-    def record_stats_global_sample(self, trigger: str = "sampler", token_consumer: bool = False, defer_token_scan: bool = False) -> dict[str, Any]:
-        started = time.perf_counter()
-        phase_started = started
-        phase_ms: dict[str, float] = {}
-        sample, record_cpu_sample = self.current_stats_sample()
-        phase_ms["sample_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        phase_started = time.perf_counter()
-        owns_expensive_stats = self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER)
-        host_metrics = stats_host_resource_metrics() if record_cpu_sample and owns_expensive_stats and trigger in {"sampler", "statsd"} else {}
-        phase_ms["host_resources_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        include_token_rates = self.stats_agent_token_sampling_due(float(sample["time"]), token_consumer=token_consumer) if record_cpu_sample and owns_expensive_stats and not defer_token_scan else False
-        phase_started = time.perf_counter()
-        deferred_token_rows: list[dict[str, Any]] = []
-        if record_cpu_sample and owns_expensive_stats and trigger == "statsd":
-            deferred_token_rows = self.stats_agent_window_rows()
-            agent_record = self.stats_agent_activity_record_from_rows(deferred_token_rows, sample["time"], include_token_rates=False)
-        else:
-            agent_record = self.stats_agent_activity_record(sample["time"], include_token_rates=include_token_rates) if record_cpu_sample and owns_expensive_stats else None
-        phase_ms["agent_activity_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        agent_token_records = list(agent_record.pop("_agent_token_records", [])) if isinstance(agent_record, dict) else []
-        usage_atom_migration_rows = list(agent_record.pop("_usage_atom_migration_rows", [])) if isinstance(agent_record, dict) else []
-        now = float(sample.get("time") or time.time())
-        phase_started = time.perf_counter()
-        shared_written = False
-        live_record: dict[str, Any] | None = None
-        live_sequence = 0
-        if record_cpu_sample:
-            process_id, label, port = self.stats_history_process_identity()
-            record = {
-                "time": sample["time"],
-                "cpu_total_percent": sample["cpu_percent"],
-                "cpu_count": 1,
-                "system_cpu_total_percent": sample["system_cpu_percent"],
-                "system_cpu_count": 1,
-                "host_metrics": host_metrics,
-                "process": {
-                    "id": process_id,
-                    "label": label,
-                    "pid": int(sample.get("pid") or os.getpid()),
-                    "port": port,
-                    "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
-                    "cpu_percent": sample["cpu_percent"],
-                    "cpu_count": 1,
-                },
-            }
-            if agent_record:
-                record.update(agent_record)
-            server_records = [record, *[item for item in agent_token_records if isinstance(item, dict)]]
-            merged = self.stats_client.merge_server_records(server_records, now=now)
-            if not merged.get("ok"):
-                raise RuntimeError(str(merged.get("error") or "statsd unavailable"))
-            shared_written = True
-            # Push the already-durable one-second delta; do not add a second
-            # history read or put token-recovery detail on the live SSE path.
-            live_sequence = max(0, int(merged.get("sequence") or 0))
-            live_record = {
-                **record,
-                "start": int(now),
-                "duration": 1,
-                "sequence": live_sequence,
-                "server_sequence": live_sequence,
-            }
-        if usage_atom_migration_rows:
-            self.statsd_migrate_usage_atom_history(usage_atom_migration_rows, now)
-        token_async_started = bool(include_token_rates and deferred_token_rows and self.start_stats_agent_token_work(deferred_token_rows, now))
-        phase_ms["history_merge_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        self.record_performance_sample(
-            BACKGROUND_ROLE_STATS_SAMPLER,
-            "global-sample",
-            trigger=trigger,
-            compute_ms=(time.perf_counter() - started) * 1000,
-            payload=sample,
-            cache_status="sampled" if record_cpu_sample else "cached",
-            record_time=sample["time"],
-            details={"agent_tokens": bool(agent_token_records), "token_consumer": bool(token_consumer), "token_due": bool(include_token_rates), "token_deferred": bool(defer_token_scan or (include_token_rates and trigger == "statsd")), "token_async_started": token_async_started, "shared_written": shared_written, **phase_ms},
-        )
-        if trigger == "statsd" and live_record is not None and self.client_events.has_demand("stats"):
-            self.publish_client_event(
-                "stats_sample",
-                {"sample": dict(sample), "record": live_record, "sequence": live_sequence},
-                trigger="statsd-sampler",
-                cache="ready",
-            )
-        return sample
-
-    def stats_sample_context(
-        self,
-        token_consumer: bool = False,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, float], float]:
-        build_started = time.perf_counter()
-        endpoint_profile: dict[str, Any] = {}
-        phase_started = time.perf_counter()
-        endpoint_profile["statsd_history_prepare_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        phase_started = time.perf_counter()
-        if token_consumer:
-            consumer_until = time.time() + STATS_AGENT_TOKEN_CONSUMER_TTL_SECONDS
-            with self.stats_history_service.agent_token_lock:
-                self.stats_history_service.agent_token_consumer_until = max(self.stats_history_service.agent_token_consumer_until, consumer_until)
-            self.stats_client.set_token_consumer_until(consumer_until)
-            if self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
-                self.wake_stats_agent_tokens_if_due()
-            else:
-                self.request_background_refresh(
-                    BACKGROUND_ROLE_STATS_SAMPLER,
-                    {"family": "agent_tokens", "reason": "stats-token-consumer", "cache_key": "agent-tokens"},
-                )
-        endpoint_profile["stats_token_consumer_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        phase_started = time.perf_counter()
-        sample = self.latest_stats_sample()
-        statsd_status = self.stats_client.runtime_status()
-        sampler_families = statsd_status.get("sampler_families") if isinstance(statsd_status.get("sampler_families"), dict) else {}
-        cpu_sampler = sampler_families.get("cpu") if isinstance(sampler_families.get("cpu"), dict) else {}
-        last_sampler_success_at = float(cpu_sampler.get("last_success_at") or 0.0)
-        sampler_fresh = bool(last_sampler_success_at and time.time() - last_sampler_success_at <= STATS_SHARED_FRESH_SECONDS)
-        shared_stats = {
-            "enabled": True,
-            "fresh": sampler_fresh,
-            "updated_at": last_sampler_success_at,
-            "rev": 0,
-            "role": "statsd",
-        }
-        endpoint_profile["stats_sample_ms"] = round((time.perf_counter() - phase_started) * 1000, 3)
-        endpoint_profile["stats_history_compact_ms"] = 0.0
-        return sample, shared_stats, endpoint_profile, build_started
-
-    @staticmethod
-    def stats_sample_history_query(
-        since: int = 0,
-        client_id: str = "",
-        token_since: int = 0,
-        token_resolution_seconds: int = 0,
-        token_history_start: int | None = None,
-        token_history_end: int | None = None,
-        history_start: int = 0,
-        history_end: int = 0,
-        history_resolution_seconds: int = 0,
-        history_max_points: int = 0,
-        include_history: bool = True,
-        exact_resolution: bool = False,
-    ) -> dict[str, Any]:
-        request = {
-            "include_history": bool(include_history),
-            "since": max(0, since),
-            "client_id": client_id,
-            "token_since": max(0, token_since),
-            "token_resolution_seconds": max(0, token_resolution_seconds),
-            "token_history_start": token_history_start,
-            "token_history_end": token_history_end,
-            "start": max(0, history_start),
-            "end": max(0, history_end),
-            "resolution_seconds": max(0, history_resolution_seconds),
-            "max_points": max(0, history_max_points),
-        }
-        # Opt-in exact-resolution serve (DOIT.1 cutover). Additive: default off, so
-        # the reader request is byte-identical to today until the client sends it.
-        if exact_resolution:
-            request["exact_resolution"] = 1
-        return request
-
-    def check_stats_coverage_integrity(self) -> dict[str, Any] | None:
-        """Read-only durable-coverage self-check that surfaces violations to Logs.
-
-        The system detects a corrupt coverage table itself (the class that once
-        blanked YO!stats) instead of waiting for a blank chart. It runs web-side
-        because the operator log ring is per-process (statsd is a separate
-        process); a violation is emitted at error level, deduped, so it is one
-        Logs line rather than a flood. On-open durable repair still heals the
-        table, so this is a monitoring backstop.
-        """
-        try:
-            store = statsd.StatsStore(statsd.default_database_path(), read_only=True)
-            store.open()
-            try:
-                report = store.coverage_integrity_report()
-            finally:
-                store.close()
-        except Exception:  # noqa: BLE001 - a monitoring check must never break serving
-            return None
-        if not report.get("ok"):
-            offenders = ", ".join(
-                f"{item.get('family')}({item.get('overlaps')})" for item in report.get("families", [])
-            )
-            emit_server_log(
-                "error",
-                "statsd",
-                f"stats coverage integrity violated: {report.get('overlapping_pairs')} overlapping "
-                f"interval pair(s), {report.get('inverted_rows')} inverted row(s)"
-                + (f" [{offenders}]" if offenders else ""),
-                category="coverage",
-                dedupe_key="stats-coverage-integrity",
-                dedupe_seconds=300.0,
-            )
-        return report
-
-    def stats_sample_payload(
-        self,
-        since: int = 0,
-        client_id: str = "",
-        token_consumer: bool = False,
-        token_since: int = 0,
-        token_resolution_seconds: int = 0,
-        token_history_start: int | None = None,
-        token_history_end: int | None = None,
-        history_start: int = 0,
-        history_end: int = 0,
-        history_resolution_seconds: int = 0,
-        history_max_points: int = 0,
-        include_history: bool = True,
-    ) -> dict[str, Any]:
-        # Monitoring backstop: a deduped read-only coverage self-check surfaces a
-        # corrupt durable coverage table to the Logs tab (at most one line / 5 min).
-        if include_history:
-            self.check_stats_coverage_integrity()
-        sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
-        encode_started = time.perf_counter()
-        history = self.stats_client.history(**self.stats_sample_history_query(
-            since=since,
-            client_id=client_id,
-            token_since=token_since,
-            token_resolution_seconds=token_resolution_seconds,
-            token_history_start=token_history_start,
-            token_history_end=token_history_end,
-            history_start=history_start,
-            history_end=history_end,
-            history_resolution_seconds=history_resolution_seconds,
-            history_max_points=history_max_points,
-            include_history=include_history,
-        ))
-        if include_history and not history.get("ok"):
-            raise RuntimeError(str(history.get("error") or "statsd unavailable"))
-        history.pop("ok", None)
-        endpoint_profile["stats_history_encode_ms"] = round((time.perf_counter() - encode_started) * 1000, 3)
-        payload = {
-            "ok": True,
-            **sample,
-            "history": history,
-            "shared_stats": shared_stats,
-        }
-        endpoint_profile["stats_app_build_ms"] = round((time.perf_counter() - build_started) * 1000, 3)
-        payload["_endpoint_profile"] = endpoint_profile
-        return payload
-
-    def stats_sample_encoded_payload(
-        self,
-        since: int = 0,
-        client_id: str = "",
-        token_consumer: bool = False,
-        token_since: int = 0,
-        token_resolution_seconds: int = 0,
-        token_history_start: int | None = None,
-        token_history_end: int | None = None,
-        history_start: int = 0,
-        history_end: int = 0,
-        history_resolution_seconds: int = 0,
-        history_max_points: int = 0,
-        include_history: bool = True,
-        exact_resolution: bool = False,
-    ) -> tuple[dict[str, Any], bytes]:
-        sample, shared_stats, endpoint_profile, build_started = self.stats_sample_context(token_consumer=token_consumer)
-        encode_started = time.perf_counter()
-        response, encoded = self.stats_client.encoded_sample(
-            sample,
-            shared_stats,
-            query=self.stats_sample_history_query(
-                since=since,
-                client_id=client_id,
-                token_since=token_since,
-                token_resolution_seconds=token_resolution_seconds,
-                token_history_start=token_history_start,
-                token_history_end=token_history_end,
-                history_start=history_start,
-                history_end=history_end,
-                history_resolution_seconds=history_resolution_seconds,
-                history_max_points=history_max_points,
-                include_history=include_history,
-                exact_resolution=exact_resolution,
-            ),
-        )
-        if not response.get("ok"):
-            raise RuntimeError(str(response.get("error") or "statsd unavailable"))
-        endpoint_profile["stats_history_encode_ms"] = round((time.perf_counter() - encode_started) * 1000, 3)
-        endpoint_profile["stats_app_build_ms"] = round((time.perf_counter() - build_started) * 1000, 3)
-        return endpoint_profile, encoded
 
     def start_background_owner(self, port: int | None = None, priority: int = 0) -> bool:
         self.background_owner = BackgroundOwnerRegistry(
@@ -3187,17 +2394,7 @@ class TmuxWebtermApp:
         # can submit/read work but must never create a child process themselves.
         self.job_client.start_for_scheduler()
         self.pricing_refresh_coordinator.start_periodic()
-        # Never gate the scheduler on statsd availability: each family loop already
-        # survives per-cycle statsd failures and self-heals when the daemon returns.
-        # Gating here turned one failed ensure_started at acquisition into a PERMANENT
-        # sampling outage (2026-07-15: a stale-revision daemon held the socket at boot
-        # and YO!stats stayed blank until the next owner handoff).
-        if not self.stats_client.ensure_started():
-            self.log_event(
-                None, "statsd_sampler_unavailable", "statsd unavailable at sampler start; scheduler will retry per cycle",
-                {"diagnostic": "statsd unavailable"}, message_key="events.message.statsHistory.sampleFailed",
-            )
-        self.start_stats_metric_scheduler()
+        self.stats_current_runtime.start()
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
@@ -3273,14 +2470,15 @@ class TmuxWebtermApp:
 
     def demote_background_owner(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
-        self.stop_stats_metric_scheduler()
+        self.stats_current_runtime.stop()
         with self.metadata_warm_lock:
             self.metadata_warm_record.stop_event.set()
         with self.activity_transcript_service.tabber_cache_lock:
+            demoted_warmer = self.activity_transcript_service.tabber_warmer_record
             self.activity_transcript_service.tabber_warmer_record = TabberActivityWarmerRecord()
             self.activity_transcript_service.tabber_cache_record.refresh_worker = None
-        with self.session_files_service.cache_lock:
-            self.session_files_service.work_records.clear()
+        demoted_warmer.wake.set()  # unpark so a parked warmer exits promptly
+        self.session_files_service.cancel_all_work()
         file_index.clear_memory_indexes()
         self.publish_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
 
@@ -3392,7 +2590,7 @@ class TmuxWebtermApp:
         )
         if result.get("local_owner"):
             if role == BACKGROUND_ROLE_STATS_SAMPLER and request_payload.get("family") == "agent_tokens":
-                result["refreshing"] = self.wake_stats_agent_tokens_if_due()
+                result["refreshing"] = self.stats_current_runtime.wake("agent_tokens")
             if not result.get("coalesced"):
                 self.log_sampled_background_refresh_event(
                     "background_refresh_started",
@@ -5193,15 +4391,14 @@ class TmuxWebtermApp:
         with self.activity_transcript_service.tabber_cache_lock:
             record = self.activity_transcript_service.tabber_warmer_record
             record.consumer_until = max(record.consumer_until, until)
+        # Unpark a warmer that idled out of demand; a no-op while it is active.
+        record.wake.set()
         return True
 
     def tabber_activity_has_recent_consumer(self) -> bool:
         now = time.monotonic()
         with self.activity_transcript_service.tabber_cache_lock:
             return self.activity_transcript_service.tabber_warmer_record.consumer_until > now
-
-    def tabber_activity_idle_refresh_seconds(self) -> float:
-        return max(TABBER_ACTIVITY_IDLE_REFRESH_SECONDS, self.tabber_activity_refresh_seconds() * 4.0)
 
     def wake_client_event_watcher(self) -> None:
         with self.client_watch_service.lock:
@@ -5525,7 +4722,31 @@ class TmuxWebtermApp:
             record.filesystem_stop_event.set()
             record.wake_event.set()
 
+    GIT_METADATA_EVENT_NAMES = frozenset({"HEAD", "index", "packed-refs", "MERGE_HEAD"})
+
+    def git_metadata_event_allowed(self, path: Path, record: ClientEventWatcherRecord) -> bool:
+        """Admit exactly the .git paths that change `git_snapshot_identity`.
+
+        Ref updates and commits touch only .git (HEAD, index, refs, packed-refs,
+        MERGE_HEAD); without these events a pure commit would never dirty the
+        repository record. objects/ and logs/ churn stays filtered out.
+        """
+        parts = path.parts
+        try:
+            git_index = parts.index(".git")
+        except ValueError:
+            return False
+        tail = parts[git_index + 1:]
+        if not tail or not (tail[0] in self.GIT_METADATA_EVENT_NAMES or tail[0] == "refs"):
+            return False
+        return any(
+            path == Path(root) or filesystem._path_is_within(path, Path(root))
+            for root in record.filesystem_watch_paths
+        )
+
     def native_filesystem_event_allowed(self, path: Path, record: ClientEventWatcherRecord) -> bool:
+        if ".git" in path.parts:
+            return self.git_metadata_event_allowed(path, record)
         if any(part in record.filesystem_skip_dirs for part in path.parts):
             return False
         # Native backends report every change under an ancestor watch root,
@@ -5606,7 +4827,13 @@ class TmuxWebtermApp:
             path = Path(raw_path).expanduser().resolve(strict=False)
             if self.native_filesystem_event_allowed(path, record):
                 native_changes.append((change, path))
-        changed_paths = sorted({path for _change, path in native_changes}, key=str)
+        all_changed = sorted({path for _change, path in native_changes}, key=str)
+        if not all_changed:
+            return []
+        # Every change (worktree or .git metadata) dirties intersecting repo
+        # records; .git paths take part in NOTHING else below.
+        self.mark_repo_state_dirty(all_changed)
+        changed_paths = [path for path in all_changed if ".git" not in path.parts]
         if not changed_paths:
             return []
         events = self.publish_native_files_changed(changed_paths)
@@ -6572,7 +5799,7 @@ class TmuxWebtermApp:
             repo_from = str(override.get("from") or "").strip() or from_ref
             repo_to = str(override.get("to") or "").strip() or to_ref
             repo = Path(repo_text)
-            repo_signatures.append((repo_text, session_files.git_snapshot_identity(repo, repo_from, repo_to)))
+            repo_signatures.append((repo_text, self.shared_git_identity(repo, repo_from, repo_to)[0]))
         return (
             kind,
             SESSION_FILES_CACHE_KEY_VERSION,
@@ -6624,10 +5851,67 @@ class TmuxWebtermApp:
             return fallback
         return requested
 
+    # ---- Repository-state record (DOIT.optimize-backends) ------------------
+    # One dirty generation per canonical Git root, bumped by the native
+    # filesystem watcher (worktree AND .git metadata events). A cached identity
+    # is reusable only while the watcher is healthy, the repo lies under a
+    # watched root, the generation is unchanged, and the entry is younger than
+    # the safety-reconciliation bound (missed/coalesced events self-heal).
+    SESSION_FILES_GIT_IDENTITY_SAFETY_SECONDS = 60.0
+
+    def repo_dirty_generation(self, repo_text: str) -> int:
+        with self.session_files_service.cache_lock:
+            return self.session_files_service.repo_dirty_generations.setdefault(repo_text, 0)
+
+    def mark_repo_state_dirty(self, changed_paths: list[Path]) -> None:
+        with self.session_files_service.cache_lock:
+            generations = self.session_files_service.repo_dirty_generations
+            for repo_text in generations:
+                repo_path = Path(repo_text)
+                if any(
+                    path == repo_path or filesystem._path_is_within(path, repo_path)
+                    for path in changed_paths
+                ):
+                    generations[repo_text] += 1
+
+    def store_git_identity(self, identity_key: tuple[Any, ...], dirty_generation: int, identity: tuple[Any, ...]) -> None:
+        with self.session_files_service.cache_lock:
+            self.session_files_service.repo_identity_cache[identity_key] = (dirty_generation, time.monotonic(), identity)
+
+    def reusable_git_identity(self, identity_key: tuple[Any, ...], repo: Path) -> tuple[Any, ...] | None:
+        record = self.client_watch_service.event_watcher_record
+        if not record.filesystem_healthy:
+            return None
+        resolved_repo = Path(str(repo)).expanduser().resolve(strict=False)
+        if not any(
+            resolved_repo == Path(root) or filesystem._path_is_within(resolved_repo, Path(root))
+            for root in record.filesystem_roots
+        ):
+            return None
+        with self.session_files_service.cache_lock:
+            entry = self.session_files_service.repo_identity_cache.get(identity_key)
+            if entry is None:
+                return None
+            generation_at_compute, computed_at, identity = entry
+            if generation_at_compute != self.session_files_service.repo_dirty_generations.get(identity_key[0], 0):
+                return None
+        if time.monotonic() - computed_at > self.SESSION_FILES_GIT_IDENTITY_SAFETY_SECONDS:
+            return None
+        return identity
+
     def session_files_disk_cache_path(self, key: tuple[Any, ...]) -> tuple[Path, str]:
-        key_text = self.client_event_payload_signature(key)
+        # Stable logical view identity only (kind, version, session, hours, refs,
+        # per-repo ref overrides): the volatile info/repo signatures (key[-2:])
+        # are a replaceable source generation stored INSIDE the record, so agent
+        # status or transcript appends REPLACE one durable file per view instead
+        # of minting a new filename per generation.
+        key_text = self.client_event_payload_signature(key[:-2])
         signature = hashlib.sha256(key_text.encode("utf-8")).hexdigest()
         return SESSION_FILES_CACHE_DIR / f"{signature}.json", signature
+
+    def session_files_source_generation(self, key: tuple[Any, ...]) -> str:
+        """The replaceable half of the cache identity: info + repo signatures."""
+        return hashlib.sha256(self.client_event_payload_signature(key[-2:]).encode("utf-8")).hexdigest()
 
     def session_files_disk_manifest_path(self, signature: str) -> Path:
         return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
@@ -6638,19 +5922,44 @@ class TmuxWebtermApp:
     def empty_session_files_disk_cache_index(self) -> dict[str, Any]:
         return {"version": SESSION_FILES_DISK_CACHE_INDEX_VERSION, "entries": {}, "recovery_cursor": ""}
 
+    def session_files_disk_cache_index_journal_path(self) -> Path:
+        return self.session_files_disk_cache_index_path().with_name(
+            self.session_files_disk_cache_index_path().name + ".journal"
+        )
+
     def read_session_files_disk_cache_index_unlocked(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.session_files_disk_cache_index_path().read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-            return self.empty_session_files_disk_cache_index()
+            payload = None
         entries = payload.get("entries") if isinstance(payload, dict) else None
-        if not isinstance(entries, dict):
-            return self.empty_session_files_disk_cache_index()
-        return {
+        index = {
             "version": SESSION_FILES_DISK_CACHE_INDEX_VERSION,
-            "entries": {str(signature): value for signature, value in entries.items() if isinstance(value, dict)},
-            "recovery_cursor": str(payload.get("recovery_cursor") or ""),
+            "entries": (
+                {str(signature): value for signature, value in entries.items() if isinstance(value, dict)}
+                if isinstance(entries, dict) else {}
+            ),
+            "recovery_cursor": str(payload.get("recovery_cursor") or "") if isinstance(payload, dict) else "",
         }
+        # Per-write updates are appended to a journal instead of rewriting the whole
+        # base index (which was O(historical entries) bytes per durable write); the
+        # base + journal merge here is the one read-side owner, and every full base
+        # rewrite folds the journal in and truncates it.
+        try:
+            journal_lines = self.session_files_disk_cache_index_journal_path().read_text(encoding="utf-8").splitlines()
+        except (FileNotFoundError, OSError):
+            journal_lines = []
+        for line in journal_lines:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(record, dict) and isinstance(record.get("signature"), str):
+                index["entries"][record["signature"]] = {
+                    "size": max(0, int(record.get("size") or 0)),
+                    "mtime": max(0.0, float(record.get("mtime") or 0.0)),
+                }
+        return index
 
     def write_session_files_disk_cache_index_unlocked(self, index: dict[str, Any]) -> None:
         atomic_write_text(
@@ -6658,14 +5967,36 @@ class TmuxWebtermApp:
             json.dumps(index, sort_keys=True, separators=(",", ":")),
             mode=0o600,
         )
+        # The base now contains everything the journal recorded (callers read the
+        # merged view before rewriting), so the journal restarts empty.
+        try:
+            self.session_files_disk_cache_index_journal_path().unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def update_session_files_disk_cache_index(self, signature: str, *, size: int, mtime: float) -> None:
         index_path = self.session_files_disk_cache_index_path()
         try:
             with file_lock(index_path, dir_mode=0o700):
-                index = self.read_session_files_disk_cache_index_unlocked()
-                index["entries"][signature] = {"size": max(0, int(size)), "mtime": max(0.0, float(mtime))}
-                self.write_session_files_disk_cache_index_unlocked(index)
+                journal_path = self.session_files_disk_cache_index_journal_path()
+                line = json.dumps(
+                    {"signature": str(signature), "size": max(0, int(size)), "mtime": max(0.0, float(mtime))},
+                    sort_keys=True, separators=(",", ":"),
+                ) + "\n"
+                with open(journal_path, "a", encoding="utf-8") as journal:
+                    journal.write(line)
+                # Bound the journal between prunes: fold it into the base once it
+                # grows past a fixed size, so reads stay cheap and the file cannot
+                # grow without limit. The fold is the ONLY O(entries) write, and it
+                # runs once per ~512 KiB of appends instead of once per write.
+                try:
+                    journal_bytes = journal_path.stat().st_size
+                except OSError:
+                    journal_bytes = 0
+                if journal_bytes > 512 * 1024:
+                    self.write_session_files_disk_cache_index_unlocked(
+                        self.read_session_files_disk_cache_index_unlocked()
+                    )
         except OSError as exc:
             logger.debug("failed to update session-files cache index: %s", exc)
 
@@ -6910,6 +6241,22 @@ class TmuxWebtermApp:
             stored_at_wall = float(record.get("stored_at", 0.0))
         except (TypeError, ValueError):
             return None
+        source_generation = self.session_files_source_generation(key)
+        stored_generation = str(record.get("source_generation") or "")
+        if stored_generation != source_generation:
+            # Same logical view, older source generation: usable only as a
+            # stale last-known-good. Never memory-cache it under the requested
+            # key — a strict fresh lookup must not see it as current.
+            if not allow_stale:
+                return None
+            payload_stale = record.get("payload")
+            try:
+                status_stale = HTTPStatus(int(record.get("status", int(HTTPStatus.OK))))
+                stored_at_stale = float(record.get("stored_at", 0.0))
+            except (TypeError, ValueError):
+                return None
+            age_stale = max(0.0, time.time() - stored_at_stale)
+            return copy.deepcopy(payload_stale), status_stale, False, age_stale
         payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
         manifest_path = self.session_files_disk_manifest_path(signature)
         try:
@@ -6935,6 +6282,7 @@ class TmuxWebtermApp:
         signature: str,
         payload: SessionFilesPayload,
         status: HTTPStatus,
+        source_generation: str = "",
     ) -> None:
         payload_signature = self.session_files_payload_signature(payload)
         payload_changed = True
@@ -6951,11 +6299,16 @@ class TmuxWebtermApp:
                 existing_status = int(existing.get("status", int(status)))
             except (TypeError, ValueError):
                 existing_status = -1
-            payload_changed = existing_payload_signature != payload_signature or existing_status != int(status)
+            payload_changed = (
+                existing_payload_signature != payload_signature
+                or existing_status != int(status)
+                or str(existing.get("source_generation") or "") != source_generation
+            )
         stored_at = time.time()
         record = {
             "version": SESSION_FILES_CACHE_VERSION,
             "signature": signature,
+            "source_generation": source_generation,
             "stored_at": stored_at,
             "status": int(status),
             "payload_signature": payload_signature,
@@ -6986,13 +6339,24 @@ class TmuxWebtermApp:
         except OSError:
             mtime = stored_at
         self.update_session_files_disk_cache_index(signature, size=payload_size, mtime=mtime)
+        # Accounting (DOIT.optimize-backends): every durable generation write is a
+        # counted event with its payload+manifest bytes and the rewritten index
+        # size, so the bounded-storage rework can be justified from measurements.
+        try:
+            index_bytes = self.session_files_disk_cache_index_path().stat().st_size
+        except OSError:
+            index_bytes = 0
+        self.record_session_files_phase(
+            "durable-cache-write", 0.0,
+            {"payload_and_manifest_bytes": int(payload_size), "index_bytes_rewritten": int(index_bytes)},
+        )
         self.request_session_files_disk_cache_prune("write")
 
     def write_session_files_disk_cache(self, key: tuple[Any, ...], payload: SessionFilesPayload, status: HTTPStatus) -> None:
         path, signature = self.session_files_disk_cache_path(key)
         try:
             with file_lock(path, dir_mode=0o700):
-                self.write_session_files_disk_cache_unlocked(path, signature, payload, status)
+                self.write_session_files_disk_cache_unlocked(path, signature, payload, status, self.session_files_source_generation(key))
         except OSError as exc:
             logger.warning("failed to write session-files cache %s: %s", path, exc)
 
@@ -7007,6 +6371,40 @@ class TmuxWebtermApp:
             details=details,
         )
 
+    def shared_git_identity(self, repo: Path, from_ref: str | None, to_ref: str | None) -> tuple[tuple[Any, ...], str]:
+        """One identity owner for BOTH the cache-key path and the snapshot path.
+
+        Order of preference: watcher-cached (repository-state record unchanged
+        -> ZERO Git commands), coalesced (another caller is computing it right
+        now), computed. The future is removed once it completes, so sequential
+        calls still recompute when the record is dirty and a file change is
+        visible to the very next request — nothing is delayed or hidden.
+        """
+        identity_key = (str(repo), from_ref or "", to_ref or "")
+        cached_identity = self.reusable_git_identity(identity_key, repo)
+        if cached_identity is not None:
+            return cached_identity, "watcher-cached"
+        with self.session_files_service.cache_lock:
+            identity_future = self.session_files_service.git_identity_futures.get(identity_key)
+            identity_owner = identity_future is None
+            if identity_owner:
+                identity_future = Future()
+                self.session_files_service.git_identity_futures[identity_key] = identity_future
+        if not identity_owner:
+            return identity_future.result(), "coalesced"
+        try:
+            dirty_generation_at_start = self.repo_dirty_generation(identity_key[0])
+            snapshot_identity = session_files.git_snapshot_identity(repo, from_ref, to_ref)
+            self.store_git_identity(identity_key, dirty_generation_at_start, snapshot_identity)
+            identity_future.set_result(snapshot_identity)
+        except BaseException as error:
+            identity_future.set_exception(error)
+            raise
+        finally:
+            with self.session_files_service.cache_lock:
+                self.session_files_service.git_identity_futures.pop(identity_key, None)
+        return snapshot_identity, "computed"
+
     def shared_session_files_git_snapshot(
         self,
         repo: Path,
@@ -7016,14 +6414,18 @@ class TmuxWebtermApp:
         identity: tuple[Any, ...] | None = None,
     ) -> dict[str, Any]:
         signature_started = time.perf_counter()
-        snapshot_identity = identity if identity is not None else session_files.git_snapshot_identity(repo, from_ref, to_ref)
+        if identity is not None:
+            snapshot_identity, identity_status = identity, "provided"
+        else:
+            snapshot_identity, identity_status = self.shared_git_identity(repo, from_ref, to_ref)
         self.record_performance_sample(
             BACKGROUND_ROLE_SESSION_FILES,
             "phase:git-signature",
             trigger="payload",
             compute_ms=(time.perf_counter() - signature_started) * 1000,
             cache_key={"kind": "git-snapshot"},
-            cache_status="computed",
+            cache_status=identity_status,
+            cache_hit=identity_status != "computed",
             details={"repo": str(repo)},
         )
         with self.session_files_service.cache_lock:
@@ -7112,9 +6514,7 @@ class TmuxWebtermApp:
             record.future.set_exception(error)
         elif result is not None and not record.future.done():
             record.future.set_result((copy.deepcopy(result[0]), result[1], result[2], result[3]))
-        with self.session_files_service.cache_lock:
-            if self.session_files_service.work_records.get(key) is record:
-                self.session_files_service.work_records.pop(key, None)
+        self.session_files_service.finish_work(key, record)
 
     def compute_session_files_cache_entry(
         self,
@@ -7123,7 +6523,13 @@ class TmuxWebtermApp:
         *,
         reserved: bool = False,
     ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float]:
-        work_record, owner = self.session_files_service.claim_work(key, threading.get_ident(), reserved=reserved)
+        path, signature = self.session_files_disk_cache_path(key)
+        work_record, owner = self.session_files_service.claim_work(
+            key,
+            threading.get_ident(),
+            reserved=reserved,
+            stable_signature=signature,
+        )
         if not owner:
             payload, status, cache_hit, age_seconds = work_record.future.result()
             self.record_performance_sample(
@@ -7139,7 +6545,6 @@ class TmuxWebtermApp:
             )
             return copy.deepcopy(payload), status, cache_hit, age_seconds
         started = time.perf_counter()
-        path, signature = self.session_files_disk_cache_path(key)
         compute_attempted = False
         compute_slot_acquired = False
         computed_result: tuple[SessionFilesPayload, HTTPStatus] | None = None
@@ -7176,13 +6581,21 @@ class TmuxWebtermApp:
                 compute_attempted = True
                 payload, status = compute()
                 computed_result = (payload, status)
-                self.set_session_files_memory_cache(key, payload, status)
                 serialization_started = time.perf_counter()
-                self.write_session_files_disk_cache_unlocked(path, signature, payload, status)
+                if self.session_files_service.stable_generation_is_current(work_record):
+                    self.set_session_files_memory_cache(key, payload, status)
+                    self.write_session_files_disk_cache_unlocked(path, signature, payload, status, self.session_files_source_generation(key))
                 self.record_session_files_phase(
                     "cache-serialization",
                     (time.perf_counter() - serialization_started) * 1000,
-                    {"cache_key_kind": self.performance_cache_key_kind(key), "payload_bytes": self.performance_payload_bytes(payload)},
+                    {
+                        "cache_key_kind": self.performance_cache_key_kind(key),
+                        "payload_bytes": self.performance_payload_bytes(payload),
+                        # Cumulative work counters (git spawns per verb, catalog
+                        # traversal, append bytes, untracked stat/read work) so
+                        # per-build deltas are derivable from consecutive samples.
+                        "runtime_counters": session_files.session_files_runtime_counters(),
+                    },
                 )
                 self.record_performance_sample(
                     BACKGROUND_ROLE_SESSION_FILES,
@@ -7470,11 +6883,10 @@ class TmuxWebtermApp:
                 request_payload = {"cache_key": repr(cache_key), "cache_key_data": cache_key}
             self.request_background_refresh(BACKGROUND_ROLE_SESSION_FILES, request_payload)
             return False
-        with self.session_files_service.cache_lock:
-            if cache_key in self.session_files_service.work_records:
-                return False
-            record = SessionFilesWorkRecord(owner_thread_id=None)
-            self.session_files_service.work_records[cache_key] = record
+        _path, stable_signature = self.session_files_disk_cache_path(cache_key)
+        record = self.session_files_service.reserve_work(cache_key, stable_signature)
+        if record is None:
+            return False
         worker = threading.Thread(target=target, args=(cache_key, *args), daemon=True)
         try:
             worker.start()
@@ -8293,7 +7705,7 @@ class TmuxWebtermApp:
         source: str,
         event_id: str,
         effort: str = "unknown",
-        pricing_profile: str = "default",
+        pricing_profile: str | None = None,
         service_tier: str = "default",
         thread_id: str = "",
         endpoint: str = "",
@@ -8313,6 +7725,15 @@ class TmuxWebtermApp:
             recorded_at = time.time()
         clean_source = str(source or "YOLOmux").strip() or "YOLOmux"
         clean_thread = str(thread_id or "").strip()
+        requested_pricing_profile = str(pricing_profile or "").strip().lower() if pricing_profile is not None else None
+        selected_pricing_profile = configured_usage_pricing_profile(
+            self.settings_payload().get("settings", {}),
+            provider=provider_name,
+            execution_source=clean_source,
+            endpoint=endpoint,
+            observed_at=recorded_at,
+            requested_profile=requested_pricing_profile,
+        )
         if provider_name == "openai" and str(endpoint or "").strip().lower() == "images":
             # Direct Images API usage identifies the exact image model in the
             # structured request/configuration, while its response supplies
@@ -8337,7 +7758,7 @@ class TmuxWebtermApp:
                 model=str(model or "").strip(),
                 model_evidence="configured invocation model" if str(model or "").strip() else "unknown",
                 effort=effort,
-                pricing_profile=pricing_profile,
+                pricing_profile=selected_pricing_profile,
                 service_tier=service_tier,
                 components=components,
                 root_thread_id=clean_thread or clean_source,
@@ -8353,15 +7774,26 @@ class TmuxWebtermApp:
                 root_thread_id=clean_thread or clean_source,
                 agent_thread_id=clean_thread or clean_source,
             ))
-        records = [normalized_usage_atom(atom) for atom in atoms]
-        records = [atom for atom in records if atom is not None]
-        if not records:
+        if not atoms:
             return False
         try:
-            response = self.stats_client.merge_server_records([{"time": recorded_at, "usage_atoms": records}], now=recorded_at)
-        except (OSError, RuntimeError, ValueError):
+            if not self.stats_current_client.ensure_started():
+                return False
+            records = tuple(
+                stats_current_usage.usage_atom_from_source(atom)
+                for atom in atoms
+            )
+            for _observations, usage_atoms, _tombstones, _coverage, _unavailable in stats_current_append_batches(
+                usage_atoms=records,
+            ):
+                response = self.stats_current_client.append(
+                    usage_atoms=usage_atoms,
+                )
+                if response.get("ok") is not True:
+                    return False
+        except (OSError, RuntimeError, TypeError, ValueError):
             return False
-        return bool(response.get("ok"))
+        return True
 
     def yoagent_stream_callback(self, stream_id: str, backend: str, *, model: str = "", effort: str = "unknown") -> Any:
         callback = self.yoagent_streams.callback_for(stream_id, backend)
@@ -8706,7 +8138,7 @@ class TmuxWebtermApp:
 
         sample_time = float(now if now is not None else sample.get("time") or time.time())
         cpu_percent = max(0.0, self.float_value(sample.get("cpu_percent"), 0.0))
-        record = self.stats_history_service.cpu_budget_record
+        record = self.stats_collection_state.cpu_budget_record
         record.current_percent = cpu_percent
         if cpu_percent <= SERVER_CPU_BUDGET_PERCENT:
             record.exceeded_since = 0.0
@@ -8746,7 +8178,7 @@ class TmuxWebtermApp:
         return self.server_cpu_budget_payload(now=sample_time)
 
     def server_cpu_budget_payload(self, *, now: float | None = None) -> dict[str, Any]:
-        record = self.stats_history_service.cpu_budget_record
+        record = self.stats_collection_state.cpu_budget_record
         sample_time = float(now if now is not None else time.time())
         sustained_seconds = max(0.0, sample_time - record.exceeded_since) if record.exceeded_since > 0 else 0.0
         status = "warning" if record.warning_emitted else ("watching" if record.exceeded_since > 0 else "ok")
@@ -8965,10 +8397,38 @@ class TmuxWebtermApp:
     def runtime_local_services(self) -> dict[str, Any]:
         """Return bounded worker diagnostics without exposing service payloads."""
         indexd = self.search_indexer.runtime_status()
-        # stats-reader retired: history encodes run in-process in this web
-        # server (StatsHistoryReader), so the honest roster is the four spawned
-        # services; in-process encode cost is part of the `web` row.
-        statsd = self.stats_client.runtime_status()
+        current_runtime = self.stats_current_runtime.status()
+        current_service = current_runtime.get("service") if isinstance(current_runtime.get("service"), dict) else {}
+        migration = current_service.get("migration") if isinstance(current_service.get("migration"), dict) else {}
+        build = current_service.get("build") if isinstance(current_service.get("build"), dict) else {}
+        service_usage = current_service.get("usage") if isinstance(current_service.get("usage"), dict) else {}
+        transcript_usage = self.stats_current_transcript_usage.status()
+        token_family = current_runtime.get("families", {}).get("agent_tokens", {}) if isinstance(current_runtime.get("families"), dict) else {}
+        token_cadence = float(token_family.get("cadence_seconds") or STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS) if isinstance(token_family, dict) else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+        usage = dict(service_usage)
+        usage["transcripts"] = transcript_usage
+        usage["health"] = stats_current_usage_health(
+            service_usage,
+            transcript_usage,
+            token_cadence,
+        )
+        statsd = {
+            "service": "statsd",
+            "pid": int(current_service.get("pid") or 0),
+            "started_at": float(current_service.get("started_at") or 0.0),
+            "version": int(current_service.get("version") or 0),
+            "healthy": current_service.get("ok") is True and migration.get("state") != "failed",
+            "clients": int(current_service.get("clients") or 0),
+            "queues": current_service.get("queue") if isinstance(current_service.get("queue"), dict) else {},
+            "cache": current_service.get("warm") if isinstance(current_service.get("warm"), dict) else {},
+            "migration": migration,
+            "build": build,
+            "delta": current_service.get("delta") if isinstance(current_service.get("delta"), dict) else {},
+            "sampler_families": current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
+            "usage": usage,
+            "last_failure": str(migration.get("failure") or build.get("last_failure") or ""),
+            "resources": {"cpu_percent": None, "rss_bytes": None},
+        }
         jobd = self.job_client.runtime_status()
         approvald = self.approval_client.runtime_status()
         rows = [indexd, statsd, jobd, approvald]
@@ -9076,12 +8536,10 @@ class TmuxWebtermApp:
                 "rss_bytes": int(sample.get("rss_bytes") or 0),
             },
             "cpu_budget": self.server_cpu_budget_payload(),
-            # Canonical Range x Resolution matrix from the single policy owner, so
-            # the browser can read choices from the server instead of a hand-copied
-            # JS table (DOIT.1 item 6). Additive: the current client ignores it; the
-            # render-only client will consume it when the exact-resolution serve path
-            # is switched on.
+            # System mirrors the same canonical matrix used by the current
+            # capabilities endpoint; there is no diagnostic-only policy copy.
             "resolution_capabilities": stats_resolution.wire_capabilities(),
+            "stats_current": self.stats_current_runtime.status(),
         }
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
@@ -9954,11 +9412,9 @@ class TmuxWebtermApp:
                 if not self.background_can_run(BACKGROUND_ROLE_TABBER_ACTIVITY):
                     return
                 started = time.monotonic()
-                refreshed = False
                 try:
                     if self.tabber_activity_has_recent_consumer():
                         self.refresh_tabber_activity_cache()
-                        refreshed = True
                     else:
                         self.record_performance_sample(
                             BACKGROUND_ROLE_TABBER_ACTIVITY,
@@ -9967,6 +9423,19 @@ class TmuxWebtermApp:
                             cache_key={"kind": "tabber-activity"},
                             cache_status="skipped:no-consumer",
                         )
+                        # Demand expired: park instead of ticking idle forever.
+                        # Clear-then-recheck closes the race with a returning
+                        # consumer: a mark before the recheck extends the
+                        # deadline (we skip the wait); one after it sets the
+                        # event (the wait returns immediately).
+                        record.wake.clear()
+                        with self.activity_transcript_service.tabber_cache_lock:
+                            if self.activity_transcript_service.tabber_warmer_record is not record or not record.running:
+                                return
+                            parked = record.consumer_until <= time.monotonic()
+                        if parked:
+                            record.wake.wait()
+                        continue
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.log_event(
                         None,
@@ -9975,7 +9444,7 @@ class TmuxWebtermApp:
                         {"diagnostic": str(exc)},
                         message_key="events.message.tabberActivity.refreshFailed",
                     )
-                interval = self.tabber_activity_refresh_seconds() if refreshed else self.tabber_activity_idle_refresh_seconds()
+                interval = self.tabber_activity_refresh_seconds()
                 elapsed = max(0.0, time.monotonic() - started)
                 time.sleep(max(0.1, interval - elapsed))
         finally:
@@ -13048,7 +12517,7 @@ class TmuxWebtermApp:
 
     def stop_auto_approve_all(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
-        self.stop_stats_metric_scheduler()
+        self.stats_current_runtime.stop()
         self.approval_client.request({"action": "shutdown"}, timeout=2.5)
         self.background_owner.stop()
         self.yoagent_controller.close_yoagent_codex_app_server()

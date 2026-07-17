@@ -9,12 +9,14 @@ import pytest
 
 from yolomux_lib import approvald
 from yolomux_lib import jobd
-from yolomux_lib import statsd
 from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services import runtime
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.local_services.registry import parse_ps_cpu_seconds
+from yolomux_lib.stats_current import client as stats_current_client
+from yolomux_lib.stats_current import service as stats_current_service
+from yolomux_lib.stats_current import storage as stats_current_storage
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +34,7 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
         "tmux_wall",
         "yolomux_lib.local_services",
         "yolomux_lib.local_services.rpc",
-        "yolomux_lib.statsd",
+        "yolomux_lib.stats_current.service",
         "yolomux_lib.jobd",
         "yolomux_lib.approvald",
     ):
@@ -152,7 +154,7 @@ def test_registry_resources_returns_none_when_ps_reports_no_such_pid(tmp_path, m
 def test_registry_health_request_identifies_expected_service_protocol(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", 5),
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 5),
     )
     captured = {}
 
@@ -170,7 +172,7 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     now = [100.0]
     registry = LocalServiceRegistry(
         tmp_path,
-        LocalServiceSpec("statsd", "yolomux_lib.statsd", "statsd.sock", 5),
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 5),
         clock=lambda: now[0],
     )
     requests = []
@@ -192,12 +194,71 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     assert requests.count("ping") == 2
 
 
+def test_registry_does_not_retire_or_replace_a_newer_service(tmp_path, monkeypatch):
+    spawned = []
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 21),
+        popen=lambda *args, **kwargs: spawned.append((args, kwargs)),
+    )
+    actions = []
+
+    def fake_request(method, payload=None, timeout=0.2):
+        actions.append(method)
+        return {"ok": False, "error_code": "upgrade_required", "version": 22, "pid": 4242}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    assert registry.ensure_started() is False
+    assert registry.ensure_started() is False
+    assert "shutdown" not in actions
+    assert spawned == []
+    assert registry.status()["upgrade_required"]["required_protocol_version"] == 22
+    assert actions == ["ping"]
+    assert registry.acquire_lease()["error_code"] == "upgrade_required"
+    assert actions == ["ping"]
+
+
+def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_path, monkeypatch):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+    )
+    actions = []
+
+    def fake_request(method, payload=None, timeout=0.2):
+        actions.append(method)
+        return {
+            "ok": False,
+            "error_code": "upgrade_required",
+            "version": 22,
+            "required_protocol_version": 22,
+            "pid": 4242,
+        }
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr("yolomux_lib.local_services.registry.pid_is_alive", lambda _pid: False)
+
+    registry._retire_incompatible_service()
+
+    assert actions == ["ping", "shutdown"]
+    assert registry._upgrade_required is None
+
+
 @pytest.mark.parametrize(
     ("module", "service_name", "client_factory", "extra_args"),
     (
         (jobd, "jobd", jobd.JobClient, ()),
         (approvald, "approvald", approvald.ApprovalClient, ()),
-        (statsd, "statsd", lambda socket_path: statsd.StatsClient(socket_path, socket_path.with_suffix(".sqlite3")), ("--database", "{database}")),
+        (
+            stats_current_service,
+            "statsd",
+            lambda socket_path: stats_current_client.StatsCurrentClient(
+                socket_path,
+                socket_path.parent / stats_current_storage.DATABASE_FILENAME,
+            )._transport,
+            ("--database", "{database}"),
+        ),
     ),
 )
 def test_service_module_entrypoint_exits_cleanly_on_sigterm(tmp_path, module, service_name, client_factory, extra_args):
@@ -213,7 +274,7 @@ def test_service_module_entrypoint_exits_cleanly_on_sigterm(tmp_path, module, se
         "30",
     ]
     for item in extra_args:
-        argv.append(str(socket_path.with_suffix(".sqlite3")) if item == "{database}" else item)
+        argv.append(str(socket_path.parent / stats_current_storage.DATABASE_FILENAME) if item == "{database}" else item)
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     client = client_factory(socket_path)
     try:

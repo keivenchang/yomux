@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import time
 from concurrent.futures import Future
@@ -208,8 +209,11 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
     assert service._submit({"task": "text_facts", "payload": {"text": "overflow"}}) == {"ok": False, "error": "queue full"}
     assert service._submit({"task": "text_facts", "payload": {"text": "invalid"}, "deadline_ms": "tomorrow"}) == {"ok": False, "error": "invalid generation or deadline"}
     assert service._submit({"task": "text_facts", "payload": {"text": "negative"}, "deadline_ms": -1}) == {"ok": False, "error": "invalid deadline"}
-    service.leases = {str(number): number for number in range(runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES)}
-    lease_response, _binary = service.handle({"action": "lease", "client_pid": 123})
+    service.leases = {
+        str(number): os.getpid()
+        for number in range(runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES)
+    }
+    lease_response, _binary = service.handle({"action": "lease", "client_pid": os.getpid()})
     assert lease_response == {"ok": False, "error": "too many clients", "leases": runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES, "version": jobd.JOBD_PROTOCOL_VERSION}
 
     broken = service._queue_record("text_facts", {"text": "crash"}, "interactive", 999, "crash")

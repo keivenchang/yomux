@@ -49,9 +49,6 @@
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
-.mobile-terminal-key-launcher--open {
-  font-size: 20px;
-}
 /* Touch terminals keep the OS keyboard for text entry. The smart-key palette is a movable overlay,
    not a permanent row, so an idle terminal keeps its full visible height. */
 .mobile-terminal-keybar {
@@ -60,13 +57,12 @@
   inset-inline-end: max(var(--space-8), env(safe-area-inset-right));
   inset-block-end: calc(max(var(--space-8), env(safe-area-inset-bottom)) + 44px);
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  grid-auto-rows: max-content;
-  align-content: start;
-  gap: var(--space-4);
-  width: min(18rem, calc(100vw - var(--space-12)));
+  grid-template-rows: 42px minmax(0, 1fr);
+  width: min(18rem, calc(100% - var(--space-4)));
+  height: min(204px, calc(100% - var(--space-4)));
   max-height: calc(100% - var(--space-4));
-  padding: calc(var(--space-2) + var(--space-4)) var(--space-2) var(--space-2);
+  padding: 0;
+  overflow: hidden;
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-md);
   background: var(--pane-ctl-bg, var(--pane-tab-control-bg));
@@ -81,18 +77,44 @@
 }
 .mobile-terminal-key-grabber {
   position: absolute;
-  inset-inline: 50% auto;
-  inset-block-start: var(--space-2);
-  width: 24px;
-  height: 3px;
+  z-index: var(--z-layer-raised);
+  inset-inline: 0;
+  inset-block-start: 0;
+  height: 42px;
+  border-block-end: 1px solid color-mix(in srgb, var(--pane-tab-text) 24%, transparent);
+  background: color-mix(in srgb, var(--pane-tab-text) 10%, var(--pane-ctl-bg, var(--pane-tab-control-bg)));
+  cursor: grab;
+  touch-action: none;
+}
+.mobile-terminal-key-grabber::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 50%;
+  inset-block-start: var(--space-3);
+  width: 40px;
+  height: 5px;
   transform: translateX(-50%);
   border-radius: var(--radius-pill);
-  background: color-mix(in srgb, var(--pane-tab-text) 55%, transparent);
-  cursor: grab;
+  background: color-mix(in srgb, var(--pane-tab-text) 78%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--pane-ctl-bg, var(--pane-tab-control-bg)) 80%, transparent);
 }
-/* Esc sits alone in the top-left corner of the keybar, like a real keyboard, level with
-   the primary row. Ctrl/Shift keep their own column directly below it, unchanged. */
-.mobile-terminal-keybar > .mobile-terminal-key--escape {
+.mobile-terminal-key-content {
+  grid-row: 2;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-rows: repeat(4, 36px);
+  gap: var(--space-1);
+  min-width: 0;
+  min-height: 0;
+  padding: 0 var(--space-1) var(--space-1);
+  overflow: hidden;
+  touch-action: none;
+}
+.mobile-terminal-key-content[hidden] {
+  display: none;
+}
+/* Esc sits alone in the top-left corner. Ctrl/Shift/Paste stay directly below it. */
+.mobile-terminal-key-content > .mobile-terminal-key--escape {
   grid-column: 1;
   grid-row: 1;
   width: 36px;
@@ -103,11 +125,9 @@
 }
 .mobile-terminal-key-side {
   grid-column: 1;
-  grid-row: 2;
+  grid-row: 2 / 5;
   display: grid;
-  grid-template-rows: repeat(2, 36px);
-  align-self: end;
-  align-content: start;
+  grid-template-rows: repeat(3, 36px);
   gap: var(--space-1);
 }
 .mobile-terminal-key-side .mobile-terminal-key {
@@ -126,38 +146,34 @@
 }
 .mobile-terminal-keyrow--primary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-1);
   overflow: visible;
-}
-.mobile-terminal-keyrow-bottom {
-  grid-column: 1 / -1;
-  grid-row: 3;
-  display: grid;
-  grid-template-columns: repeat(3, 36px);
-  justify-content: start;
-  overflow: visible;
-}
-.mobile-terminal-keyrow-bottom .mobile-terminal-key {
-  min-width: 36px;
-  padding-inline: 0;
 }
 .mobile-terminal-keyrow-shell {
   grid-column: 2;
   grid-row: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-3);
 }
-.mobile-terminal-keyrow-shell > .mobile-terminal-key--more {
-  align-self: start;
+.mobile-terminal-keybar > .mobile-terminal-key--close {
+  position: absolute;
+  z-index: var(--z-layer-control);
+  inset-inline-end: var(--space-2);
+  inset-block-start: var(--space-2);
+  width: 36px;
   min-width: 36px;
-  padding-inline: var(--space-6);
+  min-height: 36px;
+  padding-inline: 0;
+}
+.mobile-terminal-key--close {
+  font-size: 20px;
 }
 .mobile-terminal-keyrow--primary .mobile-terminal-key {
-  min-width: 36px;
-  padding-inline: var(--space-5);
+  min-width: 0;
+  padding-inline: 0;
   font-size: clamp(11px, var(--ui-font-size-xs), 15px);
 }
 .mobile-terminal-keyrow::-webkit-scrollbar {
@@ -166,45 +182,34 @@
 .mobile-terminal-keyrow[hidden] {
   display: none;
 }
-.mobile-terminal-keybar--more .mobile-terminal-keyrow-shell,
-.mobile-terminal-keybar--more > .mobile-terminal-key--escape,
-.mobile-terminal-keybar--more .mobile-terminal-key-side,
-.mobile-terminal-keybar--more .mobile-terminal-key-dpad,
-.mobile-terminal-keybar--more .mobile-terminal-keyrow-bottom {
-  visibility: hidden;
-  pointer-events: none;
-}
-.mobile-terminal-keybar--more .mobile-terminal-keyrow--more {
-  grid-column: 1 / -1;
-  grid-row: 1 / 4;
-  align-self: start;
-  display: grid;
+.mobile-terminal-key-content--more {
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
-  overflow: auto;
+  grid-template-rows: repeat(3, 36px);
+  align-content: space-between;
+  gap: var(--space-1);
 }
-.mobile-terminal-keybar--more .mobile-terminal-keyrow--more .mobile-terminal-key {
+.mobile-terminal-key-content--more .mobile-terminal-key {
   min-width: 0;
-  padding-inline: var(--space-3);
+  padding-inline: var(--space-2);
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.mobile-terminal-keybar--more .mobile-terminal-keyrow--more .mobile-terminal-key--more {
+.mobile-terminal-key-content--more .mobile-terminal-key--more {
   grid-column: 4;
   grid-row: 1;
-  width: 36px;
-  min-width: 36px;
-  padding-inline: 0;
-  justify-self: end;
+}
+.mobile-terminal-key-content--more .mobile-terminal-key--interrupt {
+  grid-column: 4;
+  grid-row: 3;
 }
 .mobile-terminal-key-dpad {
   grid-column: 2;
-  grid-row: 2;
+  grid-row: 2 / 5;
   display: grid;
-  grid-template-columns: repeat(5, 36px);
+  grid-template-columns: 36px 32px 36px 32px 44px 36px;
   grid-template-rows: repeat(3, 36px);
-  justify-content: center;
-  gap: var(--space-3);
+  justify-content: end;
+  gap: var(--space-1);
 }
 .mobile-terminal-key {
   flex: 0 0 auto;
@@ -220,14 +225,22 @@
   touch-action: manipulation;
 }
 .mobile-terminal-key-dpad .mobile-terminal-key--copy { grid-column: 1; grid-row: 1; }
-.mobile-terminal-key-dpad .mobile-terminal-key--command-v { grid-column: 1; grid-row: 3; }
+.mobile-terminal-key-dpad .mobile-terminal-key--alt { grid-column: 1; grid-row: 3; }
+.mobile-terminal-key-dpad .mobile-terminal-key--cmd { grid-column: 2; grid-row: 3; }
 .mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-up { grid-column: 5; grid-row: 1; }
 .mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-down { grid-column: 5; grid-row: 3; }
+.mobile-terminal-key-dpad .mobile-terminal-key--interrupt { grid-column: 6; grid-row: 3; }
 .mobile-terminal-key--arrow-up { grid-column: 3; grid-row: 1; }
 .mobile-terminal-key--arrow-left { grid-column: 2; grid-row: 2; }
-.mobile-terminal-key--enter { grid-column: 3; grid-row: 2; }
+.mobile-terminal-key--enter { grid-column: 5; grid-row: 2; }
 .mobile-terminal-key--arrow-right { grid-column: 4; grid-row: 2; }
 .mobile-terminal-key--arrow-down { grid-column: 3; grid-row: 3; }
+.mobile-terminal-key--arrow-left,
+.mobile-terminal-key--arrow-right {
+  min-width: 0;
+  width: 100%;
+  padding-inline: 0;
+}
 .mobile-terminal-key--interrupt {
   color: var(--danger-text);
   border-color: var(--danger-border);

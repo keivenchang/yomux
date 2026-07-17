@@ -130,7 +130,7 @@ UNUSED_CSS_TOKEN_ALLOWLIST: dict[str, str] = {
         "--editor-text-padding-inline", "--editor-ui-font-size", "--editor-ui-font-size-sm",
         "--file-explorer-open-inline-size", "--inactive-gray", "--inactive-gray-hover",
         "--inactive-tab-bg", "--inactive-tab-border", "--info-tree-border",
-        "--info-tree-group-bg", "--js-debug-agent-token-pattern-ink-rgb", "--left",
+        "--info-tree-group-bg", "--left",
         "--pane-detail-bg", "--pane-tab-active-accent", "--pane-tab-panel-detail-bg",
         "--pane-tab-panel-head-bg", "--pane-tab-panel-ring-shadow", "--pane-tab-zoom-bg",
         "--pane-tab-zoom-border", "--pane-tab-zoom-hover-bg", "--pane-tab-zoom-hover-border",
@@ -139,6 +139,9 @@ UNUSED_CSS_TOKEN_ALLOWLIST: dict[str, str] = {
         "--yolo-reminder-duration", "--z-finder-quick-access", "--z-tab-popover",
     )
 }
+UNUSED_CSS_TOKEN_ALLOWLIST["--js-debug-agent-token-pattern-ink-rgb"] = (
+    "established YO!stats theme token retained for renderer compatibility"
+)
 SEMANTIC_CONTRAST_PAIRS: tuple[tuple[str, str], ...] = (
     ("--text", "--bg"),
     ("--pane-tab-text", "--pane-tab-control-bg"),
@@ -154,8 +157,13 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/97_share_replay.js": (
         ("shared editor replay", "applyEditorStateFields("),
     ),
-    "static_src/js/yolomux/83_debug_panel.js": (
-        ("graph series descriptor", "function debugGraphSeriesData", ".value(", ".hasData("),
+    "static_src/js/yolomux/82_stats_current.js": (
+        (
+            "current plot-ready series owner",
+            "function currentStatsGroups",
+            "function currentStatsSeriesGroup",
+            "function currentStatsChartHtml",
+        ),
     ),
     # Finder, Tabber, and Differ deliberately have distinct product-specific callbacks, but their
     # selection, expansion, click, and keyboard mechanics must all flow through this one parent.
@@ -745,6 +753,8 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/81_yoagent_panel.js",
         "static_src/js/yolomux/82_chat_panel.js",
         "static_src/js/yolomux/82_preferences_panel.js",
+        "static_src/js/yolomux/82_stats_current.js",
+        "static_src/js/yolomux/83_stats_panel.js",
         "static_src/js/yolomux/83_debug_panel.js",
         "static_src/js/yolomux/90_changes_editor.js",
         "static_src/js/yolomux/92_editor_nav.js",

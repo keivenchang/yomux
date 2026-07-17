@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -8,6 +9,7 @@ from typing import Any
 
 SERVER_LOG_CAPACITY = 500
 SERVER_LOG_LEVELS = frozenset({"debug", "info", "warning", "error"})
+SERVER_LOG_MESSAGE_MAX_CHARS = 4096
 
 
 class ServerLogRing:
@@ -74,6 +76,35 @@ class ServerLogRing:
 
 
 SERVER_LOGS = ServerLogRing()
+
+
+class ServerLogHandler(logging.Handler):
+    """Mirror process warnings/errors into the operator-visible bounded ring."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):
+            message = str(record.msg)
+        level = "error" if record.levelno >= logging.ERROR else "warning" if record.levelno >= logging.WARNING else "info"
+        SERVER_LOGS.emit(
+            level,
+            record.name or "server",
+            message[:SERVER_LOG_MESSAGE_MAX_CHARS],
+            category="python",
+        )
+
+
+def install_server_log_handler() -> ServerLogHandler:
+    """Install the one root handler that feeds the in-memory operator log."""
+
+    root = logging.getLogger()
+    existing = next((handler for handler in root.handlers if isinstance(handler, ServerLogHandler)), None)
+    if existing is not None:
+        return existing
+    handler = ServerLogHandler(level=logging.WARNING)
+    root.addHandler(handler)
+    return handler
 
 
 def emit_server_log(

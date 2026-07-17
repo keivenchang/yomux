@@ -9,7 +9,13 @@ from typing import get_origin
 from typing import get_type_hints
 
 
+import threading as threading_module
+
+import yolomux_lib.app as app_module
+from yolomux_lib import common as common_module
+from yolomux_lib import sessions as sessions_module
 from yolomux_lib.app import TmuxWebtermApp
+from yolomux_lib.state_services import ClientEventWatcherRecord
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
@@ -159,6 +165,82 @@ def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_sta
     bounded = next(item for item in reversed(recent) if item["surface"] == "phase:bounded-details")
     assert len(bounded["details"]["repo"]) <= 512
     assert "nested" not in bounded["details"]
+
+
+def test_newer_session_files_generation_cannot_be_overwritten_by_delayed_old_work(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp = TmuxWebtermApp([])
+    old_started = threading_module.Event()
+    release_old = threading_module.Event()
+    results = {}
+    logical = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "s1", 24.0, "", "", ())
+    old_key = (*logical, (("s1", "old-info"),), (("repo", "old-repo"),))
+    new_key = (*logical, (("s1", "new-info"),), (("repo", "new-repo"),))
+
+    def old_compute():
+        old_started.set()
+        assert release_old.wait(timeout=5)
+        return {"files": [{"path": "old.py"}], "repos": [], "errors": []}, HTTPStatus.OK
+
+    def run_old():
+        results["old"] = webapp.compute_session_files_cache_entry(old_key, old_compute)
+
+    def run_new():
+        results["new"] = webapp.compute_session_files_cache_entry(
+            new_key,
+            lambda: ({"files": [{"path": "new.py"}], "repos": [], "errors": []}, HTTPStatus.OK),
+        )
+
+    old_thread = threading_module.Thread(target=run_old)
+    new_thread = threading_module.Thread(target=run_new)
+    try:
+        old_thread.start()
+        assert old_started.wait(timeout=5)
+        new_thread.start()
+        release_old.set()
+        old_thread.join(timeout=5)
+        new_thread.join(timeout=5)
+        assert not old_thread.is_alive()
+        assert not new_thread.is_alive()
+        path, _signature = webapp.session_files_disk_cache_path(new_key)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        assert record["source_generation"] == webapp.session_files_source_generation(new_key)
+        assert record["payload"]["files"] == [{"path": "new.py"}]
+        assert old_key not in webapp.session_files_service.cache
+        assert new_key in webapp.session_files_service.cache
+        assert results["old"][0]["files"] == [{"path": "old.py"}]
+        assert results["new"][0]["files"] == [{"path": "new.py"}]
+    finally:
+        release_old.set()
+        old_thread.join(timeout=1)
+        new_thread.join(timeout=1)
+        webapp.control_server.stop()
+
+
+def test_background_reservation_order_not_delayed_worker_start_controls_stable_cache(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp = TmuxWebtermApp([])
+    logical = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "s1", 24.0, "", "", ())
+    old_key = (*logical, (("s1", "old-info"),), (("repo", "old-repo"),))
+    new_key = (*logical, (("s1", "new-info"),), (("repo", "new-repo"),))
+    old_path, stable_signature = webapp.session_files_disk_cache_path(old_key)
+    try:
+        old_record = webapp.session_files_service.reserve_work(old_key, stable_signature)
+        assert old_record is not None
+        assert old_record.stable_generation > 0
+
+        new_payload = {"files": [{"path": "new.py"}], "repos": [], "errors": []}
+        webapp.compute_session_files_cache_entry(new_key, lambda: (new_payload, HTTPStatus.OK))
+        old_payload = {"files": [{"path": "old.py"}], "repos": [], "errors": []}
+        old_result = webapp.compute_session_files_cache_entry(old_key, lambda: (old_payload, HTTPStatus.OK), reserved=True)
+
+        record = json.loads(old_path.read_text(encoding="utf-8"))
+        assert record["payload"]["files"] == [{"path": "new.py"}]
+        assert record["source_generation"] == webapp.session_files_source_generation(new_key)
+        assert old_result[0]["files"] == [{"path": "old.py"}]
+        assert old_key not in webapp.session_files_service.cache
+    finally:
+        webapp.control_server.stop()
 
 
 def test_scans_claude_and_codex_tool_changes(tmp_path):
@@ -409,6 +491,44 @@ def test_normalized_codex_usage_atoms_subtract_cached_input_and_keep_effort_with
     assert {atom.effort for atom in by_time[2.0].values()} == {"low"}
     assert {atom.effort for atom in by_time[4.0].values()} == {"high"}
     assert sum(atom.quantity for atom in atoms if atom.direction == "output") == 25.0
+
+
+def test_codex_thread_settings_attribute_token_count_before_first_turn_context(tmp_path):
+    transcript = tmp_path / "rollout-thread-settings.jsonl"
+    transcript.write_text("\n".join(json.dumps(record) for record in [
+        {"type": "session_meta", "timestamp": 1, "payload": {"id": "thread-settings"}},
+        {"type": "response_item", "timestamp": 2, "payload": {"text": "pretend model gpt-prose"}},
+        {
+            "type": "event_msg",
+            "timestamp": 3,
+            "payload": {
+                "type": "thread_settings_applied",
+                "thread_settings": {
+                    "model": "gpt-explicit",
+                    "reasoning_effort": "xhigh",
+                    "service_tier": "default",
+                },
+            },
+        },
+        {
+            "type": "event_msg",
+            "timestamp": 4,
+            "payload": {
+                "type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": 10, "output_tokens": 5}},
+            },
+        },
+        {"type": "turn_context", "timestamp": 5, "payload": {"model": "gpt-later", "effort": "low"}},
+    ]) + "\n", encoding="utf-8")
+
+    atoms = session_files.transcript_usage_atoms(transcript, "codex")
+
+    assert {atom.model for atom in atoms} == {"gpt-explicit"}
+    assert {atom.model_evidence for atom in atoms} == {
+        "thread_settings_applied.thread_settings.model",
+    }
+    assert {atom.effort for atom in atoms} == {"xhigh"}
+    assert {atom.service_tier for atom in atoms} == {"default"}
 
 
 def test_codex_usage_atom_iterator_yields_before_reading_the_rest_of_one_large_file(monkeypatch, tmp_path):
@@ -2367,3 +2487,207 @@ def test_session_files_payload_does_not_invent_agent_for_repo_only_change(tmp_pa
     assert payload["files"][0]["agents"] == []
     assert payload["files"][0]["agent"] == ""
     assert payload["files"][0]["source"] == "git"
+
+
+def test_untracked_line_counts_cache_by_identity_and_invalidate_on_change(tmp_path, monkeypatch):
+    """Repeated payload assembly must not re-read unchanged untracked files; a
+    changed file (size/mtime) is re-read and re-counted."""
+    target = tmp_path / "notes.txt"
+    target.write_text("one\ntwo\nthree\n", encoding="utf-8")
+    session_files._UNTRACKED_LINE_COUNT_CACHE.clear()
+
+    reads = []
+    real_read_bytes = Path.read_bytes
+
+    def counting_read_bytes(self):
+        reads.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    assert session_files.untracked_added_line_count(target) == 3
+    assert session_files.untracked_added_line_count(target) == 3
+    assert len(reads) == 1  # second lookup served from the identity cache
+
+    target.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    os.utime(target, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
+    assert session_files.untracked_added_line_count(target) == 4  # identity changed -> re-read
+    assert len(reads) == 2
+
+
+def test_concurrent_views_share_one_git_identity_run(tmp_path, monkeypatch):
+    """Six concurrent session-files views of one repo must pay the expensive
+    `git status --untracked-files=all` signature ONCE (in-flight single-flight),
+    while sequential calls still recompute so freshness is never delayed."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    (repo / "one.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "one.py")
+    git(repo, "commit", "-m", "init")
+
+    real_identity = session_files.git_snapshot_identity
+    calls = []
+    owner_entered = threading_module.Event()
+    allow_finish = threading_module.Event()
+
+    def gated_counted_identity(path, from_ref=None, to_ref=None):
+        calls.append(str(path))
+        owner_entered.set()
+        # Hold the in-flight window open until the test has parked every other
+        # caller on the shared future, making the coalesce deterministic.
+        assert allow_finish.wait(timeout=10)
+        return real_identity(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files, "git_snapshot_identity", gated_counted_identity)
+    webapp = TmuxWebtermApp(["one"])
+    try:
+        results = []
+
+        errors = []
+        lined_up = threading_module.Barrier(6, timeout=10)
+
+        def view():
+            try:
+                lined_up.wait()  # all six are running before any calls: no startup latency race
+                results.append(webapp.shared_session_files_git_snapshot(repo, None, None))
+            except BaseException as error:  # surface thread failures in the assertion
+                errors.append(repr(error))
+
+        threads = [threading_module.Thread(target=view) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        assert owner_entered.wait(timeout=10)
+        time.sleep(1.0)  # let the five coalescers park on the shared future
+        allow_finish.set()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert errors == [], errors
+        assert len(results) == 6 and all(isinstance(item, dict) for item in results)
+        # Exactly TWO identity runs for a six-view cold burst: one pre-build
+        # signature shared by all six callers (the single-flight under test) plus
+        # the snapshot owner's post-build freshness re-validation. Before the
+        # single-flight this burst paid seven (six pre + one post).
+        assert len(calls) == 2, f"six concurrent views ran {len(calls)} identity computations"
+
+        # A sequential follow-up recomputes its own pre-build signature (no
+        # staleness window) and hits the cached snapshot record (no post run).
+        webapp.shared_session_files_git_snapshot(repo, None, None)
+        assert len(calls) == 3
+    finally:
+        webapp.close() if hasattr(webapp, "close") else None
+
+
+def test_session_files_runtime_counters_cover_the_bounded_accounting_dimensions(tmp_path):
+    """The accounting snapshot exposes cumulative (monotonic) work counters for
+    git spawns per verb, transcript-catalog traversal, append bytes parsed, and
+    untracked stat/line-count work, without a second profiler."""
+
+    before = session_files.session_files_runtime_counters()
+    for key in ("append_bytes_parsed", "untracked_line_count_hits", "untracked_line_count_reads", "git_commands", "transcript_catalog"):
+        assert key in before
+
+    # untracked read then identity hit
+    target = tmp_path / "untracked.py"
+    target.write_text("one\ntwo\n", encoding="utf-8")
+    assert session_files.untracked_added_line_count(target) == 2
+    assert session_files.untracked_added_line_count(target) == 2
+    # append bytes
+    state: dict[str, object] = {}
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text('{"a":1}\n', encoding="utf-8")
+    session_files.scan_transcript_append(transcript, 0, lambda line: None, state)
+    # one git spawn and one catalog traversal
+    common_module.git(["version"], cwd=str(tmp_path))
+    sessions_module._cataloged_jsonl_files(tmp_path)
+
+    after = session_files.session_files_runtime_counters()
+    assert after["untracked_line_count_reads"] == before["untracked_line_count_reads"] + 1
+    assert after["untracked_line_count_hits"] == before["untracked_line_count_hits"] + 1
+    assert after["append_bytes_parsed"] == before["append_bytes_parsed"] + len('{"a":1}\n')
+    assert after["git_commands"].get("version", 0) == before["git_commands"].get("version", 0) + 1
+    assert after["transcript_catalog"]["calls"] == before["transcript_catalog"]["calls"] + 1
+    assert after["transcript_catalog"]["dirs_statted"] > before["transcript_catalog"]["dirs_statted"]
+
+
+def test_repo_state_record_warm_hit_runs_zero_git_commands_and_dirty_event_recomputes(tmp_path, monkeypatch):
+    """Repository-state record (native-watcher backed): with the watcher healthy
+    and no event for the repo, a warm identity request runs ZERO Git commands;
+    a worktree or .git-metadata event bumps the dirty generation and exactly the
+    next request recomputes."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    (repo / "one.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "one.py")
+    git(repo, "commit", "-m", "init")
+
+    monkeypatch.setattr(TmuxWebtermApp, "discover_and_start", lambda self: None, raising=False)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = TmuxWebtermApp(["1"])
+    try:
+        resolved_repo = repo.resolve()
+        # Simulate a healthy native watcher covering this repo.
+        record = webapp.client_watch_service.event_watcher_record
+        record.filesystem_healthy = True
+        record.filesystem_roots = (str(tmp_path.resolve()),)
+        record.filesystem_watch_paths = (str(tmp_path.resolve()),)
+
+        identity_one, status_one = webapp.shared_git_identity(resolved_repo, None, None)
+        assert status_one == "computed"
+
+        # Warm: identical result, zero additional git spawns.
+        spawns_before = dict(common_module.GIT_COMMAND_COUNTS)
+        identity_two, status_two = webapp.shared_git_identity(resolved_repo, None, None)
+        assert status_two == "watcher-cached"
+        assert identity_two == identity_one
+        assert dict(common_module.GIT_COMMAND_COUNTS) == spawns_before
+
+        # A worktree event dirties the record; the next request recomputes and
+        # sees the change immediately.
+        (repo / "one.py").write_text("x = 2\n", encoding="utf-8")
+        webapp.mark_repo_state_dirty([resolved_repo / "one.py"])
+        identity_three, status_three = webapp.shared_git_identity(resolved_repo, None, None)
+        assert status_three == "computed"
+        assert identity_three != identity_one
+        # One dirty event causes AT MOST one follow-up: the next request is
+        # served from the record again with zero Git commands.
+        spawns_after_recompute = dict(common_module.GIT_COMMAND_COUNTS)
+        _identity, status_again = webapp.shared_git_identity(resolved_repo, None, None)
+        assert status_again == "watcher-cached"
+        assert dict(common_module.GIT_COMMAND_COUNTS) == spawns_after_recompute
+
+        # A pure commit (only .git metadata changes) also dirties the record.
+        git(repo, "add", "one.py")
+        git(repo, "commit", "-m", "second")
+        webapp.mark_repo_state_dirty([resolved_repo / ".git" / "HEAD"])
+        identity_four, status_four = webapp.shared_git_identity(resolved_repo, None, None)
+        assert status_four == "computed"
+        assert identity_four != identity_three
+
+        # Watcher unhealthy -> fail open: always compute.
+        record.filesystem_healthy = False
+        _identity, status_five = webapp.shared_git_identity(resolved_repo, None, None)
+        assert status_five == "computed"
+    finally:
+        webapp.control_server.stop()
+
+
+def test_git_metadata_event_filter_admits_identity_inputs_only(tmp_path):
+    """The watch filter admits exactly the .git paths that change
+    git_snapshot_identity (HEAD, index, refs, packed-refs, MERGE_HEAD) and keeps
+    objects/ and logs/ churn out."""
+
+    webapp = object.__new__(TmuxWebtermApp)
+    record = ClientEventWatcherRecord()
+    record.filesystem_watch_paths = (str(tmp_path),)
+    git_dir = tmp_path / "repo" / ".git"
+    assert webapp.git_metadata_event_allowed(git_dir / "HEAD", record) is True
+    assert webapp.git_metadata_event_allowed(git_dir / "index", record) is True
+    assert webapp.git_metadata_event_allowed(git_dir / "packed-refs", record) is True
+    assert webapp.git_metadata_event_allowed(git_dir / "MERGE_HEAD", record) is True
+    assert webapp.git_metadata_event_allowed(git_dir / "refs" / "heads" / "main", record) is True
+    assert webapp.git_metadata_event_allowed(git_dir / "objects" / "ab" / "cdef", record) is False
+    assert webapp.git_metadata_event_allowed(git_dir / "logs" / "HEAD", record) is False
+    assert webapp.git_metadata_event_allowed(Path("/outside/.git/HEAD"), record) is False
+    # The general filter routes .git paths through this policy.
+    assert webapp.native_filesystem_event_allowed(git_dir / "objects" / "pack" / "p.idx", record) is False

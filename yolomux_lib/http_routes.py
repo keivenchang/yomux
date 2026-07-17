@@ -315,69 +315,41 @@ def get_ping(request: Any, parsed: Any, route: Route) -> None:
     request.write_json({"ok": True, "time": time.time()})
 
 
-def get_stats_sample(request: Any, parsed: Any, route: Route) -> None:
+def get_stats_snapshot(request: Any, parsed: Any, route: Route) -> None:
     del route
-    started = time.perf_counter()
-    qs = request_query(request, parsed)
-    since, error = parse_query_int(qs, "since", 0, min_value=0)
-    if error:
-        request.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
-        return
-    client_id = (qs.get("client_id") or qs.get("client") or [""])[0]
-    token_consumer = query_bool(qs, "token_consumer") or query_bool(qs, "tokens")
-    token_since, token_since_error = parse_query_int(qs, "token_since", 0, min_value=0)
-    token_resolution, token_resolution_error = parse_query_int(qs, "token_resolution", 0, min_value=0)
-    token_history_start, token_history_start_error = parse_query_int(qs, "token_history_start", 0, min_value=0)
-    token_history_end, token_history_end_error = parse_query_int(qs, "token_history_end", 0, min_value=0)
-    token_history_start_supplied = "token_history_start" in qs
-    token_history_end_supplied = "token_history_end" in qs
-    history_start, history_start_error = parse_query_int(qs, "history_start", 0, min_value=0)
-    history_end, history_end_error = parse_query_int(qs, "history_end", 0, min_value=0)
-    history_resolution, history_resolution_error = parse_query_int(qs, "history_resolution", 0, min_value=0, max_value=24 * 60 * 60)
-    history_max_points, history_max_points_error = parse_query_int(qs, "history_max_points", 0, min_value=0, max_value=100_000)
-    history_enabled = (qs.get("history") or ["1"])[0] != "0" and not query_bool(qs, "history_disabled")
-    exact_resolution = query_bool(qs, "exact_resolution")
-    if token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error:
-        request_error = token_since_error or token_resolution_error or token_history_start_error or token_history_end_error or history_start_error or history_end_error or history_resolution_error or history_max_points_error
-        request.write_json(request_error.payload(), status=HTTPStatus.BAD_REQUEST)
-        return
-    try:
-        app_profile, encoded = request.server.app.stats_sample_encoded_payload(
-            since=since or 0,
-            client_id=client_id,
-            token_consumer=token_consumer,
-            token_since=token_since or 0,
-            token_resolution_seconds=token_resolution or 0,
-            token_history_start=token_history_start if token_history_start_supplied else None,
-            token_history_end=token_history_end if token_history_end_supplied else None,
-            history_start=history_start or 0,
-            history_end=history_end or 0,
-            history_resolution_seconds=history_resolution or 0,
-            history_max_points=history_max_points or 0,
-            include_history=history_enabled,
-            exact_resolution=exact_resolution,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        # Statsd is the sole durable history owner. A failed or timed-out RPC
-        # must be an explicit bounded 503, never a legacy in-process replay.
-        request.write_json(
-            error_payload(
-                "statsd unavailable",
-                message_key="stats.error.unavailable",
-                message_params={"error": "statsd unavailable"},
-                diagnostic=exc,
-                status=HTTPStatus.SERVICE_UNAVAILABLE,
-            ),
-            status=HTTPStatus.SERVICE_UNAVAILABLE,
-        )
-        return
-    build_ms = (time.perf_counter() - started) * 1000
-    setattr(request, "_http_response_compute_ms", build_ms)
-    details = {"stats_build_ms": round(build_ms, 3)}
-    if isinstance(app_profile, dict):
-        details.update(app_profile)
-    setattr(request, "_http_response_performance_details", details)
-    request.write_json_bytes(encoded)
+    result = request.server.app.stats_current_http.snapshot(
+        parsed.query,
+        authenticated_username=request.auth_identity().username,
+    )
+    if result.payload is not None:
+        request.write_json(result.payload, status=result.status)
+    else:
+        request.write_json_bytes(result.body, status=result.status)
+
+
+def get_stats_delta(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    result = request.server.app.stats_current_http.delta(
+        parsed.query,
+        authenticated_username=request.auth_identity().username,
+    )
+    if result.payload is None:
+        request.write_json_bytes(result.body, status=result.status)
+    else:
+        request.write_json(result.payload, status=result.status)
+
+
+def get_stats_stream(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    request.stream_stats_current_delta(
+        parsed.query,
+        authenticated_username=request.auth_identity().username,
+    )
+
+
+def get_stats_capabilities(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_json(request.server.app.stats_current_http.capabilities())
 
 
 def get_pricing_catalog(request: Any, parsed: Any, route: Route) -> None:
@@ -394,12 +366,15 @@ def post_pricing_catalog_refresh(request: Any, parsed: Any, route: Route) -> Non
     request.write_json(request.server.app.pricing_catalog_refresh_start(), status=HTTPStatus.ACCEPTED)
 
 
-def post_stats_history(request: Any, parsed: Any, route: Route) -> None:
+def post_stats_observations(request: Any, parsed: Any, route: Route) -> None:
     del parsed
     payload = _json_body(request, route)
     if payload is None:
         return
-    response, status = request.server.app.record_stats_history_payload(payload)
+    response, status = request.server.app.record_current_browser_observations(
+        payload,
+        authenticated_username=request.auth_identity().username,
+    )
     request.write_json(response, status=status)
 
 
@@ -1364,7 +1339,10 @@ CORE_ROUTES = (
     Route("GET", "/login", PUBLIC, get_login, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, group="core"),
     Route("GET", "/api/ping", "readonly", get_ping, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/stats-sample", "readonly", get_stats_sample, group="core"),
+    Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, group="core"),
+    Route("GET", "/api/stats-delta", "readonly", get_stats_delta, group="core"),
+    Route("GET", "/api/stats-snapshot", "readonly", get_stats_snapshot, group="core"),
+    Route("GET", "/api/stats-stream", "readonly", get_stats_stream, group="core"),
     Route("GET", "/api/pricing-catalog", "readonly", get_pricing_catalog, group="core"),
     Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
     Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
@@ -1395,7 +1373,7 @@ CORE_ROUTES = (
     Route("GET", "/api/tmux-session-exists", "readonly", get_tmux_session_exists, group="core"),
     Route("POST", "/login", PUBLIC, post_login, group="core"),
     Route("POST", "/api/self-update", "admin", post_self_update, group="core"),
-    Route("POST", "/api/stats-history", "readonly", post_stats_history, body_limit=128 * 1024, group="core"),
+    Route("POST", "/api/stats-observations", "readonly", post_stats_observations, body_limit=128 * 1024, group="core"),
     Route("POST", "/api/pricing-catalog/refresh", "admin", post_pricing_catalog_refresh, group="core"),
     Route("POST", "/api/background/claim", "admin", post_background_claim, group="core"),
     Route("POST", "/api/ensure-session", "admin", post_ensure_session, group="core"),

@@ -1,20 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Pin the canonical YO!stats Range x Resolution contract (DOIT.1 item 1).
+"""Pin the canonical current YO!stats Range, Resolution, and cadence contract.
 
-The derived matrix must exactly reproduce the hand-written table in DOIT.1.md, so
-a formula/table drift or a bucket-budget violation fails the build instead of
-shipping a decimated view. These tests own the four-value universe, the
+The derived matrix must exactly reproduce the normative current table, so a
+formula/table drift or bucket-budget violation fails the build instead of shipping
+a decimated view. These tests own the four-value universe, the
 600-bucket ceiling, AUTO resolution, and preference normalization.
 """
 
+import json
+
 import pytest
 
-from yolomux_lib import statsd
-from yolomux_lib import stats_resolution as sr
+from yolomux_lib import app as app_module
+from yolomux_lib.stats_current import resolution as sr
 
-# The canonical table copied verbatim from DOIT.1.md, as {range: (auto, (explicit...))}.
-# The derivation formula must reproduce this exactly.
+# The canonical contract table, as {range: (auto, (explicit...))}.
 EXPECTED_MATRIX = {
     5 * 60: (1, (1, 10)),
     15 * 60: (10, (10, 60)),
@@ -36,7 +37,7 @@ def test_resolution_universe_is_exactly_the_four_values():
 
 def test_derived_matrix_reproduces_the_canonical_table():
     derived = sr.resolution_matrix()
-    assert set(derived) == set(EXPECTED_MATRIX), "range set drifted from DOIT.1 table"
+    assert set(derived) == set(EXPECTED_MATRIX), "range set drifted from the current contract"
     for range_seconds, (auto, explicit) in EXPECTED_MATRIX.items():
         assert derived[range_seconds]["auto"] == auto, f"AUTO wrong at {range_seconds}s"
         assert derived[range_seconds]["explicit"] == explicit, f"explicit wrong at {range_seconds}s"
@@ -101,22 +102,13 @@ def test_is_supported_matches_the_matrix():
     assert not sr.is_supported(7 * 60, 10)  # non-preset range
 
 
-def test_statsd_status_advertises_the_canonical_capabilities(tmp_path):
-    # The server publishes the policy once from the single owner (via the status
-    # action), not per history response, so the browser reads choices from here.
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    response, _binary = service.handle_with_binary({"action": "status"})
-    assert response["resolution_capabilities"] == sr.wire_capabilities()
-
-
 def test_wire_capabilities_is_json_safe_and_matches_the_matrix():
-    import json
-
     caps = sr.wire_capabilities()
     # JSON-serializable (no tuples/sets leaking to the wire).
     json.dumps(caps)
     assert caps["resolution_choices"] == [1, 10, 60, 300]
     assert caps["max_buckets"] == 600
+    assert caps["max_live_cadence_seconds"] == 60
     by_range = {entry["range_seconds"]: entry for entry in caps["ranges"]}
     assert set(by_range) == set(EXPECTED_MATRIX)
     for range_seconds, (auto, explicit) in EXPECTED_MATRIX.items():
@@ -128,10 +120,20 @@ def test_wire_capabilities_is_json_safe_and_matches_the_matrix():
             assert entry["buckets"][resolution] <= 600
 
 
+def test_live_cadence_is_owned_by_concrete_resolution_and_capped_at_one_minute():
+    assert {resolution: sr.live_cadence_seconds(resolution) for resolution in sr.RESOLUTION_CHOICES} == {
+        1: 1,
+        10: 10,
+        60: 60,
+        300: 60,
+    }
+    with pytest.raises(ValueError):
+        sr.live_cadence_seconds(600)
+
+
 def test_system_status_payload_publishes_the_matrix_to_the_client(tmp_path):
     # The web app exposes the canonical matrix from the single owner on
     # /api/system-status so the render-only browser reads choices from the server.
-    from yolomux_lib import app as app_module
     # Build a minimal payload the way the endpoint does, asserting the owner field
     # is present and equals the single source of truth.
     caps = sr.wire_capabilities()

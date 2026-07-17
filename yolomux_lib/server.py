@@ -31,6 +31,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
+from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 import yaml
@@ -72,6 +73,8 @@ from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
 from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
 from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
+from .stats_current import http as stats_current_http
+from .stats_current import protocol as stats_current_protocol
 from .locales import resolve_locale_preference
 from .locales import user_message_payload
 from .web import html_page
@@ -218,7 +221,7 @@ SHARE_MIRROR_DEBUG_NAMES = {
 }
 SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 MAX_FS_BATCH_REQUESTS = 64
-TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
+TOKEN_LOG_RE = re.compile(r"([?&](?:token|client_id)=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
 STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
@@ -1860,6 +1863,80 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
                 self.server.app.stop_client_event_watcher_if_idle()
 
+    def stream_stats_current_delta(
+        self,
+        raw_query: str,
+        *,
+        authenticated_username: str,
+    ) -> None:
+        try:
+            cursor = stats_current_http.parse_http_delta_query(raw_query)
+        except stats_current_protocol.UnsupportedRequest as error:
+            self.write_json(error.response, status=HTTPStatus.BAD_REQUEST)
+            return
+        result = self.server.app.stats_current_http.delta_stream(
+            raw_query,
+            authenticated_username=authenticated_username,
+        )
+        if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+            self.write_json(
+                result.metadata,
+                status=result.status,
+            )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        cache_generation = cursor.after_cache_generation
+        revision_number = cursor.after_revision
+        cadence_seconds = stats_current_protocol.live_cadence_seconds(
+            cursor.resolution_seconds
+        )
+        waiter = threading.Event()
+        next_deadline = time.monotonic() + cadence_seconds
+        try:
+            while True:
+                if result.status == HTTPStatus.OK:
+                    self.write_sse_bytes("delta", result.body)
+                    cache_generation = int(result.metadata["cache_generation"])
+                    revision_number = int(result.metadata["revision"])
+                else:
+                    payload = result.metadata
+                    cache_generation = int(
+                        payload.get("cache_generation") or cache_generation
+                    )
+                    self.write_sse_json("ready", {
+                        "cache_generation": cache_generation,
+                        "revision": revision_number,
+                    })
+                waiter.wait(max(0.0, next_deadline - time.monotonic()))
+                now = time.monotonic()
+                while next_deadline <= now:
+                    next_deadline += cadence_seconds
+                query = urlencode({
+                    "range_seconds": cursor.range_seconds,
+                    "resolution_seconds": cursor.resolution_seconds,
+                    "client_id": cursor.client_id,
+                    "after_cache_generation": cache_generation,
+                    "after_revision": revision_number,
+                })
+                result = self.server.app.stats_current_http.delta_stream(
+                    query,
+                    authenticated_username=authenticated_username,
+                )
+                if result.status == HTTPStatus.CONFLICT:
+                    self.write_sse_json("repair", result.metadata)
+                    return
+                if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+                    self.write_sse_json("unavailable", result.metadata)
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            return
+
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         session = str(query_one(qs, "session", "") or "")
@@ -2168,6 +2245,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.wfile.write(f"event: {event}\n".encode("utf-8"))
         for line in data.splitlines() or [""]:
             self.wfile.write(f"data: {line}\n".encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
+    def write_sse_bytes(self, event: str, value: bytes) -> None:
+        """Write an already-validated compact JSON payload without decoding it."""
+
+        if not isinstance(value, bytes) or not value:
+            raise ValueError("SSE byte payload must be non-empty")
+        event_name = str(event or "").strip()
+        if not event_name.isascii() or not event_name or any(
+            character.isspace() or ord(character) < 33 for character in event_name
+        ):
+            raise ValueError("SSE event name is invalid")
+        self.wfile.write(f"event: {event_name}\n".encode("ascii"))
+        for line in value.splitlines() or [b""]:
+            self.wfile.write(b"data: " + line + b"\n")
         self.wfile.write(b"\n")
         self.wfile.flush()
 

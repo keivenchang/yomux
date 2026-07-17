@@ -184,6 +184,21 @@ function yoagentCodexEffortPreferenceChoices() {
   return options.map(value => ({value, label: effortPreferenceLabel(value)}));
 }
 
+function costPricingProfileChoices(path) {
+  const choices = Array.isArray(clientSettingsPayload?.choices?.[path])
+    ? clientSettingsPayload.choices[path]
+    : ['default', 'subscription'];
+  const catalogLabels = settingChoiceLabels(path);
+  return choices.map(value => ({
+    value,
+    label: value === 'default'
+      ? t('pref.cost.pricing_profile.default')
+      : value === 'subscription'
+        ? t('pref.cost.pricing_profile.subscription')
+        : catalogLabels[value] || preferenceChoiceLabel(value),
+  }));
+}
+
 function yoagentModelPreferenceChoicesForBackend(backend) {
   return backend === 'claude' ? yoagentClaudeModelPreferenceChoices() : backend === 'codex' ? yoagentCodexModelPreferenceChoices() : [];
 }
@@ -234,6 +249,7 @@ function orderedPreferenceSections(sections) {
       id === PREFERENCE_SECTION_IDS.fileExplorer ? [id, PREFERENCE_SECTION_IDS.uploads] : [id]
     )),
     PREFERENCE_SECTION_IDS.github,
+    PREFERENCE_SECTION_IDS.cost,
     PREFERENCE_SECTION_IDS.yolo,
   ];
   const rank = new Map(orderedIds.map((id, index) => [id, index]));
@@ -356,6 +372,10 @@ function preferenceSections() {
       preferenceSettingItem('performance.tab_popover_show_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
       preferenceSettingItem('performance.tab_popover_follow_delay_ms', {type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms'}),
       preferenceSettingItem('performance.remote_resize_delay_ms', {type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'}),
+    ]},
+    {id: PREFERENCE_SECTION_IDS.cost, title: t('pref.section.cost'), items: [
+      preferenceSettingItem('cost.openai_pricing_profile', {type: 'radio', choices: costPricingProfileChoices('cost.openai_pricing_profile')}),
+      preferenceSettingItem('cost.anthropic_pricing_profile', {type: 'radio', choices: costPricingProfileChoices('cost.anthropic_pricing_profile')}),
     ]},
     {id: PREFERENCE_SECTION_IDS.github, title: t('pref.section.github'), items: [
       preferenceSettingItem('github.watched_prs', {type: 'list', wide: true}),
@@ -509,6 +529,7 @@ function preferenceSearchKeywordsForItem(item) {
   if (path.startsWith('file_explorer.')) add(['finder', 'files', 'tree', 'sidebar', 'browser', 'directory', 'folder', 'navigator']);
   if (path.startsWith('uploads.')) add(['upload', 'paste', 'drop', 'filename', 'template', 'file']);
   if (path.startsWith('share.')) add(['share', 'sharing', 'viewer', 'viewers', 'url', 'http', 'https', 'read-only', 'write']);
+  if (path.startsWith('cost.')) add(['cost', 'price', 'pricing', 'api', 'list', 'subscription', 'marginal', 'codex', 'claude', 'openai', 'anthropic', 'tokens']);
   if (path === 'file_explorer.root_mode') add(['root', 'home', 'base', 'working', 'cwd', 'follow', 'track']);
   if (path === 'file_explorer.indexed_dirs') add(['index', 'indexed', 'quick open', 'quick-open', 'search', 'scan', 'directories', 'folders']);
   if (path === 'file_explorer.index_exclude_dir_names') add(['index', 'exclude', 'excluded', 'ignore', 'ignored', 'skip', 'names', 'git', 'ssh', 'pycache', 'node_modules', 'quick-open']);

@@ -11,6 +11,7 @@ import re
 
 from yolomux_lib import common
 from yolomux_lib import web
+from yolomux_lib.stats_current import storage as stats_current_storage
 
 _BOOTSTRAP_RE = re.compile(r'<script id="yolomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
@@ -41,6 +42,15 @@ def test_html_page_bootstrap_uses_unicode_escapes_not_html_entities():
     # leaving literal &lt; inside parsed strings).
     bootstrap = _bootstrap_json(web.html_page([]))
     assert "&lt;" not in bootstrap and "&gt;" not in bootstrap and "&amp;" not in bootstrap
+
+
+def test_html_page_bootstraps_the_server_owned_stats_writer_fence():
+    bootstrap = json.loads(_bootstrap_json(web.html_page([])))
+
+    assert bootstrap["statsWriterFence"] == {
+        "protocol_version": stats_current_storage.MIN_WRITER_PROTOCOL,
+        "schema_generation": stats_current_storage.SCHEMA_VERSION,
+    }
 
 
 def test_html_lang_dir_attrs_escapes_and_sets_direction():

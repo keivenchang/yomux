@@ -27,6 +27,7 @@ const jsDebugHistoryReadinessPhases = Object.freeze(['idle', 'loading', 'ready',
 const jsDebugHistoryReadinessReasonByLegacyPhase = Object.freeze({'loading-initial': 'initial', 'loading-older': 'older', 'retrying': 'retry'});
 const jsDebugHistoryLegacyPhaseByReason = Object.freeze({initial: 'loading-initial', older: 'loading-older', retry: 'retrying'});
 const jsDebugHistoryOlderOverlayDelayMs = 120;
+const jsDebugGraphResolutionWatchdogMs = 3000;
 const jsDebugHistoryRetryInitialDelayMs = 10_000;
 const jsDebugHistoryRetryMaxDelayMs = 5 * 60_000;
 const jsDebugHistoryCoverageIntervalLimit = 256;
@@ -90,6 +91,11 @@ const jsDebugStatsPollState = {
   firstSampleReceived: false,
   lastSampleAtMs: 0,
 };
+const jsDebugCurrentStatsClientState = {
+  client: null,
+  selectionKey: '',
+  startPromise: null,
+};
 // Background prefetch of the full retention window into the shared bucket cache so a
 // range/zoom switch renders cached (stale) content instantly while the normal poll
 // revalidates the switched-to range on top. Pure cache-fill: it never touches the
@@ -107,6 +113,18 @@ const jsDebugStatsUploadState = {
   worker: null,
   generation: 0,
 };
+const jsDebugCurrentObservationBatchDelayMs = 10_000;
+const jsDebugCurrentObservationRetryMaxMs = 5 * 60_000;
+const jsDebugCurrentObservationState = {
+  queue: [],
+  keys: new Set(),
+  nextHealthId: 1,
+  timer: null,
+  inFlight: false,
+  retryMs: 10_000,
+  stopped: statsWriterFence === null,
+  epoch: globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+};
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsServerUptimeSeconds = null;
 let jsDebugStatsServerPid = null;
@@ -117,6 +135,12 @@ let jsDebugStatsClientConnected = null;
 let jsDebugStatsDisconnectStartedAtMs = null;
 let jsDebugGraphZoomDomain = null;
 let jsDebugGraphSelectionState = null;
+let jsDebugGraphTouchCandidateState = null;
+const jsDebugGraphTouchArmDistancePx = 12;
+const jsDebugGraphTouchDirectionRatio = 2;
+const jsDebugGraphTouchHoldMs = 200;
+const jsDebugGraphZoomMinRatio = 0.04;
+const jsDebugGraphZoomMinBuckets = 3;
 // Last pointer type seen on a chart. Touch has no hover-without-contact, so a
 // tap pins the value tooltip (it must NOT clear on the pointerleave that fires
 // when the finger lifts); a mouse still clears on leave as before.
@@ -189,6 +213,9 @@ const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
+// A real client-health observation has the same native cadence as the 10-second
+// host gauges. This fills a 10s chart without fabricating values in 1s cells.
+const jsDebugClientHealthPollMs = 10_000;
 // Full-retention background prefetch: one request spans the whole retention window and
 // (via the server's per-span tiers) returns a few hundred coarse buckets covering EVERY
 // range, so every range switch renders from cache. The current short range keeps its own
@@ -198,11 +225,6 @@ const jsDebugStatsCoarsePollMs = 60001;
 const jsDebugHistoryPrefetchRetentionSeconds = Math.floor(jsDebugGraphRetentionMs / 1000);
 const jsDebugHistoryPrefetchIntervalMs = 5 * 60 * 1000;
 const jsDebugStatsLivePushRangeSeconds = 30 * 60;
-// Wall-clock slide cadence for live (<=30m, non-zoomed) views. One render per
-// second advances the axis and drifts content left without a data tick.
-// Display/animation cadence (AGENTS.md timing rule) -> round 1000, not an odd
-// backend poll interval: this only re-paints the view, it never fetches.
-const jsDebugGraphSlideRenderMs = 1000;
 // The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
 // non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
 // left between the coarser (60s) data fetches — the chart stays visibly live even where
@@ -364,10 +386,8 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 // former raw/rollup Map split was only bookkeeping over the same keyspace.
 const jsDebugGraphBuckets = new Map();
 const jsDebugGraphEventRecords = new Map();
-// NOT display cache: upload staging for client-observed metrics awaiting POST
-// /api/stats-history (snake_case wire records; drained by flushJsDebugStatsHistory,
-// re-queued on failure). Its lifecycle is pending-until-acknowledged, so it cannot
-// merge into the display Map above without losing upload dedupe on flush/clear.
+// NOT display cache: short-lived staging retained for the established renderer's
+// bucket bookkeeping. Current browser observations are uploaded separately.
 const jsDebugGraphPendingServerBuckets = new Map();
 const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
@@ -691,8 +711,13 @@ function setJsDebugHistoryReadiness(phase, updates = {}) {
 function beginJsDebugHistoryReadiness(requestedStartSeconds, {requestedEndSeconds = 0, targetStartSeconds = requestedStartSeconds, targetEndSeconds = requestedEndSeconds, requestedResolutionSeconds = 1, retry = false} = {}) {
   const state = jsDebugHistoryReadiness;
   const generation = Number(state.generation || 0) + 1;
+  const previousRangeSeconds = Number(state.requestedRangeSeconds) || 0;
+  const nextRangeSeconds = Number(jsDebugGraphRangeSeconds) || 0;
+  const loadingOlder = Number(state.loadedStartSeconds) > 0
+    && previousRangeSeconds > 0
+    && nextRangeSeconds > previousRangeSeconds;
   const snapshot = setJsDebugHistoryReadiness('loading', {
-    reason: retry ? 'retry' : (Number(state.loadedStartSeconds) > 0 ? 'older' : 'initial'),
+    reason: retry ? 'retry' : (loadingOlder ? 'older' : 'initial'),
     requestedRangeSeconds: jsDebugGraphRangeSeconds,
     targetStartSeconds: Math.max(0, Math.floor(Number(targetStartSeconds) || 0)),
     targetEndSeconds: Math.max(0, Math.ceil(Number(targetEndSeconds) || 0)),
@@ -1003,10 +1028,10 @@ let jsDebugGraphExactResolutionEnabled = !(typeof globalThis !== 'undefined' && 
 
 function debugGraphExactRequestResolutionSeconds() {
   // The concrete resolution to request: the explicit pick, or the range's AUTO
-  // (finest offered choice) when the picker is on AUTO. Matches the server matrix.
+  // (finest supported exact cell) when the picker is on AUTO.
   const override = Math.max(0, Number(jsDebugGraphResolutionOverrideSeconds) || 0);
   if (override > 0) return override;
-  const choices = debugGraphAvailableResolutionChoices();
+  const choices = debugGraphExactResolutionChoices(activeJsDebugGraphRangeSeconds());
   return choices.length ? Number(choices[0]) : 1;
 }
 
@@ -1694,10 +1719,21 @@ function debugGraphMergeCostSummary(target, source, multiplier = 1) {
   const scale = Math.max(0, Math.min(1, Number(multiplier) || 0));
   if (!scale) return;
   const current = target.costSummary || {
-    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
+    totalMicroUsd: 0, apiListMicroUsd: null, totalTokenQuantity: 0, dimensionTotals: null, rangeReport: false, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: true, unpricedCount: 0, unpricedTokenQuantity: 0,
     components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
   };
   current.totalMicroUsd += debugGraphCostInteger(source.costSummary.totalMicroUsd) * scale;
+  const sourceApiListMicroUsd = debugGraphCostApiListMicroUsd(source.costSummary);
+  if (sourceApiListMicroUsd !== null) current.apiListMicroUsd = (current.apiListMicroUsd ?? 0) + sourceApiListMicroUsd * scale;
+  current.totalTokenQuantity += Math.max(0, Number(source.costSummary.totalTokenQuantity) || 0) * scale;
+  if (source.costSummary.dimensionTotals) {
+    current.dimensionTotals ||= {};
+    for (const field of [...DEBUG_GRAPH_COST_TOKEN_FIELDS, ...DEBUG_GRAPH_COST_SUBTOTAL_FIELDS]) {
+      if (source.costSummary.dimensionTotals[field] === undefined) continue;
+      current.dimensionTotals[field] = (Number(current.dimensionTotals[field]) || 0) + Math.max(0, Number(source.costSummary.dimensionTotals[field]) || 0) * scale;
+    }
+  }
+  current.rangeReport = current.rangeReport || source.costSummary.rangeReport === true;
   current.knownMicroUsd += debugGraphCostInteger(source.costSummary.knownMicroUsd) * scale;
   current.lowerMicroUsd += debugGraphCostInteger(source.costSummary.lowerMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
   current.upperMicroUsd += debugGraphCostInteger(source.costSummary.upperMicroUsd ?? source.costSummary.totalMicroUsd ?? source.costSummary.knownMicroUsd) * scale;
@@ -1708,7 +1744,7 @@ function debugGraphMergeCostSummary(target, source, multiplier = 1) {
   const scaledRows = value => debugGraphCostRows(value).map(row => {
     if (scale === 1) return row;
     const scaled = {...row};
-    for (const key of ['quantity', 'token_quantity', 'micro_usd', 'total_micro_usd', 'cost_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
+    for (const key of ['quantity', 'token_quantity', 'micro_usd', 'total_micro_usd', 'cost_micro_usd', 'api_list_micro_usd', 'total_api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
       if (Number.isFinite(Number(scaled[key]))) scaled[key] = Number(scaled[key]) * scale;
     }
     return scaled;
@@ -1831,10 +1867,15 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
 function compactJsDebugGraphBuckets(nowMs = Date.now()) {
   const retentionCutoff = nowMs - jsDebugGraphRetentionMs;
   for (const [key, bucket] of [...jsDebugGraphBuckets.entries()]) {
-    if (bucket.startMs < retentionCutoff) {
+    const bucketEndMs = Number(bucket.startMs) + Math.max(jsDebugGraphRawBucketMs, Number(bucket.durationMs) || jsDebugGraphRawBucketMs);
+    if (bucketEndMs <= retentionCutoff) {
       jsDebugGraphBuckets.delete(key);
       continue;
     }
+    // Exact current snapshots are already the requested uniform resolution.
+    // The retained renderer may discard expired buckets, but it must never
+    // re-aggregate an exact server cell into an old client-side tier.
+    if (jsDebugGraphExactResolutionEnabled) continue;
     const targetDurationMs = debugGraphBucketDurationForTime(bucket.startMs, nowMs);
     if (bucket.durationMs >= targetDurationMs) continue;
     const targetStartMs = Math.floor(bucket.startMs / targetDurationMs) * targetDurationMs;
@@ -1852,27 +1893,102 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
 function recordJsDebugEventForGraph(event) {
   if (!jsDebugCollectionEnabled || !event || typeof event !== 'object') return;
   if (event.type !== 'api' && event.type !== 'sse') return;
-  const nowMs = Date.now();
-  const bucketRef = debugGraphServerBucketRefForTime(debugGraphEventTimeMs(event), nowMs);
-  if (!bucketRef) return;
-  const latencyMs = debugGraphLatencyMs(event);
-  const requestBytes = event.type === 'api' && Number.isFinite(event.requestBytes) ? Number(event.requestBytes) : 0;
-  const responseBytes = event.type === 'api' && Number.isFinite(event.responseBytes) ? Number(event.responseBytes) : 0;
-  const sseBytes = event.type === 'sse'
-    ? (Number.isFinite(event.frameBytes) ? Number(event.frameBytes) : Number(event.bytes || 0))
-    : 0;
-  const data = {
-    apiCount: event.type === 'api' ? 1 : 0,
-    sseCount: event.type === 'sse' ? 1 : 0,
-    latencyMs,
-    bandwidthBytes: requestBytes + responseBytes + sseBytes,
+  const id = Number(event.id);
+  if (!Number.isSafeInteger(id) || id < 0 || jsDebugCurrentObservationState.stopped) return;
+  const key = `${jsDebugCurrentObservationState.epoch}:${id}`;
+  queueJsDebugCurrentObservation(key, event);
+}
+
+function queueJsDebugCurrentObservation(key, event) {
+  if (jsDebugCurrentObservationState.keys.has(key) || jsDebugCurrentObservationState.queue.length >= 1000) return;
+  jsDebugCurrentObservationState.keys.add(key);
+  jsDebugCurrentObservationState.queue.push({key, event});
+  scheduleJsDebugCurrentObservationFlush();
+}
+
+function recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleTimeMs = Date.now()) {
+  const id = jsDebugCurrentObservationState.nextHealthId++;
+  queueJsDebugCurrentObservation(
+    `${jsDebugCurrentObservationState.epoch}:health:${id}`,
+    {type: 'heartbeat', ts: new Date(sampleTimeMs).toISOString(), durationMs: latencyMs, bytes: bandwidthBytes},
+  );
+}
+
+function jsDebugCurrentObservationFromEvent(entry) {
+  const event = entry.event;
+  const observedAt = Date.parse(event.ts) / 1000;
+  if (!Number.isFinite(observedAt) || observedAt < 0) return null;
+  const payload = {kind: event.type};
+  const latency = Number(event.type === 'api' || event.type === 'heartbeat' ? event.durationMs : event.receiveLatencyMs);
+  if (Number.isFinite(latency) && latency >= 0) payload.latency_ms = latency;
+  const bytes = event.type === 'api'
+    ? Number(event.requestBytes || 0) + Number(event.responseBytes || 0)
+    : Number(event.type === 'heartbeat' ? event.bytes : (event.frameBytes === undefined ? event.bytes : event.frameBytes));
+  if (Number.isFinite(bytes) && bytes >= 0) payload.bytes = bytes;
+  return {
+    event_id: entry.key,
+    family: 'browser',
+    source_id: jsDebugStatsClientIdForRequest(),
+    observed_at: observedAt,
+    epoch_id: jsDebugCurrentObservationState.epoch,
+    payload,
   };
-  debugGraphAddBucketData(debugGraphBucketForTime(debugGraphEventTimeMs(event), nowMs), data);
-  debugGraphQueueServerDelta(bucketRef, data);
-  if (event.type === 'api' && Number.isFinite(event.id)) {
-    jsDebugGraphEventRecords.set(event.id, {bucket: bucketRef, responseBytes, lastSeenAt: nowMs});
+}
+
+function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservationBatchDelayMs) {
+  const state = jsDebugCurrentObservationState;
+  if (state.stopped || state.inFlight || state.timer !== null || !state.queue.length) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    void flushJsDebugCurrentObservations();
+  }, delay);
+}
+
+async function flushJsDebugCurrentObservations() {
+  const state = jsDebugCurrentObservationState;
+  if (statsWriterFence === null) {
+    state.stopped = true;
+    state.queue.length = 0;
+    state.keys.clear();
+    return;
   }
-  compactJsDebugGraphBuckets(nowMs);
+  if (state.stopped || state.inFlight || !state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  const entries = state.queue.slice(0, 100);
+  const prepared = entries.map(entry => ({entry, observation: jsDebugCurrentObservationFromEvent(entry)}));
+  const validEntries = prepared.filter(item => item.observation);
+  const observations = validEntries.map(item => item.observation);
+  for (const {entry} of prepared.filter(item => !item.observation)) {
+    state.queue.splice(state.queue.indexOf(entry), 1);
+    state.keys.delete(entry.key);
+  }
+  if (!observations.length) return;
+  state.inFlight = true;
+  try {
+    await apiFetchJsonQuiet('/api/stats-observations', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({protocol_version: statsWriterFence.protocolVersion, schema_generation: statsWriterFence.schemaGeneration, client_id: jsDebugStatsClientIdForRequest(), observations}),
+    });
+    for (const {entry} of validEntries) {
+      const index = state.queue.indexOf(entry);
+      if (index >= 0) state.queue.splice(index, 1);
+      state.keys.delete(entry.key);
+    }
+    state.retryMs = jsDebugCurrentObservationBatchDelayMs;
+  } catch (error) {
+    if ([400, 401, 403, 404, 405, 410, 413, 422, 426].includes(Number(error?.status))) {
+      state.stopped = true;
+      state.queue.length = 0;
+      state.keys.clear();
+    }
+  } finally {
+    state.inFlight = false;
+  }
+  if (state.queue.length && !state.stopped) {
+    const delay = state.retryMs;
+    state.retryMs = Math.min(jsDebugCurrentObservationRetryMaxMs, state.retryMs * 2);
+    scheduleJsDebugCurrentObservationFlush(delay);
+  }
 }
 
 function recordApiDebugResponseBytesForGraph(event, responseBytes) {
@@ -2006,6 +2122,10 @@ function recordJsDebugStatsSample(payload = {}, {forceGraphRefresh = false, sche
 // waiting for the 30-second history-backfill poll.  Polling remains the
 // range/zoom and reconnect fallback, not the live-tail transport.
 function applyJsDebugStatsSamplePush(payload = {}) {
+  // Protocol-v2 snapshots/deltas are the sole exact-mode owner. The legacy
+  // shared stats_sample event carries a different bucket dialect and must not
+  // race the exact stream or repopulate a just-switched Resolution.
+  if (jsDebugGraphExactResolutionEnabled) return false;
   if (!payload || typeof payload !== 'object') return false;
   const sample = payload.sample && typeof payload.sample === 'object' ? payload.sample : {};
   const record = payload.record && typeof payload.record === 'object' ? payload.record : null;
@@ -2078,6 +2198,10 @@ function debugGraphApplyServerCostSummary(bucket, source) {
   if (!source || typeof source !== 'object' || Array.isArray(source)) return;
   bucket.costSummary = {
     totalMicroUsd: debugGraphCostInteger(source.total_micro_usd),
+    apiListMicroUsd: debugGraphCostApiListMicroUsd(source),
+    totalTokenQuantity: Math.max(0, Number(source.total_token_quantity) || 0),
+    dimensionTotals: source.dimension_totals && typeof source.dimension_totals === 'object' && !Array.isArray(source.dimension_totals) ? {...source.dimension_totals} : null,
+    rangeReport: source.range_report === true,
     knownMicroUsd: debugGraphCostInteger(source.known_micro_usd),
     lowerMicroUsd: debugGraphCostInteger(source.lower_micro_usd ?? source.known_micro_usd),
     upperMicroUsd: debugGraphCostInteger(source.upper_micro_usd ?? source.total_micro_usd ?? source.known_micro_usd),
@@ -2376,8 +2500,19 @@ function debugGraphMinimumDisplayResolutionMs(domain, nowMs = Date.now()) {
   );
 }
 
+function debugGraphExactResolutionChoices(rangeSeconds) {
+  const range = Math.max(1, Number(rangeSeconds) || 0);
+  return jsDebugGraphResolutionChoices.filter(resolution => {
+    const bucketCount = range / resolution;
+    return Number.isInteger(bucketCount) && bucketCount >= 12 && bucketCount <= jsDebugGraphOverridePointCap;
+  });
+}
+
 function debugGraphAvailableResolutionChoices(domain = debugGraphDomain(), nowMs = Date.now()) {
   const rangeSeconds = Math.max(1, Number(domain?.rangeSeconds) || 0);
+  if (jsDebugGraphExactResolutionEnabled && !debugGraphZoomDomainValid()) {
+    return debugGraphExactResolutionChoices(rangeSeconds);
+  }
   const domainStartMs = Number(domain?.startMs);
   const retainedSeconds = Number.isFinite(domainStartMs)
     ? debugGraphBucketDurationForTime(domainStartMs, nowMs) / 1000
@@ -4100,7 +4235,7 @@ function debugGraphPolylineHtml(series, chartMax, domain, logScale = false, noDa
   ).map((points, index) => {
     if (!points.length) return '';
     const segmentAttr = index > 0 ? ` data-js-debug-series-segment="${esc(index)}"` : '';
-    return `<polyline class="${esc(debugGraphSeriesLineClassName(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></polyline>`;
+    return `<polyline class="${esc(debugGraphSeriesLineClassName(series))}" data-js-debug-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}${debugGraphSeriesLinePatternAttrs(series)}${segmentAttr} points="${esc(points.join(' '))}" fill="none" vector-effect="non-scaling-stroke"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></polyline>`;
   }).join('');
 }
 
@@ -4153,7 +4288,7 @@ function debugGraphAreaPathHtml(series, chartMax, domain, noDataRanges = null) {
       ...lowerPoints.slice().reverse().map(point => `L ${point[0]},${point[1]}`),
       'Z',
     ].join(' ');
-    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.label)}</title></path>`;
+    return `<path class="js-debug-area js-debug-area--${esc(debugGraphSeriesClassKey(series))}" data-js-debug-area-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked}${total} d="${esc(path)}"${debugGraphSeriesStyleAttr(series)}><title>${esc(series.fullLabel || series.label)}</title></path>`;
   }).join('');
 }
 
@@ -4190,7 +4325,7 @@ function debugGraphBarRectsHtml(series, chartMax, domain, logScale = false) {
     const width = Math.max(0.5, slotWidth - gap);
     const vertical = debugGraphBarVerticalGeometry(topValue, bottomValue, chartMax, series.zeroBar === true, logScale);
     const stacked = lowerValues ? ` data-js-debug-bar-stacked="${esc(series.key)}"` : '';
-    return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(vertical.y.toFixed(2))}" width="${esc(width.toFixed(2))}" height="${esc(vertical.height.toFixed(2))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.label)}</title></rect>`;
+    return `<rect class="js-debug-bar js-debug-bar--${esc(classKey)}" data-js-debug-bar-series="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${stacked} data-js-debug-bar-total="${esc(topValue)}" data-js-debug-bar-gap="${esc(gap.toFixed(2))}" x="${esc(x.toFixed(2))}" y="${esc(vertical.y.toFixed(2))}" width="${esc(width.toFixed(2))}" height="${esc(vertical.height.toFixed(2))}"${debugGraphSeriesStyleAttr(series, {barPattern: true})}><title>${esc(series.fullLabel || series.label)}</title></rect>`;
   }).join('');
 }
 
@@ -4220,7 +4355,7 @@ function debugGraphLegendHtml(seriesItems) {
   return `<div class="js-debug-legend" aria-label="${esc(t('debug.summary'))}">
     ${seriesItems.map(series => {
       const descKey = series.descKey || jsDebugGraphDescriptionKeyByLabelKey[series.labelKey] || jsDebugGraphDescriptionKeyByLabelKey[series.metricLabelKey];
-      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
+      return `<div class="js-debug-legend-item" data-js-debug-legend="${esc(series.key)}"${debugGraphSeriesTokenAgentAttrs(series)}${debugGraphSeriesClientAttrs(series)}>${debugGraphLegendSwatchHtml(series)}<span${debugGraphExplainAttrs(series.fullLabel || series.label, descKey, {attribute: 'data-js-debug-legend-label-desc', desc: debugGraphLocalizedDescription({...series, descKey})})}>${esc(series.label)}</span></div>`;
     }).join('')}
   </div>`;
 }
@@ -4712,6 +4847,13 @@ function debugGraphCostMicroUsd(item) {
   return debugGraphCostInteger(item?.micro_usd ?? item?.total_micro_usd ?? item?.cost_micro_usd);
 }
 
+function debugGraphCostApiListMicroUsd(item) {
+  for (const value of [item?.api_list_micro_usd, item?.total_api_list_micro_usd, item?.apiListMicroUsd, item?.totalApiListMicroUsd]) {
+    if (value !== undefined && value !== null && Number.isSafeInteger(Number(value)) && Number(value) >= 0) return Number(value);
+  }
+  return null;
+}
+
 function debugGraphCostUsdText(microUsd) {
   const value = debugGraphCostInteger(microUsd);
   if (value === 0) return '$0.00';
@@ -4765,6 +4907,11 @@ function debugGraphCostUsageColumnHeaderAttrs(key, label) {
 }
 
 function debugGraphCostCompactTotals(summary) {
+  if (summary.dimensionTotals) return {
+    input: debugGraphCostInteger(summary.dimensionTotals.input_micro_usd),
+    cache: debugGraphCostInteger(summary.dimensionTotals.cache_micro_usd),
+    output: debugGraphCostInteger(summary.dimensionTotals.output_micro_usd) + debugGraphCostInteger(summary.dimensionTotals.other_micro_usd),
+  };
   const totals = {input: 0, cache: 0, output: 0};
   for (const item of summary.components) {
     const value = debugGraphCostMicroUsd(item);
@@ -4776,7 +4923,31 @@ function debugGraphCostCompactTotals(summary) {
   return totals;
 }
 
+function debugGraphCostCompactApiListTotals(summary) {
+  if (summary.dimensionTotals) return {
+    input: debugGraphCostApiListMicroUsd({api_list_micro_usd: summary.dimensionTotals.input_api_list_micro_usd}),
+    cache: debugGraphCostApiListMicroUsd({api_list_micro_usd: summary.dimensionTotals.cache_api_list_micro_usd}),
+    output: debugGraphCostInteger(summary.dimensionTotals.output_api_list_micro_usd) + debugGraphCostInteger(summary.dimensionTotals.other_api_list_micro_usd),
+  };
+  const totals = {input: null, cache: null, output: null};
+  for (const item of summary.components) {
+    const value = debugGraphCostApiListMicroUsd(item);
+    if (value === null) continue;
+    const itemClass = debugGraphCostClass(item);
+    const key = itemClass === 'input' ? 'input' : itemClass === 'cache' ? 'cache' : 'output';
+    totals[key] = (totals[key] ?? 0) + value;
+  }
+  return totals;
+}
+
 function debugGraphCostTokenTotals(summary) {
+  if (summary.dimensionTotals) return {
+    input: Math.max(0, Number(summary.dimensionTotals.input_tokens) || 0),
+    cache: Math.max(0, Number(summary.dimensionTotals.cache_tokens) || 0),
+    output: Math.max(0, Number(summary.dimensionTotals.output_tokens) || 0),
+    other: Math.max(0, Number(summary.dimensionTotals.other_tokens) || 0),
+    total: Math.max(0, Number(summary.totalTokenQuantity) || 0),
+  };
   const totals = {input: 0, cache: 0, output: 0, other: 0, total: 0};
   for (const item of summary.components) {
     if (String(item?.unit || 'tokens').toLowerCase() !== 'tokens') continue;
@@ -4788,7 +4959,7 @@ function debugGraphCostTokenTotals(summary) {
   return totals;
 }
 
-const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
+const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
 const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']);
 const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
 const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
@@ -4806,11 +4977,16 @@ function debugGraphCostAggregateRowInto(grouped, row, keyFields) {
   key ||= 'unknown';
   const current = grouped.get(key) || {...row};
   if (!grouped.has(key)) {
-    for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) current[field] = 0;
+    for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) {
+      if (!field.includes('api_list') || row?.[field] !== undefined) current[field] = 0;
+    }
     for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] = 0;
     grouped.set(key, current);
   }
-  for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) current[field] += debugGraphCostInteger(row?.[field]);
+  for (const field of DEBUG_GRAPH_COST_SUBTOTAL_FIELDS) {
+    if (field.includes('api_list') && row?.[field] === undefined) continue;
+    current[field] = debugGraphCostInteger(current[field]) + debugGraphCostInteger(row?.[field]);
+  }
   for (const field of DEBUG_GRAPH_COST_TOKEN_FIELDS) current[field] += Math.max(0, Number(row?.[field]) || 0);
 }
 
@@ -4851,18 +5027,30 @@ function debugGraphCostSummarySignature(buckets) {
 function debugGraphCostSummaryForBuckets(buckets) {
   const signature = debugGraphCostSummarySignature(buckets);
   if (signature && jsDebugCostSummaryCache.signature === signature && jsDebugCostSummaryCache.summary) return jsDebugCostSummaryCache.summary;
-  const summaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
+  const allSummaries = (buckets || []).map(bucket => bucket?.costSummary).filter(Boolean);
+  const rangeSummaries = allSummaries.filter(summary => summary.rangeReport === true);
+  const summaries = rangeSummaries.length ? rangeSummaries : allSummaries;
   const componentRows = new Map();
   const modelRows = new Map();
   const sourceRows = new Map();
   const tmuxRows = new Map();
   const result = {
-    totalMicroUsd: 0, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
+    totalMicroUsd: 0, apiListMicroUsd: null, totalTokenQuantity: 0, dimensionTotals: null, knownMicroUsd: 0, lowerMicroUsd: 0, upperMicroUsd: 0, pricedCount: 0, complete: summaries.length > 0,
     unpricedCount: 0, unpricedTokenQuantity: 0, components: [], models: [], sources: [], tmuxWindows: [], catalogRevision: '', activeCatalogRevision: '', freshness: '',
     backfill: {...jsDebugUsageAtomBackfill},
   };
   for (const summary of summaries) {
     result.totalMicroUsd += debugGraphCostInteger(summary.totalMicroUsd);
+    const apiListMicroUsd = debugGraphCostApiListMicroUsd(summary);
+    if (apiListMicroUsd !== null) result.apiListMicroUsd = (result.apiListMicroUsd ?? 0) + apiListMicroUsd;
+    result.totalTokenQuantity += Math.max(0, Number(summary.totalTokenQuantity) || 0);
+    if (summary.dimensionTotals) {
+      result.dimensionTotals ||= {};
+      for (const field of [...DEBUG_GRAPH_COST_TOKEN_FIELDS, ...DEBUG_GRAPH_COST_SUBTOTAL_FIELDS]) {
+        if (summary.dimensionTotals[field] === undefined) continue;
+        result.dimensionTotals[field] = (Number(result.dimensionTotals[field]) || 0) + Math.max(0, Number(summary.dimensionTotals[field]) || 0);
+      }
+    }
     result.knownMicroUsd += debugGraphCostInteger(summary.knownMicroUsd);
     result.lowerMicroUsd += debugGraphCostInteger(summary.lowerMicroUsd ?? summary.knownMicroUsd);
     result.upperMicroUsd += debugGraphCostInteger(summary.upperMicroUsd ?? summary.totalMicroUsd ?? summary.knownMicroUsd);
@@ -4903,6 +5091,20 @@ function debugGraphCostModelLabel(row) {
   return effort ? `${label} · ${effort}` : label;
 }
 
+function debugGraphAgentDisplayLabel(value) {
+  const full = String(value || '').trim();
+  if (!full) return debugGraphCostText('debug.cost.unknown', 'Unknown');
+  if (full.startsWith('claude-bg:')) {
+    const [, projectValue = '', sessionValue = ''] = full.split(':');
+    const projectParts = projectValue.split('-').filter(Boolean);
+    const project = projectParts.slice(-2).join('-') || projectValue;
+    const session = sessionValue.slice(0, 8);
+    return ['claude-bg', project, session].filter(Boolean).join(':');
+  }
+  if (Array.from(full).length <= 64) return full;
+  return `${Array.from(full).slice(0, 39).join('')}…${Array.from(full).slice(-16).join('')}`;
+}
+
 function debugGraphCostModelAgentKind(row) {
   const identity = [row?.provider, row?.model, row?.label].map(value => String(value || '').toLowerCase()).join(' ');
   if (identity.includes('anthropic') || identity.includes('claude')) return 'claude';
@@ -4933,6 +5135,20 @@ function debugGraphCostUsageUsdText(microUsd, tokens = 1) {
   return '$0';
 }
 
+function debugGraphCostPricePairText(microUsd, apiListMicroUsd = null) {
+  const marginalLabel = debugGraphCostText('debug.cost.marginal', 'Marginal');
+  const apiListLabel = debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices');
+  if (apiListMicroUsd === null || debugGraphCostInteger(apiListMicroUsd) === debugGraphCostInteger(microUsd)) return `${apiListLabel} ${debugGraphCostUsdText(apiListMicroUsd ?? microUsd)}`;
+  return `${marginalLabel} ${debugGraphCostUsdText(microUsd)} · ${apiListLabel} ${debugGraphCostUsdText(apiListMicroUsd)}`;
+}
+
+function debugGraphCostPricePairHtml(microUsd, apiListMicroUsd = null) {
+  const marginalLabel = debugGraphCostText('debug.cost.marginal', 'Marginal');
+  const apiListLabel = debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices');
+  if (apiListMicroUsd === null || debugGraphCostInteger(apiListMicroUsd) === debugGraphCostInteger(microUsd)) return `<small class="js-debug-cost-price-pair"><span>${esc(apiListLabel)} ${esc(debugGraphCostUsdText(apiListMicroUsd ?? microUsd))}</span></small>`;
+  return `<small class="js-debug-cost-price-pair"><span>${esc(marginalLabel)} ${esc(debugGraphCostUsdText(microUsd))}</span><span>${esc(apiListLabel)} ${esc(debugGraphCostUsdText(apiListMicroUsd))}</span></small>`;
+}
+
 function debugGraphCostBreakdownItems(row) {
   return [
     ['input', debugGraphCostText('debug.cost.input', 'Input')],
@@ -4944,6 +5160,7 @@ function debugGraphCostBreakdownItems(row) {
     label,
     tokens: Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
     microUsd: debugGraphCostInteger(row?.[`${key}_micro_usd`]),
+    apiListMicroUsd: debugGraphCostApiListMicroUsd({api_list_micro_usd: row?.[`${key}_api_list_micro_usd`]}),
   }));
 }
 
@@ -4978,14 +5195,28 @@ function debugGraphCostAllPricingSourcesHtml(components) {
   </section>`;
 }
 
-function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null} = {}) {
+function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null} = {}) {
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
   const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
+  const rowApiListMicroUsd = total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd;
   const exactTokens = `${Math.max(0, Number(tokens) || 0).toLocaleString()} tokens`;
-  return `<span class="js-debug-cost-table-metric" title="${esc(exactTokens)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><small>${esc(cost)}</small></span>`;
+  const price = rowApiListMicroUsd === null
+    ? `<small>${esc(cost)} · ${esc(debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices'))}</small>`
+    : debugGraphCostPricePairHtml(microUsd, rowApiListMicroUsd);
+  return `<span class="js-debug-cost-table-metric" title="${esc(`${exactTokens}; ${debugGraphCostPricePairText(microUsd, rowApiListMicroUsd)}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong>${price}</span>`;
 }
 
-function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = []} = {}) {
+function debugGraphCostExactTotalRow(summary) {
+  if (!summary?.dimensionTotals) return null;
+  return {
+    token_quantity: Math.max(0, Number(summary.totalTokenQuantity) || 0),
+    micro_usd: debugGraphCostInteger(summary.totalMicroUsd),
+    api_list_micro_usd: debugGraphCostApiListMicroUsd(summary),
+    ...summary.dimensionTotals,
+  };
+}
+
+function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = [], totalRow: exactTotalRow = null} = {}) {
   if (!rows.length) return '';
   const usageKeys = ['input', 'cache', 'output', 'other'];
   const usageLabels = {
@@ -4994,18 +5225,24 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
     output: debugGraphCostText('debug.cost.output', 'Output'),
     other: debugGraphCostText('debug.cost.other', 'Other'),
   };
-  const totalRow = debugGraphCostAggregateRows(rows, [])[0] || {};
+  const totalRow = exactTotalRow || debugGraphCostAggregateRows(rows, [])[0] || {};
   const rowHtml = row => {
     const breakdown = debugGraphCostBreakdownItems(row);
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
     const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
-    const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsageUsdText(debugGraphCostMicroUsd(row), totalTokens)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsageUsdText(item.microUsd, item.tokens)}`).join('; ')}`;
-    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong>${esc(labelFor(row))}</strong>`;
-    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostPricePairText(item.microUsd, item.apiListMicroUsd)}`).join('; ')}`;
+    const label = labelFor(row);
+    const fullLabel = String(row?.full_label || row?.agent_label || label);
+    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphMiddleTruncatedTextHtml(label)}</strong>`;
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}>${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(debugGraphCostText('debug.cost.grandTotal', 'Grand total'))}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  const totalApiListMicroUsd = debugGraphCostApiListMicroUsd(totalRow);
+  const grandTotalLabel = totalApiListMicroUsd !== null && totalApiListMicroUsd !== debugGraphCostMicroUsd(totalRow)
+    ? debugGraphCostText('debug.cost.grandTotalDual', 'Grand total · marginal / API list prices')
+    : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total at API list prices');
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}>${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
@@ -5016,6 +5253,7 @@ function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
     labelHeading: debugGraphCostText('debug.cost.model', 'Model'),
     labelFor: debugGraphCostModelLabel,
     components,
+    totalRow: debugGraphCostExactTotalRow(options.summary),
   });
 }
 
@@ -5112,7 +5350,7 @@ function debugGraphCostComponentDetailsHtml(rows) {
       const usageClass = debugGraphCostUsageClassLabel(row?.direction, row?.cache_role);
       const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
       const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
-      return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell"><strong>${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</strong><small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
+      return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell">${debugGraphCostPricePairHtml(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}<small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
     }).join('')}</tbody></table></div>
   </section>`;
 }
@@ -5139,10 +5377,12 @@ function debugGraphCostSubtotalText(row) {
     ['output_micro_usd', debugGraphCostText('debug.cost.output', 'Output')],
     ['other_micro_usd', debugGraphCostText('debug.cost.other', 'Other')],
   ];
-  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostRowRangeUsdText(row)}`;
+  return `${debugGraphTokensText(row?.token_quantity)} · ${parts.map(([key, label]) => `${label} ${debugGraphCostUsdText(debugGraphCostInteger(row?.[key]))}`).join(' · ')} · ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}`;
 }
 
 function debugGraphCostTmuxLabel(row) {
+  const label = String(row?.label || '').trim();
+  if (label) return label;
   const explicit = String(row?.tmux_label || '').trim();
   if (explicit) return explicit;
   const session = String(row?.tmux_session || '').trim();
@@ -5171,8 +5411,9 @@ function debugGraphCostTmuxBreakdownRows(rows) {
       other_tokens: 0,
     };
     current.token_quantity += Math.max(0, Number(row?.token_quantity) || 0);
-    for (const field of ['micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd']) {
-      current[field] += debugGraphCostInteger(row?.[field]);
+    for (const field of ['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd']) {
+      if (field.includes('api_list') && row?.[field] === undefined) continue;
+      current[field] = debugGraphCostInteger(current[field]) + debugGraphCostInteger(row?.[field]);
     }
     for (const field of ['input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']) {
       current[field] += Math.max(0, Number(row?.[field]) || 0);
@@ -5192,6 +5433,7 @@ function debugGraphCostTmuxBreakdownHtml(summary) {
     heading: debugGraphCostText('debug.cost.byAgent', 'By Agent'),
     labelHeading: t('yoagent.action.row.agent'),
     labelFor: debugGraphCostTmuxLabel,
+    totalRow: debugGraphCostExactTotalRow(summary),
   });
 }
 
@@ -5298,18 +5540,22 @@ function debugGraphCostUnknownUsageHtml(summary) {
 }
 
 function debugGraphCostReportHtml(summary, domain) {
-  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
+  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0 || Number(summary.apiListMicroUsd) > 0;
   const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
   const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
   const total = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const tokens = debugGraphCostTokenTotals(summary);
   const title = debugGraphCostText('debug.cost.details', 'Cost summary details');
+  const apiListBasis = debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices');
+  const hasApiListCounterfactual = summary.apiListMicroUsd !== null;
   // Compact report shell: one heading line carrying the range, one totals line
   // replacing the old Summary heading + nested list, one catalog status line
   // replacing the four-row catalog table. Exact values stay reachable through
   // the accessible labels; nothing about estimate/lower-bound semantics changes.
   const estimateSentence = !hasEstimatedUsage
     ? debugGraphCostText('debug.cost.waiting', 'Waiting for priced usage')
+    : hasApiListCounterfactual
+      ? debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd)
     : (exact
       ? debugGraphCostText('debug.cost.exact', `Estimated API list-price total ${total}`, {amount: total})
       : hasFiniteRange
@@ -5325,14 +5571,14 @@ function debugGraphCostReportHtml(summary, domain) {
   const totalsExact = `${debugGraphCostText('debug.cost.totalTokens', 'total tokens')}: ${Math.max(0, Number(tokens.total) || 0).toLocaleString()}; ${['input', 'cache', 'output', 'other'].map(key => `${key}=${Math.max(0, Number(tokens[key]) || 0).toLocaleString()}`).join('; ')}`;
   return `<article class="js-debug-cost-report" aria-label="${esc(title)}">
     <div class="js-debug-cost-report-title">
-      <h1>${esc(title)}</h1><span class="js-debug-cost-report-range meta-muted">${esc(debugGraphCostRangeText(domain))}</span>
+      <h1>${esc(title)}</h1><span class="js-debug-cost-report-basis">${esc(apiListBasis)}</span><span class="js-debug-cost-report-range meta-muted">${esc(debugGraphCostRangeText(domain))}</span>
     </div>
     <div class="js-debug-cost-report-body">
       <p class="js-debug-cost-report-totals" data-js-debug-cost-report-totals aria-label="${esc(`${estimateSentence}; ${totalsExact}`)}">${esc(totalsLine)}</p>
       ${debugGraphCostUnknownUsageHtml(summary)}
       ${debugGraphCostCatalogDetailsHtml(summary)}
       ${debugGraphCostTmuxBreakdownHtml(summary)}
-      ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true})}
+      ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true, summary})}
       ${debugGraphCostComponentDetailsHtml(summary.components)}
       ${debugGraphCostSourceTreeHtml(summary.sources)}
       ${debugGraphCostAllPricingSourcesHtml(summary.components)}
@@ -5342,15 +5588,22 @@ function debugGraphCostReportHtml(summary, domain) {
 
 function debugGraphCostSummaryHtml(buckets, domain) {
   const summary = debugGraphCostSummaryForBuckets(buckets);
-  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0;
+  const hasEstimatedUsage = summary.pricedCount > 0 || summary.unpricedCount > 0 || summary.upperMicroUsd > 0 || Number(summary.apiListMicroUsd) > 0;
   const exact = hasEstimatedUsage && summary.complete === true && summary.unpricedCount === 0 && debugGraphCostInteger(summary.lowerMicroUsd) === debugGraphCostInteger(summary.upperMicroUsd);
   const hasFiniteRange = debugGraphCostInteger(summary.upperMicroUsd) > debugGraphCostInteger(summary.lowerMicroUsd);
   const estimated = hasEstimatedUsage ? debugGraphCostRangeUsdText(summary) : '—';
   const compact = debugGraphCostCompactTotals(summary);
+  const compactApiList = debugGraphCostCompactApiListTotals(summary);
   const tokens = debugGraphCostTokenTotals(summary);
-  const heading = hasEstimatedUsage ? `${exact || hasFiniteRange ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed` : 'est. —, Σ displayed';
+  const heading = !hasEstimatedUsage
+    ? `${debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices')} —, Σ displayed`
+    : summary.apiListMicroUsd !== null
+      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd)}, Σ displayed`
+      : `${debugGraphCostText('debug.cost.atApiListPrices', 'At API list prices')} ${exact || hasFiniteRange ? 'est. ' : 'est. ≥'}${estimated}, Σ displayed`;
   const accessible = !hasEstimatedUsage
     ? 'No displayed usage has a selected price'
+    : summary.apiListMicroUsd !== null
+      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd)} across displayed usage; open calculation and pricing sources`
     : exact
     ? `Estimated API list-price total ${estimated} across displayed usage; open calculation and pricing sources`
     : `Estimated API list-price range ${estimated}; unknown or incomplete displayed usage widens the range`;
@@ -5360,10 +5613,10 @@ function debugGraphCostSummaryHtml(buckets, domain) {
   const backfillStatus = debugGraphCostBackfillText(summary);
   const moreInfo = debugGraphCostText('debug.cost.moreInfo', 'More Info');
   const compactRows = [
-    ['Input', compact.input === null ? null : debugGraphCostUsdText(compact.input), tokens.input],
-    ['Cache', compact.cache === null ? null : debugGraphCostUsdText(compact.cache), tokens.cache],
-    ['Output', compact.output === null ? null : debugGraphCostUsdText(compact.output), tokens.output],
-    ['Total', hasEstimatedUsage ? estimated : null, tokens.total],
+    ['Input', compact.input, compactApiList.input, tokens.input],
+    ['Cache', compact.cache, compactApiList.cache, tokens.cache],
+    ['Output', compact.output, compactApiList.output, tokens.output],
+    ['Total', hasEstimatedUsage ? summary.totalMicroUsd : null, hasEstimatedUsage ? summary.apiListMicroUsd : null, tokens.total],
   ];
   return `<section class="js-debug-chart js-debug-cost-summary" data-js-debug-summary-group="costSummary">
     <div class="js-debug-chart-head">
@@ -5378,7 +5631,7 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
     </div>
     <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-      ${compactRows.map(([label, value, tokenCount]) => `<div><dt${debugGraphCostUsageColumnHeaderAttrs(String(label).toLowerCase(), debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${esc(value === null ? '—' : value)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
+      ${compactRows.map(([label, value, apiListValue, tokenCount]) => `<div><dt${debugGraphCostUsageColumnHeaderAttrs(String(label).toLowerCase(), debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${value === null ? '—' : debugGraphCostPricePairHtml(value, apiListValue)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
     </dl>
     <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
   </section>`;
@@ -5535,12 +5788,73 @@ function jsDebugStatsLayoutItemsVisible(items) {
   return Array.isArray(items) && (items.includes(debugPaneItemId) || items.includes(yocostItemId));
 }
 
+function jsDebugCurrentStatsSelection() {
+  return {
+    rangeSeconds: normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds),
+    resolution: normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO',
+  };
+}
+
+function ensureJsDebugCurrentStatsClient() {
+  if (jsDebugCurrentStatsClientState.client) return jsDebugCurrentStatsClientState.client;
+  if (typeof globalThis.YOLOmuxStatsCurrent?.createBrowserClient !== 'function') return null;
+  const selection = jsDebugCurrentStatsSelection();
+  const client = globalThis.YOLOmuxStatsCurrent.createBrowserClient({
+    clientId: jsDebugStatsClientIdForRequest(),
+    savedRange: selection.rangeSeconds,
+    savedResolution: selection.resolution,
+    onState(state) {
+      if (state !== 'error') return;
+      setJsDebugHistoryReadiness('error', {
+        error: 'Current stats stream unavailable',
+        nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,
+      });
+    },
+    controllerOptions: {
+      onGeneration(snapshot) {
+        applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh: true});
+      },
+    },
+  });
+  jsDebugCurrentStatsClientState.client = client;
+  jsDebugCurrentStatsClientState.selectionKey = `${selection.rangeSeconds}:${selection.resolution}`;
+  return client;
+}
+
+function syncJsDebugCurrentStatsClient({select = false} = {}) {
+  const client = ensureJsDebugCurrentStatsClient();
+  if (!client) return false;
+  const visible = jsDebugCollectionEnabled && jsDebugStatsPanelVisible();
+  client.setVisible(visible);
+  if (!visible) return true;
+  const selection = jsDebugCurrentStatsSelection();
+  const key = `${selection.rangeSeconds}:${selection.resolution}`;
+  const controller = client.controller?.();
+  const currentSelection = controller?.selection?.();
+  const cachedSelection = controller?.generation?.()
+    && Number(currentSelection?.range_seconds) === Number(selection.rangeSeconds)
+    && String(currentSelection?.resolution) === String(selection.resolution);
+  if (select || key !== jsDebugCurrentStatsClientState.selectionKey) {
+    jsDebugCurrentStatsClientState.selectionKey = key;
+    if (!cachedSelection) client.select(selection.rangeSeconds, selection.resolution);
+  }
+  if (!jsDebugCurrentStatsClientState.startPromise) {
+    jsDebugCurrentStatsClientState.startPromise = client.start()
+      .catch(error => {
+        recordJsDebugStatsDiagnostic('warning', `current stats stream failed: ${jsDebugErrorText(error)}`);
+      })
+      .finally(() => { jsDebugCurrentStatsClientState.startPromise = null; });
+  }
+  return true;
+}
+
 function jsDebugStatsTokenConsumerEnabled() {
   return jsDebugStatsPanelVisible();
 }
 
 function stopJsDebugStatsPolling() {
   clearRuntimeInterval('debug-stats');
+  if (jsDebugCurrentStatsClientState.client) jsDebugCurrentStatsClientState.client.setVisible(false);
 }
 
 function jsDebugStatsLivePushEnabled() {
@@ -5568,7 +5882,8 @@ function armJsDebugStatsPolling({pollNow = false, forceGraphRefresh = false} = {
     stopJsDebugStatsPolling();
     return;
   }
-  stopJsDebugStatsPolling();
+  clearRuntimeInterval('debug-stats');
+  if (jsDebugGraphExactResolutionEnabled && syncJsDebugCurrentStatsClient()) return;
   if (pollNow) void pollJsDebugStatsSample({forceGraphRefresh});
   resetRuntimeInterval('debug-stats', pollJsDebugStatsOnInterval, jsDebugStatsPollIntervalMs());
 }
@@ -5604,35 +5919,9 @@ function maybePrefetchJsDebugHistory() {
 // Finest-source-wins at render keeps the live 1s/10s tail intact (no replaceCoverage,
 // so no fine buckets are removed).
 async function prefetchJsDebugHistoryFullRetention() {
-  if (!jsDebugCollectionEnabled || !jsDebugStatsPanelVisible()) return false;
-  if (jsDebugHistoryPrefetchState.inFlight) return false;
-  if (typeof apiFetchJsonQuiet !== 'function') return false;
-  jsDebugHistoryPrefetchState.inFlight = true;
-  const requestGeneration = jsDebugHistoryPrefetchState.generation;
-  try {
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const historyStart = Math.max(0, nowSeconds - jsDebugHistoryPrefetchRetentionSeconds);
-    const clientId = jsDebugStatsClientIdForRequest();
-    const payload = await fetchJsDebugStatsJson(
-      jsDebugStatsSampleQuery({clientId, historyStart, historyEnd: 0, historyResolution: 1}),
-      {cache: 'no-store', timeoutMs: jsDebugStatsHistoryTimeoutMs(jsDebugHistoryPrefetchRetentionSeconds)},
-    );
-    // The cache was cleared (range reset / history clear) while this fetch was in flight:
-    // dropping the stale response keeps the rendered history deterministic.
-    if (jsDebugHistoryPrefetchState.generation !== requestGeneration) return false;
-    const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
-    // A malformed/omitted coverage list only aborts THIS silent fill; it never blanks the
-    // visible chart (unlike the readiness path, which must reject malformed coverage).
-    if (!coverage) return false;
-    debugGraphApplyServerHistory(payload.history, {advanceLiveCursor: false});
-    jsDebugHistoryPrefetchState.lastFullPrefetchAtMs = performanceNow();
-    return true;
-  } catch (error) {
-    recordJsDebugStatsDiagnostic('info', `history prefetch skipped: ${jsDebugErrorText(error)}`);
-    return false;
-  } finally {
-    jsDebugHistoryPrefetchState.inFlight = false;
-  }
+  // The current server pre-materializes every supported Range/Resolution cell.
+  // A hidden full-retention prefetch only duplicates work and can starve unrelated requests.
+  return false;
 }
 
 // THE one owner of the /api/stats-sample request shape. Every runtime fetch, test
@@ -5730,6 +6019,294 @@ async function paintJsDebugHistoryResponse(generation, requestedRangeSeconds, re
   return true;
 }
 
+function jsDebugCurrentSeriesValue(series, name) {
+  const value = Number(series?.[name]?.value);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function jsDebugCurrentCostDimensionRows(dimensions = {}) {
+  const values = {
+    input: dimensions.input,
+    cache: {
+      tokens: Number(dimensions.cache_read?.tokens || 0) + Number(dimensions.cache_write?.tokens || 0),
+      micro_usd: Number(dimensions.cache_read?.micro_usd || 0) + Number(dimensions.cache_write?.micro_usd || 0),
+      api_list_micro_usd: Number(dimensions.cache_read?.api_list_micro_usd || 0) + Number(dimensions.cache_write?.api_list_micro_usd || 0),
+    },
+    output: dimensions.output,
+    other: dimensions.other,
+  };
+  return Object.fromEntries(Object.entries(values).flatMap(([key, value]) => value ? [
+    [`${key}_tokens`, Math.max(0, Number(value.tokens) || 0)],
+    [`${key}_micro_usd`, Math.max(0, Number(value.micro_usd) || 0)],
+    [`${key}_api_list_micro_usd`, Math.max(0, Number(value.api_list_micro_usd) || 0)],
+  ] : []));
+}
+
+function jsDebugCurrentCostSummary(report = {}) {
+  const priced = report.priced || {};
+  const unpriced = report.unpriced || {};
+  const modelRows = Array.isArray(report.models) ? report.models.map(row => ({
+    provider: row.provider,
+    model: row.model,
+    label: row.model,
+    token_quantity: Number(row.total_tokens) || 0,
+    micro_usd: Number(row.total_micro_usd) || 0,
+    api_list_micro_usd: Number(row.total_api_list_micro_usd) || 0,
+    lower_micro_usd: Number(row.total_micro_usd) || 0,
+    upper_micro_usd: Number(row.total_micro_usd) || 0,
+    ...jsDebugCurrentCostDimensionRows(row.dimensions),
+  })) : [];
+  const sourceRows = Array.isArray(report.agents) ? report.agents.map(row => ({
+    tmux_key: row.key,
+    tmux_label: debugGraphAgentDisplayLabel(row.label || row.source),
+    agent_kind: row.source,
+    agent_label: row.label || row.source,
+    full_label: row.label || row.source,
+    source: row.source,
+    label: debugGraphAgentDisplayLabel(row.label || row.source),
+    token_quantity: Number(row.total_tokens) || 0,
+    micro_usd: Number(row.total_micro_usd) || 0,
+    api_list_micro_usd: Number(row.total_api_list_micro_usd) || 0,
+    lower_micro_usd: Number(row.total_micro_usd) || 0,
+    upper_micro_usd: Number(row.total_micro_usd) || 0,
+    ...jsDebugCurrentCostDimensionRows(row.dimensions),
+  })) : [];
+  const components = Array.isArray(report.evidence) ? report.evidence.map(row => ({
+    ...row,
+    quantity: Number(row.tokens) || 0,
+    token_quantity: Number(row.tokens) || 0,
+    micro_usd: Number(row.micro_usd) || 0,
+    api_list_micro_usd: Number(row.api_list_micro_usd) || 0,
+    lower_micro_usd: Number(row.micro_usd) || 0,
+    upper_micro_usd: Number(row.micro_usd) || 0,
+    priced: true,
+  })) : [];
+  const totalMicroUsd = Math.max(0, Number(report.total_micro_usd) || 0);
+  const totalApiListMicroUsd = Math.max(0, Number(report.total_api_list_micro_usd) || 0);
+  return {
+    range_report: true,
+    total_micro_usd: totalMicroUsd,
+    api_list_micro_usd: totalApiListMicroUsd,
+    total_token_quantity: Math.max(0, Number(report.total_tokens) || 0),
+    dimension_totals: jsDebugCurrentCostDimensionRows(report.dimensions),
+    known_micro_usd: totalMicroUsd,
+    lower_micro_usd: totalMicroUsd,
+    upper_micro_usd: totalMicroUsd,
+    priced_count: Math.max(0, Number(priced.atoms) || 0),
+    complete: Math.max(0, Number(unpriced.tokens) || 0) === 0,
+    unpriced_count: Math.max(0, Number(unpriced.atoms) || 0),
+    unpriced_token_quantity: Math.max(0, Number(unpriced.tokens) || 0),
+    components,
+    models: modelRows,
+    sources: sourceRows,
+    tmux_windows: sourceRows,
+    catalog_revision: String(report.catalog_revision ?? ''),
+    active_catalog_revision: String(report.catalog_revision ?? ''),
+    freshness: 'current',
+  };
+}
+
+function jsDebugCurrentModelComponent(dimension, model, rate, duration) {
+  const tokens = Math.max(0, Number(rate) || 0) * Math.max(1, Number(duration) || 1) / 60;
+  const values = {
+    input: {direction: 'input', cache_role: 'none'},
+    cache_read: {direction: 'input', cache_role: 'read'},
+    cache_write: {direction: 'input', cache_role: 'write'},
+    output: {direction: 'output', cache_role: 'none'},
+    other: {direction: 'other', cache_role: 'none'},
+  }[dimension] || {direction: 'other', cache_role: 'none'};
+  return {provider: '', model, modality: 'text', unit: 'tokens', quantity: tokens, token_quantity: tokens, micro_usd: 0, lower_micro_usd: 0, upper_micro_usd: 0, priced: true, ...values};
+}
+
+function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost = null) {
+  const series = bucket?.series || {};
+  const duration = Math.max(1, Number(bucket?.duration) || 1);
+  const record = {
+    start: Number(bucket?.start) || 0,
+    duration,
+    clients: {},
+    servers: {},
+    host_metrics: {gpu_devices: {}, service_load: {}},
+    agent_token_rates: [],
+  };
+  const agentRates = new Map();
+  const modelRates = {};
+  const modelComponents = [];
+  let bucketMarginalMicroUsd = null;
+  let bucketApiListMicroUsd = null;
+  let bucketUsageTokens = null;
+  for (const name of Object.keys(series)) {
+    const value = jsDebugCurrentSeriesValue(series, name);
+    if (value === null) continue;
+    if (name === 'system_cpu_percent') {
+      record.system_cpu_total_percent = value;
+      record.system_cpu_count = 1;
+    } else if (name.startsWith('cpu_percent:')) {
+      const source = name.slice('cpu_percent:'.length);
+      record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
+      if (!record.cpu_count || source.includes(':8881')) {
+        record.cpu_total_percent = value;
+        record.cpu_count = 1;
+      }
+    } else if (name === 'ask_agents') record.ask_agent_total = value;
+    else if (name === 'run_agents') record.run_agent_total = value;
+    else if (name === 'transition_agents') record.transition_agent_total = value;
+    else if (name === 'idle_agents') record.idle_agent_total = value;
+    else if (name === 'system_memory_used_bytes') {
+      record.host_metrics.system_memory_used_total_bytes = value;
+      record.host_metrics.system_memory_count = 1;
+    } else if (name === 'system_memory_capacity_bytes') {
+      record.host_metrics.system_memory_capacity_total_bytes = value;
+      record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('gpu_util_percent:')) {
+      const source = name.slice('gpu_util_percent:'.length);
+      const device = record.host_metrics.gpu_devices[source] || {label: source, util_total_percent: 0, memory_used_total_bytes: 0, memory_capacity_total_bytes: 0, samples: 1};
+      device.util_total_percent = value;
+      record.host_metrics.gpu_devices[source] = device;
+    } else if (name.startsWith('gpu_memory_bytes:')) {
+      const source = name.slice('gpu_memory_bytes:'.length);
+      const device = record.host_metrics.gpu_devices[source] || {label: source, util_total_percent: 0, memory_used_total_bytes: 0, memory_capacity_total_bytes: 0, samples: 1};
+      device.memory_used_total_bytes = value;
+      record.host_metrics.gpu_devices[source] = device;
+    } else if (name.startsWith('service_cpu_percent:')) {
+      const source = name.slice('service_cpu_percent:'.length);
+      record.host_metrics.service_load[source] = {label: source, cpu_total_percent: value, cpu_samples: 1, cpu_min_percent: value, cpu_max_percent: value, rss_total_bytes: 0, rss_samples: 0, rss_min_bytes: 0, rss_max_bytes: 0};
+    } else if (name.startsWith('service_rss_bytes:')) {
+      const source = name.slice('service_rss_bytes:'.length);
+      const service = record.host_metrics.service_load[source] || {label: source, cpu_total_percent: 0, cpu_samples: 0, cpu_min_percent: 0, cpu_max_percent: 0};
+      Object.assign(service, {rss_total_bytes: value, rss_samples: 1, rss_min_bytes: value, rss_max_bytes: value});
+      record.host_metrics.service_load[source] = service;
+    } else if (name === 'cost_micro_usd') bucketMarginalMicroUsd = value;
+    else if (name === 'api_list_cost_micro_usd') bucketApiListMicroUsd = value;
+    else if (name === 'usage_tokens') bucketUsageTokens = value;
+    else if (name === 'browser_api_per_second') record.api_count = value * duration;
+    else if (name === 'browser_sse_per_second') record.sse_count = value * duration;
+    else if (name === 'browser_latency_ms') { record.latency_total_ms = value; record.latency_count = 1; }
+    else if (name === 'browser_bandwidth_bytes_per_second') record.bandwidth_bytes = value * duration;
+    else if (name === 'browser_disconnected_ms') record.disconnected_ms = value;
+    else if (name.startsWith('agent_tokens_per_minute:')) {
+      const key = name.slice('agent_tokens_per_minute:'.length);
+      agentRates.set(key, {key, label: debugGraphAgentDisplayLabel(key), fullLabel: key, total: value, samples: 1, tokens: value * duration / 60, seconds: duration, model_rates: {}});
+    } else if (name.startsWith('model_tokens_per_minute:')) {
+      const parts = name.slice('model_tokens_per_minute:'.length).split(':');
+      const dimension = parts.shift();
+      const model = parts.join(':') || 'unknown';
+      if (dimension === 'output') modelRates[model] = {total: value, samples: 1, tokens: value * duration / 60, seconds: duration};
+      if (dimension !== 'all') modelComponents.push(jsDebugCurrentModelComponent(dimension, model, value, duration));
+    }
+  }
+  const statusValues = ['ask_agent_total', 'run_agent_total', 'transition_agent_total', 'idle_agent_total'];
+  if (statusValues.some(key => Number.isFinite(record[key]))) record.agent_activity_samples = 1;
+  if (Object.keys(modelRates).length) agentRates.set('__models__', {key: '__models__', label: 'Models', total: 0, samples: 0, tokens: 0, seconds: duration, model_rates: modelRates});
+  record.agent_token_rates = [...agentRates.values()];
+  if (bucketMarginalMicroUsd !== null || bucketApiListMicroUsd !== null || bucketUsageTokens !== null) {
+    const hasBucketPrice = bucketMarginalMicroUsd !== null || bucketApiListMicroUsd !== null;
+    const marginalMicroUsd = bucketMarginalMicroUsd ?? bucketApiListMicroUsd ?? 0;
+    record.cost_summary = {
+      range_report: false,
+      total_micro_usd: marginalMicroUsd,
+      total_token_quantity: bucketUsageTokens ?? 0,
+      known_micro_usd: marginalMicroUsd,
+      lower_micro_usd: marginalMicroUsd,
+      upper_micro_usd: marginalMicroUsd,
+      priced_count: hasBucketPrice && bucketUsageTokens !== null ? 1 : 0,
+      complete: hasBucketPrice,
+      unpriced_count: !hasBucketPrice && bucketUsageTokens !== null ? 1 : 0,
+      unpriced_token_quantity: !hasBucketPrice ? bucketUsageTokens ?? 0 : 0,
+      components: modelComponents,
+    };
+    if (bucketApiListMicroUsd !== null) record.cost_summary.api_list_micro_usd = bucketApiListMicroUsd;
+  } else if (modelComponents.length) record.cost_summary = {components: modelComponents};
+  if (includeRangeCost && rangeCost) record.cost_summary = {...(record.cost_summary || {}), ...jsDebugCurrentCostSummary(rangeCost), components: [...modelComponents, ...jsDebugCurrentCostSummary(rangeCost).components]};
+  return record;
+}
+
+function jsDebugCurrentBucketHasFamilyData(bucket, family) {
+  const names = Object.keys(bucket?.series || {});
+  const prefixed = prefix => names.some(name => name.startsWith(prefix));
+  if (family === 'cpu') return names.includes('system_cpu_percent') || prefixed('cpu_percent:');
+  if (family === 'service_load') return prefixed('service_cpu_percent:') || prefixed('service_rss_bytes:');
+  if (family === 'agent_status') return ['ask_agents', 'run_agents', 'transition_agents', 'idle_agents'].some(name => names.includes(name));
+  if (family === 'agent_tokens' || family === 'cost') {
+    return prefixed('agent_tokens_per_minute:') || prefixed('model_tokens_per_minute:') || names.includes('cost_micro_usd') || names.includes('api_list_cost_micro_usd') || names.includes('usage_tokens');
+  }
+  if (family === 'gpu') return prefixed('gpu_util_percent:') || prefixed('gpu_memory_bytes:');
+  if (family === 'system_memory') return names.includes('system_memory_used_bytes') || names.includes('system_memory_capacity_bytes');
+  if (family === 'browser') return names.some(name => name.startsWith('browser_'));
+  return false;
+}
+
+function jsDebugCurrentCoverageIntervals(snapshot, family) {
+  const start = Number(snapshot.window_start);
+  const end = Number(snapshot.window_end);
+  const gaps = (snapshot.no_data || [])
+    .filter(span => span.family === family)
+    .map(span => ({start: Math.max(start, Number(span.start)), end: Math.min(end, Number(span.end))}))
+    .filter(span => span.end > span.start)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const buckets = (snapshot.buckets || [])
+    .filter(bucket => Number(bucket?.start) < end && Number(bucket?.start) + Number(bucket?.duration) > start)
+    .sort((left, right) => Number(left.start) - Number(right.start));
+  if (buckets.length) {
+    const intervals = [];
+    let gapIndex = 0;
+    for (const bucket of buckets) {
+      const bucketStart = Math.max(start, Number(bucket.start));
+      const bucketEnd = Math.min(end, Number(bucket.start) + Number(bucket.duration));
+      if (!(bucketEnd > bucketStart)) continue;
+      while (gapIndex < gaps.length && gaps[gapIndex].end <= bucketStart) gapIndex += 1;
+      let hasGap = false;
+      for (let index = gapIndex; index < gaps.length && gaps[index].start < bucketEnd; index += 1) {
+        if (gaps[index].end > bucketStart) {
+          hasGap = true;
+          break;
+        }
+      }
+      // no_data is source-scoped. The retained UI can paint only a family-wide
+      // band, so an exact value from any source keeps that bucket covered.
+      if (!hasGap || jsDebugCurrentBucketHasFamilyData(bucket, family)) {
+        const previous = intervals.at(-1);
+        if (previous && previous.endSeconds === bucketStart) previous.endSeconds = bucketEnd;
+        else intervals.push({startSeconds: bucketStart, endSeconds: bucketEnd, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds});
+      }
+    }
+    return intervals;
+  }
+  const intervals = [];
+  let cursor = start;
+  for (const gap of gaps) {
+    if (gap.start > cursor) intervals.push({startSeconds: cursor, endSeconds: gap.start, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds});
+    cursor = Math.max(cursor, gap.end);
+  }
+  if (cursor < end) intervals.push({startSeconds: cursor, endSeconds: end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds});
+  return intervals;
+}
+
+function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {}) {
+  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
+  clearJsDebugGraphData();
+  buckets.forEach((bucket, index) => debugGraphApplyServerRecord(jsDebugCurrentBucketRecord(bucket, index === buckets.length - 1, snapshot.cost_report)));
+  const requestInterval = {startSeconds: snapshot.window_start, endSeconds: snapshot.window_end, resolutionSeconds: snapshot.resolution_seconds, sourceResolutionSeconds: snapshot.resolution_seconds};
+  jsDebugHistoryReadiness.phase = 'ready';
+  jsDebugHistoryReadiness.reason = '';
+  jsDebugHistoryReadiness.overlayVisible = false;
+  jsDebugHistoryReadiness.requestCoverageIntervals = [requestInterval];
+  jsDebugHistoryReadiness.coverageIntervals = [requestInterval];
+  jsDebugHistoryReadiness.storeCoverageIntervals = Object.fromEntries(
+    ['cpu', 'service_load', 'agent_status', 'agent_tokens', 'cost', 'gpu', 'system_memory', 'browser'].map(family => [family, jsDebugCurrentCoverageIntervals(snapshot, family)]),
+  );
+  jsDebugHistoryReadiness.loadedStartSeconds = snapshot.window_start;
+  jsDebugHistoryReadiness.loadedEndSeconds = snapshot.window_end;
+  jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
+  jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
+  const firstSample = !jsDebugStatsPollState.firstSampleReceived;
+  jsDebugStatsPollState.lastSampleAtMs = Date.now();
+  jsDebugStatsPollState.firstSampleReceived = true;
+  resolveDebugGraphResolutionChange(jsDebugHistoryReadiness);
+  if (firstSample) armJsDebugStatsPolling();
+  scheduleJsDebugPanelRefresh({force: forceGraphRefresh, immediate: true});
+}
+
 async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   if (!jsDebugCollectionEnabled) return;
   if (!jsDebugStatsPanelVisible()) {
@@ -5744,112 +6321,18 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
   if (typeof apiFetchJsonQuiet !== 'function') return;
   jsDebugStatsPollState.pending = false;
   jsDebugStatsPollState.inFlight = true;
-  let readinessRequest = null;
-  let historyRequestSuppressed = false;
   try {
-    const clientId = jsDebugStatsClientIdForRequest();
-    const tokenConsumer = jsDebugStatsTokenConsumerEnabled() ? '1' : '0';
-    const domain = debugGraphDomain();
-    const targetStart = Math.max(0, Math.floor(domain.startMs / 1000));
-    const targetEnd = Math.max(targetStart + 1, Math.ceil(domain.endMs / 1000));
-    const historyResolution = jsDebugRequestedHistoryResolutionSeconds();
-    const coverageResolution = jsDebugHistoryCoverageResolutionSeconds(targetStart, historyResolution);
-    const needsHistoryCoverage = jsDebugHistoryCoverageNeedsRefresh(targetStart, targetEnd, coverageResolution);
-    if (needsHistoryCoverage) {
-      const state = jsDebugHistoryReadiness;
-      if (jsDebugHistoryReadinessErrorLike(state) && !jsDebugHistoryAutoRetryDue(state)) {
-        historyRequestSuppressed = true;
-      } else {
-        const currentRequestMatches = jsDebugHistoryReadinessBusy(state)
-          && Number(state.requestedRangeSeconds) === Number(jsDebugGraphRangeSeconds)
-          && Number(state.targetStartSeconds) === Number(targetStart)
-          && Number(state.targetEndSeconds) === Number(targetEnd)
-          && Number(state.requestedResolutionSeconds) === Number(coverageResolution);
-        if (!currentRequestMatches || state.reason === 'retry') {
-          const requestWindow = jsDebugHistoryRequestWindow(targetStart, targetEnd, coverageResolution);
-          beginJsDebugHistoryReadiness(requestWindow.startSeconds, {
-            targetStartSeconds: targetStart,
-            targetEndSeconds: targetEnd,
-            requestedEndSeconds: requestWindow.endSeconds,
-            requestedResolutionSeconds: coverageResolution,
-            retry: jsDebugHistoryReadinessErrorLike(state),
-          });
-        }
-        readinessRequest = jsDebugHistoryReadinessSnapshot();
-        await nextAnimationFrame();
-        if (!jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
-      }
-    }
-    const historyEnd = readinessRequest
-      ? Math.max(0, Math.floor(Number(readinessRequest.requestedEndSeconds) || 0))
-      : 0;
-    const historyStart = readinessRequest ? readinessRequest.requestedStartSeconds : (historyRequestSuppressed ? 0 : targetStart);
-    const payload = await fetchJsDebugStatsJson(jsDebugStatsSampleQuery({
-      since: readinessRequest ? 0 : (jsDebugStatsServerSequence || 0),
-      clientId,
-      tokenConsumer,
-      historyStart,
-      historyEnd,
-      historyResolution,
-      history: !historyRequestSuppressed,
-      exactResolution: jsDebugGraphExactResolutionEnabled,
-    }), {
+    const rangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds);
+    const requestedResolution = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO';
+    const url = `/api/stats-snapshot?range_seconds=${encodeURIComponent(rangeSeconds)}&resolution=${encodeURIComponent(requestedResolution)}&client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}&since_generation=0`;
+    const snapshot = await fetchJsDebugStatsJson(url, {
       cache: 'no-store',
-      timeoutMs: jsDebugStatsHistoryTimeoutMs(readinessRequest?.requestedRangeSeconds || jsDebugGraphRangeSeconds),
+      timeoutMs: jsDebugStatsHistoryTimeoutMs(rangeSeconds),
     });
-    if (readinessRequest && !jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) return;
-    const pendingCoverage = normalizedJsDebugHistoryPending(payload?.history);
-    if (readinessRequest && pendingCoverage) {
-      recordJsDebugStatsDiagnostic('info', `history backfill pending: ${pendingCoverage.reason}`);
-      setJsDebugHistoryReadiness('loading', {
-        reason: 'retry',
-        error: pendingCoverage.reason,
-        nextAutoRetryAtMs: performanceNow() + pendingCoverage.retryAfterMs,
-      });
-      return;
-    }
-    const coverage = normalizedJsDebugHistoryCoverage(payload?.history);
-    if (readinessRequest && !coverage) {
-      recordJsDebugStatsDiagnostic('error', 'coverage rejected: response omitted or malformed the required interval list');
-      throw new Error('stats history response has malformed coverage intervals');
-    }
-    if (readinessRequest) recordJsDebugHistoryCoverageDiagnostic(coverage, readinessRequest);
-    if (coverage?.mode === 'older' && Number(coverage.sourceResolutionSeconds || 0) >= 60) {
-      recordJsDebugStatsDiagnostic('info', `history range served from ${coverage.sourceResolutionSeconds}s retained rollup`);
-    }
-    const replaceCoverage = coverage?.intervals.filter(interval => (
-      jsDebugHistoryCoverageResolutionForRange(interval.startSeconds, interval.endSeconds) > interval.resolutionSeconds
-    )) || null;
-    const applyStartedAt = performanceNow();
-    recordJsDebugStatsSample(payload, {
-      forceGraphRefresh: forceGraphRefresh || needsHistoryCoverage,
-      scheduleRefresh: !readinessRequest,
-      advanceHistoryCursor: coverage?.mode !== 'older',
-      replaceCoverage,
-    });
-    if (coverage) applyJsDebugHistoryCoverage(coverage, readinessRequest);
-    recordClientPerfCounter('statsHistoryApply', performanceNow() - applyStartedAt);
-    if (readinessRequest) {
-      if (coverage.hasMoreOlder && Number.isFinite(coverage.nextOlderEnd) && coverage.nextOlderEnd > readinessRequest.targetStartSeconds) {
-        jsDebugStatsPollState.pending = true;
-        jsDebugStatsPollState.pendingForceGraphRefresh = true;
-        return;
-      }
-      await paintJsDebugHistoryResponse(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds);
-    }
+    applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh: true});
   } catch (error) {
-    if (readinessRequest && jsDebugHistoryRequestIsCurrent(readinessRequest.generation, readinessRequest.requestedRangeSeconds, readinessRequest.requestedStartSeconds)) {
-      const elapsedMs = Math.max(0, performanceNow() - Number(readinessRequest.loadingStartedAtMs || performanceNow()));
-      const level = error?.name === 'TimeoutError' ? 'error' : 'warning';
-      const reason = error?.name === 'TimeoutError'
-        ? `history request timed out after ${Math.round(elapsedMs)}ms`
-        : `history request failed: ${jsDebugErrorText(error)}`;
-      recordJsDebugStatsDiagnostic(level, reason);
-      setJsDebugHistoryReadiness('error', {
-        error: jsDebugErrorText(error),
-        nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryDelayMs(readinessRequest.attemptCount),
-      });
-    }
+    recordJsDebugStatsDiagnostic('warning', `current stats request failed: ${jsDebugErrorText(error)}`);
+    setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error), nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs});
   } finally {
     jsDebugStatsPollState.inFlight = false;
     if (jsDebugStatsPollState.pending) {
@@ -5862,11 +6345,8 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
 }
 
 function scheduleJsDebugStatsHistoryFlush() {
-  if (!jsDebugCollectionEnabled || jsDebugStatsUploadState.timer || typeof setTimeout !== 'function') return;
-  jsDebugStatsUploadState.timer = setTimeout(() => {
-    jsDebugStatsUploadState.timer = null;
-    flushJsDebugStatsHistory();
-  }, jsDebugStatsHistoryFlushMs);
+  // Current browser observations are uploaded as original events by
+  // scheduleJsDebugCurrentObservationFlush; legacy aggregate buckets are retired.
 }
 
 function jsDebugStatsHistoryUploadRequest(records, clientId, since) {
@@ -5894,61 +6374,12 @@ function jsDebugStatsHistoryUploadRequest(records, clientId, since) {
 }
 
 async function flushJsDebugStatsHistory() {
-  if (!jsDebugCollectionEnabled || !jsDebugGraphPendingServerBuckets.size || typeof apiFetchJsonQuiet !== 'function') return;
-  if (jsDebugStatsUploadState.worker) return jsDebugStatsUploadState.worker;
-  const records = [...jsDebugGraphPendingServerBuckets.values()]
-    .map(record => ({...record}))
-    .filter(record => record.api_count || record.sse_count || record.latency_count || record.bandwidth_bytes || record.disconnected_ms || record.cpu_count || record.system_cpu_count)
-    .sort((a, b) => (Number(a.start) - Number(b.start)) || (Number(a.duration) - Number(b.duration)));
-  if (!records.length) return;
-  const clientId = jsDebugStatsClientIdForRequest();
-  const since = jsDebugStatsServerSequence || 0;
-  const {chunk, held, body} = jsDebugStatsHistoryUploadRequest(records, clientId, since);
-  for (const record of chunk) {
-    const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-    jsDebugGraphPendingServerBuckets.delete(key);
-  }
-  const generation = jsDebugStatsUploadState.generation;
-  let worker = null;
-  worker = (async () => {
-    try {
-      await apiFetchJsonQuiet('/api/stats-history', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body,
-      });
-      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
-      scheduleJsDebugPanelRefresh();
-    } catch (_error) {
-      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
-      for (const record of chunk) {
-        const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-        const existing = jsDebugGraphPendingServerBuckets.get(key);
-        if (existing) {
-          for (const field of ['api_count', 'sse_count', 'latency_total_ms', 'latency_count', 'bandwidth_bytes', 'disconnected_ms', 'cpu_total_percent', 'cpu_count', 'system_cpu_total_percent', 'system_cpu_count']) {
-            existing[field] = Number(existing[field] || 0) + Number(record[field] || 0);
-          }
-        } else {
-          jsDebugGraphPendingServerBuckets.set(key, record);
-        }
-      }
-    } finally {
-      if (jsDebugStatsUploadState.generation !== generation || jsDebugStatsUploadState.worker !== worker) return;
-      for (const record of held) {
-        const key = `${Math.floor(Number(record.start) * 1000)}:${Math.floor(Number(record.duration) * 1000)}`;
-        if (!jsDebugGraphPendingServerBuckets.has(key)) jsDebugGraphPendingServerBuckets.set(key, record);
-      }
-      jsDebugStatsUploadState.worker = null;
-      if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
-    }
-  })();
-  jsDebugStatsUploadState.worker = worker;
-  return worker;
+  // The current observation endpoint owns browser telemetry. Retain this hook because
+  // the established renderer still calls it, but never write the retired history API.
+  jsDebugGraphPendingServerBuckets.clear();
 }
 
 async function clearJsDebugServerHistory() {
-  const priorWorker = jsDebugStatsUploadState.worker;
-  const generation = ++jsDebugStatsUploadState.generation;
   const restartPolling = runtimeIntervalActive('debug-stats');
   stopJsDebugStatsPolling();
   jsDebugStatsPollState.firstSampleReceived = false;
@@ -5965,32 +6396,9 @@ async function clearJsDebugServerHistory() {
     clearTimeout(jsDebugStatsUploadState.timer);
     jsDebugStatsUploadState.timer = null;
   }
-  if (priorWorker) {
-    try {
-      await priorWorker;
-    } catch (_error) {}
-  }
-  if (jsDebugStatsUploadState.generation !== generation) return;
-  if (jsDebugStatsUploadState.worker === priorWorker) jsDebugStatsUploadState.worker = null;
-  if (typeof apiFetchJsonQuiet !== 'function') {
-    if (restartPolling) armJsDebugStatsPolling({pollNow: true});
-    return;
-  }
-  try {
-    const payload = await apiFetchJsonQuiet('/api/stats-history', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({client_id: jsDebugStatsClientIdForRequest(), clear: true}),
-    });
-    if (jsDebugStatsUploadState.generation !== generation) return;
-    debugGraphApplyServerHistory(payload?.history);
-    scheduleJsDebugPanelRefresh();
-  } catch (_error) {
-  } finally {
-    if (jsDebugStatsUploadState.generation !== generation) return;
-    if (restartPolling) armJsDebugStatsPolling({pollNow: true});
-    if (jsDebugGraphPendingServerBuckets.size) scheduleJsDebugStatsHistoryFlush();
-  }
+  clearJsDebugGraphData();
+  scheduleJsDebugPanelRefresh({force: true});
+  if (restartPolling) armJsDebugStatsPolling({pollNow: true});
 }
 
 function startJsDebugStatsPolling({pollNow = true} = {}) {
@@ -6010,6 +6418,10 @@ async function pollJsDebugClientHealth() {
     const latencyMs = Math.max(0, performanceNow() - startedAt);
     const bandwidthBytes = jsDebugRequestBytes(url) + utf8ByteLength(JSON.stringify(payload || {}));
     const sampleTimeMs = Date.now();
+    if (jsDebugGraphExactResolutionEnabled) {
+      recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleTimeMs);
+      return;
+    }
     const bucketRef = debugGraphServerBucketRefForTime(sampleTimeMs, sampleTimeMs);
     const data = {heartbeatCount: 1, latencyMs, bandwidthBytes};
     debugGraphAddBucketData(debugGraphBucketForTime(sampleTimeMs, sampleTimeMs), data);
@@ -6025,7 +6437,7 @@ function startJsDebugClientHealthPolling() {
   // A background health request is best-effort: an offline/browser-suspended page has no
   // sample to contribute and must not surface an unhandled promise rejection.
   void pollJsDebugClientHealth().catch(() => {});
-  resetRuntimeInterval('debug-client-health', () => { void pollJsDebugClientHealth().catch(() => {}); }, jsDebugStatsPollMs);
+  resetRuntimeInterval('debug-client-health', () => { void pollJsDebugClientHealth().catch(() => {}); }, jsDebugClientHealthPollMs);
 }
 
 function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {}) {
@@ -6405,6 +6817,16 @@ function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() 
   const historyQuery = profile.returned_records == null || profile.source_records == null
     ? '—'
     : `${debugSystemNumber(profile.returned_records)} returned · ${debugSystemNumber(profile.source_records)} source`;
+  const usage = statsd.usage && typeof statsd.usage === 'object' ? statsd.usage : {};
+  const usageHealth = usage.health && typeof usage.health === 'object' ? usage.health : {};
+  const usageState = ['ok', 'warning', 'idle'].includes(usageHealth.state) ? usageHealth.state : 'idle';
+  const usageLabel = usageState === 'warning' ? 'Warning' : (usageState === 'ok' ? 'Healthy' : 'Idle');
+  const usageReason = usageHealth.reason || 'no usage health evidence';
+  const acceptedAge = Number(usageHealth.last_accepted_atom_age_seconds);
+  const usageHtml = `<div class="js-debug-usage-health js-debug-usage-health--${esc(usageState)}" data-js-debug-usage-health="${esc(usageState)}" ${usageState === 'warning' ? 'role="alert"' : 'role="status"'}>
+    <strong>${esc(usageLabel)}:</strong> <span>${esc(usageReason)}</span>
+    <span>Last accepted ${Number.isFinite(acceptedAge) ? esc(debugGraphTerseTimeText(acceptedAge * 1000)) : '—'} · Quarantined conflicts ${esc(debugSystemNumber(usage.quarantined_conflict_count))}</span>
+  </div>`;
   const aggregate = debugSystemRowsHtml([
     ['Status', statsd.sampler_alive === true ? 'Running' : 'Idle'],
     ['Last cycle', debugGraphTerseTimeText(Number(statsd.sampler_last_cycle_seconds || 0) * 1000)],
@@ -6415,7 +6837,7 @@ function debugSystemStatsSamplerCardHtml(services = [], nowSeconds = Date.now() 
   ]);
   return debugSystemCardHtml(
     'YO!stats sampler',
-    `${aggregate}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
+    `${aggregate}${usageHtml}${debugSystemSamplerFamiliesHtml(statsd.sampler_families, nowSeconds)}`,
     {wide: true},
   );
 }
@@ -6662,6 +7084,7 @@ function handleYoCostTableSort(event, panel) {
 function bindYoCostPanel(panel) {
   if (!panel || panel.dataset.jsYoCostBound === 'true') return;
   panel.dataset.jsYoCostBound = 'true';
+  bindDebugGraphTouchSelection(panel);
   panel.addEventListener('pointerdown', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     handleDebugGraphPointerDown(event, panel);
@@ -6674,7 +7097,7 @@ function bindYoCostPanel(panel) {
   });
   panel.addEventListener('pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
-    cancelDebugGraphSelection(panel);
+    handleDebugGraphPointerCancel(event, panel);
   });
   panel.addEventListener('input', event => { handleDebugGraphControlEvent(event, panel); });
   panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
@@ -6718,7 +7141,12 @@ function renderYoCostPanels({force = false} = {}) {
     && document.visibilityState !== 'hidden'
     && itemIsActivePaneTab(yocostItemId);
   if (!force && (!visible || nowMs < jsDebugCostPanelNextRefreshAtMs)) return false;
+  let rendered = false;
   for (const panel of document.querySelectorAll('.js-yocost-panel')) {
+    if (debugGraphInteractionBelongsToPanel(panel)) {
+      panel.dataset.jsDebugGraphRefreshPending = 'true';
+      continue;
+    }
     const body = panel.querySelector('.js-yocost-body');
     const scroll = body?.querySelector('.js-yocost-scroll');
     const scrollTop = scroll?.scrollTop || 0;
@@ -6727,8 +7155,11 @@ function renderYoCostPanels({force = false} = {}) {
       body.innerHTML = `${panelToastStackHtml(yocostItemId)}<div class="preferences-scroll js-yocost-scroll">${yoCostPanelHtml()}</div>`;
       restoreElementScrollPosition(body.querySelector('.js-yocost-scroll'), scrollTop, scrollLeft);
     }
+    delete panel.dataset.jsDebugGraphRefreshPending;
     bindYoCostPanel(panel);
+    rendered = true;
   }
+  if (!rendered) return false;
   const delayMs = debugCostAgeRefreshDelayMs();
   jsDebugCostPanelNextRefreshAtMs = nowMs + delayMs;
   jsDebugCostAgeNextRefreshAtMs = nowMs + delayMs;
@@ -6771,15 +7202,44 @@ function createDebugPanel() {
   return panel;
 }
 
+function debugLogScrollAnchor(log) {
+  if (!log) return null;
+  const scrollTop = Number(log.scrollTop) || 0;
+  const maxScroll = Math.max(0, Number(log.scrollHeight) - Number(log.clientHeight));
+  return {
+    scrollTop,
+    scrollLeft: Number(log.scrollLeft) || 0,
+    nearBottom: maxScroll - scrollTop <= 20,
+    selectionStart: Number(log.selectionStart),
+    selectionEnd: Number(log.selectionEnd),
+  };
+}
+
+function restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom = false} = {}) {
+  if (!log || !anchor) return;
+  if (Number.isFinite(anchor.selectionStart) && Number.isFinite(anchor.selectionEnd)) {
+    try { log.setSelectionRange(anchor.selectionStart, anchor.selectionEnd); } catch (_) {}
+  }
+  // Restoring a textarea selection can scroll the caret into view, so position
+  // restoration must be last to preserve a reader who is above the tail.
+  log.scrollTop = scrollToBottom || anchor.nearBottom ? log.scrollHeight : anchor.scrollTop;
+  log.scrollLeft = anchor.scrollLeft;
+}
+
 function renderDebugPanels(options = {}) {
   if (dragState.item != null) return;
   for (const panel of document.querySelectorAll('.js-debug-panel')) {
     const body = panel.querySelector('.js-debug-body');
-    refreshDebugPanelFromEvents(panel, options);
     if (body && (options.force === true || !body.querySelector('[data-js-debug-log]'))) {
+      const outerScroll = body.querySelector('.js-debug-scroll');
+      const outerScrollTop = outerScroll?.scrollTop || 0;
+      const outerScrollLeft = outerScroll?.scrollLeft || 0;
+      const logAnchor = debugLogScrollAnchor(body.querySelector('[data-js-debug-log]'));
       body.innerHTML = `${panelToastStackHtml(debugPaneItemId)}<div class="preferences-scroll js-debug-scroll">${debugPanelHtml()}</div>`;
-      refreshDebugPanelFromEvents(panel, {force: true});
+      restoreElementScrollPosition(body.querySelector('.js-debug-scroll'), outerScrollTop, outerScrollLeft);
+      restoreDebugLogScrollAnchor(body.querySelector('[data-js-debug-log]'), logAnchor, {scrollToBottom: options.scrollLogToBottom === true});
     }
+    refreshDebugPanelFromEvents(panel, options);
     bindDebugPanel(panel);
   }
   renderYoCostPanels(options);
@@ -6817,20 +7277,20 @@ function refreshDebugPanelFromEvents(panel, options = {}) {
   const graph = panel.querySelector('[data-js-debug-graph]');
   refreshDebugGraphElement(graph, options);
   const log = panel.querySelector('[data-js-debug-log]');
-  if (!log || (document.activeElement === log && options.force !== true)) return;
+  if (!log) return;
   const text = jsDebugTextForClipboard();
   if (log.value === text) return;
-  const oldTop = log.scrollTop;
-  const maxScroll = Math.max(0, log.scrollHeight - log.clientHeight);
-  const nearBottom = maxScroll - oldTop <= 20;
+  const anchor = debugLogScrollAnchor(log);
   log.value = text;
-  log.scrollTop = nearBottom || options.force === true ? log.scrollHeight : oldTop;
+  restoreDebugLogScrollAnchor(log, anchor, {scrollToBottom: options.scrollLogToBottom === true});
 }
 
 function debugGraphFocusedControl(graph) {
   const active = typeof document !== 'undefined' ? document.activeElement : null;
   if (!graph || !active || !graph.contains(active)) return null;
-  if (active.matches?.('[data-js-debug-range-slider]')) return null;
+  // These controls live outside the replaceable graph body. Keeping either
+  // focused must not defer an accepted history paint until focusout.
+  if (active.matches?.('[data-js-debug-range-slider], [data-js-debug-resolution-override]')) return null;
   return active.closest?.('.js-debug-graph-controls, [data-js-debug-model-token-dimension]') || null;
 }
 
@@ -6925,6 +7385,10 @@ function refreshDebugCostAgeLabels(nowMs = Date.now()) {
   return true;
 }
 
+function debugGraphSlideIntervalMs(resolutionMs) {
+  return Number(resolutionMs) <= 1000 ? 1000 : 5000;
+}
+
 function debugGraphSlidingAxisActive() {
   // Live ranges up to 1h advance continuously with the wall clock so the axis
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
@@ -6938,13 +7402,14 @@ function debugGraphLiveTickerNeeded() {
 
 function debugGraphSlideLiveViews(nowMs = Date.now()) {
   // Re-render each visible live graph at most once per slide interval so the
-  // plot region drifts left with wall clock. The per-graph throttle keeps this
-  // to ~1s and never fires within a sub-second window of a fresh render, so
-  // data-tick throttling and mounted controls are undisturbed.
+  // plot and x-axis move in the same repaint. One-second data slides every second;
+  // coarser data slides every five seconds without inventing extra data ticks.
+  const resolutionMs = debugGraphDisplayResolutionMs(debugGraphDomain(nowMs), 0, nowMs);
+  const slideIntervalMs = debugGraphSlideIntervalMs(resolutionMs);
   for (const graph of document.querySelectorAll('[data-js-debug-graph]')) {
     if (graph.offsetParent === null) continue;
     const renderedAt = Number(graph.dataset.jsDebugGraphRenderedAt);
-    if (Number.isFinite(renderedAt) && nowMs - renderedAt < jsDebugGraphSlideRenderMs) continue;
+    if (Number.isFinite(renderedAt) && nowMs - renderedAt < slideIntervalMs) continue;
     refreshDebugGraphElement(graph, {force: true});
   }
 }
@@ -6994,6 +7459,10 @@ function flushDeferredDebugGraphRefresh(graph) {
 
 function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = true} = {}) {
   if (!graph || jsDebugGraphRangeSliderDragging) return false;
+  if (debugGraphInteractionBelongsToPanel(graph.closest('.js-debug-panel, .js-yocost-panel'))) {
+    graph.dataset.jsDebugGraphRefreshPending = 'true';
+    return false;
+  }
   if (deferFocusedControl && debugGraphFocusedControl(graph)) {
     graph.dataset.jsDebugGraphRefreshPending = 'true';
     return false;
@@ -7025,6 +7494,7 @@ function refreshDebugGraphElement(graph, {force = false, deferFocusedControl = t
     graph.setAttribute('aria-busy', jsDebugHistoryReadinessBusy() ? 'true' : 'false');
     delete graph.dataset.jsDebugGraphRefreshPending;
     if (typeof scheduleAgentWindowActivityAnimationSync === 'function') scheduleAgentWindowActivityAnimationSync(graph);
+    resolveDebugGraphResolutionChange(jsDebugHistoryReadiness, {painted: true});
     syncDebugGraphLiveTicker();
   } finally {
     clientPerfEnd(perf);
@@ -7068,6 +7538,27 @@ function setDebugSubTab(tab) {
 
 function requestJsDebugHistoryForCurrentDomain({retry = false, forceGraphRefresh = true} = {}) {
   if (!jsDebugStatsPanelVisible()) return false;
+  if (jsDebugGraphExactResolutionEnabled) {
+    const client = ensureJsDebugCurrentStatsClient();
+    const selection = jsDebugCurrentStatsSelection();
+    const currentSelection = client?.controller?.()?.selection?.();
+    const cachedSelection = client?.controller?.()?.generation?.()
+      && Number(currentSelection?.range_seconds) === Number(selection.rangeSeconds)
+      && String(currentSelection?.resolution) === String(selection.resolution);
+    if (!retry && cachedSelection) {
+      syncJsDebugCurrentStatsClient();
+      return false;
+    }
+    const domain = debugGraphDomain();
+    beginJsDebugHistoryReadiness(Math.max(0, Math.floor(domain.startMs / 1000)), {
+      targetStartSeconds: Math.max(0, Math.floor(domain.startMs / 1000)),
+      targetEndSeconds: Math.max(1, Math.ceil(domain.endMs / 1000)),
+      requestedEndSeconds: Math.max(1, Math.ceil(domain.endMs / 1000)),
+      requestedResolutionSeconds: jsDebugRequestedHistoryResolutionSeconds(),
+      retry,
+    });
+    return syncJsDebugCurrentStatsClient({select: true});
+  }
   const domain = debugGraphDomain();
   const requestedStartSeconds = Math.max(0, Math.floor(domain.startMs / 1000));
   const requestedDomainEndSeconds = Math.max(requestedStartSeconds + 1, Math.ceil(domain.endMs / 1000));
@@ -7131,7 +7622,7 @@ function setDebugGraphResolutionOverride(value) {
   // value now, before any fetch resolves.
   refreshDebugGraphSurfaces();
   if (normalized === previousSeconds) {
-    jsDebugGraphPendingResolutionChange = null;
+    clearDebugGraphPendingResolutionChange({hideOverlay: jsDebugHistoryReadiness.phase === 'ready'});
     return;
   }
   // Cached/instant path: when the domain's buckets are already client-side (the common
@@ -7142,10 +7633,26 @@ function setDebugGraphResolutionOverride(value) {
   //
   const fetching = requestJsDebugHistoryForCurrentDomain();
   if (!fetching) {
-    jsDebugGraphPendingResolutionChange = null;
+    clearDebugGraphPendingResolutionChange({hideOverlay: jsDebugHistoryReadiness.phase === 'ready'});
     return;
   }
-  jsDebugGraphPendingResolutionChange = {previousSeconds, generation: Number(jsDebugHistoryReadiness.generation || 0)};
+  clearDebugGraphPendingResolutionChange();
+  const pending = {
+    previousSeconds,
+    targetSeconds: normalized,
+    rangeSeconds: Number(jsDebugGraphRangeSeconds),
+    requestedResolutionSeconds: Number(jsDebugHistoryReadiness.requestedResolutionSeconds),
+    targetStartSeconds: Number(jsDebugHistoryReadiness.targetStartSeconds),
+    targetEndSeconds: Number(jsDebugHistoryReadiness.targetEndSeconds),
+    armedGeneration: Number(jsDebugHistoryReadiness.generation || 0),
+    armedAtMs: performanceNow(),
+    watchdogTimer: null,
+  };
+  jsDebugGraphPendingResolutionChange = pending;
+  pending.watchdogTimer = setTimeout(() => {
+    if (jsDebugGraphPendingResolutionChange !== pending) return;
+    resolveDebugGraphResolutionChange(jsDebugHistoryReadiness, {painted: true, watchdog: true});
+  }, jsDebugGraphResolutionWatchdogMs);
   // An explicit user action must acknowledge within a frame, so surface the shared overlay
   // immediately rather than after the older-load debounce that avoids flashing on passive
   // tail repairs.
@@ -7154,19 +7661,74 @@ function setDebugGraphResolutionOverride(value) {
   syncJsDebugHistoryReadinessSurfaces();
 }
 
+function clearDebugGraphPendingResolutionChange({hideOverlay = false} = {}) {
+  const pending = jsDebugGraphPendingResolutionChange;
+  if (pending && pending.watchdogTimer !== null && typeof clearTimeout === 'function') clearTimeout(pending.watchdogTimer);
+  jsDebugGraphPendingResolutionChange = null;
+  if (!hideOverlay) return;
+  jsDebugHistoryReadiness.overlayVisible = false;
+  syncJsDebugHistoryReadinessSurfaces();
+}
+
+function debugGraphResolutionChangeDataSatisfied(pending, state) {
+  if (!pending || state?.phase !== 'ready') return false;
+  if (Number(state.generation) < Number(pending.armedGeneration)) return false;
+  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds)) return false;
+  if (Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return false;
+  if (Number(state.resolutionSeconds) !== Number(pending.requestedResolutionSeconds)) return false;
+  const intervals = [...(state.requestCoverageIntervals || [])]
+    .filter(interval => Number(interval.resolutionSeconds) === Number(pending.requestedResolutionSeconds))
+    .sort((left, right) => Number(left.startSeconds) - Number(right.startSeconds));
+  if (jsDebugGraphExactResolutionEnabled) {
+    // Exact snapshots are bucket-aligned by the server, while the browser's
+    // pre-request domain is based on an arbitrary current millisecond. The
+    // accepted range/resolution key plus one contiguous full-range slice is
+    // therefore the authority; requiring identical endpoints leaves the
+    // resolution-change latch stuck after the correct snapshot has painted.
+    let covered = 0;
+    let cursor = null;
+    for (const interval of intervals) {
+      const intervalStart = Number(interval.startSeconds);
+      const intervalEnd = Number(interval.endSeconds);
+      if (!Number.isFinite(intervalStart) || !Number.isFinite(intervalEnd) || intervalEnd <= intervalStart) continue;
+      if (cursor !== null && intervalStart > cursor) return false;
+      const start = cursor === null ? intervalStart : Math.max(intervalStart, cursor);
+      covered += Math.max(0, intervalEnd - start);
+      cursor = Math.max(cursor ?? intervalEnd, intervalEnd);
+    }
+    return covered >= Number(pending.rangeSeconds);
+  }
+  const start = Number(pending.targetStartSeconds);
+  const end = Number(pending.targetEndSeconds);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+  let cursor = start;
+  for (const interval of intervals) {
+    const intervalStart = Number(interval.startSeconds);
+    const intervalEnd = Number(interval.endSeconds);
+    if (!Number.isFinite(intervalStart) || !Number.isFinite(intervalEnd) || intervalEnd <= cursor) continue;
+    if (intervalStart > cursor) return false;
+    cursor = Math.max(cursor, intervalEnd);
+    if (cursor >= end) return true;
+  }
+  return false;
+}
+
 // Resolve a pending Resolution-change fetch. Generation-guarded so a stale history response
 // can neither clear nor revert a newer request. On success the overlay clears through the
 // normal ready path; on failure the control reverts to its previous value with a danger
 // toast (never a silent snap-back) and the chart returns to that cached resolution.
-function resolveDebugGraphResolutionChange(state) {
+function resolveDebugGraphResolutionChange(state, {painted = false, watchdog = false} = {}) {
   const pending = jsDebugGraphPendingResolutionChange;
-  if (!pending || Number(state.generation) !== Number(pending.generation)) return;
+  if (!pending || Number(state.generation) < Number(pending.armedGeneration)) return;
   if (state.phase === 'ready') {
-    jsDebugGraphPendingResolutionChange = null;
+    if (!painted || !debugGraphResolutionChangeDataSatisfied(pending, state)) return;
+    if (watchdog) recordJsDebugStatsDiagnostic('warning', `resolution overlay watchdog cleared a satisfied ${pending.requestedResolutionSeconds}s view after ${Math.round(performanceNow() - pending.armedAtMs)}ms`);
+    clearDebugGraphPendingResolutionChange({hideOverlay: true});
     return;
   }
   if (state.phase !== 'error') return;
-  jsDebugGraphPendingResolutionChange = null;
+  if (Number(jsDebugGraphResolutionOverrideSeconds) !== Number(pending.targetSeconds) || Number(jsDebugGraphRangeSeconds) !== Number(pending.rangeSeconds)) return;
+  clearDebugGraphPendingResolutionChange();
   const revertedSeconds = normalizedDebugGraphResolutionOverrideSeconds(pending.previousSeconds, debugGraphDomain(), Date.now());
   jsDebugGraphResolutionOverrideSeconds = revertedSeconds;
   saveJsDebugStatsUiPreferences();
@@ -7368,29 +7930,144 @@ function debugGraphSelectionRatioForEvent(event, selection = jsDebugGraphSelecti
   return debugGraphPointerRatioFromRect(event?.clientX, selection.rect);
 }
 
-function handleDebugGraphPointerDown(event, panel) {
-  const ratio = debugGraphPointerRatioForEvent(event);
-  if (ratio == null || event.button > 0) return false;
-  event.preventDefault();
-  jsDebugGraphLastPointerType = event.pointerType || 'mouse';
-  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control], [data-js-debug-model-token-dimension]')) document.activeElement.blur?.();
-  const svg = event.target.closest('.js-debug-line-chart');
-  // Capture the pointer so a touch drag keeps delivering pointermove even when the
-  // finger strays past the SVG's bounding box mid-drag.
-  if (event.pointerId != null && typeof svg?.setPointerCapture === 'function') {
-    try { svg.setPointerCapture(event.pointerId); } catch (_) { /* capture is best-effort */ }
+function debugGraphInteractionBelongsToPanel(panel) {
+  if (!panel) return false;
+  return jsDebugGraphSelectionState?.panel === panel
+    || jsDebugGraphTouchCandidateState?.panel === panel;
+}
+
+function flushDeferredDebugGraphInteractionRefresh(panel) {
+  if (!panel) return false;
+  let flushed = false;
+  for (const graph of panel.querySelectorAll?.('[data-js-debug-graph]') || []) {
+    flushed = flushDeferredDebugGraphRefresh(graph) || flushed;
+  }
+  if (panel.matches?.('.js-yocost-panel') && panel.dataset.jsDebugGraphRefreshPending === 'true') {
+    delete panel.dataset.jsDebugGraphRefreshPending;
+    flushed = renderYoCostPanels({force: true}) || flushed;
+  }
+  return flushed;
+}
+
+function clearDebugGraphTouchCandidate(candidate = jsDebugGraphTouchCandidateState) {
+  if (!candidate || candidate !== jsDebugGraphTouchCandidateState) return;
+  if (candidate.holdTimer !== null) clearTimeout(candidate.holdTimer);
+  jsDebugGraphTouchCandidateState = null;
+}
+
+function debugGraphTouchCandidateDecision(candidate, clientX, clientY, nowMs) {
+  if (!candidate) return 'cancel';
+  const dx = Math.abs(Number(clientX) - candidate.startClientX);
+  const dy = Math.abs(Number(clientY) - candidate.startClientY);
+  if (dx >= jsDebugGraphTouchArmDistancePx && dx > jsDebugGraphTouchDirectionRatio * dy) return 'arm';
+  if (dy >= jsDebugGraphTouchArmDistancePx && dy >= dx) return 'scroll';
+  if (Number(nowMs) - candidate.startedAtMs >= jsDebugGraphTouchHoldMs && dy < jsDebugGraphTouchArmDistancePx) return 'arm';
+  return 'wait';
+}
+
+function handleDebugGraphTouchMove(event, panel) {
+  if (!event || !panel || event.touches?.length !== 1) return false;
+  const touch = event.touches[0];
+  const selection = jsDebugGraphSelectionState;
+  if (selection?.panel === panel) {
+    if (event.cancelable !== false) event.preventDefault();
+    return true;
+  }
+  const candidate = jsDebugGraphTouchCandidateState;
+  if (candidate?.panel !== panel) return false;
+  candidate.currentClientX = Number(touch.clientX);
+  candidate.currentClientY = Number(touch.clientY);
+  const ratio = debugGraphPointerRatioFromRect(touch.clientX, candidate.rect);
+  if (ratio != null) candidate.currentRatio = ratio;
+  const decision = debugGraphTouchCandidateDecision(
+    candidate,
+    candidate.currentClientX,
+    candidate.currentClientY,
+    Number.isFinite(Number(event.timeStamp)) ? Number(event.timeStamp) : performanceNow(),
+  );
+  if (decision === 'arm') {
+    if (event.cancelable !== false) event.preventDefault();
+    startDebugGraphSelection(candidate);
+    return true;
+  }
+  if (decision === 'scroll') {
+    clearDebugGraphTouchCandidate(candidate);
+    jsDebugGraphLastPointerType = 'mouse';
+    debugGraphClearInteractionLines(panel);
+    flushDeferredDebugGraphInteractionRefresh(panel);
+  }
+  return false;
+}
+
+function bindDebugGraphTouchSelection(panel) {
+  if (!panel || panel.dataset.jsDebugTouchSelectionBound === 'true') return;
+  panel.dataset.jsDebugTouchSelectionBound = 'true';
+  panel.addEventListener('touchmove', event => {
+    handleDebugGraphTouchMove(event, panel);
+  }, {passive: false});
+}
+
+function startDebugGraphSelection(candidate, event = null) {
+  if (!candidate) return false;
+  clearDebugGraphTouchCandidate(candidate);
+  if (event?.cancelable !== false) event?.preventDefault?.();
+  const {panel, svg, pointerId, rect, domain, startRatio, currentRatio} = candidate;
+  if (pointerId != null && typeof svg?.setPointerCapture === 'function') {
+    try { svg.setPointerCapture(pointerId); } catch (_) { /* capture is best-effort */ }
   }
   jsDebugGraphSelectionState = {
     panel,
     svg,
+    pointerId,
+    pointerType: candidate.pointerType,
+    rect,
+    domain,
+    startRatio,
+    currentRatio,
+    resolutionMs: candidate.resolutionMs,
+  };
+  debugGraphSetInteractionLines(panel, currentRatio);
+  debugGraphSetSelectionRects(panel, startRatio, currentRatio);
+  return true;
+}
+
+function handleDebugGraphPointerDown(event, panel) {
+  const ratio = debugGraphPointerRatioForEvent(event);
+  if (ratio == null || event.button > 0) return false;
+  const pointerType = event.pointerType || 'mouse';
+  if (pointerType !== 'touch') jsDebugGraphLastPointerType = pointerType;
+  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control], [data-js-debug-model-token-dimension]')) document.activeElement.blur?.();
+  const svg = event.target.closest('.js-debug-line-chart');
+  const candidate = {
+    panel,
+    svg,
     pointerId: event.pointerId,
+    pointerType,
     rect: svg.getBoundingClientRect(),
     domain: debugGraphGridDomain(panel),
     startRatio: ratio,
     currentRatio: ratio,
+    startClientX: Number(event.clientX),
+    startClientY: Number(event.clientY),
+    currentClientX: Number(event.clientX),
+    currentClientY: Number(event.clientY),
+    startedAtMs: Number.isFinite(Number(event.timeStamp)) ? Number(event.timeStamp) : performanceNow(),
+    resolutionMs: 0,
+    holdTimer: null,
   };
-  debugGraphSetInteractionLines(panel, ratio);
-  debugGraphSetSelectionRects(panel, ratio, ratio);
+  candidate.resolutionMs = debugGraphDisplayResolutionMs(candidate.domain, 0, Date.now());
+  if (candidate.pointerType === 'touch') {
+    clearDebugGraphTouchCandidate();
+    jsDebugGraphTouchCandidateState = candidate;
+    candidate.holdTimer = setTimeout(() => {
+      if (jsDebugGraphTouchCandidateState !== candidate) return;
+      if (debugGraphTouchCandidateDecision(candidate, candidate.currentClientX, candidate.currentClientY, candidate.startedAtMs + jsDebugGraphTouchHoldMs) === 'arm') startDebugGraphSelection(candidate);
+    }, jsDebugGraphTouchHoldMs);
+    debugGraphSetInteractionLines(panel, ratio);
+  } else {
+    event.preventDefault();
+    startDebugGraphSelection(candidate, event);
+  }
   // Touch has no hover-before-press, so surface the value at the touched point
   // immediately on contact (a mouse already shows it from hover).
   debugGraphSetHoverTooltip(panel, event, ratio);
@@ -7398,7 +8075,30 @@ function handleDebugGraphPointerDown(event, panel) {
 }
 
 function handleDebugGraphPointerMove(event, panel) {
+  const candidate = jsDebugGraphTouchCandidateState;
+  if (candidate?.panel === panel && candidate.pointerId === event.pointerId) {
+    const ratio = debugGraphPointerRatioFromRect(event.clientX, candidate.rect);
+    if (ratio == null) return;
+    candidate.currentRatio = ratio;
+    candidate.currentClientX = Number(event.clientX);
+    candidate.currentClientY = Number(event.clientY);
+    const elapsedMs = (Number.isFinite(Number(event.timeStamp)) ? Number(event.timeStamp) : performanceNow()) - candidate.startedAtMs;
+    const decision = debugGraphTouchCandidateDecision(candidate, candidate.currentClientX, candidate.currentClientY, candidate.startedAtMs + elapsedMs);
+    if (decision === 'arm') {
+      startDebugGraphSelection(candidate, event);
+    } else if (decision === 'scroll') {
+      clearDebugGraphTouchCandidate(candidate);
+      jsDebugGraphLastPointerType = 'mouse';
+      debugGraphClearInteractionLines(panel);
+      return;
+    } else {
+      debugGraphSetInteractionLines(panel, ratio);
+      debugGraphSetHoverTooltip(panel, event, ratio);
+      return;
+    }
+  }
   if (jsDebugGraphSelectionState?.panel === panel) {
+    if (jsDebugGraphSelectionState.pointerType === 'touch' && event.cancelable !== false) event.preventDefault();
     const ratio = debugGraphSelectionRatioForEvent(event);
     if (ratio == null) return;
     jsDebugGraphSelectionState.currentRatio = ratio;
@@ -7413,13 +8113,22 @@ function handleDebugGraphPointerMove(event, panel) {
   debugGraphSetHoverTooltip(panel, event, ratio);
 }
 
-function handleDebugGraphPointerUp(event, panel) {
+function handleDebugGraphPointerUp(event, panel, {useEventRatio = true} = {}) {
+  const candidate = jsDebugGraphTouchCandidateState;
+  if (candidate?.panel === panel && candidate.pointerId === event.pointerId) {
+    clearDebugGraphTouchCandidate(candidate);
+    jsDebugGraphLastPointerType = 'touch';
+    const ratio = debugGraphPointerRatioFromRect(event.clientX, candidate.rect);
+    if (ratio != null) debugGraphSetInteractionLines(panel, ratio);
+    flushDeferredDebugGraphInteractionRefresh(panel);
+    return;
+  }
   const selection = jsDebugGraphSelectionState;
   if (!selection || selection.panel !== panel) return;
   if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
     try { selection.svg.releasePointerCapture(selection.pointerId); } catch (_) { /* already released */ }
   }
-  const ratio = debugGraphSelectionRatioForEvent(event);
+  const ratio = useEventRatio ? debugGraphSelectionRatioForEvent(event) : null;
   if (ratio != null) selection.currentRatio = ratio;
   const start = Math.max(0, Math.min(1, Number(selection.startRatio)));
   const end = Math.max(0, Math.min(1, Number(selection.currentRatio)));
@@ -7430,7 +8139,9 @@ function handleDebugGraphPointerUp(event, panel) {
   const domain = selection.domain;
   const spanMs = Math.max(1, Number(domain.endMs) - Number(domain.startMs));
   const selectedMs = (maxRatio - minRatio) * spanMs;
-  if (selectedMs >= 1000 && Math.abs(maxRatio - minRatio) >= 0.01) {
+  if (selection.pointerType === 'touch') jsDebugGraphLastPointerType = 'mouse';
+  const minimumGestureMs = Math.max(1000, Number(selection.resolutionMs) * jsDebugGraphZoomMinBuckets);
+  if (selectedMs >= minimumGestureMs && Math.abs(maxRatio - minRatio) >= jsDebugGraphZoomMinRatio) {
     jsDebugGraphZoomDomain = {
       startMs: Number(domain.startMs) + (minRatio * spanMs),
       endMs: Number(domain.startMs) + (maxRatio * spanMs),
@@ -7442,10 +8153,28 @@ function handleDebugGraphPointerUp(event, panel) {
     for (const graph of document.querySelectorAll('[data-js-debug-graph]')) syncDebugGraphControls(graph);
   } else {
     debugGraphSetInteractionLines(panel, end);
+    flushDeferredDebugGraphInteractionRefresh(panel);
   }
 }
 
+function handleDebugGraphPointerCancel(event, panel) {
+  const selection = jsDebugGraphSelectionState;
+  const matchingPointer = selection?.pointerId == null
+    || event?.pointerId == null
+    || selection.pointerId === event.pointerId;
+  if (selection?.panel === panel && matchingPointer) {
+    handleDebugGraphPointerUp(event, panel, {useEventRatio: false});
+    return;
+  }
+  cancelDebugGraphSelection(panel);
+}
+
 function cancelDebugGraphSelection(panel) {
+  if (jsDebugGraphTouchCandidateState?.panel === panel) {
+    clearDebugGraphTouchCandidate();
+    jsDebugGraphLastPointerType = 'mouse';
+    debugGraphClearInteractionLines(panel);
+  }
   const selection = jsDebugGraphSelectionState;
   if (selection?.panel !== panel) return;
   if (selection.pointerId != null && typeof selection.svg?.releasePointerCapture === 'function') {
@@ -7453,6 +8182,7 @@ function cancelDebugGraphSelection(panel) {
   }
   debugGraphClearSelectionRects(panel);
   jsDebugGraphSelectionState = null;
+  flushDeferredDebugGraphInteractionRefresh(panel);
 }
 
 function handleDebugGraphControlEvent(event, panel) {
@@ -7542,6 +8272,7 @@ function handleDebugGraphControlEvent(event, panel) {
 function bindDebugPanel(panel) {
   if (!panel || panel.dataset.debugBound === 'true') return;
   panel.dataset.debugBound = 'true';
+  bindDebugGraphTouchSelection(panel);
   bindDebugCostSummaryTabButtons(panel.querySelector('[data-js-debug-graph]'));
   syncDebugSystemPolling({pollNow: jsDebugSubTab === 'system' && !jsDebugSystemState.payload});
   syncDebugLogsPolling({pollNow: jsDebugSubTab === 'logs' && !jsDebugLogsState.updatedAt});
@@ -7566,7 +8297,7 @@ function bindDebugPanel(panel) {
   });
   panel.addEventListener('pointercancel', event => {
     handleDebugGraphControlEvent(event, panel);
-    cancelDebugGraphSelection(panel);
+    handleDebugGraphPointerCancel(event, panel);
   });
   panel.addEventListener('input', event => {
     handleDebugGraphControlEvent(event, panel);
