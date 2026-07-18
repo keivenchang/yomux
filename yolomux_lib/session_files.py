@@ -17,6 +17,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from dataclasses import field
+from dataclasses import fields
 from datetime import datetime
 from datetime import timezone
 from http import HTTPStatus
@@ -29,6 +30,7 @@ from .atomic_file import atomic_write_text
 from .atomic_file import file_lock
 from .common import AgentInfo
 from .common import SessionInfo
+from .common import TmuxPaneInfo
 from .common import git
 from .common import git_ahead_behind_counts
 from .common import is_generated_upload_name
@@ -3102,3 +3104,94 @@ def session_files_payload(
         "errors": errors,
         "warnings": warnings,
     }, HTTPStatus.OK
+
+
+# --- jobd `session_files_view` worker orchestrator (DOIT.offload-web-refreshers, item 4) ----------
+# The session-files COMPUTE (recursive transcript discovery + `git` snapshots) is CPU/IO-bound work
+# that must not run in an HTTP request thread. `jobd` runs this orchestrator in a spawn worker, keyed
+# by the same product identity the web disk cache uses, so warm requests read the last-known-good
+# product with ZERO in-process git spawns and ZERO recursive discovery. This module imports no
+# app/web code, so it is safe to import into the `jobd` worker.
+SESSION_FILES_VIEW_MAX_SESSIONS = 64
+
+
+def dataclass_from_json(cls: type, data: dict[str, Any]) -> Any:
+    """Rebuild a flat frozen dataclass from `dataclasses.asdict` output.
+
+    Only known fields are consumed so a forward/backward-incompatible payload cannot inject
+    unexpected constructor keywords; missing keys degrade to ``None`` rather than crashing the
+    worker, matching the tolerant behaviour of the live discovery path.
+    """
+    valid = {item.name for item in fields(cls)}
+    return cls(**{name: data.get(name) for name in valid})
+
+
+def session_info_from_json(data: dict[str, Any]) -> SessionInfo:
+    """Reconstruct one ``SessionInfo`` (and its nested tmux/agent records) from serialized JSON."""
+    if not isinstance(data, dict):
+        raise ValueError("session info payload must be an object")
+    panes = [dataclass_from_json(TmuxPaneInfo, item) for item in (data.get("panes") or []) if isinstance(item, dict)]
+    selected_raw = data.get("selected_pane")
+    selected = dataclass_from_json(TmuxPaneInfo, selected_raw) if isinstance(selected_raw, dict) else None
+    agents = [dataclass_from_json(AgentInfo, item) for item in (data.get("agents") or []) if isinstance(item, dict)]
+    return SessionInfo(session=str(data.get("session") or ""), panes=panes, selected_pane=selected, agents=agents)
+
+
+def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    """Compute one bounded session-files product from a serialized request.
+
+    A per-task memoizing snapshot provider recomputes the REAL git identity/snapshot inside this
+    worker (not the web process) and reuses it across the single-session and cross-session passes, so
+    one repo is snapshotted at most once per task. The result is trimmed to fit the broker's result
+    ceiling with an explicit ``truncated`` flag, mirroring the transcript-view worker's contract.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("session_files_view payload must be an object")
+    raw_infos = payload.get("infos")
+    if not isinstance(raw_infos, dict):
+        raise ValueError("session_files_view infos must be an object")
+    if len(raw_infos) > SESSION_FILES_VIEW_MAX_SESSIONS:
+        raise ValueError("session_files_view infos exceed the bounded session limit")
+    infos = {str(name): session_info_from_json(value) for name, value in raw_infos.items() if isinstance(value, dict)}
+    session = str(payload.get("session") or "").strip() or None
+    hours = bounded_session_files_hours(payload.get("hours"))
+    from_ref = str(payload.get("from_ref") or "").strip() or None
+    to_ref = str(payload.get("to_ref") or "").strip() or None
+    raw_repo_refs = payload.get("repo_refs")
+    repo_refs = raw_repo_refs if isinstance(raw_repo_refs, dict) else {}
+    include_cross = bool(payload.get("include_cross_session_attribution", not bool(session)))
+
+    snapshot_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    def provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
+        key = (str(repo), repo_from or "", repo_to or "")
+        snapshot = snapshot_cache.get(key)
+        if snapshot is None:
+            snapshot = build_git_snapshot(repo, repo_from, repo_to)
+            snapshot_cache[key] = snapshot
+        return copy.deepcopy(snapshot)
+
+    result_payload, status = session_files_payload(
+        session,
+        infos,
+        hours,
+        from_ref=from_ref,
+        to_ref=to_ref,
+        repo_refs=repo_refs,
+        include_cross_session_attribution=include_cross,
+        git_snapshot_provider=provider,
+    )
+    truncated = bound_session_files_view_payload(result_payload, max_bytes)
+    return {"payload": result_payload, "status": int(status), "truncated": truncated}
+
+
+def bound_session_files_view_payload(result_payload: dict[str, Any], max_bytes: int) -> bool:
+    """Trim the file list until the serialized product fits ``max_bytes``; report if it was trimmed."""
+    files = result_payload.get("files")
+    truncated = False
+    while len(json.dumps(result_payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > max_bytes:
+        if not isinstance(files, list) or not files:
+            break
+        files.pop()
+        truncated = True
+    return truncated

@@ -23,6 +23,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from . import session_files
 from .common import STATE_DIR
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
@@ -47,7 +48,8 @@ from .transcripts import transcript_activity_state_from_text
 # The envelope transport remains LOCAL_RPC_VERSION. Bump this service generation whenever the
 # registered task/result contract changes so a newly restarted web process retires an older daemon.
 # v3: added the materialized-product layer (last-known-good store + `product` RPC + per-product counters).
-JOBD_PROTOCOL_VERSION = 3
+# v4: registered the `session_files_view` task; a v3 daemon lacks it, so the fence retires the old one.
+JOBD_PROTOCOL_VERSION = 4
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_MAX_WORKERS = 2
 JOBD_MAX_QUEUE = 64
@@ -173,9 +175,21 @@ def _transcript_view(payload: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _session_files_view(payload: bytes) -> bytes:
+    """Compute one bounded session-files product (recursive discovery + git) in a worker.
+
+    Keeps ALL git spawns and transcript discovery out of the web process. The orchestrator lives in
+    ``session_files`` (import-safe, no app/web) so it is unit-testable without a broker socket.
+    """
+    value = json.loads(payload.decode("utf-8"))
+    result = session_files.session_files_view_result(value, max_bytes=JOBD_MAX_RESULT_BYTES - 4096)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 REGISTERED_TASKS = {
     "indexed_repo_roots": _indexed_repo_roots,
     "json_compact": _json_compact,
+    "session_files_view": _session_files_view,
     "text_facts": _text_facts,
     "transcript_view": _transcript_view,
 }

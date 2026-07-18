@@ -367,6 +367,20 @@ ATTENTION_ACK_TTL_SECONDS = 7 * 24 * 3600
 ATTENTION_INSTANCE_MAX_ENTRIES = 2048
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
+# jobd `session_files_view` product wait budget for the owner-side background refresh worker. The
+# worker runs in a dedicated thread, so a bounded block-poll here keeps the git/discovery CPU in the
+# jobd worker process without ever touching an HTTP request thread.
+SESSION_FILES_JOBD_JOB_DEADLINE_MS = 30_000
+SESSION_FILES_JOBD_WAIT_SECONDS = 25.0
+SESSION_FILES_JOBD_POLL_SECONDS = 0.05
+
+
+class SessionFilesJobdUnavailable(RuntimeError):
+    """jobd could not materialize a session-files product (submit rejected or product not ready).
+
+    Raised out of the owner-side compute so the single-flight record is released and NOTHING stale is
+    cached; the next request re-triggers. It never falls back to inline git in the caller's thread.
+    """
 SESSION_FILES_CACHE_VERSION = 1
 SESSION_FILES_CACHE_KEY_VERSION = 4
 SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
@@ -5786,7 +5800,16 @@ class TmuxWebtermApp:
             repo_from = str(override.get("from") or "").strip() or from_ref
             repo_to = str(override.get("to") or "").strip() or to_ref
             repo = Path(repo_text)
-            repo_signatures.append((repo_text, self.shared_git_identity(repo, repo_from, repo_to)[0]))
+            # CRITICAL for "zero git spawns in warm requests": a `git status` identity ran here on
+            # every key build after a repo change. When the fs watcher covers the repo, its dirty
+            # generation int is the authoritative change signal, so use it and spawn NO git. The real
+            # git identity/snapshot is recomputed inside the jobd worker on an actual recompute. When
+            # the watcher is unhealthy, fall back to the git-spawn identity; the time-based
+            # SESSION_FILES_CACHE_SECONDS staleness remains the no-watcher backstop.
+            if self.watcher_covers_repo(repo):
+                repo_signatures.append((repo_text, self.repo_dirty_generation(repo_text)))
+            else:
+                repo_signatures.append((repo_text, self.shared_git_identity(repo, repo_from, repo_to)[0]))
         return (
             kind,
             SESSION_FILES_CACHE_KEY_VERSION,
@@ -5865,15 +5888,25 @@ class TmuxWebtermApp:
         with self.session_files_service.cache_lock:
             self.session_files_service.repo_identity_cache[identity_key] = (dirty_generation, time.monotonic(), identity)
 
-    def reusable_git_identity(self, identity_key: tuple[Any, ...], repo: Path) -> tuple[Any, ...] | None:
+    def watcher_covers_repo(self, repo: Path) -> bool:
+        """True when the native fs watcher is healthy AND watching a root that contains `repo`.
+
+        This is the one predicate that decides whether a repo's dirty generation is authoritative,
+        so both the cache-KEY path (which uses the generation int instead of spawning `git`) and the
+        identity-reuse path (`reusable_git_identity`) share it rather than re-deriving the coverage
+        test with divergent edge cases.
+        """
         record = self.client_watch_service.event_watcher_record
         if not record.filesystem_healthy:
-            return None
+            return False
         resolved_repo = Path(str(repo)).expanduser().resolve(strict=False)
-        if not any(
+        return any(
             resolved_repo == Path(root) or filesystem._path_is_within(resolved_repo, Path(root))
             for root in record.filesystem_roots
-        ):
+        )
+
+    def reusable_git_identity(self, identity_key: tuple[Any, ...], repo: Path) -> tuple[Any, ...] | None:
+        if not self.watcher_covers_repo(repo):
             return None
         with self.session_files_service.cache_lock:
             entry = self.session_files_service.repo_identity_cache.get(identity_key)
@@ -6778,6 +6811,81 @@ class TmuxWebtermApp:
             phase_recorder=self.record_session_files_phase,
         )
 
+    def session_files_view_coalesce_identity(self, cache_key: tuple[Any, ...]) -> tuple[str, int]:
+        """Cross-port product identity for `session_files_view`.
+
+        The coalesce_key is the stable view signature plus the replaceable info+repo source
+        generation, so two web ports sharing one jobd socket and one disk-cache dir dedupe to ONE
+        worker execution for the same product. The numeric generation is derived from that same
+        source signature and drives jobd's generation guard, so an older completion can never
+        overwrite a newer product for the same view.
+        """
+        _path, signature = self.session_files_disk_cache_path(cache_key)
+        source_generation = self.session_files_source_generation(cache_key)
+        coalesce_key = f"session_files:{signature}:{source_generation}"[:256]
+        generation = int(hashlib.sha256(source_generation.encode("utf-8")).hexdigest()[:12], 16)
+        return coalesce_key, generation
+
+    def compute_session_files_payload_via_jobd(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str = "freshness",
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        """Materialize the session-files payload in jobd instead of the web process.
+
+        Submits the `session_files_view` product and block-polls its last-known-good bytes. ALL git
+        spawns and recursive transcript discovery happen in the jobd worker. Raises
+        ``SessionFilesJobdUnavailable`` (never inline git) when the broker cannot produce a matching
+        product within the bounded wait, so the single-flight release and no-cache behavior are the
+        caller's terminal handling.
+        """
+        coalesce_key, generation = self.session_files_view_coalesce_identity(cache_key)
+        payload = {
+            "session": session or "",
+            "infos": {name: asdict(info) for name, info in infos.items()},
+            "hours": session_files.bounded_session_files_hours(hours),
+            "from_ref": str(from_ref or ""),
+            "to_ref": str(to_ref or ""),
+            "repo_refs": repo_refs or {},
+            "include_cross_session_attribution": not bool(session),
+        }
+        response = self.job_client.submit(
+            "session_files_view",
+            payload,
+            priority=priority,
+            generation=generation,
+            coalesce_key=coalesce_key,
+            deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
+        )
+        if not response.get("ok"):
+            raise SessionFilesJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+        deadline = time.monotonic() + SESSION_FILES_JOBD_WAIT_SECONDS
+        while True:
+            meta, body = self.job_client.product(coalesce_key)
+            if not meta.get("ok"):
+                raise SessionFilesJobdUnavailable("jobd product rpc unavailable")
+            state = str(meta.get("state") or "")
+            if body and state in {"ready", "stale"} and int(meta.get("generation") or 0) >= generation:
+                return self.session_files_payload_from_product(body)
+            if time.monotonic() >= deadline:
+                raise SessionFilesJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+            time.sleep(SESSION_FILES_JOBD_POLL_SECONDS)
+
+    def session_files_payload_from_product(self, body: bytes) -> tuple[SessionFilesPayload, HTTPStatus]:
+        data = json.loads(body.decode("utf-8"))
+        payload = data.get("payload") if isinstance(data, dict) else None
+        if not isinstance(payload, dict):
+            raise SessionFilesJobdUnavailable("malformed jobd session-files product")
+        status = HTTPStatus(int(data.get("status") or int(HTTPStatus.OK)))
+        return payload, status
+
     def refresh_session_files_payload_cache(
         self,
         cache_key: tuple[Any, ...],
@@ -6801,7 +6909,7 @@ class TmuxWebtermApp:
         try:
             self.compute_session_files_cache_entry(
                 cache_key,
-                lambda: self.compute_session_files_payload_for_infos(session, infos, hours, from_ref, to_ref, repo_refs, cache_key),
+                lambda: self.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key),
                 reserved=True,
             )
             compute_ms = (time.perf_counter() - started) * 1000
@@ -6816,6 +6924,10 @@ class TmuxWebtermApp:
                 message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
             )
             self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
+        except SessionFilesJobdUnavailable as exc:
+            # jobd could not produce the product this cycle. The single-flight is already released by
+            # compute_session_files_cache_entry; nothing stale is cached and the next request retries.
+            logger.info("session-files payload refresh deferred (jobd) for %s: %s", cache_key, exc)
         except Exception as exc:
             logger.warning("session-files payload refresh failed for %s: %s", cache_key, exc)
             raise
@@ -6842,7 +6954,7 @@ class TmuxWebtermApp:
         try:
             self.compute_session_files_cache_entry(
                 cache_key,
-                lambda: (self.compute_session_files_payload_for_info(info, hours, from_ref, to_ref, repo_refs, cache_key), HTTPStatus.OK),
+                lambda: self.compute_session_files_payload_via_jobd(info.session, {info.session: info}, hours, from_ref, to_ref, repo_refs, cache_key),
                 reserved=True,
             )
             compute_ms = (time.perf_counter() - started) * 1000
@@ -6857,6 +6969,8 @@ class TmuxWebtermApp:
                 message_params={"target": message_descriptor("backgroundOwner.sessionFiles", "Session files")},
             )
             self.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {**refresh_details, "compute_ms": compute_ms})
+        except SessionFilesJobdUnavailable as exc:
+            logger.info("session-files info refresh deferred (jobd) for %s: %s", cache_key, exc)
         except Exception as exc:
             logger.warning("session-files info refresh failed for %s: %s", cache_key, exc)
             raise

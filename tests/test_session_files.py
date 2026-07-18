@@ -2691,3 +2691,93 @@ def test_git_metadata_event_filter_admits_identity_inputs_only(tmp_path):
     assert webapp.git_metadata_event_allowed(Path("/outside/.git/HEAD"), record) is False
     # The general filter routes .git paths through this policy.
     assert webapp.native_filesystem_event_allowed(git_dir / "objects" / "pack" / "p.idx", record) is False
+
+
+def _new_git_verbs(before):
+    return {
+        verb: common_module.GIT_COMMAND_COUNTS[verb] - before.get(verb, 0)
+        for verb in common_module.GIT_COMMAND_COUNTS
+        if common_module.GIT_COMMAND_COUNTS[verb] - before.get(verb, 0) > 0
+    }
+
+
+def test_session_files_cache_key_uses_watcher_generation_and_skips_git_identity(tmp_path, monkeypatch):
+    """DOIT.offload-web-refreshers item 4, step 3: when the native watcher covers a repo the cache
+    KEY carries its dirty-generation int, so the heavy `git status`/`for-each-ref` identity commands
+    do NOT run on the key path. An unhealthy watcher falls back to the git-spawn identity."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "one.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "one.py")
+    git(repo, "commit", "-m", "init")
+    resolved_repo = repo.resolve()
+
+    monkeypatch.setattr(TmuxWebtermApp, "discover_and_start", lambda self: None, raising=False)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = TmuxWebtermApp(["1"])
+    try:
+        pane = PaneInfo(
+            session="1", window="0", pane="0", pane_id="%1", target="1:0.0",
+            current_path=str(resolved_repo), command="zsh", active=True, window_active=True, title="", pid=11,
+        )
+        infos = {"1": SessionInfo(session="1", panes=[pane], selected_pane=pane, agents=[])}
+
+        record = webapp.client_watch_service.event_watcher_record
+        record.filesystem_healthy = True
+        record.filesystem_roots = (str(tmp_path.resolve()),)
+        record.filesystem_watch_paths = (str(tmp_path.resolve()),)
+
+        spawns_before = dict(common_module.GIT_COMMAND_COUNTS)
+        key_one = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
+        # The identity commands (git status / for-each-ref) are NOT spawned on the watcher path.
+        healthy_verbs = _new_git_verbs(spawns_before)
+        assert "status" not in healthy_verbs
+        assert "for-each-ref" not in healthy_verbs
+
+        repo_signatures = dict(key_one[-1])
+        assert len(repo_signatures) == 1
+        (repo_text, signature), = repo_signatures.items()
+        assert isinstance(signature, int)
+        assert signature == webapp.repo_dirty_generation(repo_text)
+        # The int must NOT be misread as a reusable git identity by the snapshot-provider bridge.
+        assert webapp.session_files_git_identity_for_cache_key(key_one, resolved_repo) is None
+
+        # A watched change bumps the generation, so the cache key changes with still-no identity spawn.
+        (repo / "one.py").write_text("x = 2\n", encoding="utf-8")
+        webapp.mark_repo_state_dirty([resolved_repo / "one.py"])
+        spawns_mid = dict(common_module.GIT_COMMAND_COUNTS)
+        key_two = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
+        assert key_two != key_one
+        assert "status" not in _new_git_verbs(spawns_mid)
+
+        # Watcher unhealthy -> fall back to the git-spawn identity (a tuple, not the int backstop).
+        record.filesystem_healthy = False
+        spawns_unhealthy = dict(common_module.GIT_COMMAND_COUNTS)
+        key_unhealthy = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
+        assert "status" in _new_git_verbs(spawns_unhealthy)
+        (_repo_text, unhealthy_signature), = dict(key_unhealthy[-1]).items()
+        assert isinstance(unhealthy_signature, tuple)
+    finally:
+        webapp.control_server.stop()
+
+
+def test_session_files_view_coalesce_identity_is_stable_and_source_scoped(tmp_path, monkeypatch):
+    """Two apps sharing one jobd socket + disk-cache dir must derive the SAME product coalesce_key
+    for the same view (cross-port single execution), and a source-generation change must move it."""
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    webapp_a = TmuxWebtermApp([])
+    webapp_b = TmuxWebtermApp([])
+    try:
+        stable_key = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 24.0, "", "", "", (), ())
+        key_gen_x = (*stable_key[:-1], (("repoX", 1),))
+        key_gen_y = (*stable_key[:-1], (("repoX", 2),))
+        coalesce_a, generation_a = webapp_a.session_files_view_coalesce_identity(key_gen_x)
+        coalesce_b, generation_b = webapp_b.session_files_view_coalesce_identity(key_gen_x)
+        assert coalesce_a == coalesce_b
+        assert generation_a == generation_b
+        coalesce_y, generation_y = webapp_a.session_files_view_coalesce_identity(key_gen_y)
+        assert coalesce_y != coalesce_a
+    finally:
+        webapp_a.control_server.stop()
+        webapp_b.control_server.stop()

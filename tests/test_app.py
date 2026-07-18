@@ -5055,6 +5055,13 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.refresh_sessions = lambda *args, **kwargs: []
     webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (target(cache_key, *args) or True)
+
+    # The owner-side background refresh now materializes the payload in jobd; simulate a successful
+    # product so the stale-while-revalidate recompute is still observed by the in-process fake.
+    def fake_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority="freshness"):
+        return fake_session_files_payload(session, infos, hours, from_ref, to_ref, repo_refs)
+
+    monkeypatch.setattr(webapp, "compute_session_files_payload_via_jobd", fake_via_jobd)
     try:
         first, first_status = webapp.session_files_payload("5")
         key = next(iter(webapp.session_files_service.cache))
@@ -11720,12 +11727,13 @@ def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkey
 
         compute_calls = []
 
-        def failing_compute(*args, **kwargs):
+        def failing_via_jobd(*args, **kwargs):
             compute_calls.append(True)
-            raise RuntimeError("refresh blew up")
+            raise app_module.SessionFilesJobdUnavailable("refresh blew up")
 
-        # The refresh WORKER fails; the request-side stale serve must not care.
-        monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", failing_compute)
+        # The refresh WORKER (now a jobd product materialization) fails; the request-side stale serve
+        # must not care, and the failing refresh must replace nothing.
+        monkeypatch.setattr(webapp, "compute_session_files_payload_via_jobd", failing_via_jobd)
 
         payload = webapp.cached_session_files_payload_for_info(info)
         assert payload["files"] == populated["files"]

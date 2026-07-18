@@ -4,11 +4,125 @@ import threading
 import time
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
+from dataclasses import asdict
 from pathlib import Path
 
+import pytest
+
 from yolomux_lib import jobd
+from yolomux_lib import session_files
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import SessionInfo
+from yolomux_lib.common import TmuxPaneInfo
 from yolomux_lib.local_services import rpc
 from yolomux_lib.local_services import runtime
+
+from _git_helpers import git
+from _git_helpers import init_repo
+
+
+def _session_info_json(session, repo, transcript=None, kind="claude"):
+    pane = TmuxPaneInfo(
+        session=session, window="0", pane="0", pane_id="%1", target=f"{session}:0.0",
+        current_path=str(repo), command="zsh", active=True, window_active=True, title="", pid=11,
+    )
+    agents = []
+    if transcript is not None:
+        agents.append(AgentInfo(
+            session=session, kind=kind, pid=1, pane_target="%1", command=kind, cwd=str(repo),
+            status=None, session_id=None, transcript=str(transcript), error=None,
+        ))
+    return asdict(SessionInfo(session=session, panes=[pane], selected_pane=pane, agents=agents))
+
+
+def _init_repo_with_commit(repo):
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "one.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "one.py")
+    git(repo, "commit", "-m", "init")
+
+
+def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_text(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    (repo / "one.py").write_text("x = 2\n", encoding="utf-8")
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(
+        json.dumps({
+            "type": "assistant",
+            "__raw_sentinel__": "SENTINEL_MUST_NOT_LEAK",
+            "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": "one.py"}}]},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    payload = {
+        "session": "s1",
+        "infos": {"s1": _session_info_json("s1", repo, transcript)},
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+    }
+    result_bytes = jobd.run_registered_task("session_files_view", json.dumps(payload).encode("utf-8"))
+    assert len(result_bytes) <= jobd.JOBD_MAX_RESULT_BYTES
+    result = json.loads(result_bytes.decode("utf-8"))
+    assert set(result) >= {"payload", "status", "truncated"}
+    assert result["status"] == 200
+    assert result["truncated"] is False
+    # The git-tracked modification is attributed to the editing agent.
+    entries = {Path(item["path"]).name: item for item in result["payload"]["files"]}
+    assert "one.py" in entries
+    assert entries["one.py"]["agents"] == ["claude"]
+    # The bounded product carries structured facts only; no raw transcript bytes ever cross the wire.
+    assert "SENTINEL_MUST_NOT_LEAK" not in result_bytes.decode("utf-8")
+    assert "tool_use" not in result_bytes.decode("utf-8")
+
+
+def test_session_files_view_task_rejects_malformed_or_oversized_payload():
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("session_files_view", json.dumps({"infos": "not-an-object"}).encode("utf-8"))
+    # infos over the bounded session limit is rejected before any git/discovery work runs.
+    too_many = {str(index): {} for index in range(session_files.SESSION_FILES_VIEW_MAX_SESSIONS + 1)}
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("session_files_view", json.dumps({"infos": too_many}).encode("utf-8"))
+    # A payload larger than the broker's input ceiling is rejected by run_registered_task itself.
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("session_files_view", b"{" + b" " * (jobd.JOBD_MAX_PAYLOAD_BYTES + 1))
+
+
+def test_session_files_view_memoizes_git_snapshot_per_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    (repo / "one.py").write_text("x = 3\n", encoding="utf-8")
+    calls: list[str] = []
+    real_build = session_files.build_git_snapshot
+
+    def counting_build(path, from_ref=None, to_ref=None):
+        calls.append(str(path))
+        return real_build(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files, "build_git_snapshot", counting_build)
+    # Two sessions whose panes sit in the SAME repo, cross-session pass: the memoizing provider must
+    # build that repo's git snapshot exactly once for the whole task.
+    payload = {
+        "session": "",
+        "infos": {
+            "a": _session_info_json("a", repo),
+            "b": _session_info_json("b", repo),
+        },
+        "hours": 24.0,
+        "include_cross_session_attribution": True,
+    }
+    result = session_files.session_files_view_result(payload, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    assert result["status"] == 200
+    assert len(calls) == 1
+
+
+def test_session_files_view_bounding_trims_files_and_sets_truncated_flag():
+    payload = {"files": [{"path": f"/repo/file{index}.py", "blob": "y" * 256} for index in range(200)], "repos": []}
+    truncated = session_files.bound_session_files_view_payload(payload, 4096)
+    assert truncated is True
+    assert len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) <= 4096
+    assert len(payload["files"]) < 200
 
 
 def _wait_for_result(client: jobd.JobClient, job_id: str) -> dict:
@@ -383,7 +497,9 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
 
 def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v3 added the materialized-product layer (product RPC + last-known-good store + counters).
-    assert jobd.JOBD_PROTOCOL_VERSION == 3
+    # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
+    assert jobd.JOBD_PROTOCOL_VERSION == 4
+    assert "session_files_view" in jobd.REGISTERED_TASKS
     assert jobd.JOBD_PROTOCOL_VERSION != jobd.LOCAL_RPC_VERSION
 
 
