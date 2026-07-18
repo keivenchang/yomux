@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -269,6 +270,88 @@ def recent_agent_paths_from_files(files_payload: dict[str, Any] | None, limit: i
             existing["statuses"].append(status)
         by_path[path] = existing
     return sorted(by_path.values(), key=lambda item: (-float(item.get("mtime") or 0.0), str(item.get("path") or "")))[:limit]
+
+
+AGENT_WINDOW_OWNED_FIELDS = (
+    "state", "working_elapsed_seconds", "idle_since", "last_active_ts",
+    "working_stopped_ts", "observed_ts", "screen_text", "status_tokens",
+    "attention_key", "attention_acknowledged", "attention_acknowledged_at",
+    "cooldown_attention_key", "cooldown_acknowledged", "cooldown_acknowledged_at",
+)
+AGENT_WINDOW_STATE_RANK = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
+
+
+def assemble_agent_window_rows(gathered_agents: list[dict[str, Any]], *, snapshot_revision: int = 0) -> list[dict[str, Any]]:
+    """Build and sort agent-window rows from pre-gathered per-agent data.
+
+    Pure over its inputs so the identical assembly runs in the web owner and in a
+    jobd worker: every impure value (screen state, working-stopped timestamp,
+    attention keys, acknowledgements, path/git, and the statusd-owned overwrite
+    row) is gathered by the caller and passed in as plain data.
+    """
+    rows: list[dict[str, Any]] = []
+    for gathered in gathered_agents:
+        state = gathered["state"]
+        elapsed = gathered["elapsed"]
+        last_active_ts = gathered["last_active_ts"]
+        working_stopped_ts = gathered["working_stopped_ts"]
+        pid = gathered["pid"]
+        paths = gathered["paths"]
+        fallback_path = gathered["fallback_path"]
+        row = {
+            "kind": gathered["kind"],
+            "state": state,
+            "window": gathered["window"],
+            "window_index": gathered["window_index"],
+            "window_name": gathered["window_name"],
+            "label": gathered["window_label"],
+            "window_label": gathered["window_label"],
+            "pane": gathered["pane"],
+            "pane_target": gathered["pane_target"],
+            "pid": pid if pid > 0 else None,
+            "current": gathered["window_is_current"],
+            "window_active": gathered["window_is_current"],
+            "path": paths[0] if paths else fallback_path,
+            "paths": paths,
+            "path_entries": gathered["path_entries"],
+            "git": gathered["git"],
+            "transcript": gathered["transcript"],
+            "transcript_id": gathered["transcript_id"],
+            "agent_session_id": gathered["agent_session_id"],
+            "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
+            "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
+            "last_active_ts": last_active_ts,
+            "working_stopped_ts": working_stopped_ts if working_stopped_ts > 0 else None,
+            "observed_ts": gathered["observed_ts"],
+            "screen_text": gathered["screen_text"],
+            "status_tokens": gathered["status_tokens"],
+            "_agent_order": gathered["agent_index"],
+        }
+        attention_key = gathered["attention_key"]
+        if attention_key:
+            row["attention_key"] = attention_key
+            row["attention_acknowledged"] = gathered["attention_acknowledged"]
+            row["attention_acknowledged_at"] = gathered["attention_acknowledged_at"]
+        cooldown_attention_key = gathered["cooldown_attention_key"]
+        if cooldown_attention_key:
+            row["cooldown_attention_key"] = cooldown_attention_key
+            row["cooldown_acknowledged"] = gathered["cooldown_acknowledged"]
+            row["cooldown_acknowledged_at"] = gathered["cooldown_acknowledged_at"]
+        owned = gathered.get("owned")
+        if owned is not None:
+            # Keep locally computed path metadata, but never publish a second prompt/screen
+            # classification while a roster revision is available.
+            for field_name in AGENT_WINDOW_OWNED_FIELDS:
+                if field_name in owned:
+                    row[field_name] = copy.deepcopy(owned[field_name])
+                else:
+                    row.pop(field_name, None)
+            row["agent_window_snapshot_revision"] = snapshot_revision
+        rows.append(row)
+    rows.sort(key=lambda item: (AGENT_WINDOW_STATE_RANK.get(str(item.get("state") or ""), 9), item.get("window_index") if isinstance(item.get("window_index"), int) else 9999, int(item.get("_agent_order") or 0)))
+    for item in rows:
+        item.pop("_agent_order", None)
+    return rows
 
 
 def build_recent_agents_payload(

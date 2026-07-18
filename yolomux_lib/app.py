@@ -52,6 +52,7 @@ from . import yolo_rules
 from .approvals import blank_prompt_state
 from .approvals import hybrid_approval_prompt_state
 from .activity_summary import activity_signature
+from .activity_summary import assemble_agent_window_rows
 from .activity_summary import build_recent_agents_payload
 from .activity_summary import build_global_activity_summary
 from .activity_summary import build_session_activity_summary
@@ -12344,7 +12345,7 @@ class TmuxWebtermApp:
         activity = self.activity_snapshot_with_recency(activity_snapshot)
         observed_ts = time.time()
         shared_instances = self.shared_agent_window_attention_instances_snapshot()
-        rows: list[dict[str, Any]] = []
+        gathered_agents: list[dict[str, Any]] = []
         window_names = {str(pane.window or ""): str(pane.window_name or "") for pane in info.panes}
         path_records = self.agent_window_path_records(info, files_payload=files_payload) if include_path_metadata else {}
         current_by_window, pane_by_window = self.agent_window_pane_maps(info)
@@ -12398,64 +12399,40 @@ class TmuxWebtermApp:
             attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, state, attention_signature)
             cooldown_signature = self.agent_window_attention_signature("cooldown", screen, working_stopped_ts)
             cooldown_attention_key = self.agent_window_attention_key(session, window, str(agent.pane_target or ""), kind, "cooldown", cooldown_signature)
-            row = {
+            gathered_agents.append({
                 "kind": kind,
                 "state": state,
                 "window": window,
                 "window_index": window_index,
                 "window_name": window_name,
-                "label": window_label,
                 "window_label": window_label,
                 "pane": pane,
                 "pane_target": str(agent.pane_target or ""),
-                "pid": pid if pid > 0 else None,
-                "current": window_is_current,
-                "window_active": window_is_current,
-                "path": paths[0] if paths else fallback_path,
+                "pid": pid,
+                "window_is_current": window_is_current,
                 "paths": paths,
                 "path_entries": path_entries,
+                "fallback_path": fallback_path,
                 "git": copy.deepcopy(path_record.get("git")) if isinstance(path_record, dict) and isinstance(path_record.get("git"), dict) else None,
                 "transcript": str(agent.transcript or ""),
                 "transcript_id": self.agent_transcript_id(agent),
                 "agent_session_id": str(agent.session_id or ""),
-                "working_elapsed_seconds": elapsed if state == "working" and elapsed >= 0 else None,
-                "idle_since": last_active_ts if state == "idle" and last_active_ts > 0 else None,
+                "elapsed": elapsed,
                 "last_active_ts": last_active_ts,
-                "working_stopped_ts": working_stopped_ts if working_stopped_ts > 0 else None,
+                "working_stopped_ts": working_stopped_ts,
                 "observed_ts": observed_ts,
                 "screen_text": str(screen.get("text") or ""),
                 "status_tokens": screen.get("status_tokens") if isinstance(screen.get("status_tokens"), (int, float)) else None,
-                "_agent_order": agent_index,
-            }
-            if attention_key:
-                row["attention_key"] = attention_key
-                row["attention_acknowledged"] = self.attention_acknowledged(attention_key)
-                row["attention_acknowledged_at"] = self.attention_acknowledged_at(attention_key)
-            if cooldown_attention_key:
-                row["cooldown_attention_key"] = cooldown_attention_key
-                row["cooldown_acknowledged"] = self.attention_acknowledged(cooldown_attention_key)
-                row["cooldown_acknowledged_at"] = self.attention_acknowledged_at(cooldown_attention_key)
-            owned = (owned_rows_by_target or {}).get((session, str(agent.pane_target or ""), kind))
-            if owned is not None:
-                # Keep locally computed path metadata, but never publish a second prompt/screen
-                # classification while a roster revision is available.
-                for field_name in (
-                    "state", "working_elapsed_seconds", "idle_since", "last_active_ts",
-                    "working_stopped_ts", "observed_ts", "screen_text", "status_tokens",
-                    "attention_key", "attention_acknowledged", "attention_acknowledged_at",
-                    "cooldown_attention_key", "cooldown_acknowledged", "cooldown_acknowledged_at",
-                ):
-                    if field_name in owned:
-                        row[field_name] = copy.deepcopy(owned[field_name])
-                    else:
-                        row.pop(field_name, None)
-                row["agent_window_snapshot_revision"] = snapshot_revision
-            rows.append(row)
-        state_rank = {"working": 0, "approval": 1, "needs-input": 2, "idle": 3}
-        rows.sort(key=lambda item: (state_rank.get(str(item.get("state") or ""), 9), item.get("window_index") if isinstance(item.get("window_index"), int) else 9999, int(item.get("_agent_order") or 0)))
-        for item in rows:
-            item.pop("_agent_order", None)
-        return rows
+                "agent_index": agent_index,
+                "attention_key": attention_key,
+                "attention_acknowledged": self.attention_acknowledged(attention_key) if attention_key else None,
+                "attention_acknowledged_at": self.attention_acknowledged_at(attention_key) if attention_key else None,
+                "cooldown_attention_key": cooldown_attention_key,
+                "cooldown_acknowledged": self.attention_acknowledged(cooldown_attention_key) if cooldown_attention_key else None,
+                "cooldown_acknowledged_at": self.attention_acknowledged_at(cooldown_attention_key) if cooldown_attention_key else None,
+                "owned": (owned_rows_by_target or {}).get((session, str(agent.pane_target or ""), kind)),
+            })
+        return assemble_agent_window_rows(gathered_agents, snapshot_revision=snapshot_revision)
 
     def auto_approve_session_status(
         self,
