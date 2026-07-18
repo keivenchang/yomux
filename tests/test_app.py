@@ -6141,6 +6141,76 @@ def test_poll_client_events_once_transcript_content_change_skips_metadata_refres
     assert webapp.activity_transcript_service.context_items_cache == {}
 
 
+def test_publish_context_items_ready_events_on_transcript_watch_routes_through_jobd(monkeypatch, tmp_path):
+    # Checkbox 8: transcript-identity watch events must invalidate the typed jobd transcript_view
+    # product, not parse inline. publish_context_items_ready_events (called from
+    # poll_client_events_once on transcripts_changed/transcript_content_changed, a server-side
+    # watch loop) calls context_items -> transcript_compact_view_bounded, which checkbox 5 already
+    # routes through jobd -- prove that wiring holds for the transcript-watch trigger path.
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "watched"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("transcript-watch-triggered refresh must not parse inline")))
+    submitted_tasks = []
+
+    class TrackingJobClient:
+        def submit(self, task, payload, **kwargs):
+            submitted_tasks.append(task)
+            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "pending", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = TrackingJobClient()
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([{"session": "5", "messages": 20}], [], []))
+    published = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: published.append(event_type))
+    try:
+        events = webapp.publish_context_items_ready_events(trigger="transcripts_changed")
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["context_items_ready"]
+    assert published == ["context_items_ready"]
+    # A perpetually-pending product polls/resubmits, but every submission is the jobd product
+    # task -- never an inline parse.
+    assert submitted_tasks and set(submitted_tasks) == {"transcript_view"}
+
+
+def test_publish_session_files_ready_events_on_fs_watch_routes_through_jobd_not_inline(monkeypatch):
+    # Checkbox 8: filesystem/transcript watch events (poll_client_events_once, a server-side
+    # watch loop, never a browser poll) must invalidate the typed jobd product, not recompute
+    # inline. publish_session_files_ready_events forces session_files_payload(force=True),
+    # which checkbox 9 already routes through compute_session_files_payload_via_jobd -- prove
+    # that wiring holds for the fs-watch/transcript-watch trigger path specifically.
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("fs-watch-triggered session-files refresh must not call inline compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = _install_fake_session_files_jobd(monkeypatch, webapp, {"session": "1", "files": [{"path": "watched.py"}], "repos": [], "errors": []})
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], [{"session": "1", "hours": 24.0, "from_ref": None, "to_ref": None, "repo_refs": None}], []))
+    published = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: published.append(event_type))
+    try:
+        events = webapp.publish_session_files_ready_events(trigger="fs_changed")
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["session_files_ready"]
+    assert published == ["session_files_ready"]
+    assert calls == [("1", ("1",), 24.0, None, None, None)]  # jobd was submitted, inline never called
+
+
 def test_poll_client_events_once_refreshes_session_files_on_transcript_change(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
