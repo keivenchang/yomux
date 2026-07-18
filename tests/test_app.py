@@ -3377,6 +3377,45 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     assert submitted_session_batches == [["1", "2"], ["2"], ["1"]]
 
 
+def test_tabber_activity_rebuild_signature_reacts_to_owned_roster_row_change_alone(monkeypatch):
+    # A roster-only change (e.g. a cooldown timer statusd advances) with no new tmux screen
+    # capture must still bust the per-session reuse signature -- otherwise a REUSED session would
+    # keep serving a stale owned row (state/attention/cooldown) until something else changed.
+    session = "1"
+    info = SessionInfo(
+        session=session, panes=[], selected_pane=None,
+        agents=[AgentInfo(session, "codex", 101, "%1", "codex", "/repo", "running", "sid-1", None, None)],
+    )
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({session: info}, []))
+    webapp = app_module.TmuxWebtermApp([session])
+    webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: [session]
+    webapp.cached_session_files_payloads_for_infos = lambda agent_infos, hours=24.0: {name: {"files": [], "repos": [], "errors": []} for name in agent_infos}
+    webapp.activity_snapshot_with_recency = lambda snapshot=None: {}
+    webapp.agent_window_screen_state = lambda agent, preclassified_by_target=None: {"key": "idle", "text": ""}
+    webapp.merge_shared_attention_acks = lambda: False
+    roster_stopped_ts = {"value": 100.0}
+
+    def fake_status_snapshot_payload():
+        return {
+            "agent_window_snapshot_revision": 1,
+            "sessions": {session: {"agent_windows": [{"pane_target": "%1", "kind": "codex", "state": "idle", "working_stopped_ts": roster_stopped_ts["value"]}]}},
+        }
+
+    webapp.status_snapshot_payload = fake_status_snapshot_payload
+    submitted = _install_fake_tabber_activity_jobd(monkeypatch, webapp)
+    try:
+        first = webapp.build_activity_payload()
+        second = webapp.build_activity_payload()
+        roster_stopped_ts["value"] = 200.0
+        changed = webapp.build_activity_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first["agent_windows"][session][0]["working_stopped_ts"] == 100.0
+    assert changed["agent_windows"][session][0]["working_stopped_ts"] == 200.0
+    assert submitted == [[session], [session]]
+
+
 def test_session_files_and_tabber_refreshes_are_per_target_single_flight(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp = app_module.TmuxWebtermApp([])

@@ -8990,6 +8990,7 @@ class TmuxWebtermApp:
         activity_snapshot: dict[str, Any],
         preclassified_by_target: dict[str, dict[str, Any]],
         attention_ack_rev: int,
+        owned_rows_for_session: dict[tuple[str, str, str], dict[str, Any]] | None = None,
     ) -> str:
         activity_rows = {
             key: value
@@ -9016,6 +9017,17 @@ class TmuxWebtermApp:
             screen = preclassified_by_target.get(target, {})
             state = self.agent_window_state_from_screen(screen)
             screen_rows.append((target, state, self.agent_window_attention_signature(state, screen)))
+        # `statusd`'s owned roster row (state/attention/cooldown for statusd-classified agents,
+        # see agent_window_gathered_agents) is normally a byproduct of the same tmux screen text
+        # already folded into `screen_rows` above -- but a roster-only change (e.g. a cooldown
+        # timer advancing with no new screen capture) would otherwise be invisible here, so this
+        # session would keep reusing a stale owned row until something else changed. Folding the
+        # owned rows in directly closes that gap without keying on the GLOBAL roster revision
+        # (which would defeat per-session reuse on every unrelated session's roster tick).
+        owned_rows_signature = sorted(
+            (target, kind, self.stable_client_event_payload_signature(row))
+            for (_row_session, target, kind), row in (owned_rows_for_session or {}).items()
+        )
         signature_payload = {
             "info": session_info_cache_signature(info),
             "panes": pane_rows,
@@ -9023,6 +9035,7 @@ class TmuxWebtermApp:
             "activity": activity_rows,
             "screens": screen_rows,
             "attention_ack_rev": attention_ack_rev,
+            "owned": owned_rows_signature,
         }
         return self.stable_client_event_payload_signature(signature_payload)
 
@@ -9143,12 +9156,16 @@ class TmuxWebtermApp:
                 if agent.pane_target
             }
             preclassified_by_session[session] = screens
+            owned_rows_for_session = {
+                key: row for key, row in owned_agent_rows.items() if key[0] == session
+            }
             session_signatures[session] = self.tabber_activity_session_source_signature(
                 info,
                 session_files_by_session.get(session, {}),
                 activity_snapshot,
                 screens,
                 attention_ack_rev,
+                owned_rows_for_session,
             )
         with self.activity_transcript_service.tabber_cache_lock:
             record = self.activity_transcript_service.tabber_cache_record
