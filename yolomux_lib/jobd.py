@@ -154,6 +154,10 @@ def _transcript_view(payload: bytes) -> bytes:
     result: dict[str, Any] = {
         "generation": [int(after.st_mtime_ns), int(after.st_size)],
         "read_generation": [int(before.st_mtime_ns), int(before.st_size)],
+        # File identity (device, inode) is separate from the [mtime, size] generation so a
+        # replaced inode that coincidentally reproduces the same mtime/size cannot satisfy an
+        # old key. The consumer rejects a result whose identity differs from the file it expects.
+        "identity": [int(after.st_dev), int(after.st_ino)],
         "items": items,
         "since_items": since_items,
         "since_stats": since_stats,

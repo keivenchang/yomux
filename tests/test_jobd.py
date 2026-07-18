@@ -137,6 +137,56 @@ def test_transcript_view_rejects_traversal_and_symlink_paths_at_worker(tmp_path)
             raise AssertionError(f"{candidate} must be rejected")
 
 
+def test_transcript_view_reports_file_identity_separate_from_byte_generation(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"timestamp": "2026-07-10T00:00:00Z", "payload": {"type": "user_message", "message": "identity"}}) + "\n", encoding="utf-8")
+    stat = transcript.stat()
+    result = json.loads(jobd.run_registered_task("transcript_view", json.dumps({"path": str(transcript), "line_limit": 100, "item_limit": 20}).encode("utf-8")))
+
+    # The device+inode identity is a separate field so a replaced inode cannot satisfy an old key,
+    # while the existing [mtime_ns, size] generation shape is preserved for existing consumers.
+    assert result["identity"] == [stat.st_dev, stat.st_ino]
+    assert result["generation"] == [stat.st_mtime_ns, stat.st_size]
+    assert len(result["generation"]) == 2
+    # A file whose device+inode differs (a replaced file) would report a different identity, so a
+    # consumer keyed to the original identity rejects it even if [mtime, size] coincidentally match.
+    assert result["identity"] != [stat.st_dev + 1, stat.st_ino + 1]
+
+
+def test_two_ports_coalesce_one_worker_run_and_read_identical_product_bytes(tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"timestamp": "2026-07-10T00:00:00Z", "payload": {"type": "user_message", "message": "shared product"}}) + "\n", encoding="utf-8")
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    port_a = jobd.JobClient(socket_path)
+    port_b = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not port_a.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    payload = {"path": str(transcript), "line_limit": 100, "item_limit": 20, "kind": "codex"}
+    product_key = "transcript:v1:shared"
+    first = port_a.submit("transcript_view", payload, generation=1, coalesce_key=product_key)
+    second = port_b.submit("transcript_view", payload, generation=1, coalesce_key=product_key)
+    _wait_for_result(port_a, first["job"]["job_id"])
+    meta_a, body_a = port_a.product(product_key)
+    meta_b, body_b = port_b.product(product_key)
+    status = port_a.request({"action": "status"})
+    port_a.request({"action": "shutdown"})
+    worker.join(timeout=2.0)
+
+    assert first["coalesced"] is False
+    # The second port's identical product key coalesces onto the first job: one worker run only.
+    assert second["coalesced"] is True
+    assert status["product_counters"]["transcript_view"]["completed"] == 1
+    assert meta_a["state"] == "ready" and meta_b["state"] == "ready"
+    # Both ports read byte-identical last-known-good product bytes for the shared key.
+    assert body_a == body_b and body_a != b""
+    assert json.loads(body_a)["items"][-1]["text"] == "shared product"
+
+
 def test_jobd_supersedes_stale_queued_generations_and_keeps_payloads_bounded(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     old_record = service._queue_record("text_facts", {"text": "old"}, "maintenance", 1, "same")

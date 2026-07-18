@@ -1976,6 +1976,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     "path": str(path),
                     "items": items,
                     "pending": bool(payload.get("pending")),
+                    "stale": bool(payload.get("stale")),
                     "agent": payload.get("agent"),
                     "errors": payload.get("errors", []),
                 },

@@ -177,6 +177,7 @@ from .transcripts import format_transcript_item
 from .transcripts import transcript_activity_is_recent
 from .transcripts import transcript_delta_result_state
 from .transcripts import transcript_run_metadata
+from .transcripts import TRANSCRIPT_PARSER_GENERATION
 from .transcripts import terminal_input_counts_as_user_activity
 from .transcripts import trim_prompt_text
 from .prompt_detector import agent_screen_state
@@ -398,6 +399,11 @@ SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS = 128
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
+# Bounded synchronous wait the /api/context* consumers give a warm/fast transcript product so it
+# returns in the same request instead of an empty pending shape. Kept well under the HTTP route
+# timeout; a cold transcript still returns pending immediately once this budget elapses.
+CONTEXT_VIEW_SYNC_WAIT_MS = 251
+CONTEXT_VIEW_SYNC_POLL_MS = 23
 SHARE_TOKEN_DEFAULT_TTL_SECONDS = 3600.0
 SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
 SHARE_MAX_VIEWERS_DEFAULT = 2
@@ -10371,7 +10377,16 @@ class TmuxWebtermApp:
         safe_lines = max(0, min(compact_lines, MAX_COMPACT_TRANSCRIPT_ITEMS))
         stable_identity = transcript_cache_identity(str(path))
         since_text = since.astimezone(timezone.utc).isoformat() if since is not None else ""
-        cache_key = (stable_identity, generation, safe_messages, safe_lines, str(agent.kind or ""), since_text)
+        expected_identity = [int(stable_identity[1]), int(stable_identity[2])]
+        # Fold the parser generation into the memory cache key AND the jobd keys so a parser-shape
+        # change (bumped TRANSCRIPT_PARSER_GENERATION) busts every previously cached entry/product.
+        cache_key = (TRANSCRIPT_PARSER_GENERATION, stable_identity, generation, safe_messages, safe_lines, str(agent.kind or ""), since_text)
+        # The product key is deliberately byte-generation-STRIPPED (no mtime/size). mtime+size busts
+        # the exact cache key on every append, so an active transcript would otherwise stay `pending`
+        # forever; keying the last-known-good product by stable file identity + shape lets a newer
+        # append supersede older queued parses (via the byte-derived generation number) while the
+        # prior complete product is still served stale-while-revalidate.
+        product_key = f"transcript:v{TRANSCRIPT_PARSER_GENERATION}:{stable_identity}:{safe_messages}:{safe_lines}:{since_text}"
         service = self.activity_transcript_service
         with service.transcript_job_cache_lock:
             cached = service.transcript_job_cache.get(cache_key)
@@ -10382,7 +10397,11 @@ class TmuxWebtermApp:
             if job.get("status") == "completed" and isinstance(job.get("result"), dict):
                 result = dict(job["result"])
                 expected_generation = [generation[1], generation[2]]
-                if result.get("generation") == expected_generation and result.get("read_generation") == expected_generation:
+                # Reject append/truncate/replace races: the result must describe the exact bytes we
+                # expect AND the exact file identity (device+inode), so a replaced inode that reused
+                # the same mtime/size cannot satisfy this key.
+                identity_ok = "identity" not in result or result.get("identity") == expected_identity
+                if result.get("generation") == expected_generation and result.get("read_generation") == expected_generation and identity_ok:
                     with service.transcript_job_cache_lock:
                         self.cache_set_limited(service.transcript_job_cache, cache_key, result, CONTEXT_ITEMS_CACHE_MAX_ITEMS)
                         service.transcript_job_records.pop(cache_key, None)
@@ -10407,13 +10426,28 @@ class TmuxWebtermApp:
                 },
                 priority="freshness",
                 generation=generation_number,
-                coalesce_key=f"transcript:{stable_identity}:{generation[1]}:{generation[2]}:{safe_messages}:{safe_lines}:{since_text}",
+                coalesce_key=product_key,
                 deadline_ms=15_000,
             )
             job = request.get("job") if isinstance(request.get("job"), dict) else {}
             if request.get("ok") and isinstance(job.get("job_id"), str):
                 with service.transcript_job_cache_lock:
                     service.transcript_job_records[cache_key] = job["job_id"]
+            stale = self.transcript_product_view(product_key, expected_identity)
+            if stale is not None:
+                return {
+                    "session": session,
+                    "path": str(path),
+                    "messages": safe_messages,
+                    "compact_lines": list(stale.get("compact_lines") or []),
+                    "items": copy.deepcopy(stale.get("items") or []),
+                    "since_items": copy.deepcopy(stale.get("since_items") or []),
+                    "since_stats": dict(stale.get("since_stats") or {}),
+                    "pending": False,
+                    "stale": True,
+                    "agent": asdict(agent),
+                    "errors": errors,
+                }, HTTPStatus.OK
             return {
                 "session": session,
                 "path": str(path),
@@ -10423,6 +10457,7 @@ class TmuxWebtermApp:
                 "since_items": [],
                 "since_stats": {},
                 "pending": True,
+                "stale": False,
                 "agent": asdict(agent),
                 "errors": errors,
             }, HTTPStatus.OK
@@ -10435,13 +10470,69 @@ class TmuxWebtermApp:
             "since_items": copy.deepcopy(cached.get("since_items") or []),
             "since_stats": dict(cached.get("since_stats") or {}),
             "pending": False,
+            "stale": False,
             "agent": asdict(agent),
             "errors": errors,
         }, HTTPStatus.OK
 
+    def transcript_product_view(self, product_key: str, expected_identity: list[int]) -> dict[str, Any] | None:
+        """Return decoded last-known-good product bytes for stale-while-revalidate, or None.
+
+        Serves the newest complete compact facts jobd has for this file identity + shape when the
+        exact byte-generation result is not yet available. Product bytes are always fully parsed
+        compact items, never the raw appended line. A transport failure (`unavailable`) and a
+        `pending`/`none` state both return None so the caller emits the empty pending shape.
+        """
+        product_meta, product_body = self.job_client.product(product_key)
+        if not isinstance(product_meta, dict) or not product_meta.get("ok") or not product_body:
+            return None
+        if product_meta.get("state") not in {"ready", "stale"}:
+            return None
+        try:
+            decoded = json.loads(product_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        # The product key already scopes bytes to this device+inode, but reject a mismatched
+        # identity defensively so a reused key can never leak another file's compact facts.
+        if "identity" in decoded and decoded.get("identity") != expected_identity:
+            return None
+        return decoded
+
+    def transcript_compact_view_bounded(
+        self,
+        session: str,
+        messages: int,
+        *,
+        compact_lines: int = 0,
+        since: datetime | None = None,
+        wait_ms: int = CONTEXT_VIEW_SYNC_WAIT_MS,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Shared /api/context* entry point: give a warm/fast product a bounded synchronous wait.
+
+        The single-shot `transcript_compact_view` already serves an exact cached result or a
+        last-known-good `stale` product synchronously; this wrapper additionally gives a freshly
+        submitted parse a short bounded window to finish so a small or already-warming transcript
+        resolves in the same request instead of the client polling again. A cold transcript still
+        returns `pending` immediately once the budget elapses. `stale` and `unavailable` stay
+        distinct from `pending` because the underlying payload's flags pass through unchanged.
+        """
+        payload, status = self.transcript_compact_view(session, messages, compact_lines=compact_lines, since=since)
+        if status != HTTPStatus.OK or wait_ms <= 0:
+            return payload, status
+        deadline = time.monotonic() + (wait_ms / 1000.0)
+        poll_seconds = max(0.001, CONTEXT_VIEW_SYNC_POLL_MS / 1000.0)
+        while payload.get("pending") and not payload.get("stale") and time.monotonic() < deadline:
+            time.sleep(poll_seconds)
+            payload, status = self.transcript_compact_view(session, messages, compact_lines=compact_lines, since=since)
+            if status != HTTPStatus.OK:
+                return payload, status
+        return payload, status
+
     def context_tail(self, session: str, messages: int) -> tuple[dict[str, Any], HTTPStatus]:
         safe_messages = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
-        payload, status = self.transcript_compact_view(session, safe_messages, compact_lines=safe_messages)
+        payload, status = self.transcript_compact_view_bounded(session, safe_messages, compact_lines=safe_messages)
         if status != HTTPStatus.OK:
             return payload, status
         return {
@@ -10450,12 +10541,13 @@ class TmuxWebtermApp:
             "messages": safe_messages,
             "text": "\n\n".join(payload["compact_lines"]),
             "pending": bool(payload.get("pending")),
+            "stale": bool(payload.get("stale")),
             "agent": payload.get("agent"),
             "errors": payload.get("errors", []),
         }, HTTPStatus.OK
 
     def context_items(self, session: str, messages: int) -> tuple[dict[str, Any], HTTPStatus]:
-        payload, status = self.transcript_compact_view(session, messages)
+        payload, status = self.transcript_compact_view_bounded(session, messages)
         if status != HTTPStatus.OK:
             return payload, status
         return {
@@ -10464,6 +10556,7 @@ class TmuxWebtermApp:
             "messages": payload["messages"],
             "items": payload["items"],
             "pending": bool(payload.get("pending")),
+            "stale": bool(payload.get("stale")),
             "agent": payload.get("agent"),
             "errors": payload.get("errors", []),
         }, HTTPStatus.OK

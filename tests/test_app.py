@@ -6381,6 +6381,7 @@ def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsin
                     "result": {
                         "read_generation": [stat.st_mtime_ns, stat.st_size],
                         "generation": [stat.st_mtime_ns, stat.st_size],
+                        "identity": [stat.st_dev, stat.st_ino],
                         "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}],
                         "compact_lines": [],
                         "since_items": [],
@@ -6389,24 +6390,238 @@ def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsin
                 },
             }
 
+        def product(self, coalesce_key, timeout=0.5):
+            # Cold first pass: nothing materialized yet, so the pending path stays pending.
+            return {"ok": True, "state": "none", "generation": 0}, b""
+
     monkeypatch.setattr(app_module, "tail_file_lines", unexpected_tail_file_lines)
     webapp = app_module.TmuxWebtermApp(["5"])
     worker = CompletedTranscriptJob()
     webapp.job_client = worker
     try:
-        first, first_status = webapp.context_items("5", 20)
-        second, second_status = webapp.context_items("5", 20)
+        # Drive the single-shot core: the first request submits and returns pending without any
+        # request-time parse; the second returns the bounded worker facts once jobd has completed.
+        first, first_status = webapp.transcript_compact_view("5", 20)
+        second, second_status = webapp.transcript_compact_view("5", 20)
     finally:
         webapp.control_server.stop()
 
     assert first_status == HTTPStatus.OK
     assert second_status == HTTPStatus.OK
     assert first["pending"] is True
+    assert first["stale"] is False
     assert first["items"] == []
     assert second["pending"] is False
     assert second["items"] == [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}]
     assert len(worker.submissions) == 1
     assert worker.submissions[0][0] == "transcript_view"
+    # The coalesce key is byte-generation-stripped so appends supersede rather than re-key forever.
+    coalesce_key = worker.submissions[0][2]["coalesce_key"]
+    assert coalesce_key.startswith(f"transcript:v{app_module.TRANSCRIPT_PARSER_GENERATION}:")
+    assert str(transcript.stat().st_mtime_ns) not in coalesce_key
+
+
+def _single_agent_session_info(session: str, transcript: Path, tmp_path: Path) -> SessionInfo:
+    return SessionInfo(
+        session=session,
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session=session,
+                kind="codex",
+                pid=123,
+                pane_target=f"{session}:0.0",
+                command="codex",
+                cwd=str(tmp_path),
+                status="running",
+                session_id=f"session-{session}",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+
+
+def test_transcript_compact_view_serves_last_known_good_product_stale_during_append(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "old"}}) + "\n", encoding="utf-8")
+    # Simulate an in-progress append: a raw line jobd has not parsed yet. The web process must never
+    # surface this raw text; it serves the prior complete product instead.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write('{"payload":{"type":"user_message","message":"RAW-APPENDED-UNPARSED"}}\n')
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+    stat = transcript.stat()
+    product_body = json.dumps({
+        "generation": [stat.st_mtime_ns - 10, stat.st_size - 5],
+        "read_generation": [stat.st_mtime_ns - 10, stat.st_size - 5],
+        "identity": [stat.st_dev, stat.st_ino],
+        "items": [{"role": "assistant", "timestamp": "", "cwd": "", "text": "prior complete answer"}],
+        "compact_lines": ["prior complete answer"],
+        "since_items": [],
+        "since_stats": {},
+    }).encode("utf-8")
+
+    class StaleProductJob:
+        def submit(self, task, payload, **kwargs):
+            return {"ok": True, "coalesced": False, "job": {"job_id": "job-newer"}}
+
+        def result(self, job_id):
+            # The newer-generation parse is still building.
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "stale", "generation": 1}, product_body
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = StaleProductJob()
+    try:
+        payload, status = webapp.transcript_compact_view("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["pending"] is False
+    assert payload["stale"] is True
+    assert payload["items"] == [{"role": "assistant", "timestamp": "", "cwd": "", "text": "prior complete answer"}]
+    assert "RAW-APPENDED-UNPARSED" not in json.dumps(payload)
+
+
+def test_transcript_compact_view_rejects_replaced_inode_result(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "current file"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+    stat = transcript.stat()
+
+    class ReplacedInodeJob:
+        def __init__(self):
+            self.submissions = 0
+
+        def submit(self, task, payload, **kwargs):
+            self.submissions += 1
+            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
+
+        def result(self, job_id):
+            # Same [mtime, size] as the live file, but a DIFFERENT device+inode: a replaced file
+            # that coincidentally reproduced the byte generation must not satisfy this key.
+            return {
+                "ok": True,
+                "job": {
+                    "status": "completed",
+                    "result": {
+                        "generation": [stat.st_mtime_ns, stat.st_size],
+                        "read_generation": [stat.st_mtime_ns, stat.st_size],
+                        "identity": [stat.st_dev + 1, stat.st_ino + 1],
+                        "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "from a replaced file"}],
+                        "compact_lines": [],
+                        "since_items": [],
+                        "since_stats": {},
+                    },
+                },
+            }
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "none", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    worker = ReplacedInodeJob()
+    webapp.job_client = worker
+    try:
+        first, _ = webapp.transcript_compact_view("5", 20)
+        second, _ = webapp.transcript_compact_view("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert first["pending"] is True
+    # The mismatched-inode completion is rejected, so the view stays pending and re-submits.
+    assert second["pending"] is True
+    assert second["items"] == []
+    assert worker.submissions == 2
+    assert "from a replaced file" not in json.dumps(second)
+
+
+def test_bumping_transcript_parser_generation_busts_cached_transcript_job(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "hello"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+
+    class SubmitTrackingJob:
+        def __init__(self):
+            self.coalesce_keys = []
+
+        def submit(self, task, payload, **kwargs):
+            self.coalesce_keys.append(kwargs.get("coalesce_key"))
+            return {"ok": True, "coalesced": False, "job": {"job_id": f"job-{len(self.coalesce_keys)}"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "none", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    worker = SubmitTrackingJob()
+    webapp.job_client = worker
+    baseline = app_module.TRANSCRIPT_PARSER_GENERATION
+    try:
+        webapp.transcript_compact_view("5", 20)
+        # A parser-shape change bumps the generation and must bust the previously keyed cache/product.
+        monkeypatch.setattr(app_module, "TRANSCRIPT_PARSER_GENERATION", baseline + 1)
+        webapp.transcript_compact_view("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert len(worker.coalesce_keys) == 2
+    assert worker.coalesce_keys[0].startswith(f"transcript:v{baseline}:")
+    assert worker.coalesce_keys[1].startswith(f"transcript:v{baseline + 1}:")
+    assert worker.coalesce_keys[0] != worker.coalesce_keys[1]
+
+
+def test_context_items_bounded_wrapper_resolves_warm_product_without_local_parse(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "warm"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+    stat = transcript.stat()
+
+    class WarmProductJob:
+        def submit(self, task, payload, **kwargs):
+            return {"ok": True, "coalesced": True, "job": {"job_id": "job-1"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            body = json.dumps({
+                "generation": [stat.st_mtime_ns - 1, stat.st_size - 1],
+                "read_generation": [stat.st_mtime_ns - 1, stat.st_size - 1],
+                "identity": [stat.st_dev, stat.st_ino],
+                "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "warm"}],
+                "compact_lines": [],
+                "since_items": [],
+                "since_stats": {},
+            }).encode("utf-8")
+            return {"ok": True, "state": "ready", "generation": 1}, body
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = WarmProductJob()
+    try:
+        payload, status = webapp.transcript_compact_view_bounded("5", 20, wait_ms=0)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    # A warm product returns synchronously as stale (distinct from pending), even with a zero wait.
+    assert payload["pending"] is False
+    assert payload["stale"] is True
+    assert payload["items"] == [{"role": "user", "timestamp": "", "cwd": "", "text": "warm"}]
 
 
 def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_path):
