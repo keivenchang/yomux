@@ -636,6 +636,7 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "debug.system.localServices.field.pid",
     "debug.system.localServices.field.products",
     "debug.system.localServices.field.queues",
+    "debug.system.localServices.field.runtime",
     "debug.system.localServices.field.started",
     "debug.system.localServices.field.status",
     "debug.system.localServices.field.uptime",

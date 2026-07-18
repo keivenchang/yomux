@@ -222,6 +222,7 @@ class JobRecord:
     error: str = ""
     completed_at: float = 0.0
     deadline_at: float = 0.0
+    running_started_at: float = 0.0
 
 
 class PersistentJobBroker:
@@ -245,12 +246,21 @@ class PersistentJobBroker:
         # web route can serve a prior complete product while a newer generation is still building.
         self.latest_product: dict[str, tuple[int, bytes, float]] = {}
         self.product_counters: dict[str, dict[str, int]] = {}
+        # Per-task pure execution duration (excludes queue wait): count/total/max in milliseconds,
+        # bounded per task name (not per job) so this dict cannot grow with job volume.
+        self.product_runtime_ms: dict[str, dict[str, float]] = {}
         self.executor: ProcessPoolExecutor | None = None
         self.high_priority_streak = 0
 
     def _bump_counter(self, task: str, name: str) -> None:
         counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0})
         counters[name] = counters.get(name, 0) + 1
+
+    def _record_runtime_ms(self, task: str, elapsed_ms: float) -> None:
+        stats = self.product_runtime_ms.setdefault(task, {"count": 0.0, "total_ms": 0.0, "max_ms": 0.0})
+        stats["count"] += 1
+        stats["total_ms"] += elapsed_ms
+        stats["max_ms"] = max(stats["max_ms"], elapsed_ms)
 
     def _store_product(self, record: JobRecord) -> None:
         # Generation guard: a slow older-generation completion must never overwrite a newer
@@ -323,15 +333,21 @@ class PersistentJobBroker:
                     self._mark_terminal(record, "completed")
                     self._store_product(record)
                     self._bump_counter(record.task, "completed")
+                    if record.running_started_at > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
             except BrokenProcessPool as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(record, "failed", "worker crashed")
                     self._bump_counter(record.task, "failed")
+                    if record.running_started_at > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
                 restart_executor = True
             except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(record, "failed", redact_local_service_text(exc))
                     self._bump_counter(record.task, "failed")
+                    if record.running_started_at > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
         if restart_executor and self.executor is not None:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.executor = None
@@ -381,6 +397,7 @@ class PersistentJobBroker:
                 continue
             record.future = self._executor().submit(run_registered_task, record.task, record.payload)
             record.status = "running"
+            record.running_started_at = time.monotonic()
             active += 1
         self._prune_records()
 
@@ -473,6 +490,10 @@ class PersistentJobBroker:
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
             "cache": {"records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS, "products": len(self.latest_product)},
             "product_counters": {task: dict(counters) for task, counters in self.product_counters.items()},
+            "product_runtime_ms": {
+                task: {"count": int(stats["count"]), "total_ms": round(stats["total_ms"], 3), "max_ms": round(stats["max_ms"], 3), "avg_ms": round(stats["total_ms"] / stats["count"], 3) if stats["count"] else 0.0}
+                for task, stats in self.product_runtime_ms.items()
+            },
             "last_success": max((record.completed_at for record in self.records.values() if record.status == "completed"), default=0.0),
             "last_failure": next((record.error for record in reversed(list(self.records.values())) if record.status == "failed"), ""),
             "restart_backoff_seconds": 0.0,
@@ -573,7 +594,7 @@ class JobClient(LocalServiceClient):
     def runtime_status(self) -> dict[str, Any]:
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        return {"service": "jobd", "pid": int(payload.get("pid") or 0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "resources": self.registry.resources(int(payload.get("pid") or 0))}
+        return {"service": "jobd", "pid": int(payload.get("pid") or 0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""), "resources": self.registry.resources(int(payload.get("pid") or 0))}
 
 
 def main(argv: list[str] | None = None) -> int:

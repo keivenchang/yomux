@@ -378,6 +378,7 @@
   "debug.system.localServices.field.pid": "PID",
   "debug.system.localServices.field.products": "Products",
   "debug.system.localServices.field.queues": "Queues",
+  "debug.system.localServices.field.runtime": "Runtime",
   "debug.system.localServices.field.started": "Started",
   "debug.system.localServices.field.status": "Status",
   "debug.system.localServices.field.uptime": "Uptime",

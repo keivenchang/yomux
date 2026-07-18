@@ -6569,6 +6569,7 @@ const debugSystemLocalServiceFields = Object.freeze([
   {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
   {key: 'cache', labelKey: 'debug.system.localServices.field.cache'},
   {key: 'products', labelKey: 'debug.system.localServices.field.products'},
+  {key: 'runtime', labelKey: 'debug.system.localServices.field.runtime'},
 ]);
 
 function debugSystemServiceName(service = {}) {
@@ -6603,6 +6604,13 @@ function debugSystemProductCountersText(service = {}) {
   const counters = service.product_counters && typeof service.product_counters === 'object' ? service.product_counters : {};
   return Object.entries(counters)
     .map(([task, byOutcome]) => `${task}: ${debugSystemDictSummaryText(byOutcome).split('\n').join(', ')}`)
+    .join('\n');
+}
+
+function debugSystemProductRuntimeText(service = {}) {
+  const runtime = service.product_runtime_ms && typeof service.product_runtime_ms === 'object' ? service.product_runtime_ms : {};
+  return Object.entries(runtime)
+    .map(([task, stats]) => `${task}: avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})`)
     .join('\n');
 }
 
@@ -6679,6 +6687,10 @@ function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSe
   if (fieldKey === 'products') {
     const productsText = debugSystemProductCountersText(service);
     return valueOrPrevious({display: productsText || '—', identity: productsText});
+  }
+  if (fieldKey === 'runtime') {
+    const runtimeText = debugSystemProductRuntimeText(service);
+    return valueOrPrevious({display: runtimeText || '—', identity: runtimeText});
   }
   return {display: '—', identity: 'empty'};
 }

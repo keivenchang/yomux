@@ -596,6 +596,39 @@ def test_jobd_product_counters_track_accepted_coalesced_superseded_and_completed
     assert service.common_status()["product_counters"]["json_compact"]["completed"] == 1
 
 
+def test_jobd_tracks_per_task_runtime_count_total_and_max(tmp_path, monkeypatch):
+    # Per-product runtime totals/maxima (checkbox 10): pure execution duration, excluding queue
+    # wait, tracked per task name and surfaced through common_status/runtime_status.
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    clock_state = {"now": 100.0}
+    monkeypatch.setattr(jobd.time, "monotonic", lambda: clock_state["now"])
+
+    fast = service._queue_record("json_compact", {"a": 1}, "freshness", 1, "fast")
+    fast.status = "running"
+    fast.running_started_at = clock_state["now"]  # 100.0
+    fast.future = Future()
+    fast.future.set_result(b'{"a":1}')
+    clock_state["now"] = 100.05  # 50ms of pure execution
+    service._pump()
+
+    slow = service._queue_record("json_compact", {"a": 2}, "freshness", 2, "slow")
+    slow.status = "running"
+    slow.running_started_at = clock_state["now"]  # 100.05
+    slow.future = Future()
+    slow.future.set_result(b'{"a":2}')
+    clock_state["now"] = 100.25  # 200ms of pure execution
+    service._pump()
+
+    stats = service.product_runtime_ms["json_compact"]
+    assert stats["count"] == 2
+    assert stats["max_ms"] == pytest.approx(200.0, abs=1.0)
+    assert stats["total_ms"] == pytest.approx(250.0, abs=1.0)
+
+    status_stats = service.common_status()["product_runtime_ms"]["json_compact"]
+    assert status_stats["count"] == 2
+    assert status_stats["avg_ms"] == pytest.approx(125.0, abs=1.0)
+
+
 def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):
     # The last-known-good product store is bounded independently of the job-record
     # ring (removal/tombstone behavior): once JOBD_MAX_PRODUCTS distinct coalesce
