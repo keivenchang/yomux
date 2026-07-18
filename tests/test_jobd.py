@@ -594,3 +594,35 @@ def test_jobd_product_counters_track_accepted_coalesced_superseded_and_completed
     service._pump()
     assert service.product_counters["json_compact"]["completed"] == 1
     assert service.common_status()["product_counters"]["json_compact"]["completed"] == 1
+
+
+def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):
+    # The last-known-good product store is bounded independently of the job-record
+    # ring (removal/tombstone behavior): once JOBD_MAX_PRODUCTS distinct coalesce
+    # keys have a stored product, completing one more evicts the OLDEST-STORED
+    # entry so the store cannot grow unbounded across many distinct products.
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    original_max = jobd.JOBD_MAX_PRODUCTS
+    try:
+        jobd.JOBD_MAX_PRODUCTS = 3
+        for index in range(3):
+            record = service._queue_record("json_compact", {"i": index}, "freshness", 1, f"key-{index}")
+            record.status = "running"
+            record.future = Future()
+            record.future.set_result(f'{{"i":{index}}}'.encode())
+            service._pump()
+        assert set(service.latest_product) == {"key-0", "key-1", "key-2"}
+
+        overflow = service._queue_record("json_compact", {"i": 3}, "freshness", 1, "key-3")
+        overflow.status = "running"
+        overflow.future = Future()
+        overflow.future.set_result(b'{"i":3}')
+        service._pump()
+
+        assert len(service.latest_product) == 3
+        assert "key-0" not in service.latest_product  # the oldest-stored entry was evicted
+        assert "key-3" in service.latest_product
+        meta, body = service._product({"coalesce_key": "key-0"})
+        assert meta["state"] == "none" and body == b""  # a tombstoned key reports honestly, not stale data
+    finally:
+        jobd.JOBD_MAX_PRODUCTS = original_max
