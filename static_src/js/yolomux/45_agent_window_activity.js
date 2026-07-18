@@ -88,6 +88,15 @@ function agentWindowIsWorkingState(state) {
   return agentWindowStateKey(state) === STATE_KEY.working;
 }
 
+// A working state comes from the live screen classifier, while transcript timestamps describe
+// historical persisted activity. Consumers that show both the state glyph and an "Ago" value
+// must use this liveness clock first so a visibly working window cannot look hours old.
+function agentWindowWorkingRecencyTs(agent, nowSeconds = Date.now() / 1000) {
+  if (!agentWindowIsWorkingState(agent?.state)) return 0;
+  const now = Number(nowSeconds);
+  return Number.isFinite(now) && now > 0 ? now : 0;
+}
+
 function agentWindowIsAttentionState(state) {
   return AGENT_WINDOW_ATTENTION_STATES.has(agentWindowStateKey(state));
 }

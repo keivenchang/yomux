@@ -4016,9 +4016,11 @@ function tabberAgentRecency(agent) {
 
 // Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
 // visible date text, and parent session bubbling.
-function tabberWindowRecency(row) {
+function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
   const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
   if (isAgent) {
+    const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);
+    if (workingTs > 0) return workingTs;
     const activityTs = tabberAgentRecency(row?.agentActivity);
     if (activityTs > 0) return activityTs;
     if (String(row?.agentStatus?.state || STATE_KEY.idle) !== STATE_KEY.idle) return 0;
@@ -4296,7 +4298,7 @@ function buildTabberTree() {
     const sessionWork = sessionWorkDescription(session, info, 0);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
-    const nowSeconds = Date.now() / 1000;
+    const nowSeconds = fileTreeRecencyNowMs() / 1000;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: visibleItems.has(session)},
@@ -4309,7 +4311,7 @@ function buildTabberTree() {
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
-      const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});
+      const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus}, nowSeconds);
       const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;

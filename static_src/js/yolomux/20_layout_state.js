@@ -4481,6 +4481,7 @@ function commandPaletteLabel() {
 
 function commandPaletteEmptyText() {
   if (fileQuickOpenState.loading) return t('search.searching');
+  if (fileQuickOpenState.indexWarming) return t('finder.index.indexing');
   if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.noMatches');
 }
@@ -4666,13 +4667,31 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
+function clearFileQuickOpenIndexRetry() {
+  if (fileQuickOpenState.indexRetry) clearTimeout(fileQuickOpenState.indexRetry);
+  fileQuickOpenState.indexRetry = null;
+}
+
+function scheduleFileQuickOpenIndexRetry(query, requestId) {
+  clearFileQuickOpenIndexRetry();
+  fileQuickOpenState.indexRetry = setTimeout(() => {
+    fileQuickOpenState.indexRetry = null;
+    if (requestId !== fileQuickOpenState.requestId) return;
+    if (commandPaletteState.node?.hidden) return;
+    if (commandPaletteState.query !== query) return;
+    refreshFileQuickOpenCandidates(query);
+  }, fileQuickOpenIndexRetryMs);
+}
+
 function abortFileQuickOpenSearch() {
   if (fileQuickOpenState.abortController) {
     try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
   fileQuickOpenState.abortController = null;
+  clearFileQuickOpenIndexRetry();
   fileQuickOpenState.requestId += 1;
   fileQuickOpenState.loading = false;
+  fileQuickOpenState.indexWarming = false;
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -4693,6 +4712,16 @@ function dedupeFileSearchResults(files) {
   return out;
 }
 
+function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
+  return {
+    root: normalizeStoredFileExplorerIndexedDir(payload?.root || payload?.root_realpath || searchRoot) || searchRoot,
+    files: Array.isArray(payload?.files) ? payload.files : [],
+    // This is deliberately data-driven. The UI must not turn an explicit in-progress
+    // backend response into a completed empty search just because it has no rows yet.
+    indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+  };
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
@@ -4701,6 +4730,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
+  fileQuickOpenState.indexWarming = false;
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -4727,7 +4757,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
           const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
           const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
+          return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }
@@ -4745,12 +4775,17 @@ async function refreshFileQuickOpenCandidates(query = '') {
       fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
+      // A new or externally indexed root can take a moment to publish its first durable snapshot.
+      // The backend explicitly marks that response as warming; it is not a completed empty search.
+      fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
+      if (fileQuickOpenState.indexWarming) scheduleFileQuickOpenIndexRetry(query, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
     if (requestId !== fileQuickOpenState.requestId) return;
     if (error?.name === 'AbortError') return;
     fileQuickOpenState.candidates = [];
+    fileQuickOpenState.indexWarming = false;
     fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},

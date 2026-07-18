@@ -752,9 +752,11 @@ const fileQuickOpenState = {
   root: '',
   candidates: [],
   loading: false,
+  indexWarming: false,
   error: '',
   requestId: 0,
   debounce: null,
+  indexRetry: null,
   abortController: null,
 };
 let tabsMenuSearchText = '';
@@ -1855,6 +1857,7 @@ const uiDelayMs = Object.freeze({
   tmuxWindowSwitchReveal: 4000,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
+  fileQuickOpenIndexRetry: 500,
   commandPaletteMissingPathRetry: 1001,
   clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
@@ -1884,6 +1887,7 @@ const yolomuxTiming = Object.freeze({
   tmuxWindowSwitchPaintCapMs: 250,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
+  fileQuickOpenIndexRetryMs: uiDelayMs.fileQuickOpenIndexRetry,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
   clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
@@ -1913,6 +1917,7 @@ const {
   tmuxWindowSwitchPaintCapMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
+  fileQuickOpenIndexRetryMs,
   commandPaletteMissingPathRetryMs,
   clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
@@ -11383,6 +11388,7 @@ function commandPaletteLabel() {
 
 function commandPaletteEmptyText() {
   if (fileQuickOpenState.loading) return t('search.searching');
+  if (fileQuickOpenState.indexWarming) return t('finder.index.indexing');
   if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
   return t('palette.noMatches');
 }
@@ -11568,13 +11574,31 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
+function clearFileQuickOpenIndexRetry() {
+  if (fileQuickOpenState.indexRetry) clearTimeout(fileQuickOpenState.indexRetry);
+  fileQuickOpenState.indexRetry = null;
+}
+
+function scheduleFileQuickOpenIndexRetry(query, requestId) {
+  clearFileQuickOpenIndexRetry();
+  fileQuickOpenState.indexRetry = setTimeout(() => {
+    fileQuickOpenState.indexRetry = null;
+    if (requestId !== fileQuickOpenState.requestId) return;
+    if (commandPaletteState.node?.hidden) return;
+    if (commandPaletteState.query !== query) return;
+    refreshFileQuickOpenCandidates(query);
+  }, fileQuickOpenIndexRetryMs);
+}
+
 function abortFileQuickOpenSearch() {
   if (fileQuickOpenState.abortController) {
     try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
   fileQuickOpenState.abortController = null;
+  clearFileQuickOpenIndexRetry();
   fileQuickOpenState.requestId += 1;
   fileQuickOpenState.loading = false;
+  fileQuickOpenState.indexWarming = false;
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -11595,6 +11619,16 @@ function dedupeFileSearchResults(files) {
   return out;
 }
 
+function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
+  return {
+    root: normalizeStoredFileExplorerIndexedDir(payload?.root || payload?.root_realpath || searchRoot) || searchRoot,
+    files: Array.isArray(payload?.files) ? payload.files : [],
+    // This is deliberately data-driven. The UI must not turn an explicit in-progress
+    // backend response into a completed empty search just because it has no rows yet.
+    indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+  };
+}
+
 async function refreshFileQuickOpenCandidates(query = '') {
   const root = fileQuickOpenState.root || fileQuickOpenRootForSearch();
   if (!root) return;
@@ -11603,6 +11637,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
   fileQuickOpenState.abortController = typeof AbortController === 'function' ? new AbortController() : null;
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
+  fileQuickOpenState.indexWarming = false;
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -11629,7 +11664,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
           const normalizedRoot = normalizeStoredFileExplorerIndexedDir(searchRoot);
           const recursive = normalizedRoot && fileExplorerDirectoryIsIndexed(normalizedRoot) ? '&recursive=1' : '';
           const payload = await apiFetchJson(`/api/fs/search?root=${encodeURIComponent(searchRoot)}&query=${encodeURIComponent(commandPaletteSearchQuery(query))}&limit=500${recursive}`, fetchOptions);
-          return {ok: true, root: normalizeStoredFileExplorerIndexedDir(payload.root || payload.root_realpath || searchRoot) || searchRoot, files: Array.isArray(payload.files) ? payload.files : []};
+          return {ok: true, ...fileQuickOpenSearchPayloadResult(payload, searchRoot)};
         } catch (error) {
           return {ok: false, root: searchRoot, error};
         }
@@ -11647,12 +11682,17 @@ async function refreshFileQuickOpenCandidates(query = '') {
       fileQuickOpenState.candidates = dedupeFileSearchResults(
         successful.flatMap(result => result.files.map(file => ({...file, indexed_root: result.root}))),
       );
+      // A new or externally indexed root can take a moment to publish its first durable snapshot.
+      // The backend explicitly marks that response as warming; it is not a completed empty search.
+      fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
+      if (fileQuickOpenState.indexWarming) scheduleFileQuickOpenIndexRetry(query, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
     if (requestId !== fileQuickOpenState.requestId) return;
     if (error?.name === 'AbortError') return;
     fileQuickOpenState.candidates = [];
+    fileQuickOpenState.indexWarming = false;
     fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},
@@ -18959,9 +18999,11 @@ function tabberAgentRecency(agent) {
 
 // Window rows have one semantic recency clock: this exact timestamp feeds row mtime,
 // visible date text, and parent session bubbling.
-function tabberWindowRecency(row) {
+function tabberWindowRecency(row, nowSeconds = Date.now() / 1000) {
   const isAgent = row?.isAgent === true || ['claude', 'codex'].includes(String(row?.agentKey || '').toLowerCase());
   if (isAgent) {
+    const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);
+    if (workingTs > 0) return workingTs;
     const activityTs = tabberAgentRecency(row?.agentActivity);
     if (activityTs > 0) return activityTs;
     if (String(row?.agentStatus?.state || STATE_KEY.idle) !== STATE_KEY.idle) return 0;
@@ -19239,7 +19281,7 @@ function buildTabberTree() {
     const sessionWork = sessionWorkDescription(session, info, 0);
     const sessionNameLabel = sessionLabel(session) || session;
     const sessionDisplay = sessionWork ? `${sessionNameLabel}  ${sessionWork}` : sessionNameLabel;
-    const nowSeconds = Date.now() / 1000;
+    const nowSeconds = fileTreeRecencyNowMs() / 1000;
     const sessionEntry = {
       name: sessionName, kind: 'dir', mtime: 0, sortName: sessionDisplay,
       tabber: {type: 'session', session, label: sessionNameLabel, description: sessionWork, icon: '●', branchText: branch, active: visibleItems.has(session)},
@@ -19252,7 +19294,7 @@ function buildTabberTree() {
       const isAgent = Boolean(agentKey) || tabberWindowIsAgent(record.name);
       const agentActivity = isAgent ? tabberAgentForWindow(session, record.index, agentKey) : null;
       const repoEntries = isAgent && agentStatus ? tabberRepoEntriesForAgentWindow(agentStatus, session, record.index) : [];
-      const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});
+      const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus}, nowSeconds);
       const active = tmuxWindowRecordIsActive(session, record);
       const label = tmuxWindowCanonicalLabel(session, record, record.indexedButtonLabel || `${record.indexText}:${record.buttonNameLabel || record.name}`, info);
       const agentStatusForDisplay = agentStatus ? {...agentStatus, current: active, window_active: active} : null;
@@ -19994,6 +20036,15 @@ function agentWindowStateKey(state) {
 
 function agentWindowIsWorkingState(state) {
   return agentWindowStateKey(state) === STATE_KEY.working;
+}
+
+// A working state comes from the live screen classifier, while transcript timestamps describe
+// historical persisted activity. Consumers that show both the state glyph and an "Ago" value
+// must use this liveness clock first so a visibly working window cannot look hours old.
+function agentWindowWorkingRecencyTs(agent, nowSeconds = Date.now() / 1000) {
+  if (!agentWindowIsWorkingState(agent?.state)) return 0;
+  const now = Number(nowSeconds);
+  return Number.isFinite(now) && now > 0 ? now : 0;
 }
 
 function agentWindowIsAttentionState(state) {

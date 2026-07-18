@@ -1315,6 +1315,7 @@ async function runTabberSuite() {
 
   test('Tabber window recency uses one timestamp for display, sorting, and parent bubbling', () => {
     const api = loadYolomux('', ['4']);
+    const beforeRender = Date.now() / 1000;
     api.setFileExplorerModeForTest('tabber');
     api.setFileExplorerTreeDateModeForTest('date');
     api.setTranscriptInfoForTest('4', {
@@ -1343,9 +1344,10 @@ async function runTabberSuite() {
     const claudeWindow = windows.find(row => row.tabber.windowIndex === 0);
     const bashWindow = windows.find(row => row.tabber.windowIndex === 1);
     const repoRows = tree.entriesByDir.get('/' + session.name + '/' + claudeWindow.name);
-    assert.equal(claudeWindow.mtime, 2000, 'Claude/Codex window mtime uses transcript-event recency, not status or ledger recency');
+    assert.ok(claudeWindow.mtime >= beforeRender, 'a live working state wins over a stale transcript timestamp');
+    assert.ok(claudeWindow.mtime <= Date.now() / 1000, 'the working recency clock is anchored to the current render');
     assert.equal(bashWindow.mtime, 3000, 'bash/non-agent window mtime uses activity[session:window].active_recency_ts');
-    assert.equal(session.mtime, 3000, 'parent session mtime is max child semantic mtime after child rows are assigned');
+    assert.equal(session.mtime, claudeWindow.mtime, 'parent session mtime bubbles the same live working clock as its child');
     assert.equal(repoRows[0].mtime, 9000, 'touched-path file mtime stays on the path row');
 
     const rows = api.tabberRenderedRowsForTest();
@@ -1353,11 +1355,19 @@ async function runTabberSuite() {
     const claudeRow = rows.find(row => row.type === 'window' && row.path === '/s_4/w_0');
     const bashRow = rows.find(row => row.type === 'window' && row.path === '/s_4/w_1');
     const repoRow = rows.find(row => row.type === 'repo' && row.repoRoot === '/home/u/proj');
-    assert.equal(claudeRow?.date, api.sessionFileTimeText(2000), 'Claude/Codex child date text uses the same transcript timestamp as row mtime');
+    assert.equal(claudeRow?.date, api.sessionFileTimeText(claudeWindow.mtime), 'Claude/Codex child date text uses the same live working timestamp as row mtime');
     assert.equal(bashRow?.date, api.sessionFileTimeText(3000), 'bash/non-agent child date text uses the same ledger timestamp as row mtime');
     assert.equal(sessionRow?.date, '', 'parent session rows omit aggregate timestamps because child sub-windows own the recency');
     assert.equal(repoRow?.date, api.sessionFileTimeText(9000), 'touched-path rows still display touched-file recency');
-    assert.notEqual(claudeRow?.date, 'working for 1h 00m', 'working status does not replace the Tabber date column timestamp');
+    assert.notEqual(claudeRow?.date, api.sessionFileTimeText(2000), 'stale transcript history cannot override a visibly working row');
+
+    api.setAutoApproveStateForTest('4', {agent_windows: [
+      {kind: 'claude', state: 'idle', last_active_ts: 8000, window_index: 0, window_name: 'claude', window_label: '0:claude', pid: 4100, active: true},
+    ]});
+    const idleTree = api.buildTabberTree();
+    const idleSession = idleTree.entries.find(entry => entry.tabber?.session === '4');
+    const idleClaudeWindow = idleTree.entriesByDir.get('/' + idleSession.name).find(row => row.tabber.windowIndex === 0);
+    assert.equal(idleClaudeWindow.mtime, 2000, 'after the live working state clears, Tabber returns to the historical transcript clock');
   });
 
   test('Tabber preserves Ago timestamps across follower refresh placeholders', () => {
@@ -1382,7 +1392,7 @@ async function runTabberSuite() {
       .filter(row => row.type === 'window')
       .map(row => [row.path, row.date]));
     const originalDates = windowDates();
-    assert.equal(originalDates['/s_4/w_0'], api.sessionFileTimeText(2000), 'full snapshot shows the agent timestamp');
+    assert.equal(originalDates['/s_4/w_0'], api.sessionFileTimeText(Date.now() / 1000), 'a live working row shows the current liveness clock instead of stale transcript history');
     assert.equal(originalDates['/s_4/w_1'], api.sessionFileTimeText(3000), 'full snapshot shows the shell timestamp');
 
     const placeholder = {activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: true}};
@@ -1395,12 +1405,12 @@ async function runTabberSuite() {
       agent_windows: {'4': [{window_index: 0}]},
     };
     assert.equal(api.applyTabberActivityPayloadForTest(replacement, 3), true, 'a complete newer snapshot replaces the current payload');
-    assert.deepEqual(windowDates(), {'/s_4/w_0': api.sessionFileTimeText(4000), '/s_4/w_1': api.sessionFileTimeText(5000)}, 'complete replacement updates both timestamps');
+    assert.deepEqual(windowDates(), {'/s_4/w_0': api.sessionFileTimeText(Date.now() / 1000), '/s_4/w_1': api.sessionFileTimeText(5000)}, 'complete replacement updates historical rows without replacing a live working clock');
     assert.equal(api.applyTabberActivityPayloadForTest({...replacement, activity: {'4:1': {active_recency_ts: 7000}}}, 1), false, 'an older overlapping request cannot roll back an accepted snapshot');
     assert.equal(windowDates()['/s_4/w_1'], api.sessionFileTimeText(5000), 'stale response ordering leaves the accepted timestamp intact');
 
     assert.equal(api.applyTabberActivityPayloadForTest({activity: {}, agents: [], agent_windows: {}, cache: {refreshing_elsewhere: false}}, 4), true, 'a genuine non-placeholder empty snapshot remains authoritative');
-    assert.deepEqual(windowDates(), {'/s_4/w_0': '', '/s_4/w_1': ''}, 'legitimate expiry can remove timestamps instead of retaining data forever');
+    assert.deepEqual(windowDates(), {'/s_4/w_0': api.sessionFileTimeText(Date.now() / 1000), '/s_4/w_1': ''}, 'legitimate activity expiry removes historical rows without hiding a current working status');
   });
 
   // DOIT.58 B1-B7: Tabber's fixed panel — source guards that rows route through the
@@ -1496,8 +1506,8 @@ async function runTabberSuite() {
     assert.ok(/function tabberAgentForWindow\(session, windowIndex, agentKey = ''\)/.test(source), 'Tabber can look up agent transcript activity by session/window');
     assert.ok(source.includes('function agentWindowPathEntries(agent)') && source.includes('function windowViewModel(session, windowIndex'), 'Tabber reads paths through the shared backend agent-window view model');
     assert.equal(/tabberTouchedRepoPathsForWindow|tabberRepoPathsForWindow|tabberFileMatchesWindow/.test(source), false, 'Tabber has no client-side per-window path resolver');
-    assert.ok(source.includes('function tabberWindowRecency(row)') && source.includes('const activityTs = tabberAgentRecency(row?.agentActivity)') && source.includes('return tabberRecency(`${session}:${windowIndex}`)'), 'Tabber window rows have one helper that owns the semantic recency timestamp');
-    assert.ok(source.includes('const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus});'), 'Tabber window mtime comes from the shared window-recency helper');
+    assert.ok(source.includes('function agentWindowWorkingRecencyTs(agent, nowSeconds = Date.now() / 1000)') && source.includes('function tabberWindowRecency(row, nowSeconds = Date.now() / 1000)') && source.includes('const workingTs = agentWindowWorkingRecencyTs(row?.agentStatus, nowSeconds);') && source.includes('const activityTs = tabberAgentRecency(row?.agentActivity)') && source.includes('return tabberRecency(`${session}:${windowIndex}`)'), 'Tabber window rows use the shared live working clock before historical activity timestamps');
+    assert.ok(source.includes('const windowMtime = tabberWindowRecency({session, windowIndex: record.index, record, isAgent, agentKey, agentActivity, agentStatus}, nowSeconds);'), 'Tabber window mtime comes from the shared window-recency helper');
 	    assert.ok(/function updateTabberRow\([\s\S]*updateFileTreeRowContents\(row, icon, label,[\s\S]*applyFileTreeRowRecency\(row, entry, options\)/.test(source), 'Tabber timestamp rows route through the shared Finder/Differ recency styling');
 	    assert.ok(/function tabberWindowDateDisplay\(recencyTs, agentStatus = null, nowSeconds = Date\.now\(\) \/ 1000\)[\s\S]*fileExplorerTreeDateModeForView\('tabber'\) === 'none'[\s\S]*sessionFileDisplayTimeText\(recencyTs, \{nowSeconds, view: 'tabber'\}\)/.test(source), 'Tabber window date text renders the same timestamp used for row mtime and parent bubbling');
 	    assert.equal(/const dateText = agentStatusForDisplay \? sessionPopoverAgentStateText/.test(source), false, 'Tabber agent rows do not bypass the Date toggle with popover-only status text');
@@ -1712,7 +1722,7 @@ async function runTabberSuite() {
     assert.ok(activeWindowRow?.nameHtml.includes('(pid=12345)'), 'PD4: agent Tabber rows render pid beside the compact visible sub-window label');
     assert.equal(/\stitle=/.test(activeWindowRow?.nameHtml || ''), false, 'visible Tabber window chrome strips nested native title hovers');
     assert.equal(activeWindowRow?.ariaCurrent, 'true', 'N10: the active tmux sub-window row exposes aria-current');
-    assert.equal(activeWindowRow?.date, '', 'working agent Tabber rows do not fabricate date text without transcript recency');
+    assert.equal(activeWindowRow?.date, api.sessionFileRelativeTimeText(Date.now() / 1000, Date.now() / 1000), 'working agent Tabber rows use the shared live-status clock even without transcript history');
     assert.equal(activeWindowRow?.dateHtml, '', 'working agent Tabber rows keep status out of the date column');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'needs-input', last_active_ts: Date.now() / 1000 - 5, window_index: 0, window_name: 'claude', window_label: '0:claude'},
@@ -1777,13 +1787,13 @@ async function runTabberSuite() {
     assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'just-updated', 'Tabber Ago timestamp rows mark very recent process activity just-updated');
     assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.dateClasses.includes('attention-pulse'), true, 'Tabber Ago very recent rows pulse the timestamp cell with the shared attention class');
     assert.notEqual(recentTabberAgoRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.dateAttentionDelay, '', 'Tabber timestamp pulses are phase-aligned');
-    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'recent', 'Tabber Ago timestamp rows keep sub-ten-minute graduated styling');
+    assert.equal(recentTabberAgoRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'just-updated', 'a visibly working Tabber row is marked just-updated instead of retaining stale transcript age');
 	    api.setFileExplorerTreeDateModeForTest('date');
 	    const recentTabberDateRows = api.tabberRenderedRowsForTest();
 	    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, 'just-updated', 'Tabber Date timestamp rows preserve very recent recency');
 	    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.dateClasses.includes('attention-pulse'), true, 'Tabber Date timestamp rows keep the shared pulse');
-	    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'recent', 'Tabber Date timestamp rows preserve graduated recency');
-	    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.date, api.sessionFileTimeText(2000 - 9 * 60), 'Tabber Date mode shows an absolute timestamp for agent sub-window rows');
+    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.recency, 'just-updated', 'Tabber Date rows retain the shared current working clock');
+    assert.equal(recentTabberDateRows.find(r => r.type === 'window' && /0:claude/.test(r.name))?.date, api.sessionFileTimeText(2000), 'Tabber Date mode shows the current working timestamp for agent sub-window rows');
 	    api.setFileExplorerTreeDateModeForTest('none');
 	    const noDateTabberRows = api.tabberRenderedRowsForTest();
 	    assert.equal(noDateTabberRows.find(r => r.type === 'window' && /1:bash/.test(r.name))?.recency, '', 'Tabber None mode hides timestamp recency styling');
@@ -1882,9 +1892,8 @@ async function runTabberSuite() {
     assert.ok(rowTypes.includes('tab'), 'non-tmux tabs appear in the Tabber');
     assert.ok(rowTypes.indexOf('tab') > rowTypes.lastIndexOf('session'), 'non-tmux tabs render after the sessions');
 
-    // B4 recency sort: agent windows use the backend transcript timestamp. A fresh user-input heartbeat in
-    // session 1's Claude window and a newer touched-path mtime under it must not make it outrank the newer
-    // Codex transcript in session 2.
+    // B4 recency sort: a live working state is newer than historical transcript activity. A fresh
+    // user-input heartbeat and a newer touched-path mtime are still not alternate clocks for the row.
     api.setFileExplorerTreeSortModeForTest('newest');
     api.setAutoApproveStateForTest('1', {agent_windows: [
       {kind: 'claude', state: 'working', working_elapsed_seconds: 13500, window_index: 0, window_name: 'claude', window_label: '0:claude', pid: 12345, active: true, path_entries: [{path: '/home/u/proj', mtime: 999999, git: {root: '/home/u/proj', branch: 'devbranch'}}]},
@@ -1899,7 +1908,7 @@ async function runTabberSuite() {
     const recency = api.tabberRenderedRowsForTest().map(r => r.name);
     const codexAt = recency.findIndex(n => /0:codex/.test(n));
     const claudeAt = recency.findIndex(n => /0:claude/.test(n));
-    assert.ok(codexAt >= 0 && claudeAt >= 0 && codexAt < claudeAt, 'B4: the more-recently-used agent transcript sorts first (codex before claude)');
+    assert.ok(codexAt >= 0 && claudeAt >= 0 && claudeAt < codexAt, 'B4: a currently working window sorts before older transcript activity');
     api.setFileExplorerTreeDateModeForTest('date');
     api.setAutoApproveStateForTest('1', {});
     api.setTabberActivityForTest({

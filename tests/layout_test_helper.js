@@ -981,6 +981,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenRootForFile,
   fileQuickOpenRootForSearch,
   fileQuickOpenRootsForSearch,
+  fileQuickOpenSearchPayloadResultForTest: fileQuickOpenSearchPayloadResult,
   fileQuickOpenTargetSlot,
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
@@ -2167,6 +2168,10 @@ globalThis.__layoutTestApi = {
     fileQuickOpenState.error = '';
     commandPaletteMode = 'files';
   },
+  setFileQuickOpenIndexWarmingForTest(warming) {
+    fileQuickOpenState.indexWarming = Boolean(warming);
+    commandPaletteMode = 'files';
+  },
   setFileQuickOpenLoadingForTest(loading) {
     fileQuickOpenState.loading = Boolean(loading);
     fileQuickOpenState.error = '';
@@ -2212,6 +2217,7 @@ globalThis.__layoutTestApi = {
     const rows = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
     return rows.length ? commandPaletteResultsHtml(rows, query) : '';
   },
+  commandPaletteEmptyTextForTest: commandPaletteEmptyText,
   commandPaletteItemLabelHtmlForTest: commandPaletteItemLabelHtml,
   commandPaletteStatusHtmlForTest: commandPaletteStatusHtml,
   setTabsMenuSearchTextForTest(value) { tabsMenuSearchText = String(value || ''); },

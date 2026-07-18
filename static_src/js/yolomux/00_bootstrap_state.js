@@ -751,9 +751,11 @@ const fileQuickOpenState = {
   root: '',
   candidates: [],
   loading: false,
+  indexWarming: false,
   error: '',
   requestId: 0,
   debounce: null,
+  indexRetry: null,
   abortController: null,
 };
 let tabsMenuSearchText = '';

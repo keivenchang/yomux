@@ -5380,6 +5380,36 @@ async function runShareThemeSuite() {
     const indexedItem = priorityItems.find(item => item.key === 'file:/home/test/dynamo/notes/target.md');
     assert.ok(contextItem && indexedItem, 'file quick-open renders both context and external indexed matches');
     assert.ok(api.commandPaletteItemScore(contextItem, 'target') > api.commandPaletteItemScore(indexedItem, 'target'), 'file quick-open prioritizes the active context over external indexed roots');
+    test('quick-open does not claim a warming indexed search has no matches', () => {
+      const warmingApi = loadYolomux('', ['1']);
+      warmingApi.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
+      warmingApi.setCommandPaletteQueryForTest('2026.md');
+      const warming = warmingApi.fileQuickOpenSearchPayloadResultForTest({
+        root: '/home/test/dynamo',
+        files: [],
+        index_state: 'warming',
+        index_coverage: 'pending',
+      }, '/home/test/dynamo');
+      assert.equal(warming.indexWarming, true, 'a backend warming response stays pending rather than becoming an empty completed search');
+      warmingApi.setFileQuickOpenCandidatesForTest(warming.root, warming.files);
+      warmingApi.setFileQuickOpenIndexWarmingForTest(warming.indexWarming);
+      assert.equal(warmingApi.commandPaletteEmptyTextForTest(), 'Indexing…', 'the palette reports indexing instead of a false No matches result');
+      const ready = warmingApi.fileQuickOpenSearchPayloadResultForTest({
+        root: '/home/test/dynamo',
+        files: [{
+          name: '2026.md',
+          path: '/home/test/dynamo/notes/t5t/2026.md',
+          relative_path: 'notes/t5t/2026.md',
+          kind: 'file',
+        }],
+        index_state: 'ready',
+        index_coverage: 'full',
+      }, '/home/test/dynamo');
+      assert.equal(ready.indexWarming, false, 'a completed response clears the warming state');
+      warmingApi.setFileQuickOpenCandidatesForTest(ready.root, ready.files);
+      warmingApi.setFileQuickOpenIndexWarmingForTest(ready.indexWarming);
+      assert.ok(warmingApi.fileQuickOpenItems().some(item => item.path === '/home/test/dynamo/notes/t5t/2026.md'), 'the indexed file appears after its snapshot is ready');
+    });
     api.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test')), ['/home/test/dynamo'], 'an indexed child under the default root replaces the broad live parent search');
     assert.equal(api.fileQuickOpenRootMatchesPathAlias('/home/test/yolomux.dev', 'yolo/TODO.md'), true, 'bare yolo/... queries match the YOLOmux repo basename as a narrow root alias');
