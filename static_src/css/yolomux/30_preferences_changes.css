@@ -573,7 +573,7 @@
 }
 .js-debug-chart-toggle-menu {
   position: absolute;
-  z-index: 5;
+  z-index: var(--z-menu-dropdown);
   top: calc(100% + var(--space-3));
   left: 0;
   display: grid;
@@ -650,9 +650,6 @@
   width: 100%;
   min-width: 0;
   accent-color: var(--active-accent-bright);
-}
-.js-debug-chart-toggle-control {
-  flex: 0 1 auto;
 }
 .js-debug-range-slider-control datalist {
   display: none;

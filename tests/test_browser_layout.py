@@ -675,7 +675,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
               range: Boolean(graph.querySelector('[data-js-debug-range-slider]')),
               resolution: Boolean(graph.querySelector('[data-js-debug-resolution-override]')),
               toggles: graph.querySelectorAll('[data-js-debug-chart-toggle]').length,
-              toggleLabels: [...graph.querySelectorAll('[data-js-debug-chart-toggle]')].map(button => button.textContent.trim()),
+              toggleLabels: [...graph.querySelectorAll('[data-js-debug-chart-toggle]')].map(toggle => (toggle.closest('label') || toggle).textContent.trim()),
               layouts: [...graph.querySelectorAll('button[data-js-debug-chart-layout]')].map(button => button.textContent.trim()),
               cards: graph.querySelectorAll('.js-debug-chart').length,
               closeButtons: graph.querySelectorAll('.js-debug-chart-close').length,

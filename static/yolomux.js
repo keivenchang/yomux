@@ -47717,8 +47717,11 @@ function debugGraphChartToggleControlsHtml() {
     <div class="js-debug-chart-toggle-menu" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     ${jsDebugGraphChartControlItems.map(group => {
       const label = debugGraphLocalizedLabel(group);
+      // Compact labels are an English-only design vocabulary. Other locales keep the existing
+      // localized chart title until their own compact translation exists; never leak English UI.
+      const toggleLabel = i18nActiveLocale === 'en' ? String(group.toggleLabelEn || label) : label;
       const visible = debugGraphChartVisible(group.key);
-      return `<label><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(label)}</label>`;
+      return `<label title="${esc(label)}"><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(toggleLabel)}</label>`;
     }).join('')}
     </div>
   </details>`;
