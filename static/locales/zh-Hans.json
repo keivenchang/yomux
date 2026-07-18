@@ -312,7 +312,7 @@
   "debug.graph.series.allAgentsTotal.desc": "对所有已知智能体求和的总令牌或活动序列。",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE（所有客户端总计）",
   "debug.graph.series.allClientsApiSseTotal.desc": "对所有保留浏览器客户端求和的 API 加 SSE 组合流量。",
-  "debug.graph.series.defaultProcessCpu": "优乐mux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "优乐mux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "为此页面提供服务的当前 yolomux.py 进程 CPU 利用率。",
   "debug.graph.series.gpuDevice.desc": "GPU 设备 {device} 的 {metric}。",
   "debug.graph.series.modelToken.desc": "所选令牌维度中 {model} 的模型令牌速率。",

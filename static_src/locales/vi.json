@@ -308,7 +308,7 @@
   "debug.graph.series.allAgentsTotal.desc": "Chuỗi token hoặc hoạt động tổng cộng được cộng trên tất cả tác nhân đã biết.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (tổng số khách hàng)",
   "debug.graph.series.allClientsApiSseTotal.desc": "Lưu lượng API cộng SSE kết hợp được cộng trên tất cả máy khách trình duyệt được giữ lại.",
-  "debug.graph.series.defaultProcessCpu": "CPU của yolomux.py %",
+  "debug.graph.series.defaultProcessCpu": "CPU của yolomux.py (web) %",
   "debug.graph.series.defaultProcessCpu.desc": "Mức sử dụng CPU của tiến trình yolomux.py đang phục vụ trang này.",
   "debug.graph.series.gpuDevice.desc": "{metric} cho thiết bị GPU {device}.",
   "debug.graph.series.modelToken.desc": "Tốc độ token mô hình cho {model} trong chiều token đã chọn.",

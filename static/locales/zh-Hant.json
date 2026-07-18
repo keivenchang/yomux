@@ -312,7 +312,7 @@
   "debug.graph.series.allAgentsTotal.desc": "對所有已知代理加總的總權杖或活動序列。",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE（所有用戶端總計）",
   "debug.graph.series.allClientsApiSseTotal.desc": "對所有保留瀏覽器用戶端加總的 API 加 SSE 組合流量。",
-  "debug.graph.series.defaultProcessCpu": "優樂mux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "優樂mux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "為此頁面提供服務的目前 yolomux.py 程序 CPU 使用率。",
   "debug.graph.series.gpuDevice.desc": "GPU 裝置 {device} 的 {metric}。",
   "debug.graph.series.modelToken.desc": "所選權杖維度中 {model} 的模型權杖速率。",

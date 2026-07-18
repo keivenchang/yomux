@@ -312,7 +312,7 @@
   "debug.graph.series.allAgentsTotal.desc": "सभी ज्ञात एजेंटों में जोड़ी गई कुल टोकन या गतिविधि श्रृंखला।",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (कुल सभी ग्राहक)",
   "debug.graph.series.allClientsApiSseTotal.desc": "सभी रखे गए ब्राउज़र क्लाइंटों में जोड़ा गया संयुक्त API और SSE ट्रैफ़िक।",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "इस पृष्ठ को सेवा देने वाली सक्रिय yolomux.py प्रक्रिया का CPU उपयोग।",
   "debug.graph.series.gpuDevice.desc": "GPU डिवाइस {device} के लिए {metric}।",
   "debug.graph.series.modelToken.desc": "चयनित टोकन आयाम में {model} के लिए मॉडल टोकन दर।",

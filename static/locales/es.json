@@ -318,7 +318,7 @@
   "debug.graph.series.allAgentsTotal.desc": "Serie total de tokens o actividad sumada entre todos los agentes conocidos.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (todos los clientes en total)",
   "debug.graph.series.allClientsApiSseTotal.desc": "Tráfico API más SSE combinado sumado entre todos los clientes de navegador retenidos.",
-  "debug.graph.series.defaultProcessCpu": "% de CPU yolomux.py",
+  "debug.graph.series.defaultProcessCpu": "% de CPU yolomux.py (web)",
   "debug.graph.series.defaultProcessCpu.desc": "Uso de CPU del proceso yolomux.py activo que sirve esta página.",
   "debug.graph.series.gpuDevice.desc": "{metric} del dispositivo GPU {device}.",
   "debug.graph.series.modelToken.desc": "Tasa de tokens de modelo para {model} en la dimensión de tokens seleccionada.",

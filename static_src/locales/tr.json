@@ -308,7 +308,7 @@
   "debug.graph.series.allAgentsTotal.desc": "Bilinen tüm ajanlarda toplanan toplam belirteç veya etkinlik serisi.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (tüm müşterilerin toplamı)",
   "debug.graph.series.allClientsApiSseTotal.desc": "Saklanan tüm tarayıcı istemcilerinde toplanan birleşik API ve SSE trafiği.",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "Bu sayfaya hizmet veren etkin yolomux.py sürecinin CPU kullanımı.",
   "debug.graph.series.gpuDevice.desc": "GPU aygıtı {device} için {metric}.",
   "debug.graph.series.modelToken.desc": "Seçili belirteç boyutunda {model} için model belirteci hızı.",

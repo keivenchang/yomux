@@ -308,7 +308,7 @@
   "debug.graph.series.allAgentsTotal.desc": "알려진 모든 에이전트에서 합산한 토큰 또는 활동 시리즈.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE(모든 클라이언트 합계)",
   "debug.graph.series.allClientsApiSseTotal.desc": "보존된 모든 브라우저 클라이언트에서 합산한 API 및 SSE 통합 트래픽.",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py의 CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web)의 CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "이 페이지를 제공하는 활성 yolomux.py 프로세스의 CPU 사용률.",
   "debug.graph.series.gpuDevice.desc": "GPU 장치 {device}의 {metric}.",
   "debug.graph.series.modelToken.desc": "선택한 토큰 차원에서 {model}의 모델 토큰 속도.",

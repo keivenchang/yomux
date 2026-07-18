@@ -320,7 +320,7 @@
   "debug.graph.series.allAgentsTotal.desc": "Общая серия токенов или активности, суммированная по всем известным агентам.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (всего клиентов)",
   "debug.graph.series.allClientsApiSseTotal.desc": "Объединенный трафик API и SSE, суммированный по всем сохраненным клиентам браузера.",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "Загрузка CPU активного процесса yolomux.py, обслуживающего эту страницу.",
   "debug.graph.series.gpuDevice.desc": "{metric} для устройства GPU {device}.",
   "debug.graph.series.modelToken.desc": "Скорость токенов модели для {model} в выбранном измерении токенов.",

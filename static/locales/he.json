@@ -318,7 +318,7 @@
   "debug.graph.series.allAgentsTotal.desc": "סדרת סך אסימונים או פעילות המסוכמת על פני כל הסוכנים הידועים.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (כל הלקוחות בסך הכל)",
   "debug.graph.series.allClientsApiSseTotal.desc": "תעבורת API ו־SSE משולבת המסוכמת על פני כל לקוחות הדפדפן השמורים.",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "ניצול CPU של תהליך yolomux.py הפעיל שמשרת דף זה.",
   "debug.graph.series.gpuDevice.desc": "{metric} עבור התקן GPU ‏{device}.",
   "debug.graph.series.modelToken.desc": "קצב אסימוני מודל עבור {model} בממד האסימונים שנבחר.",

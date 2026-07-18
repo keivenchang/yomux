@@ -336,7 +336,7 @@
   "debug.graph.series.allAgentsTotal.desc": "سلسلة إجمالية للرموز أو النشاط مجموعَة عبر كل الوكلاء المعروفين.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (إجمالي جميع العملاء)",
   "debug.graph.series.allClientsApiSseTotal.desc": "حركة API وSSE مجتمعة ومجمعة عبر كل عملاء المتصفح المحتفظ بهم.",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "استخدام CPU لعملية yolomux.py النشطة التي تخدم هذه الصفحة.",
   "debug.graph.series.gpuDevice.desc": "{metric} لجهاز GPU ‏{device}.",
   "debug.graph.series.modelToken.desc": "معدل رموز النموذج لـ {model} في بُعد الرموز المحدد.",

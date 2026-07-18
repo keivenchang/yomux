@@ -312,7 +312,7 @@
   "debug.graph.series.allAgentsTotal.desc": "既知の全エージェントで合計したトークンまたはアクティビティの系列。",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (全クライアント合計)",
   "debug.graph.series.allClientsApiSseTotal.desc": "保持された全ブラウザー クライアントで合計した API と SSE の合計通信量。",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py の CPU 使用率 (%)",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) の CPU 使用率 (%)",
   "debug.graph.series.defaultProcessCpu.desc": "このページを提供しているアクティブな yolomux.py プロセスの CPU 使用率。",
   "debug.graph.series.gpuDevice.desc": "GPU デバイス {device} の {metric}。",
   "debug.graph.series.modelToken.desc": "選択されたトークン次元での {model} のモデル トークン率。",

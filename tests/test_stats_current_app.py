@@ -55,6 +55,19 @@ def test_cpu_adapter_forces_a_native_sample_at_the_scheduler_deadline():
     }
 
 
+def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.runtime_local_services = lambda: {"services": [
+        {"service": "statsd", "pid": 21, "resources": {"cpu_percent": 4, "rss_bytes": 400}},
+        {"service": "web", "pid": 22, "resources": {"cpu_percent": 9, "rss_bytes": 900}},
+    ]}
+
+    facts = webapp.collect_current_stats_service_load(attempt("service_load", 10))
+
+    assert [observation.source_id for observation in facts.observations] == ["statsd"]
+    assert facts.observations[0].payload == {"running": True, "cpu_percent": 4.0, "rss_bytes": 400.0}
+
+
 def test_token_adapter_uses_incremental_structured_atoms_and_keeps_dimensions(tmp_path):
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text(

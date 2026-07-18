@@ -58,6 +58,13 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.doesNotMatch(retiredMount, /YOLOmuxStatsCurrent\.mount|data-current-stats-mount/);
 });
 
+test('Services omits the duplicated web process while CPU names it clearly', () => {
+  const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const serviceSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
+  assert.match(cpuSource, /yolomux\.py \(web\) :\$\{legacyWebPort\[1\]\}/);
+  assert.match(serviceSource, /if \(key === 'web'\) continue;/);
+});
+
 test('all established chart controls and semantic renderers remain present', () => {
   for (const label of ['CPU', 'Servers load', 'Sys mem', 'Agent #', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
     assert.ok(source.includes(`toggleLabelEn: '${label}'`), label);

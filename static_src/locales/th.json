@@ -308,7 +308,7 @@
   "debug.graph.series.allAgentsTotal.desc": "ชุดโทเค็นหรือกิจกรรมรวมที่บวกจากเอเจนต์ที่รู้จักทั้งหมด.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (ลูกค้าทั้งหมด)",
   "debug.graph.series.allClientsApiSseTotal.desc": "ทราฟฟิก API รวม SSE ที่บวกจากไคลเอนต์เบราว์เซอร์ที่เก็บไว้ทั้งหมด.",
-  "debug.graph.series.defaultProcessCpu": "yolomux.py CPU %",
+  "debug.graph.series.defaultProcessCpu": "yolomux.py (web) CPU %",
   "debug.graph.series.defaultProcessCpu.desc": "การใช้ CPU ของกระบวนการ yolomux.py ที่ให้บริการหน้านี้.",
   "debug.graph.series.gpuDevice.desc": "{metric} สำหรับอุปกรณ์ GPU {device}.",
   "debug.graph.series.modelToken.desc": "อัตราโทเค็นโมเดลสำหรับ {model} ในมิติโทเค็นที่เลือก.",

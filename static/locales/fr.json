@@ -318,7 +318,7 @@
   "debug.graph.series.allAgentsTotal.desc": "Série totale de jetons ou d’activité additionnée sur tous les agents connus.",
   "debug.graph.series.allClientsApiSseTotal": "API+SSE (tous les clients au total)",
   "debug.graph.series.allClientsApiSseTotal.desc": "Trafic API plus SSE combiné additionné sur tous les clients navigateur conservés.",
-  "debug.graph.series.defaultProcessCpu": "% du processeur yolomux.py",
+  "debug.graph.series.defaultProcessCpu": "% du processeur yolomux.py (web)",
   "debug.graph.series.defaultProcessCpu.desc": "Utilisation CPU du processus yolomux.py actif qui sert cette page.",
   "debug.graph.series.gpuDevice.desc": "{metric} pour le GPU {device}.",
   "debug.graph.series.modelToken.desc": "Débit de jetons modèle pour {model} dans la dimension de jetons sélectionnée.",

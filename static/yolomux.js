@@ -47502,13 +47502,17 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
     .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
     .map(([processId, label]) => {
       const current = processId === currentProcessId;
+      const legacyWebPort = String(processId).match(/^port:(\d+)$/);
+      const displayLabel = legacyWebPort && label === processId
+        ? `yolomux.py (web) :${legacyWebPort[1]}`
+        : label;
       const color = current
         ? jsDebugGraphProcessCpuColors.current
         : jsDebugGraphProcessCpuColors.peers[peerIndex++ % jsDebugGraphProcessCpuColors.peers.length];
       return {
         key: `cpu:${processId}`,
         labelKey: 'debug.graph.series.processCpu',
-        labelParams: {process: label},
+        labelParams: {process: displayLabel},
         unit: 'percent',
         cssKey: 'cpu',
         chartMetricKey: 'cpu',
@@ -47564,6 +47568,8 @@ function debugGraphServiceLoadSeriesDefs(buckets) {
   const services = new Map();
   for (const bucket of buckets) {
     for (const [key, item] of bucket?.hostMetrics?.serviceLoad?.entries?.() || []) {
+      // Old retained buckets contain the synthetic web row. Its PID is already shown by CPU.
+      if (key === 'web') continue;
       if (Number(item?.cpuSamples || 0) > 0) services.set(key, String(item.label || key));
     }
   }

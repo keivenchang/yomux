@@ -2187,16 +2187,12 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        latest = self.latest_stats_sample()
-        rows = list(self.runtime_local_services().get("services") or [])
-        rows.append({
-            "service": "web",
-            "pid": int(latest.get("pid") or os.getpid()),
-            "resources": {
-                "cpu_percent": latest.get("cpu_percent"),
-                "rss_bytes": latest.get("rss_bytes"),
-            },
-        })
+        # The CPU family is the single owner of the yolomux.py web-process metric. Keeping
+        # it out of Services avoids rendering one PID twice at different collector cadences.
+        rows = [
+            row for row in self.runtime_local_services().get("services") or []
+            if isinstance(row, dict) and str(row.get("service") or "").strip() != "web"
+        ]
         samples = []
         for row in rows:
             if not isinstance(row, dict):

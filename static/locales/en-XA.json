@@ -312,7 +312,7 @@
   "debug.graph.series.allAgentsTotal.desc": "⟦Ťóťáł ťóķéñ óř áçťíṽíťý šéříéš šúɱɱéđ áçřóšš áłł ķñóŵñ áǧéñťš.·························⟧",
   "debug.graph.series.allClientsApiSseTotal": "⟦ÁƤÍ+ŠŠÉ (áłł çłíéñťš ťóťáł)···········⟧",
   "debug.graph.series.allClientsApiSseTotal.desc": "⟦Çóɱƀíñéđ ÁƤÍ ƥłúš ŠŠÉ ťřáƒƒíç šúɱɱéđ áçřóšš áłł řéťáíñéđ ƀřóŵšéř çłíéñťš.·····························⟧",
-  "debug.graph.series.defaultProcessCpu": "⟦ýółóɱúẋ.ƥý ÇƤÚ %······⟧",
+  "debug.graph.series.defaultProcessCpu": "⟦ýółóɱúẋ.ƥý (ŵéƀ) ÇƤÚ %·········⟧",
   "debug.graph.series.defaultProcessCpu.desc": "⟦ÇƤÚ úťíłížáťíóñ ƒóř ťĥé áçťíṽé ýółóɱúẋ.ƥý ƥřóçéšš šéřṽíñǧ ťĥíš ƥáǧé.···························⟧",
   "debug.graph.series.gpuDevice.desc": "⟦{metric} ƒóř ǦƤÚ đéṽíçé {device}.·······⟧",
   "debug.graph.series.modelToken.desc": "⟦Ɱóđéł ťóķéñ řáťé ƒóř {model} íñ ťĥé šéłéçťéđ ťóķéñ đíɱéñšíóñ.······················⟧",
