@@ -58,11 +58,37 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.doesNotMatch(retiredMount, /YOLOmuxStatsCurrent\.mount|data-current-stats-mount/);
 });
 
+test('zero-valued CPU samples remain visibly inside the chart viewBox', () => {
+  const geometrySource = source.slice(0, source.indexOf('// The readiness machine'));
+  const plotSource = sourceFunction('debugGraphPlotYForValue', 'debugGraphXForTime');
+  const context = {result: null};
+  vm.runInNewContext(`${geometrySource}\n${plotSource}\nresult = {zero: debugGraphPlotYForValue(0, 100), max: debugGraphPlotYForValue(100, 100), height: jsDebugGraphGeometry.height};`, context);
+  assert.equal(context.result.zero, context.result.height - 4, 'a valid 0% web CPU line is not clipped below the SVG');
+  assert.equal(context.result.max, 8, 'the top plotting bound stays unchanged');
+});
+
 test('Services omits the duplicated web process while CPU names it clearly', () => {
   const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
   const serviceSource = sourceFunction('debugGraphServiceLoadSeriesDefs', 'debugGraphDisplayHoldOutage');
   assert.match(cpuSource, /yolomux\.py \(web\) :\$\{legacyWebPort\[1\]\}/);
   assert.match(serviceSource, /if \(key === 'web'\) continue;/);
+});
+
+test('CPU promotes the newest sampled owner instead of covering it with a duplicate fallback', () => {
+  const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const context = {
+    result: null,
+    location: {port: '9001', protocol: 'https:'},
+    jsDebugGraphProcessCpuColors: {current: 'green', peers: ['red']},
+    debugGraphProcessCpuBucketValue: () => 0,
+    debugGraphProcessCpuBucketHasData: () => true,
+  };
+  vm.runInNewContext(`${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([{servers: new Map([['port:9000', {cpuCount: 1, label: 'port:9000'}]])}]);`, context);
+  assert.equal(context.result.length, 1);
+  assert.equal(context.result[0].key, 'cpu:port:9000');
+  assert.equal(context.result[0].labelParams.process, 'yolomux.py (web)');
+  assert.equal(context.result[0].color, 'green');
+  assert.equal(context.result[0].linePattern, 'solid');
 });
 
 test('all established chart controls and semantic renderers remain present', () => {
@@ -76,6 +102,33 @@ test('all established chart controls and semantic renderers remain present', () 
   assert.match(css, /\.js-debug-chart/);
   assert.match(css, /\.js-debug-system-grid/);
   assert.match(css, /\.js-debug-logs-view/);
+});
+
+test('YO!stats and YO!cost place shared size before range and resolution', () => {
+  const controlsSource = sourceFunction('debugGraphControlsHtml', 'debugGraphLocalDateKey');
+  const costSource = sourceFunction('yoCostPanelHtml', 'openYoCostTranscriptPreview');
+  const controlOrder = [
+    controlsSource.indexOf('debugGraphLayoutControlsHtml()'),
+    controlsSource.indexOf('debugGraphChartToggleControlsHtml()'),
+    controlsSource.indexOf('debugGraphRangeResolutionControlsHtml(nowMs)'),
+  ];
+  const costOrder = [
+    costSource.indexOf('data-js-yocost-data-age-label'),
+    costSource.indexOf('debugGraphLayoutControlsHtml()'),
+    costSource.indexOf('${refresh}'),
+    costSource.indexOf('debugGraphRangeResolutionControlsHtml(nowMs)'),
+  ];
+  assert.ok(controlOrder.every((index, position) => index >= 0 && (position === 0 || index > controlOrder[position - 1])), 'YO!stats control order');
+  assert.ok(costOrder.every((index, position) => index >= 0 && (position === 0 || index > costOrder[position - 1])), 'YO!cost control order');
+  assert.match(css, /\.js-debug-chart-layout-control \{\s+grid-column: 2;\s+grid-row: 1;/);
+  assert.match(css, /\.js-debug-chart-toggle-control \{\s+grid-column: 1;\s+grid-row: 1;/);
+  assert.match(source, /<details class="js-debug-chart-toggle-control" data-js-debug-chart-menu>/);
+  assert.match(source, /<input type="checkbox" data-js-debug-chart-toggle=/);
+  assert.match(source, /event\.type === 'change' && chartToggle[\s\S]*?chartToggle\.checked/);
+  assert.match(source, /function handleDebugGraphOutsideTapDismiss\(event\)[\s\S]*?data-js-debug-chart-menu\]\[open\][\s\S]*?menu\.open = false/);
+  assert.match(css, /\.js-debug-chart-toggle-menu \{[\s\S]*?position: absolute;/);
+  assert.match(css, /@container \(max-width: 20rem\) \{\s+\.js-debug-graph-controls/);
+  assert.match(css, /\.js-yocost-controls > \.js-debug-range-resolution-controls \{\s+flex: 1 0 100%;\s+order: 2;/);
 });
 
 test('the System sampler renders stalled usage as an explicit bounded warning', () => {

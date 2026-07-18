@@ -8,6 +8,7 @@ copy subtly different permissions, cleanup, or rolling-RPC behavior.
 from __future__ import annotations
 
 import fcntl
+import multiprocessing
 import os
 import signal
 import socket
@@ -30,6 +31,19 @@ SignalHandlers = list[tuple[int, signal.Handlers]]
 LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS = 0.5
 LOCAL_SERVICE_MAX_CLIENT_LEASES = 64
 LOCAL_SERVICE_SECRET_MARKERS = ("token", "secret", "password", "cookie", "authorization", "api_key", "apikey", "bearer")
+
+
+class LocalRpcServiceState:
+    """Shared singleton-service lifecycle state; semantics stay with each daemon."""
+
+    def __init__(self, socket_path: Path, *, prefix: str, idle_seconds: float):
+        self.socket_path = safe_socket_path(socket_path, prefix=prefix)
+        self.lock_path = self.socket_path.with_suffix(".lock")
+        self.stop_event = multiprocessing.get_context("spawn").Event()
+        self.idle_seconds = max(1.0, float(idle_seconds))
+        self.started_at = time.time()
+        self.last_client_at = time.monotonic()
+        self.leases: dict[str, int] = {}
 
 
 def reap_dead_client_leases(leases: dict[str, int]) -> int:

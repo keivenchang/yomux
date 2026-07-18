@@ -160,6 +160,10 @@ from .metadata import session_to_json
 from .metadata import watched_pr_metadata
 from .sessions import active_window_for_panes
 from .sessions import discover_sessions
+from .sessions import discover_status_sessions
+from .statusd_client import StatusClient
+from .statusd_protocol import StatusProtocolError
+from .statusd_protocol import validate_snapshot as validate_status_snapshot
 from .settings import default_settings
 from .settings import save_settings
 from .settings import SETTINGS_PATH
@@ -1622,9 +1626,10 @@ del _yoagent_app_field, _yoagent_global_callable
 
 
 class TmuxWebtermApp:
-    def __init__(self, sessions: list[str], dangerously_yolo: bool = False):
+    def __init__(self, sessions: list[str], dangerously_yolo: bool = False, *, status_service_mode: bool = False):
         self.sessions = sessions
         self.dangerously_yolo = dangerously_yolo
+        self.status_service_mode = status_service_mode
         self.share_tokens: dict[str, dict[str, Any]] = {}
         self.share_tokens_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
@@ -1672,6 +1677,7 @@ class TmuxWebtermApp:
         self.job_client = JobClient()
         self.upload_retention_sweeper = UploadRetentionSweeper()
         self.approval_client = ApprovalClient()
+        self.status_client = StatusClient()
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
         self.agent_window_transition_lock = threading.RLock()
@@ -1730,7 +1736,8 @@ class TmuxWebtermApp:
         self.event_log = EventLog(EVENT_LOG_PATH)
         self.run_history_store = RunHistoryStore(RUN_HISTORY_PATH)
         self.control_server = YolomuxControlServer(self.handle_control_request)
-        self.control_server.start()
+        if not status_service_mode:
+            self.control_server.start()
         self.background_owner: BackgroundOwnerRegistry | DisabledBackgroundOwner = DisabledBackgroundOwner()
         self.search_indexer = SearchIndexerClient()
         self.stats_current_client = StatsCurrentClient()
@@ -1865,21 +1872,23 @@ class TmuxWebtermApp:
         return rev
 
     def stats_agent_window_rows(self) -> list[dict[str, Any]]:
-        # The stats sampler deliberately joins the roster owner.  Falling back to its own
-        # discovery/classification path made one tmux window simultaneously report different
-        # states to auto-approve, Tabber, and YO!stats.
+        payload = self.status_snapshot_payload()
+        return self.stats_agent_window_rows_from_auto_approve_payload(payload) if payload is not None else []
+
+    def status_snapshot_payload(self) -> AutoApproveStatusPayload | None:
+        """Decode statusd's completed public snapshot for non-HTTP consumers only."""
+
         if not self.sessions:
-            return []
-        cached_payload = self.fresh_auto_approve_payload_for_stats()
-        if cached_payload is None:
-            # The one-second stats control request is a latency-critical state
-            # sample.  Cold roster discovery belongs to the existing async
-            # cache owner; one initial missing status point is honest, while a
-            # synchronous tmux/transcript refresh would stall CPU + status and
-            # trigger statsd's exponential outage backoff.
-            self.start_auto_approve_cache_refresh()
-            return []
-        return self.stats_agent_window_rows_from_auto_approve_payload(cached_payload)
+            return None
+        response, body = self.status_client.snapshot(self.sessions, timeout=1.0)
+        if response.get("ok") is not True or not body:
+            return None
+        try:
+            validate_status_snapshot(response, body)
+            payload = json.loads(body.decode("utf-8"))
+        except (StatusProtocolError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def fresh_auto_approve_payload_for_stats(self) -> AutoApproveStatusPayload | None:
         with self.auto_approve_cache_condition:
@@ -5482,14 +5491,14 @@ class TmuxWebtermApp:
 
     def poll_auto_approve_client_event_once(self) -> list[str]:
         started = time.perf_counter()
-        # The read endpoint may return stale data while it refreshes, but this watcher owns the
-        # SSE transition that turns terminal attention into the visible indicator.
-        payload, status = self.refresh_auto_approve_cache_sync(require_fresh=True)
-        signature_payload = {"status": int(status), "data": payload}
-        serialization_started = time.perf_counter()
-        signature = self.stable_client_event_payload_signature(signature_payload)
-        timings = copy.deepcopy(payload.get("timings")) if isinstance(payload, dict) and isinstance(payload.get("timings"), dict) else {}
-        add_phase_timing(timings, "serialization", serialization_started)
+        # statusd owns discovery, pane capture, classification, and encoding. The watcher only
+        # observes its immutable generation so it can wake browsers to fetch the same bytes.
+        response, _body = self.status_client.snapshot(self.sessions, timeout=1.0)
+        if response.get("ok") is not True:
+            return []
+        status = HTTPStatus(int(response.get("status") or HTTPStatus.OK))
+        generation = int(response.get("generation") or 0)
+        signature = f"statusd:{generation}:{int(status)}"
         with self.client_watch_service.lock:
             previous = self.client_watch_service.auto_approve_signature
             self.client_watch_service.auto_approve_signature = signature
@@ -5498,10 +5507,7 @@ class TmuxWebtermApp:
         if previous == signature:
             return []
         event_payload: dict[str, Any] = {"status": int(status), "refresh": True, "signature": signature}
-        if timings:
-            event_payload["timings"] = timings
-        if isinstance(payload, dict) and isinstance(payload.get("cache"), dict):
-            event_payload["cache"] = copy.deepcopy(payload["cache"])
+        event_payload["generation"] = generation
         self.publish_client_event(
             "auto_approve_changed",
             event_payload,
@@ -8434,8 +8440,9 @@ class TmuxWebtermApp:
             "resources": {"cpu_percent": None, "rss_bytes": None},
         }
         jobd = self.job_client.runtime_status()
+        statusd = self.status_client.runtime_status()
         approvald = self.approval_client.runtime_status()
-        rows = [indexd, statsd, jobd, approvald]
+        rows = [indexd, statsd, jobd, statusd, approvald]
         totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
         now = time.time()
         for row in rows:
@@ -8894,7 +8901,7 @@ class TmuxWebtermApp:
         # Do not make activity's cold path synchronously build a second roster.  At startup the
         # roster refresh owns the first classification; until it commits, activity keeps its
         # existing path and joins the owned revision on the next refresh.
-        roster_payload = self.fresh_auto_approve_payload_for_stats()
+        roster_payload = self.status_snapshot_payload()
         snapshot_revision, owned_agent_rows = (
             self.agent_window_snapshot_rows_by_target(roster_payload)
             if roster_payload is not None
@@ -11906,6 +11913,7 @@ class TmuxWebtermApp:
             record.worker = None
             record.generation += 1
             self.auto_approve_cache_condition.notify_all()
+        self.status_client.invalidate("auto_approve")
 
     def _read_shared_attention_acks_locked(self) -> tuple[dict[str, float], int]:
         data = self._read_shared_tmux_ai_status_locked()
@@ -12359,6 +12367,8 @@ class TmuxWebtermApp:
         self,
         session: str | None = None,
         timings: dict[str, float] | None = None,
+        *,
+        sync_workers: bool = True,
     ) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
         refresh_started = time.perf_counter()
         refresh_errors = self.refresh_sessions(maintenance=False)
@@ -12367,9 +12377,10 @@ class TmuxWebtermApp:
             diagnostic = f"unknown session: {session}"
             return user_message_payload("yoagent.error.unknownSession", diagnostic, session=session), HTTPStatus.NOT_FOUND
         removed = False
-        worker_started = time.perf_counter()
-        self.sync_auto_approve_agent_workers(takeover=False)
-        add_phase_timing(timings, "worker_sync", worker_started)
+        if sync_workers:
+            worker_started = time.perf_counter()
+            self.sync_auto_approve_agent_workers(takeover=False)
+            add_phase_timing(timings, "worker_sync", worker_started)
         if removed:
             self.persist_auto_sessions()
         activity_snapshot = self.activity_snapshot_with_recency()
@@ -12379,7 +12390,8 @@ class TmuxWebtermApp:
                 payload["timings"] = dict(timings)
             return payload, HTTPStatus.OK
         discover_started = time.perf_counter()
-        discovered_sessions, discovery_errors = discover_sessions(self.sessions)
+        discovery = discover_status_sessions if self.status_service_mode else discover_sessions
+        discovered_sessions, discovery_errors = discovery(self.sessions)
         add_phase_timing(timings, "discover_sessions", discover_started)
         sessions_started = time.perf_counter()
         sessions_payload = {
@@ -12518,6 +12530,19 @@ class TmuxWebtermApp:
                     self.start_auto_approve_cache_refresh()
                 return self.auto_approve_cache_payload(cached)
         return self.refresh_auto_approve_cache_sync()
+
+    def auto_approve_status_bytes(self, session: str | None = None) -> tuple[bytes, HTTPStatus]:
+        """Return daemon-owned status bytes without web-side discovery or encoding."""
+
+        response, body = self.status_client.snapshot(self.sessions, session=session, timeout=1.0)
+        if response.get("ok") is not True or not body:
+            status = int(response.get("status") or HTTPStatus.SERVICE_UNAVAILABLE)
+            return b'{"error":"status service unavailable"}', HTTPStatus(status)
+        try:
+            metadata = validate_status_snapshot(response, body)
+        except StatusProtocolError:
+            return b'{"error":"status service upgrade required"}', HTTPStatus.SERVICE_UNAVAILABLE
+        return body, HTTPStatus(metadata.status)
 
     def stop_auto_approve_all(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()

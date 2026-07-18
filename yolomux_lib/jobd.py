@@ -46,13 +46,17 @@ from .transcripts import transcript_activity_state_from_text
 
 # The envelope transport remains LOCAL_RPC_VERSION. Bump this service generation whenever the
 # registered task/result contract changes so a newly restarted web process retires an older daemon.
-JOBD_PROTOCOL_VERSION = 2
+# v3: added the materialized-product layer (last-known-good store + `product` RPC + per-product counters).
+JOBD_PROTOCOL_VERSION = 3
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_MAX_WORKERS = 2
 JOBD_MAX_QUEUE = 64
 JOBD_MAX_PAYLOAD_BYTES = 256 * 1024
 JOBD_MAX_RESULT_BYTES = 512 * 1024
 JOBD_MAX_RECORDS = 256
+# The last-known-good product store is keyed by coalesce_key (per file/session), so bound it
+# independently of the job-record ring and evict the oldest completed bytes past this many keys.
+JOBD_MAX_PRODUCTS = 256
 JOBD_MAX_DEADLINE_MS = 120_000
 JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY = 4
 JOBD_SOCKET_NAME = "jobd.sock"
@@ -218,8 +222,28 @@ class PersistentJobBroker:
         self.queues = {priority: deque() for priority in JOBD_PRIORITIES}
         self.coalesced: dict[tuple[str, str], str] = {}
         self.latest_generation: dict[str, int] = {}
+        # Materialized-product layer: newest completed bytes per coalesce_key (last-known-good),
+        # and bounded per-task counters. These make stale-while-revalidate a broker property so a
+        # web route can serve a prior complete product while a newer generation is still building.
+        self.latest_product: dict[str, tuple[int, bytes, float]] = {}
+        self.product_counters: dict[str, dict[str, int]] = {}
         self.executor: ProcessPoolExecutor | None = None
         self.high_priority_streak = 0
+
+    def _bump_counter(self, task: str, name: str) -> None:
+        counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0})
+        counters[name] = counters.get(name, 0) + 1
+
+    def _store_product(self, record: JobRecord) -> None:
+        # Generation guard: a slow older-generation completion must never overwrite a newer
+        # complete product. A failed/superseded record never reaches here (it is terminal already).
+        stored = self.latest_product.get(record.coalesce_key)
+        if stored is not None and record.generation < stored[0]:
+            return
+        self.latest_product[record.coalesce_key] = (record.generation, record.result, time.time())
+        if len(self.latest_product) > JOBD_MAX_PRODUCTS:
+            oldest_key = min(self.latest_product, key=lambda key: self.latest_product[key][2])
+            self.latest_product.pop(oldest_key, None)
 
     def _executor(self) -> ProcessPoolExecutor:
         if self.executor is None:
@@ -279,13 +303,17 @@ class PersistentJobBroker:
                 if record.status != "timed_out":
                     record.result = result
                     self._mark_terminal(record, "completed")
+                    self._store_product(record)
+                    self._bump_counter(record.task, "completed")
             except BrokenProcessPool as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(record, "failed", "worker crashed")
+                    self._bump_counter(record.task, "failed")
                 restart_executor = True
             except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(record, "failed", redact_local_service_text(exc))
+                    self._bump_counter(record.task, "failed")
         if restart_executor and self.executor is not None:
             self.executor.shutdown(wait=False, cancel_futures=True)
             self.executor = None
@@ -328,6 +356,7 @@ class PersistentJobBroker:
                 break
             if record.generation < self.latest_generation.get(record.coalesce_key, record.generation):
                 self._mark_terminal(record, "superseded")
+                self._bump_counter(record.task, "superseded")
                 continue
             if record.deadline_at > 0 and now >= record.deadline_at:
                 self._mark_terminal(record, "timed_out", "deadline exceeded before execution")
@@ -350,6 +379,7 @@ class PersistentJobBroker:
             if record.coalesce_key == coalesce_key and record.status == "queued" and record.generation < generation:
                 record.status = "superseded"
                 record.completed_at = time.time()
+                self._bump_counter(record.task, "superseded")
 
     def _queued_count(self) -> int:
         return sum(1 for record in self.records.values() if record.status == "queued")
@@ -385,14 +415,31 @@ class PersistentJobBroker:
         existing_id = self.coalesced.get((task, coalesce_key))
         existing = self.records.get(existing_id or "")
         if existing is not None and existing.generation >= generation and existing.status in {"queued", "running", "completed"}:
+            self._bump_counter(task, "coalesced")
             return {"ok": True, "coalesced": True, "job": self._record_payload(existing)}
         if self._queued_count() >= JOBD_MAX_QUEUE:
             return {"ok": False, "error": "queue full"}
         self.latest_generation[coalesce_key] = max(generation, self.latest_generation.get(coalesce_key, generation))
         self._supersede_stale_queued(coalesce_key, generation)
         record = self._queue_record(task, payload, priority, generation, coalesce_key, deadline_at)
+        self._bump_counter(task, "accepted")
         self._pump()
         return {"ok": True, "coalesced": False, "job": self._record_payload(record)}
+
+    def _product(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
+        coalesce_key = str(request.get("coalesce_key") or "")
+        if not coalesce_key:
+            return {"ok": False, "error": "missing coalesce_key"}, b""
+        stored = self.latest_product.get(coalesce_key)
+        latest_gen = self.latest_generation.get(coalesce_key, 0)
+        inflight = any(record.coalesce_key == coalesce_key and record.status in {"queued", "running"} for record in self.records.values())
+        if stored is None:
+            # `pending`: a job is building the first product. `none`: a successful lookup with
+            # nothing in flight and nothing ever produced (distinct from an RPC failure = unavailable).
+            return {"ok": True, "state": "pending" if inflight else "none", "generation": 0, "inflight": inflight}, b""
+        generation, body, stored_at = stored
+        state = "stale" if (inflight or latest_gen > generation) else "ready"
+        return {"ok": True, "state": state, "generation": generation, "stored_at": stored_at, "inflight": inflight}, body
 
     def common_status(self) -> dict[str, Any]:
         self._pump()
@@ -406,7 +453,8 @@ class PersistentJobBroker:
             "worker_count": self.worker_count,
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
-            "cache": {"records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS},
+            "cache": {"records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS, "products": len(self.latest_product)},
+            "product_counters": {task: dict(counters) for task, counters in self.product_counters.items()},
             "last_success": max((record.completed_at for record in self.records.values() if record.status == "completed"), default=0.0),
             "last_failure": next((record.error for record in reversed(list(self.records.values())) if record.status == "failed"), ""),
             "restart_backoff_seconds": 0.0,
@@ -428,6 +476,9 @@ class PersistentJobBroker:
             self._pump()
             record = self.records.get(str(request.get("job_id") or ""))
             return ({"ok": False, "error": "unknown job"} if record is None else {"ok": True, "job": self._record_payload(record, include_result=True)}), b""
+        if action == "product":
+            self._pump()
+            return self._product(request)
         if action == "cancel":
             record = self.records.get(str(request.get("job_id") or ""))
             if record is None:
@@ -493,10 +544,18 @@ class JobClient(LocalServiceClient):
     def result(self, job_id: str) -> dict[str, Any]:
         return self.request({"action": "result", "job_id": job_id})
 
+    def product(self, coalesce_key: str, timeout: float = 0.5) -> tuple[dict[str, Any], bytes]:
+        """Return the newest completed product bytes for an identity (last-known-good).
+
+        The metadata `state` is ready | stale | pending | none; the caller maps a transport
+        failure to unavailable. Bytes are empty unless a completed product exists.
+        """
+        return self.request_with_binary({"action": "product", "coalesce_key": coalesce_key}, timeout=timeout)
+
     def runtime_status(self) -> dict[str, Any]:
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        return {"service": "jobd", "pid": int(payload.get("pid") or 0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "generation": int(payload.get("generation") or 0), "resources": self.registry.resources(int(payload.get("pid") or 0))}
+        return {"service": "jobd", "pid": int(payload.get("pid") or 0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "resources": self.registry.resources(int(payload.get("pid") or 0))}
 
 
 def main(argv: list[str] | None = None) -> int:

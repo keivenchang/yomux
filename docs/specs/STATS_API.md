@@ -25,6 +25,7 @@ flowchart LR
 - The SQLite database stores original per-family observations at their real timestamps and cadences, identity-deduplicated usage atoms, covered epochs, explicit unavailable spans, and schema metadata. Explicit unavailable spans are coverage facts used when an old aggregate or a known source outage cannot be represented by an original observation; they are never display buckets.
 - One background materializer reads a consistent database snapshot and builds the four epoch-aligned immutable resolution layers. Full rebuilds, incremental dirty-cell recomputation, coverage generation, and encoding never run on the statsd listener/writer thread or an HTTP request thread.
 - The web process does not open the stats database. It authenticates and validates HTTP, forwards current RPC requests, and returns statsd's pre-encoded JSON bytes without temporal aggregation or decode/re-encode work.
+- Agent Status rows consume the shared statusd generation. The web collector does not rediscover tmux panes, classify screens, read transcript tails, or construct a second status roster.
 - The browser renders returned values, axes, geometry, hover, visibility, and zoom clipping. It does not bucket, merge, average, compute rates, sample-hold, interpolate, infer coverage, prefetch other ranges, combine generations, or choose another resolution.
 
 ## Schema and writer fence

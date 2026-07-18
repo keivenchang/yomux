@@ -332,5 +332,99 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
 
 
 def test_jobd_task_registry_generation_is_independent_from_transport_version():
-    assert jobd.JOBD_PROTOCOL_VERSION == 2
+    # v3 added the materialized-product layer (product RPC + last-known-good store + counters).
+    assert jobd.JOBD_PROTOCOL_VERSION == 3
     assert jobd.JOBD_PROTOCOL_VERSION != jobd.LOCAL_RPC_VERSION
+
+
+def test_jobd_product_serves_last_known_good_bytes_across_the_state_taxonomy(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+
+    # none: nothing produced, nothing in flight.
+    meta, body = service._product({"coalesce_key": "k"})
+    assert meta["state"] == "none" and body == b""
+
+    # pending: a first-generation job is building, no product yet.
+    record = service._queue_record("json_compact", {"a": 1}, "freshness", 1, "k")
+    record.status = "running"
+    record.future = Future()
+    meta, body = service._product({"coalesce_key": "k"})
+    assert meta["state"] == "pending" and body == b""
+
+    # ready: the job completes and its bytes become the last-known-good product.
+    record.future.set_result(b'{"a":1}')
+    service._pump()
+    meta, body = service._product({"coalesce_key": "k"})
+    assert meta["state"] == "ready" and meta["generation"] == 1 and body == b'{"a":1}'
+
+    # stale: a newer generation is building; the prior complete bytes are still served.
+    newer = service._queue_record("json_compact", {"a": 2}, "freshness", 2, "k")
+    newer.status = "running"
+    newer.future = Future()
+    service.latest_generation["k"] = 2
+    meta, body = service._product({"coalesce_key": "k"})
+    assert meta["state"] == "stale" and meta["generation"] == 1 and body == b'{"a":1}'
+
+
+def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    older = service._queue_record("json_compact", {"gen": 1}, "freshness", 1, "k")
+    older.status = "running"
+    older.future = Future()
+    newer = service._queue_record("json_compact", {"gen": 2}, "freshness", 2, "k")
+    newer.status = "running"
+    newer.future = Future()
+    service.latest_generation["k"] = 2
+
+    # The newer generation completes first and becomes the product.
+    newer.future.set_result(b'{"gen":2}')
+    service._pump()
+    assert service.latest_product["k"][0] == 2
+
+    # A slow OLDER-generation completion must not replace the newer complete product.
+    older.future.set_result(b'{"gen":1}')
+    service._pump()
+    assert service.latest_product["k"][0] == 2
+    assert json.loads(service.latest_product["k"][1]) == {"gen": 2}
+
+    # A failed refresh must not replace it either.
+    failing = service._queue_record("json_compact", {"gen": 3}, "freshness", 3, "k")
+    failing.status = "running"
+    failing.future = Future()
+    failing.future.set_exception(BrokenProcessPool("child exited"))
+
+    class BrokenExecutor:
+        def shutdown(self, **_kwargs):
+            return None
+
+    service.executor = BrokenExecutor()  # type: ignore[assignment]
+    service._pump()
+    assert failing.status == "failed"
+    assert json.loads(service.latest_product["k"][1]) == {"gen": 2}
+
+
+def test_jobd_product_counters_track_accepted_coalesced_superseded_and_completed(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    # Occupy the only worker slot so submitted jobs stay queued (no real subprocess dispatch).
+    block = service._queue_record("json_compact", {"x": 1}, "interactive", 1, "block")
+    block.status = "running"
+    block.future = Future()
+
+    accepted = service._submit({"action": "submit", "task": "json_compact", "payload": {"a": 1}, "priority": "freshness", "generation": 1, "coalesce_key": "k"})
+    assert accepted["coalesced"] is False
+    coalesced = service._submit({"action": "submit", "task": "json_compact", "payload": {"a": 1}, "priority": "freshness", "generation": 1, "coalesce_key": "k"})
+    assert coalesced["coalesced"] is True
+    service._submit({"action": "submit", "task": "json_compact", "payload": {"a": 2}, "priority": "freshness", "generation": 2, "coalesce_key": "k"})
+
+    counters = service.product_counters["json_compact"]
+    assert counters["accepted"] == 2  # the block record is queued directly (not via _submit); k gen1 + k gen2
+    assert counters["coalesced"] == 1
+    assert counters["superseded"] == 1
+
+    done = service._queue_record("json_compact", {"a": 9}, "freshness", 9, "done")
+    done.status = "running"
+    done.future = Future()
+    done.future.set_result(b'{"a":9}')
+    service._pump()
+    assert service.product_counters["json_compact"]["completed"] == 1
+    assert service.common_status()["product_counters"]["json_compact"]["completed"] == 1

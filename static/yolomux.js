@@ -44042,14 +44042,17 @@ const jsDebugGraphGeometry = (() => {
   const width = 600;
   const height = 120;
   const plotTop = 8;
-  const plotHeight = height - plotTop;
+  // Keep zero-valued sampled lines inside the SVG viewBox. A baseline at `height`
+  // clips the stroke completely, leaving a legend item without a visible chart line.
+  const plotBottom = height - 4;
+  const plotHeight = plotBottom - plotTop;
   return Object.freeze({
     width,
     height,
     plotTop,
     plotHeight,
-    plotBottom: plotTop + plotHeight,
-    hoverBottom: plotTop + plotHeight,
+    plotBottom,
+    hoverBottom: plotBottom,
   });
 })();
 // The readiness machine has FOUR phases; `reason` qualifies the one loading phase
@@ -47482,11 +47485,11 @@ function debugGraphClientMetricSeriesDefs(buckets) {
 
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
-  for (const bucket of buckets) {
+  for (const [bucketIndex, bucket] of buckets.entries()) {
     if (!(bucket.servers instanceof Map)) continue;
     for (const [processId, process] of bucket.servers.entries()) {
       if (Number(process?.cpuCount || 0) <= 0) continue;
-      processes.set(processId, String(process?.label || processId));
+      processes.set(processId, {label: String(process?.label || processId), bucketIndex});
     }
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
@@ -47497,15 +47500,18 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
     hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
   };
   if (!processes.size) return [fallbackSelf];
+  const activeProcessId = processes.has(currentProcessId)
+    ? currentProcessId
+    : [...processes.entries()].sort((left, right) => right[1].bucketIndex - left[1].bucketIndex || left[0].localeCompare(right[0]))[0][0];
   let peerIndex = 0;
   const definitions = [...processes.entries()]
-    .sort((a, b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]))
-    .map(([processId, label]) => {
-      const current = processId === currentProcessId;
+    .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
+    .map(([processId, process]) => {
+      const current = processId === activeProcessId;
       const legacyWebPort = String(processId).match(/^port:(\d+)$/);
-      const displayLabel = legacyWebPort && label === processId
-        ? `yolomux.py (web) :${legacyWebPort[1]}`
-        : label;
+      const displayLabel = legacyWebPort && process.label === processId
+        ? (current ? 'yolomux.py (web)' : `yolomux.py (web) :${legacyWebPort[1]}`)
+        : process.label;
       const color = current
         ? jsDebugGraphProcessCpuColors.current
         : jsDebugGraphProcessCpuColors.peers[peerIndex++ % jsDebugGraphProcessCpuColors.peers.length];
@@ -47524,7 +47530,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
         hasData: bucket => debugGraphProcessCpuBucketHasData(bucket, processId),
       };
     });
-  return processes.has(currentProcessId) ? definitions : [fallbackSelf, ...definitions];
+  return definitions;
 }
 
 function debugGraphGpuDeviceSeriesDefs(buckets, metric) {
@@ -47706,25 +47712,31 @@ function debugGraphRangeControlsHtml(nowMs = Date.now()) {
 }
 
 function debugGraphChartToggleControlsHtml() {
-  return `<div class="js-debug-chart-toggle-control" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
-    <span>${esc(t('debug.graph.control.charts'))}:</span>
+  return `<details class="js-debug-chart-toggle-control" data-js-debug-chart-menu>
+    <summary aria-label="${esc(t('debug.graph.control.charts'))}">${esc(t('debug.graph.control.charts'))}</summary>
+    <div class="js-debug-chart-toggle-menu" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     ${jsDebugGraphChartControlItems.map(group => {
       const label = debugGraphLocalizedLabel(group);
-      // Compact labels are an English-only design vocabulary. Other locales keep the existing
-      // localized chart title until their own compact translation exists; never leak English UI.
-      const toggleLabel = i18nActiveLocale === 'en' ? String(group.toggleLabelEn || label) : label;
       const visible = debugGraphChartVisible(group.key);
-      return `<button type="button" data-js-debug-chart-toggle="${esc(group.key)}" aria-pressed="${visible ? 'true' : 'false'}" title="${esc(label)}">${esc(toggleLabel)}</button>`;
+      return `<label><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(label)}</label>`;
     }).join('')}
-  </div>`;
+    </div>
+  </details>`;
+}
+
+function debugGraphLayoutControlsHtml() {
+  return `<div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>`;
+}
+
+function debugGraphRangeResolutionControlsHtml(nowMs = Date.now()) {
+  return `<div class="js-debug-range-resolution-controls">${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}</div>`;
 }
 
 function debugGraphControlsHtml(nowMs = Date.now()) {
   return `<div class="js-debug-graph-controls">
-    ${debugGraphRangeControlsHtml(nowMs)}
-    ${debugGraphResolutionLabelHtml(nowMs)}
-    <div class="js-debug-chart-layout-control" role="group" aria-label="${esc(t('debug.graph.control.size'))}"><span>${esc(t('debug.graph.control.size'))}:</span>${['AUTO', 'S', 'M', 'L', 'MAX'].map((label, value) => `<button type="button" data-js-debug-chart-layout="${value}" aria-pressed="${jsDebugGraphChartLayout === value ? 'true' : 'false'}">${label}</button>`).join('')}</div>
+    ${debugGraphLayoutControlsHtml()}
     ${debugGraphChartToggleControlsHtml()}
+    ${debugGraphRangeResolutionControlsHtml(nowMs)}
   </div>`;
 }
 
@@ -51096,7 +51108,7 @@ function yoCostPanelHtml() {
   // rebuilt with YO!stats content by the graph-refresh loops); the readiness
   // sync toggles this overlay through its own targeted pass.
   const chartArea = `<div class="js-yocost-chart-area" data-js-yocost-chart-area data-js-debug-history-state="${esc(jsDebugHistoryReadinessStateName())}">${charts}${debugGraphHistoryOverlayHtml()}</div>`;
-  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphRangeControlsHtml(nowMs)}${debugGraphResolutionLabelHtml(nowMs)}${refresh}</div>${chartArea}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
+  return `<div class="js-yocost-graphs" data-js-yocost-graphs><div class="js-yocost-controls" data-js-yocost-data-age><span data-js-yocost-data-age-label>${esc(ageLabel)}</span>${debugGraphLayoutControlsHtml()}${refresh}${debugGraphRangeResolutionControlsHtml(nowMs)}</div>${chartArea}</div>${debugGraphCostReportHtml(debugGraphCostSummaryForBuckets(costBuckets), debugGraphDomain(nowMs))}`;
 }
 
 function openYoCostTranscriptPreview(event) {
@@ -51366,8 +51378,8 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
   graph.querySelectorAll('[data-js-debug-chart-layout]').forEach(button => {
     button.setAttribute('aria-pressed', Number(button.dataset.jsDebugChartLayout) === jsDebugGraphChartLayout ? 'true' : 'false');
   });
-  graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(button => {
-    button.setAttribute('aria-pressed', debugGraphChartVisible(button.dataset.jsDebugChartToggle) ? 'true' : 'false');
+  graph.querySelectorAll('[data-js-debug-chart-toggle]').forEach(toggle => {
+    toggle.checked = debugGraphChartVisible(toggle.dataset.jsDebugChartToggle);
   });
   const resolution = graph.querySelector('[data-js-debug-resolution]');
   const expectedHost = document.createElement('div');
@@ -51937,6 +51949,10 @@ function debugGraphClearInteractionLinesUnlessPinned(panel) {
 }
 
 function handleDebugGraphOutsideTapDismiss(event) {
+  const chartMenu = event.target?.closest?.('[data-js-debug-chart-menu]');
+  document.querySelectorAll('[data-js-debug-chart-menu][open]').forEach(menu => {
+    if (menu !== chartMenu) menu.open = false;
+  });
   // Dismiss a pinned touch tooltip when the next tap lands outside the chart that
   // owns it. A tap on a chart updates the tooltip through the normal pointerdown
   // path, so only genuinely-outside taps clear here.
@@ -52260,7 +52276,11 @@ function handleDebugGraphControlEvent(event, panel) {
     return true;
   }
   const chartToggle = event.target.closest('[data-js-debug-chart-toggle]');
-  if (event.type === 'click' && chartToggle && panel.contains(chartToggle)) {
+  if (event.type === 'change' && chartToggle && panel.contains(chartToggle)) {
+    setDebugGraphChartVisible(chartToggle.dataset.jsDebugChartToggle, chartToggle.checked);
+    return true;
+  }
+  if (event.type === 'click' && chartToggle && panel.contains(chartToggle) && chartToggle.tagName !== 'INPUT') {
     event.preventDefault();
     const chartKey = chartToggle.dataset.jsDebugChartToggle;
     setDebugGraphChartVisible(chartKey, !debugGraphChartVisible(chartKey));

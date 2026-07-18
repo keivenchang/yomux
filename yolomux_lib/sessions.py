@@ -475,6 +475,7 @@ def read_claude_agent(
     *,
     sessions_root: Path | None = None,
     projects_root: Path | None = None,
+    enrich_paths: bool = True,
 ) -> AgentInfo:
     sessions_root = sessions_root or Path.home() / ".claude" / "sessions"
     projects_root = projects_root or Path.home() / ".claude" / "projects"
@@ -503,10 +504,10 @@ def read_claude_agent(
 
     session_id = metadata.get("sessionId")
     transcript_path = None
-    if isinstance(session_id, str) and session_id:
+    if enrich_paths and isinstance(session_id, str) and session_id:
         transcript_path = find_transcript_by_session_id(projects_root, session_id)
     metadata_cwd = metadata.get("cwd") if isinstance(metadata.get("cwd"), str) else None
-    transcript_cwd = claude_transcript_latest_cwd(transcript_path)
+    transcript_cwd = claude_transcript_latest_cwd(transcript_path) if enrich_paths else None
 
     return AgentInfo(
         session=session,
@@ -518,7 +519,7 @@ def read_claude_agent(
         status=metadata.get("status") if isinstance(metadata.get("status"), str) else None,
         session_id=session_id if isinstance(session_id, str) else None,
         transcript=str(transcript_path) if transcript_path else None,
-        error=None if transcript_path else "claude transcript not found",
+        error=None if transcript_path or not enrich_paths else "claude transcript not found",
         model=agent_model_from_metadata(metadata) or agent_model_from_command(process.command),
     )
 
@@ -530,21 +531,17 @@ def select_claude_agent(
     *,
     sessions_root: Path | None = None,
     projects_root: Path | None = None,
+    enrich_paths: bool = True,
 ) -> AgentInfo | None:
     sessions_root = sessions_root or Path.home() / ".claude" / "sessions"
     candidates: list[AgentInfo] = []
     for process in processes:
         if classify_agent(process.command) != "claude" and not (sessions_root / f"{process.pid}.json").is_file():
             continue
-        candidates.append(
-            read_claude_agent(
-                session,
-                pane,
-                process,
-                sessions_root=sessions_root,
-                projects_root=projects_root,
-            )
-        )
+        options: dict[str, Any] = {"sessions_root": sessions_root, "projects_root": projects_root}
+        if not enrich_paths:
+            options["enrich_paths"] = False
+        candidates.append(read_claude_agent(session, pane, process, **options))
     if not candidates:
         return None
     with_transcript = [agent for agent in candidates if agent.transcript]
@@ -945,10 +942,10 @@ def codex_transcript_from_process_fd(
     return newest_codex_transcript(codex_rollout_paths(targets, root))
 
 
-def read_codex_agent(session: str, pane: TmuxPaneInfo, process: ProcessInfo) -> AgentInfo:
-    proc_cwd = process_cwd(process.pid) or pane.current_path
-    transcript_path = codex_transcript_from_process_fd(process.pid) or find_recent_codex_transcript(proc_cwd)
-    session_id = codex_transcript_session_id(transcript_path)
+def read_codex_agent(session: str, pane: TmuxPaneInfo, process: ProcessInfo, *, enrich_paths: bool = True) -> AgentInfo:
+    proc_cwd = (process_cwd(process.pid) or pane.current_path) if enrich_paths else pane.current_path
+    transcript_path = (codex_transcript_from_process_fd(process.pid) or find_recent_codex_transcript(proc_cwd)) if enrich_paths else None
+    session_id = codex_transcript_session_id(transcript_path) if enrich_paths else None
     return AgentInfo(
         session=session,
         kind="codex",
@@ -959,7 +956,7 @@ def read_codex_agent(session: str, pane: TmuxPaneInfo, process: ProcessInfo) -> 
         status=None,
         session_id=session_id,
         transcript=str(transcript_path) if transcript_path else None,
-        error=None if transcript_path else "codex transcript not found by process fd or cwd",
+        error=None if transcript_path or not enrich_paths else "codex transcript not found by process fd or cwd",
         model=agent_model_from_command(process.command),
     )
 
@@ -976,22 +973,28 @@ def selected_codex_process(processes: list[ProcessInfo]) -> ProcessInfo | None:
     )
 
 
-def select_codex_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+def select_codex_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo], *, enrich_paths: bool = True) -> AgentInfo | None:
     process = selected_codex_process(processes)
     if process is None:
         return None
-    return read_codex_agent(session, pane, process)
+    if enrich_paths:
+        return read_codex_agent(session, pane, process)
+    return read_codex_agent(session, pane, process, enrich_paths=False)
 
 
-def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo]) -> AgentInfo | None:
+def select_pane_agent(session: str, pane: TmuxPaneInfo, processes: list[ProcessInfo], *, enrich_paths: bool = True) -> AgentInfo | None:
     kinds = [kind for process in processes if (kind := classify_agent(process.command)) in {"claude", "codex"}]
     if not kinds:
         return None
     # `processes` is breadth-first from the tmux pane PID. The first real agent is the interactive
     # owner; a nested agent command launched as a tool must not replace its parent pane identity.
     if kinds[0] == "claude":
-        return select_claude_agent(session, pane, processes)
-    return select_codex_agent(session, pane, processes)
+        if enrich_paths:
+            return select_claude_agent(session, pane, processes)
+        return select_claude_agent(session, pane, processes, enrich_paths=False)
+    if enrich_paths:
+        return select_codex_agent(session, pane, processes)
+    return select_codex_agent(session, pane, processes, enrich_paths=False)
 
 
 def _darwin_process_cwd(pid: int) -> str | None:
@@ -1105,7 +1108,7 @@ def preferred_pane(panes: list[TmuxPaneInfo], agents: list[AgentInfo]) -> TmuxPa
     return sorted(panes, key=pane_sort_key)[0]
 
 
-def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list[str]]:
+def discover_sessions(sessions: list[str], *, enrich_paths: bool = True) -> tuple[dict[str, SessionInfo], list[str]]:
     errors: list[str] = []
     panes, tmux_error = list_tmux_panes()
     if tmux_error:
@@ -1135,7 +1138,7 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             process_label, process_label_pid = pane_process_label(raw_pane, candidates)
             pane = replace(raw_pane, process_label=process_label, process_label_pid=process_label_pid)
             session_panes.append(pane)
-            agent = select_pane_agent(session, pane, candidates)
+            agent = select_pane_agent(session, pane, candidates, enrich_paths=enrich_paths)
             if agent is not None and agent.pid not in seen_pids:
                 seen_pids.add(agent.pid)
                 agents.append(agent)
@@ -1146,3 +1149,9 @@ def discover_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list
             agents=agents,
         )
     return result, errors
+
+
+def discover_status_sessions(sessions: list[str]) -> tuple[dict[str, SessionInfo], list[str]]:
+    """Discover the topology and agent identities needed by shared status only."""
+
+    return discover_sessions(sessions, enrich_paths=False)

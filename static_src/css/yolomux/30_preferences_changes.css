@@ -526,8 +526,35 @@
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
+.js-debug-chart-layout-control {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: start;
+}
+.js-debug-range-resolution-controls {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: var(--space-6);
+  min-width: 0;
+}
+.js-debug-range-resolution-controls > .js-debug-resolution-label {
+  grid-column: 2;
+  grid-row: 1;
+}
+.js-debug-range-resolution-controls > .js-debug-range-slider-control {
+  grid-column: 1;
+  grid-row: 1;
+}
+.js-debug-chart-toggle-control {
+  grid-column: 1;
+  grid-row: 1;
+  position: relative;
+}
 .js-debug-chart-layout-control button,
-.js-debug-chart-toggle-control button {
+.js-debug-chart-toggle-control summary {
   min-inline-size: 2.5rem;
   min-block-size: 1.65rem;
   padding: var(--space-2) var(--space-4);
@@ -537,16 +564,63 @@
   background: var(--panel2);
   font: inherit;
 }
-@container (max-width: 56rem) {
+.js-debug-chart-toggle-control summary {
+  cursor: pointer;
+  list-style: none;
+}
+.js-debug-chart-toggle-control summary::-webkit-details-marker {
+  display: none;
+}
+.js-debug-chart-toggle-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--space-3));
+  left: 0;
+  display: grid;
+  min-inline-size: 14rem;
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel2);
+  box-shadow: var(--shadow-popover);
+}
+.js-debug-chart-toggle-menu label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-block-size: 1.7rem;
+  cursor: pointer;
+}
+.js-debug-chart-toggle-menu input {
+  accent-color: var(--active-accent-bright);
+}
+@container (max-width: 20rem) {
   .js-debug-graph-controls {
     grid-template-columns: minmax(0, 1fr);
   }
-  .js-debug-resolution-label {
+  .js-debug-range-resolution-controls {
+    grid-template-columns: minmax(0, 1fr);
+    grid-row: 4;
     justify-self: start;
   }
   .js-debug-chart-layout-control,
   .js-debug-chart-toggle-control {
     grid-column: 1;
+  }
+  .js-debug-chart-layout-control {
+    grid-row: 1;
+  }
+  .js-debug-range-resolution-controls > .js-debug-range-slider-control {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .js-debug-range-resolution-controls > .js-debug-resolution-label {
+    grid-column: 1;
+    grid-row: 2;
+  }
+  .js-debug-chart-toggle-control {
+    grid-row: 1;
+    justify-self: start;
   }
 }
 .js-debug-subtab:not(.active):hover,
@@ -578,13 +652,7 @@
   accent-color: var(--active-accent-bright);
 }
 .js-debug-chart-toggle-control {
-  display: inline-flex;
-  grid-column: 1 / -1;
-  grid-row: 2;
   flex: 0 1 auto;
-  align-items: center;
-  gap: var(--space-4);
-  min-width: 0;
 }
 .js-debug-range-slider-control datalist {
   display: none;
@@ -1191,26 +1259,17 @@
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .js-yocost-controls > [data-js-yocost-data-age-label],
-.js-yocost-controls > .js-debug-resolution-label,
 .js-yocost-controls > button {
   flex: none;
 }
-.js-yocost-controls > .js-debug-range-slider-control {
-  flex: 1 1 20ch;
-  max-inline-size: 40%;
+.js-yocost-controls > .js-debug-range-resolution-controls {
+  flex: 1 0 100%;
+  order: 2;
 }
 .js-yocost-controls > button {
   margin-inline-start: auto;
 }
-@container (max-width: 40rem) {
-  .js-yocost-controls > .js-debug-range-slider-control {
-    flex-basis: 100%;
-    max-inline-size: 100%;
-    order: 2;
-  }
-  .js-yocost-controls > .js-debug-resolution-label {
-    order: 3;
-  }
+@container (max-width: 20rem) {
   .js-yocost-controls > button {
     order: 1;
   }

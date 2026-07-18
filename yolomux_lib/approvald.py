@@ -25,6 +25,7 @@ from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
+from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
 from .settings import default_settings
@@ -68,17 +69,11 @@ class ApprovalWorkerRecord:
     worker: AutoApproveWorker
 
 
-class PersistentApprovalService:
+class PersistentApprovalService(LocalRpcServiceState):
     """One shared owner for target-keyed approval workers."""
 
     def __init__(self, socket_path: Path, idle_seconds: float = APPROVALD_DEFAULT_IDLE_SECONDS):
-        self.socket_path = safe_socket_path(socket_path, prefix="yolomux-approvald")
-        self.lock_path = self.socket_path.with_suffix(".lock")
-        self.stop_event = multiprocessing.get_context("spawn").Event()
-        self.idle_seconds = max(1.0, float(idle_seconds))
-        self.started_at = time.time()
-        self.last_client_at = time.monotonic()
-        self.leases: dict[str, int] = {}
+        super().__init__(socket_path, prefix="yolomux-approvald", idle_seconds=idle_seconds)
         self.records: dict[str, ApprovalWorkerRecord] = {}
         self.event_log = EventLog(EVENT_LOG_PATH)
 

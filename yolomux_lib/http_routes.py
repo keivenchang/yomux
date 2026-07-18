@@ -605,7 +605,8 @@ def get_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
     session = query_one(qs, "session", None)
-    request.write_app_result(request.server.app.auto_approve_status(session))
+    body, status = request.server.app.auto_approve_status_bytes(session)
+    request.write_json_bytes(body, status=status)
 
 
 def get_notify(request: Any, parsed: Any, route: Route) -> None:

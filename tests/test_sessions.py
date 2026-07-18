@@ -258,6 +258,38 @@ def test_read_claude_agent_prefers_latest_transcript_cwd(tmp_path):
     assert agent.cwd == str(repo)
 
 
+def test_lightweight_status_discovery_skips_transcript_and_process_path_enrichment(monkeypatch, tmp_path):
+    pane = _pane(100)
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="claude"),
+    }
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    (sessions_root / "101.json").write_text(json.dumps({"sessionId": "session-101", "cwd": "/repo", "status": "busy"}), encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([pane], None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(sessions, "find_transcript_by_session_id", lambda *_args: calls.append("transcript") or None)
+    monkeypatch.setattr(sessions, "claude_transcript_latest_cwd", lambda *_args: calls.append("tail") or None)
+    original_select = sessions.select_claude_agent
+    monkeypatch.setattr(
+        sessions,
+        "select_claude_agent",
+        lambda session, item, candidates, *, enrich_paths=True: original_select(
+            session, item, candidates, sessions_root=sessions_root, projects_root=tmp_path / "projects", enrich_paths=enrich_paths,
+        ),
+    )
+
+    discovered, errors = sessions.discover_status_sessions(["1"])
+
+    assert errors == []
+    agent = discovered["1"].agents[0]
+    assert (agent.kind, agent.pid, agent.pane_target, agent.model, agent.session_id) == ("claude", 101, pane.target, None, "session-101")
+    assert agent.cwd == "/repo"
+    assert calls == []
+
+
 def test_select_claude_agent_follows_daemon_delegated_session(tmp_path):
     clear_transcript_lookup_cache()
     claude_root = tmp_path / ".claude"
