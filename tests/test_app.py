@@ -234,6 +234,33 @@ def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch)
     assert by_name["statsd"]["uptime_seconds"] is None
 
 
+def test_runtime_local_services_jobd_row_exposes_product_counters_and_cache(monkeypatch):
+    # The System view's "Cache" and "Products" diagnostic rows read service.cache /
+    # service.product_counters directly off the jobd runtime_status row; prove the
+    # checkbox-3 jobd product-layer counters actually reach that surface.
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "service": {"ok": True, "pid": 0, "started_at": 0.0, "migration": {"state": "ready"}},
+            "families": {},
+        })
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
+            "service": "jobd", "pid": 4242, "resources": {},
+            "cache": {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2},
+            "product_counters": {"transcript_view": {"accepted": 5, "coalesced": 2, "completed": 4, "failed": 0, "superseded": 1}},
+        })
+        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+        services = webapp.runtime_local_services()["services"]
+    finally:
+        webapp.control_server.stop()
+
+    jobd_row = next(row for row in services if row["service"] == "jobd")
+    assert jobd_row["cache"] == {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2}
+    assert jobd_row["product_counters"]["transcript_view"]["completed"] == 4
+    assert jobd_row["product_counters"]["transcript_view"]["accepted"] == 5
+
+
 def test_stats_usage_health_warns_only_for_committed_growth_without_fresh_atoms():
     warning = app_module.stats_current_usage_health(
         {"last_accepted_at": 800.0},

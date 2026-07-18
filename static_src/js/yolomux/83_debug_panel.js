@@ -6566,6 +6566,8 @@ const debugSystemLocalServiceFields = Object.freeze([
   {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
   {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
   {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
+  {key: 'cache', labelKey: 'debug.system.localServices.field.cache'},
+  {key: 'products', labelKey: 'debug.system.localServices.field.products'},
 ]);
 
 function debugSystemServiceName(service = {}) {
@@ -6583,9 +6585,24 @@ function debugSystemStripPrevText(value) {
   return String(value || '').replace(new RegExp(`^${prefix}\\s*`), '');
 }
 
+function debugSystemDictSummaryText(dict) {
+  const entries = dict && typeof dict === 'object' ? Object.entries(dict) : [];
+  return entries.map(([key, value]) => `${key} ${value}`).join('\n');
+}
+
 function debugSystemQueueText(service = {}) {
-  const queues = service.queues && typeof service.queues === 'object' ? service.queues : {};
-  return Object.entries(queues).map(([key, count]) => `${key} ${count}`).join('\n');
+  return debugSystemDictSummaryText(service.queues);
+}
+
+function debugSystemCacheText(service = {}) {
+  return debugSystemDictSummaryText(service.cache);
+}
+
+function debugSystemProductCountersText(service = {}) {
+  const counters = service.product_counters && typeof service.product_counters === 'object' ? service.product_counters : {};
+  return Object.entries(counters)
+    .map(([task, byOutcome]) => `${task}: ${debugSystemDictSummaryText(byOutcome).split('\n').join(', ')}`)
+    .join('\n');
 }
 
 function debugSystemLocalServiceRecord(name) {
@@ -6652,6 +6669,14 @@ function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSe
   if (fieldKey === 'queues') {
     const queueText = debugSystemQueueText(service);
     return valueOrPrevious({display: queueText || '—', identity: queueText});
+  }
+  if (fieldKey === 'cache') {
+    const cacheText = debugSystemCacheText(service);
+    return valueOrPrevious({display: cacheText || '—', identity: cacheText});
+  }
+  if (fieldKey === 'products') {
+    const productsText = debugSystemProductCountersText(service);
+    return valueOrPrevious({display: productsText || '—', identity: productsText});
   }
   return {display: '—', identity: 'empty'};
 }
