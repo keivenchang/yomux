@@ -192,14 +192,14 @@ function primeTerminalClipboardAvailability() {
 const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
   {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
-  {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'alt', macLabel: '⌥', pcLabel: 'Alt', macAriaLabel: 'Option / Alt', pcAriaLabel: 'Alt', modifier: 'alt'},
   {action: 'shift', label: 'Shift', ariaLabel: 'Shift', modifier: 'shift'},
-  {action: 'cmd', label: 'Cmd', ariaLabel: 'Command / Meta', modifier: 'cmd'},
+  {action: 'cmd', macLabel: '⌘', pcLabel: '⊞', macAriaLabel: 'Command / Meta', pcAriaLabel: 'Windows / Super / Meta', modifier: 'cmd'},
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
-  {action: 'copy', label: '⌘C', ariaLabelKey: 'common.copy', ariaLabelSuffix: 'Cmd-C'},
-  {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
+  {action: 'copy', macLabel: '⌘C', pcLabel: 'Ctrl+C', ariaLabelKey: 'common.copy', macAriaLabelSuffix: 'Command-C', pcAriaLabelSuffix: 'Ctrl-C'},
+  {action: 'command-v', macLabel: '⌘V', pcLabel: 'Ctrl+V', macAriaLabel: 'Command-V', pcAriaLabel: 'Ctrl-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
   {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
@@ -213,7 +213,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
 const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   // These mirror browser/app actions that a phone has no physical Command key for. They are
   // actions rather than terminal bytes: Cmd-P opens quick-open; Paste stays visible in the first row.
-  {action: 'command-p', label: '⌘P', ariaLabel: 'Command-P'},
+  {action: 'command-p', macLabel: '⌘P', pcLabel: 'Ctrl+P', macAriaLabel: 'Command-P', pcAriaLabel: 'Ctrl-P'},
   {action: 'home', label: 'Home', ariaLabel: 'Home'},
   {action: 'end', label: 'End', ariaLabel: 'End'},
   {action: 'delete', label: 'Del', ariaLabel: 'Delete', data: '\x1b[3~'},
@@ -228,11 +228,11 @@ const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'sh
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-// Esc renders alone in the top-left corner. Shift stays in the left utility column while Ctrl
-// anchors the bottom row before Alt/Cmd; Copy/Paste stack directly beside the navigation grid.
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tmux-prefix', 'backspace', 'more']);
+// Esc renders alone in the top-left corner. Tab, Shift, and Ctrl fill the left utility column;
+// Ctrl anchors the bottom row before Alt/Cmd, and Copy/Paste stack beside the navigation grid.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift']);
+const terminalMobileAccessorySideActions = Object.freeze(['tab', 'shift', 'ctrl']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
 const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
@@ -290,8 +290,10 @@ function terminalMobileAccessoryButtonHtml(session, definition, state, extraClas
   // every other palette key can change the terminal and keeps the existing write gate.
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
-  const label = definition.labelKey ? t(definition.labelKey) : definition.label;
-  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel}${definition.ariaLabelSuffix ? ` (${definition.ariaLabelSuffix})` : ''}`;
+  const macPlatform = isMacPlatform();
+  const label = definition.labelKey ? t(definition.labelKey) : (macPlatform ? definition.macLabel : definition.pcLabel) || definition.label;
+  const ariaLabelSuffix = macPlatform ? definition.macAriaLabelSuffix : definition.pcAriaLabelSuffix;
+  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : (macPlatform ? definition.macAriaLabel : definition.pcAriaLabel) || definition.ariaLabel}${ariaLabelSuffix ? ` (${ariaLabelSuffix})` : ''}`;
   return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 

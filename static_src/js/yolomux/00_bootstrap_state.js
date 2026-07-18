@@ -1564,7 +1564,7 @@ function platformOverride() {
 function isMacPlatform() {
   const override = platformOverride();
   if (override) return override === 'mac';
-  return /(Macintosh|MacIntel|Mac OS|macOS|\bMac\b)/i.test(browserPlatformText());
+  return /(Macintosh|MacIntel|Mac OS|macOS|\bMac\b|iPad|iPhone|iPod)/i.test(browserPlatformText());
 }
 
 function appModifier(event) {

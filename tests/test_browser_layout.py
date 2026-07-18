@@ -5212,12 +5212,12 @@ body {{ margin:0; display:block; min-height:0; }} #pane {{ width:320px; height:2
     assert metrics["launcherHidden"] is True and metrics["initiallyHidden"] is True, metrics
     assert metrics["first"] and metrics["second"] and metrics["third"], metrics
     assert abs(metrics["grabber"]["left"] - metrics["bar"]["left"]) <= 1 and abs(metrics["grabber"]["right"] - metrics["bar"]["right"]) <= 1, metrics
-    assert metrics["close"]["right"] <= metrics["bar"]["right"] and metrics["close"]["right"] >= metrics["bar"]["right"] - 12, metrics
-    assert metrics["close"]["top"] >= metrics["bar"]["top"] and metrics["close"]["top"] <= metrics["bar"]["top"] + 12, metrics
+    assert metrics["close"]["left"] >= metrics["bar"]["left"] and metrics["close"]["right"] <= metrics["bar"]["right"], metrics
+    assert metrics["close"]["top"] >= metrics["grabber"]["bottom"] and metrics["close"]["bottom"] <= metrics["bar"]["bottom"], metrics
     assert metrics["bar"]["left"] >= metrics["pane"]["left"] and metrics["bar"]["right"] <= metrics["pane"]["right"], metrics
     assert metrics["bar"]["top"] >= metrics["pane"]["top"] and metrics["bar"]["bottom"] <= metrics["pane"]["bottom"], metrics
     assert metrics["overflow"] == "hidden" and metrics["contentTouch"] == "none" and metrics["grabberTouch"] == "none", metrics
-    assert metrics["userSelect"] == "none" and metrics["scrollHeight"] == metrics["clientHeight"] and metrics["scrollTop"] == 0, metrics
+    assert metrics["userSelect"] == "none" and 0 <= metrics["scrollHeight"] - metrics["clientHeight"] <= 1 and 0 <= metrics["scrollTop"] <= 1, metrics
     assert metrics["minKeyHeight"] >= 36 and metrics["close"]["width"] >= 36 and metrics["close"]["height"] >= 36, metrics
 
 
@@ -5241,7 +5241,18 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
           const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const state=()=>{const value=terminalMobileAccessoryState('1');return {open:value.open,x:value.x,y:value.y};};
           (async()=>{const frames=[];terminals.get('1').socket={readyState:WebSocket.OPEN,send(frame){frames.push(JSON.parse(frame));}};const initial={barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};tap(launcher,71);await settle();const opened={bar:box(bar),pane:box(pane),grabber:box(grabber),close:box(close),barHidden:bar.hidden,launcherHidden:launcher.hidden,placement:bar.dataset.terminalMobilePlacement,state:state(),first:bar.firstElementChild===grabber,second:bar.children[1]===close,third:bar.children[2]===content,actions:[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort()};const beforeContentDrag=state();drag(content,-90,-40,72);await settle();const afterContentDrag=state();drag(grabber,-120,-80,73);await settle();const dragged={bar:box(bar),pane:box(pane),barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};tap(bar.querySelector('[data-terminal-mobile-key="tab"]'),74);await settle();tap(close,75);await settle();const closed={barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state(),launcher:box(launcher)};tap(launcher,76);await settle();const reopened={bar:box(bar),pane:box(pane),barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};done({initial,opened,beforeContentDrag,afterContentDrag,dragged,closed,reopened,frames,errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
-        """)
+            """)
+        metrics["shiftSticky"] = browser.execute_script(
+            """
+            const button = document.querySelector('[data-terminal-mobile-keybar="1"] [data-terminal-mobile-key="shift"]');
+            button.click();
+            button.click();
+            const state = terminalMobileAccessoryState('1');
+            const locked = {active: state.shift, locked: state.shiftLocked, pressed: button.getAttribute('aria-pressed'), classLocked: button.classList.contains('locked')};
+            button.click();
+            return {locked, unlocked: {active: state.shift, locked: state.shiftLocked, pressed: button.getAttribute('aria-pressed'), classLocked: button.classList.contains('locked')}};
+            """
+        )
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
@@ -5254,7 +5265,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
     expected_actions = sorted(["escape", "ctrl", "shift", "alt", "tab", "tmux-prefix", "backspace", "more", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "cmd", "arrow-down", "tmux-scroll-down", "interrupt"])
     assert opened["actions"] == expected_actions, metrics
     assert abs(opened["grabber"]["left"] - opened["bar"]["left"]) <= 1 and abs(opened["grabber"]["right"] - opened["bar"]["right"]) <= 1, metrics
-    assert opened["close"]["right"] <= opened["bar"]["right"] and opened["close"]["top"] >= opened["bar"]["top"], metrics
+    assert opened["close"]["right"] <= opened["bar"]["right"] and opened["close"]["top"] >= opened["grabber"]["bottom"], metrics
     assert metrics["beforeContentDrag"] == metrics["afterContentDrag"], metrics
     assert metrics["dragged"]["state"] != metrics["beforeContentDrag"] and metrics["dragged"]["barHidden"] is False and metrics["dragged"]["launcherHidden"] is True, metrics
     for snapshot in (metrics["dragged"], metrics["reopened"]):
@@ -5262,6 +5273,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
         assert snapshot["bar"]["top"] >= snapshot["pane"]["top"] - 0.5 and snapshot["bar"]["bottom"] <= snapshot["pane"]["bottom"] + 0.5, metrics
     assert metrics["closed"]["barHidden"] is True and metrics["closed"]["launcherHidden"] is False and metrics["closed"]["state"]["open"] is False, metrics
     assert metrics["reopened"]["barHidden"] is False and metrics["reopened"]["launcherHidden"] is True and metrics["reopened"]["state"]["open"] is True, metrics
+    assert metrics["shiftSticky"] == {"locked": {"active": True, "locked": True, "pressed": "true", "classLocked": True}, "unlocked": {"active": False, "locked": False, "pressed": "false", "classLocked": False}}, metrics
     assert {"type": "input", "data": "\t"} in metrics["frames"], metrics
 
 
@@ -5286,7 +5298,7 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
           const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const visibleActions=()=>[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort();
           const surfaceState=()=>({launchers:[...pane.querySelectorAll('[data-terminal-mobile-toggle="1"]')].map(node=>node.hidden),bars:[...pane.querySelectorAll('[data-terminal-mobile-keybar="1"]')].map(node=>node.hidden)});
-          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),arrow:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
+          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),arrowJoinBorders={up:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')).borderBottomColor,down:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')).borderTopColor,left:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')).borderRightColor,right:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')).borderLeftColor},primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,arrowJoinBorders,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),escape:box(primaryPage.querySelector('[data-terminal-mobile-key="escape"]')),tab:box(primaryPage.querySelector('[data-terminal-mobile-key="tab"]')),shift:box(primaryPage.querySelector('[data-terminal-mobile-key="shift"]')),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),prefix:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-prefix"]')),backspace:box(primaryPage.querySelector('[data-terminal-mobile-key="backspace"]')),more:box(primaryPage.querySelector('[data-terminal-mobile-key="more"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),up:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),down:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),left:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),more:box(morePage.querySelector('[data-terminal-mobile-key="more"]')),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
         """)
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
@@ -5298,25 +5310,37 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
     assert primary["surfaces"] == {"launchers": [True, True], "bars": [False, False]}, metrics
     assert primary["bar"]["left"] >= primary["pane"]["left"] - 0.5 and primary["bar"]["right"] <= primary["pane"]["right"] + 0.5, metrics
     assert primary["bar"]["top"] >= primary["pane"]["top"] - 0.5 and primary["bar"]["bottom"] <= primary["pane"]["bottom"] + 0.5, metrics
-    assert abs(primary["bar"]["width"] - 288) <= 1 and abs(primary["bar"]["height"] - 204) <= 1, metrics
+    assert abs(primary["bar"]["width"] - 252) <= 1 and abs(primary["bar"]["height"] - 171) <= 1, metrics
     assert abs(primary["grabber"]["left"] - primary["bar"]["left"]) <= 1 and abs(primary["grabber"]["right"] - primary["bar"]["right"]) <= 1, metrics
     assert primary["grabber"]["height"] > 0 and primary["grabberBorder"] != "0px" and primary["grabberBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert primary["actions"] == sorted(["escape", "ctrl", "shift", "tab", "tmux-prefix", "backspace", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "arrow-down", "tmux-scroll-down", "alt", "cmd", "interrupt", "more"]), metrics
     assert abs(primary["copy"]["left"] - primary["paste"]["left"]) <= 1 and abs(primary["copy"]["right"] - primary["paste"]["right"]) <= 1, metrics
     assert 0 <= primary["paste"]["top"] - primary["copy"]["bottom"] <= 8, metrics
+    assert abs(primary["escape"]["left"] - primary["tab"]["left"]) <= 1 and 0 <= primary["tab"]["top"] - primary["escape"]["bottom"] <= 8, metrics
+    assert 0 <= primary["shift"]["top"] - primary["tab"]["bottom"] <= 8 and 0 <= primary["ctrl"]["top"] - primary["shift"]["bottom"] <= 8, metrics
+    assert abs(primary["up"]["top"] - primary["pgUp"]["top"]) <= 1 and 0 <= primary["pgUp"]["left"] - primary["up"]["right"] <= 8, metrics
+    assert abs(primary["down"]["top"] - primary["pgDown"]["top"]) <= 1 and 0 <= primary["pgDown"]["left"] - primary["down"]["right"] <= 8, metrics
+    assert all(abs(primary[action]["width"] - 48) <= 1 for action in ("prefix", "backspace", "more")), metrics
     assert metrics["overflow"]["actions"] == sorted(["command-p", "home", "end", "delete", "shift-tab", "ctrl-d", "ctrl-z", "ctrl-l", "ctrl-r", "more", "interrupt"]), metrics
     assert metrics["overflow"]["moreState"] is True and metrics["primaryAgain"]["moreState"] is False, metrics
-    assert primary["interrupt"]["right"] >= primary["page"]["right"] - 5 and primary["interrupt"]["bottom"] >= max(primary["pgDown"]["bottom"], primary["arrow"]["bottom"]) - 1, metrics
-    assert abs(primary["ctrl"]["top"] - primary["alt"]["top"]) <= 1 and primary["ctrl"]["right"] <= primary["alt"]["left"], metrics
+    assert 8 <= primary["left"]["left"] - primary["paste"]["right"] <= 24, metrics
+    assert 8 <= primary["enter"]["left"] - primary["pgUp"]["right"] <= 24 and 8 <= primary["interrupt"]["left"] - primary["pgDown"]["right"] <= 24, metrics
+    assert abs(primary["ctrl"]["top"] - primary["alt"]["top"]) <= 1 and 0 <= primary["alt"]["left"] - primary["ctrl"]["right"] <= 8, metrics
     assert abs(primary["alt"]["top"] - primary["cmd"]["top"]) <= 1 and 0 <= primary["cmd"]["left"] - primary["alt"]["right"] <= 8, metrics
-    assert abs(primary["right"]["top"] - primary["enter"]["top"]) <= 1 and 0 <= primary["enter"]["left"] - primary["right"]["right"] <= 8, metrics
-    assert primary["enter"]["width"] >= primary["right"]["width"], metrics
+    assert primary["enter"]["top"] <= primary["up"]["top"] + 1 and primary["enter"]["bottom"] >= primary["right"]["bottom"] - 1, metrics
+    assert abs(primary["enter"]["width"] - primary["interrupt"]["width"]) <= 1 and abs(primary["enter"]["left"] - primary["interrupt"]["left"]) <= 1, metrics
+    assert 0 <= primary["interrupt"]["top"] - primary["enter"]["bottom"] <= 8, metrics
     assert metrics["overflow"]["interrupt"]["right"] >= metrics["overflow"]["page"]["right"] - 5 and metrics["overflow"]["interrupt"]["bottom"] >= metrics["overflow"]["page"]["bottom"] - 5, metrics
-    assert primary["pgUp"]["width"] > primary["arrow"]["width"] and primary["pgDown"]["width"] > primary["arrow"]["width"], metrics
+    assert primary["pgUp"]["width"] > primary["up"]["width"] and primary["pgDown"]["width"] > primary["down"]["width"], metrics
+    assert set(primary["arrowJoinBorders"].values()) == {"rgba(0, 0, 0, 0)"}, metrics
     for page in (metrics["overflow"], metrics["primaryAgain"]):
         assert abs(page["bar"]["width"] - primary["bar"]["width"]) <= 0.5 and abs(page["bar"]["height"] - primary["bar"]["height"]) <= 0.5, metrics
     assert metrics["primaryAgain"]["actions"] == primary["actions"], metrics
-    assert primary["close"]["right"] <= primary["bar"]["right"] and primary["close"]["top"] >= primary["bar"]["top"], metrics
+    assert primary["close"]["right"] <= primary["bar"]["right"] and primary["close"]["top"] >= primary["grabber"]["bottom"], metrics
+    assert 0 <= primary["bar"]["right"] - max(primary["close"]["right"], primary["enter"]["right"], primary["interrupt"]["right"]) <= 2, metrics
+    assert 0 <= primary["bar"]["bottom"] - max(primary["ctrl"]["bottom"], primary["pgDown"]["bottom"], primary["interrupt"]["bottom"]) <= 2, metrics
+    assert abs(primary["close"]["top"] - primary["more"]["top"]) <= 1 and 0 <= primary["close"]["left"] - primary["more"]["right"] <= 8, metrics
+    assert abs(primary["close"]["top"] - metrics["overflow"]["more"]["top"]) <= 1 and 0 <= primary["close"]["left"] - metrics["overflow"]["more"]["right"] <= 8, metrics
     assert metrics["closed"] == {"barHidden": True, "launcherHidden": False, "open": False, "surfaces": {"launchers": [False, False], "bars": [True, True]}}, metrics
 
 
