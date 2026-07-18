@@ -4208,6 +4208,44 @@ def test_prompt_and_screen_status_does_not_hide_programmer_errors(monkeypatch):
         webapp.control_server.stop()
 
 
+def _install_fake_session_files_jobd(monkeypatch, webapp, response):
+    """Mock only the `session_files_view` jobd product (checkbox 4/9 routes the
+    request-thread compute through jobd submit()+product(), not an inline
+    session_files call); every other task (e.g. transcript_view) still goes
+    through the real job_client. `response` is either a payload dict or a
+    call-tuple -> payload dict callable; returns the recorded submit calls as
+    (session, infos_keys, hours, from_ref, to_ref, repo_refs) tuples."""
+    calls = []
+    coalesce_keys: set[str] = set()
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "session_files_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        calls.append((
+            payload.get("session") or None,
+            tuple(payload.get("infos", {}).keys()),
+            payload["hours"],
+            payload.get("from_ref") or None,
+            payload.get("to_ref") or None,
+            payload.get("repo_refs") or None,
+        ))
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        result = response(calls[-1]) if callable(response) else response
+        body = json.dumps({"payload": result, "status": 200}).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
+    return calls
+
+
 def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp_path):
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "Fix tabs"}}) + "\n", encoding="utf-8")
@@ -4247,7 +4285,6 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     }
     monkeypatch.setattr(app_module, "session_work_graph", lambda info, cache, allow_network=False: {"version": 1, "loading": False, "generation": 1, "git_worktrees": {}, "local_repositories": {}, "hosted_repositories": {}, "local_branches": {}, "pull_requests": {}, "linear_issues": {}, "path_observations": {}, "runtime_actors": {}, "tmux_sessions": {}, "tmux_windows": {}, "tmux_panes": {}, "worktree_branch_activity": {}})
     monkeypatch.setattr(app_module, "activity_work_summary_from_graph", lambda _graph: work_payload)
-    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: files_payload)
 
     def fake_build(info, work, files, locale="en", **_kwargs):
         calls.append((info.session, locale))
@@ -4255,6 +4292,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
 
     monkeypatch.setattr(app_module, "build_session_activity_summary", fake_build)
     webapp = app_module.TmuxWebtermApp(["5"])
+    _install_fake_session_files_jobd(monkeypatch, webapp, files_payload)
     webapp.warm_metadata_cache_async = lambda sessions: None
     tail_many_calls = []
 
@@ -4942,16 +4980,10 @@ def test_normalized_client_session_files_uses_shared_lookback_bounds():
 
 def test_session_files_payload_reuses_short_cache(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
-    calls = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
-
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
-        calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
-        return {"session": session, "files": [], "repos": [], "errors": []}, HTTPStatus.OK
-
-    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5"])
+    calls = _install_fake_session_files_jobd(monkeypatch, webapp, lambda call: {"session": call[0], "files": [], "repos": [], "errors": []})
     webapp.refresh_sessions = lambda *args, **kwargs: []
     try:
         first, first_status = webapp.session_files_payload("5")
@@ -4971,17 +5003,13 @@ def test_session_files_payload_reuses_short_cache(monkeypatch):
 
 def test_session_files_payload_reuses_shared_disk_cache_between_apps(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
-    calls = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
-
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
-        calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
-        return {"session": session, "files": [{"path": "/repo/one.txt"}], "repos": [{"path": "/repo"}], "errors": []}, HTTPStatus.OK
-
-    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
+    fake_payload = {"files": [{"path": "/repo/one.txt"}], "repos": [{"path": "/repo"}], "errors": []}
     first_app = app_module.TmuxWebtermApp(["5"])
     second_app = app_module.TmuxWebtermApp(["5"])
+    calls = _install_fake_session_files_jobd(monkeypatch, first_app, lambda call: {"session": call[0], **fake_payload})
+    calls2 = _install_fake_session_files_jobd(monkeypatch, second_app, lambda call: {"session": call[0], **fake_payload})
     first_app.refresh_sessions = lambda *args, **kwargs: []
     second_app.refresh_sessions = lambda *args, **kwargs: []
     try:
@@ -4994,6 +5022,7 @@ def test_session_files_payload_reuses_shared_disk_cache_between_apps(monkeypatch
     assert first_status == HTTPStatus.OK
     assert second_status == HTTPStatus.OK
     assert calls == [("5", ("5",), 24.0, None, None, None)]
+    assert calls2 == []  # the second app reused the shared disk cache; it never called jobd itself
     assert first["cache"]["hit"] is False
     assert second["cache"]["hit"] is True
     assert second["files"] == [{"path": "/repo/one.txt"}]
@@ -5063,7 +5092,6 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
     info5 = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     info6 = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
     discover_calls = []
-    payload_calls = []
     test_thread_id = threading.get_ident()
 
     def fake_discover(sessions):
@@ -5071,16 +5099,11 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
         infos = {"5": info5, "6": info6}
         return {session: infos[session] for session in sessions if session in infos}, []
 
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
-        payload_calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
-        return {"session": session, "files": [{"path": f"{session}.txt"}], "repos": [], "errors": []}, HTTPStatus.OK
-
     monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
-    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
+    payload_calls = _install_fake_session_files_jobd(monkeypatch, webapp, lambda call: {"session": call[0], "files": [{"path": f"{call[0]}.txt"}], "repos": [], "errors": []})
     webapp.refresh_sessions = lambda *args, **kwargs: []
     discover_calls.clear()
-    payload_calls.clear()
     try:
         first, first_status = webapp.session_files_batch_payload(["5", "6"])
         second, second_status = webapp.session_files_batch_payload(["5", "6"])
@@ -5100,6 +5123,53 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
     assert second["sessions"]["6"]["cache"]["hit"] is True
     assert first["sessions"]["5"]["files"] == [{"path": "5.txt"}]
     assert first["sessions"]["6"]["files"] == [{"path": "6.txt"}]
+
+
+def test_session_files_cold_miss_never_calls_inline_compute_on_request_thread(monkeypatch):
+    # Checkbox 9: the request-thread cold-miss path must never resurrect inline
+    # git/discovery -- it routes through the jobd session_files_view product.
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("request-thread cold miss must not call inline session_files compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    _install_fake_session_files_jobd(monkeypatch, webapp, {"session": "5", "files": [{"path": "via-jobd.py"}], "repos": [], "errors": []})
+    webapp.refresh_sessions = lambda *args, **kwargs: []
+    try:
+        payload, status = webapp.session_files_payload("5", force=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["files"] == [{"path": "via-jobd.py"}]
+
+
+def test_session_files_jobd_unavailable_returns_pending_never_inline_git(monkeypatch):
+    # Checkbox 9: when jobd cannot produce the product, the request thread must
+    # serve the bounded "refreshing elsewhere" shape, never fall back to inline git.
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("jobd-unavailable fallback must not call inline session_files compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp.job_client, "submit", lambda *args, **kwargs: {"ok": False, "error": "jobd down"})
+    webapp.refresh_sessions = lambda *args, **kwargs: []
+    try:
+        payload, status = webapp.session_files_payload("5", force=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload.get("refreshing_elsewhere") is True
+    assert payload["files"] == []
 
 
 def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):

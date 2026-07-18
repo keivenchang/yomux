@@ -6794,28 +6794,6 @@ class TmuxWebtermApp:
             phase_recorder=self.record_session_files_phase,
         )
 
-    def compute_session_files_payload_for_infos(
-        self,
-        session: str | None,
-        infos: dict[str, SessionInfo],
-        hours: float,
-        from_ref: str | None,
-        to_ref: str | None,
-        repo_refs: dict[str, dict[str, str]] | None,
-        cache_key: tuple[Any, ...] | None = None,
-    ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        return session_files.session_files_payload(
-            session,
-            infos,
-            hours,
-            from_ref=from_ref,
-            to_ref=to_ref,
-            repo_refs=repo_refs,
-            include_cross_session_attribution=not bool(session),
-            git_snapshot_provider=self.session_files_git_snapshot_provider(cache_key),
-            phase_recorder=self.record_session_files_phase,
-        )
-
     def session_files_view_coalesce_identity(self, cache_key: tuple[Any, ...]) -> tuple[str, int]:
         """Cross-port product identity for `session_files_view`.
 
@@ -7049,10 +7027,14 @@ class TmuxWebtermApp:
                     )
                     self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
                     if self.background_refresh_should_fallback(refresh_result):
-                        payload, _status, _hit, _age = self.compute_session_files_cache_entry(
-                            key,
-                            lambda: (self.compute_session_files_payload_for_info(info, hours, from_ref, to_ref, repo_refs, key), HTTPStatus.OK),
-                        )
+                        try:
+                            payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                                key,
+                                lambda: self.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive"),
+                            )
+                        except SessionFilesJobdUnavailable:
+                            # Serve the stale bytes already read above; never resurrect inline git here.
+                            pass
             return payload
         if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
             refresh_result = self.request_background_refresh(
@@ -7061,17 +7043,23 @@ class TmuxWebtermApp:
             )
             self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
             if self.background_refresh_should_fallback(refresh_result):
-                payload, _status, _hit, _age = self.compute_session_files_cache_entry(
-                    key,
-                    lambda: (self.compute_session_files_payload_for_info(info, hours, from_ref, to_ref, repo_refs, key), HTTPStatus.OK),
-                )
-                return copy.deepcopy(payload)
+                try:
+                    payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                        key,
+                        lambda: self.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive"),
+                    )
+                    return copy.deepcopy(payload)
+                except SessionFilesJobdUnavailable:
+                    pass
             return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
-        payload, _status, _hit, _age = self.compute_session_files_cache_entry(
-            key,
-            lambda: (self.compute_session_files_payload_for_info(info, hours, from_ref, to_ref, repo_refs, key), HTTPStatus.OK),
-        )
-        return copy.deepcopy(payload)
+        try:
+            payload, _status, _hit, _age = self.compute_session_files_cache_entry(
+                key,
+                lambda: self.compute_session_files_payload_via_jobd(info.session, infos, hours, from_ref, to_ref, repo_refs, key, priority="interactive"),
+            )
+            return copy.deepcopy(payload)
+        except SessionFilesJobdUnavailable:
+            return {"files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
 
     def warm_start_session_files_payload_cache(self) -> None:
         if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
@@ -7129,6 +7117,17 @@ class TmuxWebtermApp:
         cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
         max_age = SESSION_FILES_CACHE_SECONDS
         cached = None if force else self.get_session_files_cache(cache_key, max_age_seconds=max_age, allow_stale=True)
+        priority = "interactive" if force else "freshness"
+
+        def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
+            return self.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority)
+
+        def pending_payload() -> SessionFilesPayload:
+            info = infos.get(session) if session else None
+            if info is not None:
+                return session_files.refreshing_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
+            return {"session": session or "", "files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
+
         cache_meta: dict[str, Any]
         if cached:
             payload, status, fresh, age_seconds = cached
@@ -7150,17 +7149,19 @@ class TmuxWebtermApp:
                     )
                     self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
                     if self.background_refresh_should_fallback(refresh_result):
-                        payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
-                            cache_key,
-                            lambda: self.compute_session_files_payload_for_infos(session, infos, hours, from_ref, to_ref, repo_refs, cache_key),
-                        )
-                        cache_meta = {
-                            "hit": cache_hit,
-                            "stale": False,
-                            "age_seconds": round(age_seconds, 3),
-                            "refresh_seconds": max_age,
-                            "fallback": True,
-                        }
+                        try:
+                            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                            cache_meta = {
+                                "hit": cache_hit,
+                                "stale": False,
+                                "age_seconds": round(age_seconds, 3),
+                                "refresh_seconds": max_age,
+                                "fallback": True,
+                            }
+                        except SessionFilesJobdUnavailable:
+                            # Keep serving the stale payload/status already bound above; never
+                            # resurrect inline git/discovery on the request thread.
+                            cache_meta["refreshing_elsewhere"] = True
                     else:
                         cache_meta["refreshing_elsewhere"] = True
         else:
@@ -7170,30 +7171,22 @@ class TmuxWebtermApp:
                     self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
                 )
                 self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
+                computed = False
                 if self.background_refresh_should_fallback(refresh_result):
-                    payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
-                        cache_key,
-                        lambda: self.compute_session_files_payload_for_infos(session, infos, hours, from_ref, to_ref, repo_refs, cache_key),
-                    )
-                    cache_meta = {
-                        "hit": cache_hit,
-                        "stale": False,
-                        "age_seconds": round(age_seconds, 3),
-                        "refresh_seconds": max_age,
-                        "fallback": True,
-                    }
-                else:
-                    info = infos.get(session) if session else None
-                    if info is not None:
-                        payload = session_files.refreshing_session_files_payload_for_info(
-                            info,
-                            hours=hours,
-                            from_ref=from_ref,
-                            to_ref=to_ref,
-                            repo_refs=repo_refs,
-                        )
-                    else:
-                        payload = {"session": session or "", "files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
+                    try:
+                        payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                        cache_meta = {
+                            "hit": cache_hit,
+                            "stale": False,
+                            "age_seconds": round(age_seconds, 3),
+                            "refresh_seconds": max_age,
+                            "fallback": True,
+                        }
+                        computed = True
+                    except SessionFilesJobdUnavailable:
+                        pass
+                if not computed:
+                    payload = pending_payload()
                     status = HTTPStatus.OK
                     cache_meta = {
                         "hit": False,
@@ -7203,17 +7196,25 @@ class TmuxWebtermApp:
                         "refreshing_elsewhere": True,
                     }
             else:
-                payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
-                    cache_key,
-                    lambda: self.compute_session_files_payload_for_infos(session, infos, hours, from_ref, to_ref, repo_refs, cache_key),
-                )
-                cache_meta = {
-                    "hit": cache_hit,
-                    "stale": False,
-                    "age_seconds": round(age_seconds, 3),
-                    "refresh_seconds": max_age,
-                    "refreshing": False,
-                }
+                try:
+                    payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
+                    cache_meta = {
+                        "hit": cache_hit,
+                        "stale": False,
+                        "age_seconds": round(age_seconds, 3),
+                        "refresh_seconds": max_age,
+                        "refreshing": False,
+                    }
+                except SessionFilesJobdUnavailable:
+                    payload = pending_payload()
+                    status = HTTPStatus.OK
+                    cache_meta = {
+                        "hit": False,
+                        "stale": True,
+                        "age_seconds": None,
+                        "refresh_seconds": max_age,
+                        "refreshing_elsewhere": True,
+                    }
         payload = copy.deepcopy(payload)
         structured_extra_errors = [
             value if isinstance(value, dict) else message_descriptor("diff.warning.discovery", value, {"error": value})

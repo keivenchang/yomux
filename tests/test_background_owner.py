@@ -941,18 +941,26 @@ def test_follower_batch_session_files_does_not_spawn_warm_threads(monkeypatch, n
 
 
 def test_follower_missing_session_files_uses_bounded_fallback_when_owner_unresponsive(monkeypatch, no_control_socket, tmp_path):
+    # The bounded fallback compute now routes through the jobd session_files_view
+    # product (checkbox 4/9), not an inline session_files call; mock the jobd
+    # submit/product RPCs instead of the retired direct compute function.
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = UnresponsiveFollowerOwner()
     webapp.background_owner = owner
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
-    compute_calls = []
+    submit_calls = []
 
-    def compute_payload(*_args, **_kwargs):
-        compute_calls.append(True)
-        return {"files": [{"path": "fallback.py"}], "repos": [], "errors": []}
+    def fake_submit(task, payload, **_kwargs):
+        submit_calls.append(task)
+        return {"ok": True, "job": {"job_id": "fake"}}
 
-    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", compute_payload)
+    def fake_product(_coalesce_key, timeout=0.5):
+        body = json.dumps({"payload": {"files": [{"path": "fallback.py"}], "repos": [], "errors": []}, "status": 200}).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
     try:
         payload = webapp.cached_session_files_payload_for_info(info)
         events = webapp.event_log.tail(limit=5)
@@ -961,7 +969,7 @@ def test_follower_missing_session_files_uses_bounded_fallback_when_owner_unrespo
         webapp.control_server.stop()
 
     assert payload["files"] == [{"path": "fallback.py"}]
-    assert compute_calls == [True]
+    assert submit_calls == ["session_files_view"]
     assert owner.refresh_requests == [BACKGROUND_ROLE_SESSION_FILES]
     assert owner.fallbacks == [BACKGROUND_ROLE_SESSION_FILES]
     assert "background_refresh_fallback" in {event["type"] for event in events}
