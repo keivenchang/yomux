@@ -4798,7 +4798,7 @@ function activateTab(session, name, options = {}) {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
     scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
-    if (options.userInitiated) focusTerminalFromUserAction(session);
+    if (options.userInitiated) focusTerminalFromUserAction(session, 0, options);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
     clearFocusedTerminal(session);

@@ -29617,9 +29617,18 @@ function scheduleTabSwitchPhaseTwo(generation, work) {
 
 function activatePaneTab(side, session, options = {}) {
   if (!layoutSlotKeys().includes(side) || !itemInLayout(session)) return;
+  const focusOptions = {...options};
   if (options.userInitiated === true) {
     dismissSessionToasts(session);
     acknowledgeNotificationTarget(session);
+    if (isTmuxSession(session)) {
+      // Capture the red/yellow generation at the actual tab click. Waiting for the deferred
+      // terminal focus can leave a visibly opened pane unacknowledged, or acknowledge a newer
+      // child after tmux/status state advances.
+      acknowledgeTerminalAttentionFromUserAction(session, null, options);
+      focusOptions.acknowledgeAgentWindow = false;
+      focusOptions.acknowledgePromptAttention = false;
+    }
   }
   if (options.userInitiated === true && isTmuxSession(session)) {
     noteFileExplorerChangesSessionInteraction(session);
@@ -29648,7 +29657,7 @@ function activatePaneTab(side, session, options = {}) {
     // this item active so Tabber never renders the transient old-active/new-focus combination.
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     if (isFileExplorerItem(session)) activateFileExplorerSurface(session);
-    focusPanel(session, {userInitiated: options.userInitiated === true});
+    focusPanel(session, focusOptions);
     return;
   }
   const generation = nextTabSwitchHighlightGeneration();
@@ -29666,7 +29675,7 @@ function activatePaneTab(side, session, options = {}) {
   // Phase 2 (next frame, generation-guarded): terminal focus/fit follows the highlight and coalesces
   // across rapid cycling so only the final target engages its xterm.
   if (options.userInitiated && isTmuxSession(session)) {
-    scheduleTabSwitchPhaseTwo(generation, () => focusTerminalFromUserAction(session, 25));
+    scheduleTabSwitchPhaseTwo(generation, () => focusTerminalFromUserAction(session, 25, focusOptions));
   }
 }
 
@@ -29684,7 +29693,7 @@ async function selectSession(session, options = {}) {
     return;
   }
   if (activeSessions.includes(session)) {
-    focusPanel(session, {userInitiated: options.userInitiated === true});
+    focusPanel(session, options);
     return;
   }
   if (isTmuxSession(session) && filesOnlySlotForSession(session)) {
@@ -30728,7 +30737,7 @@ function focusPanel(session, options = {}) {
     setFocusedPanelItem(session, {userInitiated: options.userInitiated === true});
     return;
   }
-  activateTab(session, 'terminal', {userInitiated: options.userInitiated === true});
+  activateTab(session, 'terminal', options);
 }
 
 function shareHostTerminalSize(session) {
@@ -71998,7 +72007,7 @@ function activateTab(session, name, options = {}) {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
     scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
-    if (options.userInitiated) focusTerminalFromUserAction(session);
+    if (options.userInitiated) focusTerminalFromUserAction(session, 0, options);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
     clearFocusedTerminal(session);
