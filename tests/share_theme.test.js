@@ -1548,8 +1548,8 @@ async function runShareThemeSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal keydown both dismisses the touch key palette and commits the Finder Modified-files target');
-    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal paste both dismisses the touch key palette and commits the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/container\.addEventListener\('keydown'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/container\.addEventListener\('paste'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
@@ -2658,12 +2658,12 @@ async function runShareThemeSuite() {
     assert.equal(popoverLeft, 10);
     assert.equal(popoverForPosition.style.left, '10px', 'session tab popovers align to the owning pane gutter instead of the narrow tab label');
     assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
-    assert.equal(popoverForPosition.style.width, '490px', 'session tab popovers use their owning pane width minus the shared edge gutter');
-    assert.equal(popoverForPosition.style.maxWidth, '490px', 'owning-pane width overrides the generic desktop popover cap');
+    assert.equal(popoverForPosition.style.width, '520px', 'session tab popovers use measured content width even when it exceeds the owning pane');
+    assert.equal(popoverForPosition.style.maxWidth, '520px', 'session content width remains capped through the replayable inline maximum');
     assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
-    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width);
+    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) > panelForPopover.getBoundingClientRect().width);
     const tabberPaneForPopover = {
       getBoundingClientRect() {
         return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};
@@ -2680,8 +2680,18 @@ async function runShareThemeSuite() {
     };
     api.positionPaneTabPopover(tabberTab, tabberPopover);
     assert.equal(tabberPopover.style.left, '80px', 'Tabber session popovers align to the owning pane instead of the indented tree row');
-    assert.equal(tabberPopover.style.width, '700px', 'Tabber session popovers span the owning pane width');
-    assert.equal(tabberPopover.style.maxWidth, '700px', 'Tabber pane width overrides the generic tab-popover cap');
+    assert.equal(tabberPopover.style.width, '520px', 'Tabber session popovers use the same measured content width as pane tabs');
+    assert.equal(tabberPopover.style.maxWidth, '520px', 'Tabber session popovers keep the shared viewport-capped content width');
+    const filePopover = new TestElement('file-popover');
+    filePopover.classList.add('file-popover');
+    filePopover.rect = {left: 0, right: 340, top: 0, bottom: 220, width: 340, height: 220};
+    api.positionPaneTabPopover({
+      getBoundingClientRect() { return {left: 34, right: 274, top: 40, bottom: 68, width: 240, height: 28}; },
+      querySelector() { return filePopover; },
+      closest() { return panelForPopover; },
+    }, filePopover);
+    assert.equal(filePopover.style.width, '340px', 'file preview popovers retain their measured content width');
+    assert.equal(filePopover.style.maxWidth, '', 'file preview popovers retain their CSS maximum instead of the session inline cap');
     api.positionPaneTabPopover({
       getBoundingClientRect() {
         return {left: 1080, right: 1160, top: 40, bottom: 68, width: 80, height: 28};

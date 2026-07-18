@@ -355,7 +355,7 @@ python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
 python3 yolomux.py --http                  # explicit plain-HTTP opt-out
 ```
 
-HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; proceed past the warning only when it matches the server you intended to reach. `--http` cannot be combined with `--cert`/`--key`.
+HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; run `tools/setup-tls.sh` once to issue a local-CA certificate, then import the printed CA once on each client that connects by LAN IP or hostname. `--http` cannot be combined with `--cert`/`--key`.
 
 ## Authentication & roles
 

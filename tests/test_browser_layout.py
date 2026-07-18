@@ -2960,31 +2960,55 @@ def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp
     assert abs(metrics["infoBar"]["right"] - metrics["popover"]["right"] - 8) <= 1, metrics
 
 
-def test_live_session_tab_popover_uses_owning_pane_width(browser, tmp_path):
+def test_live_session_tab_popover_uses_content_width_across_panes(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
-            "const tab = document.querySelector('.pane-tab[data-pane-tab=\"1\"]'); return typeof positionPaneTabPopover === 'function' && !!paneTabPopoverForAnchor(tab);"
+            "return typeof positionPaneTabPopover === 'function' && document.querySelector('#grid');"
         )
     )
     metrics = browser.execute_script(
         """
-        const tab = document.querySelector('.pane-tab[data-pane-tab="1"]');
-        const popover = paneTabPopoverForAnchor(tab);
+        const host = document.createElement('section');
+        host.className = 'panel';
+        host.style.cssText = 'position:fixed;left:40px;top:100px;width:220px;height:180px;';
+        const tab = document.createElement('button');
+        tab.className = 'pane-tab session-popover-host';
+        tab.textContent = 'session';
+        const popover = document.createElement('div');
+        popover.className = 'session-popover';
+        popover.innerHTML = '<div class="popover-row"><span class="popover-label">Name</span><span class="popover-value">DIS-2408__frontend-crates__vllm-0_25_0-parser-research</span></div>';
+        tab.appendChild(popover);
+        host.appendChild(tab);
+        document.body.appendChild(host);
+        const fileHost = host.cloneNode(false);
+        fileHost.style.left = '700px';
+        const fileTab = document.createElement('button');
+        fileTab.className = 'pane-tab session-popover-host';
+        const filePopover = document.createElement('div');
+        filePopover.className = 'session-popover file-popover';
+        filePopover.style.width = '280px';
+        filePopover.textContent = 'file preview';
+        fileTab.appendChild(filePopover);
+        fileHost.appendChild(fileTab);
+        document.body.appendChild(fileHost);
+        const {rect} = window.__yolomuxTestHelpers;
+        const fileWidthBefore = rect(filePopover).width;
         positionPaneTabPopover(tab, popover);
         tab.classList.add('popover-open');
         popover.classList.add('popover-open');
-        const {rect} = window.__yolomuxTestHelpers;
-        return {tab: rect(tab), pane: rect(paneTabPopoverOwningPane(tab)), popover: rect(popover)};
+        positionPaneTabPopover(fileTab, filePopover);
+        fileTab.classList.add('popover-open');
+        filePopover.classList.add('popover-open');
+        const row = popover.querySelector('.popover-value');
+        return {pane: rect(host), popover: rect(popover), row: rect(row), viewportWidth: window.innerWidth, fileWidthBefore, filePopover: rect(filePopover), fileMaxWidth: filePopover.style.maxWidth};
         """
     )
-    assert metrics["popover"]["width"] > metrics["tab"]["width"] * 2, metrics
-    assert metrics["popover"]["left"] >= metrics["pane"]["left"] + 6, metrics
-    assert metrics["popover"]["right"] <= metrics["pane"]["right"] - 6, metrics
-    left_gutter = metrics["popover"]["left"] - metrics["pane"]["left"]
-    right_gutter = metrics["pane"]["right"] - metrics["popover"]["right"]
-    assert abs(left_gutter - right_gutter) <= 1, metrics
-    assert abs(metrics["popover"]["width"] - (metrics["pane"]["width"] - left_gutter - right_gutter)) <= 1, metrics
+    assert metrics["popover"]["width"] >= metrics["pane"]["width"] + 100, metrics
+    assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewportWidth"], metrics
+    assert metrics["row"]["height"] < 30, metrics
+    assert abs(metrics["filePopover"]["width"] - metrics["fileWidthBefore"]) <= 1, metrics
+    assert metrics["fileMaxWidth"] == "", metrics
 
 
 def test_pane_control_families_share_paint_and_glyph_base(browser, tmp_path):
@@ -5260,7 +5284,7 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
           const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const visibleActions=()=>[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort();
           const surfaceState=()=>({launchers:[...pane.querySelectorAll('[data-terminal-mobile-toggle="1"]')].map(node=>node.hidden),bars:[...pane.querySelectorAll('[data-terminal-mobile-keybar="1"]')].map(node=>node.hidden)});
-          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),arrow:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
+          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),arrow:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
         """)
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
@@ -5276,9 +5300,12 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
     assert abs(primary["grabber"]["left"] - primary["bar"]["left"]) <= 1 and abs(primary["grabber"]["right"] - primary["bar"]["right"]) <= 1, metrics
     assert primary["grabber"]["height"] > 0 and primary["grabberBorder"] != "0px" and primary["grabberBackground"] != "rgba(0, 0, 0, 0)", metrics
     assert primary["actions"] == sorted(["escape", "ctrl", "shift", "tab", "tmux-prefix", "backspace", "copy", "arrow-up", "tmux-scroll-up", "arrow-left", "enter", "arrow-right", "command-v", "arrow-down", "tmux-scroll-down", "alt", "cmd", "interrupt", "more"]), metrics
+    assert abs(primary["copy"]["left"] - primary["paste"]["left"]) <= 1 and abs(primary["copy"]["right"] - primary["paste"]["right"]) <= 1, metrics
+    assert 0 <= primary["paste"]["top"] - primary["copy"]["bottom"] <= 8, metrics
     assert metrics["overflow"]["actions"] == sorted(["command-p", "home", "end", "delete", "shift-tab", "ctrl-d", "ctrl-z", "ctrl-l", "ctrl-r", "more", "interrupt"]), metrics
     assert metrics["overflow"]["moreState"] is True and metrics["primaryAgain"]["moreState"] is False, metrics
     assert primary["interrupt"]["right"] >= primary["page"]["right"] - 5 and primary["interrupt"]["bottom"] >= max(primary["pgDown"]["bottom"], primary["arrow"]["bottom"]) - 1, metrics
+    assert abs(primary["ctrl"]["top"] - primary["alt"]["top"]) <= 1 and primary["ctrl"]["right"] <= primary["alt"]["left"], metrics
     assert abs(primary["alt"]["top"] - primary["cmd"]["top"]) <= 1 and 0 <= primary["cmd"]["left"] - primary["alt"]["right"] <= 8, metrics
     assert abs(primary["right"]["top"] - primary["enter"]["top"]) <= 1 and 0 <= primary["enter"]["left"] - primary["right"]["right"] <= 8, metrics
     assert primary["enter"]["width"] >= primary["right"]["width"], metrics
@@ -5353,6 +5380,18 @@ def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browse
               send(frame) { window.__mobileModifierFrames.push(JSON.parse(frame)); },
             };
             item.term = item.term || {modes: {}, focus() {}};
+            sendTerminalMobileAccessoryInput('1', 'open');
+            const container = document.getElementById(terminalDomId('1'));
+            document.body.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true, pointerType: 'touch'}));
+            container.dispatchEvent(new KeyboardEvent('keydown', {key: 'a', bubbles: true}));
+            container.dispatchEvent(new Event('paste', {bubbles: true}));
+            container.dispatchEvent(new InputEvent('beforeinput', {bubbles: true, inputType: 'insertText', data: 'a'}));
+            const persistentBeforeModifier = {...terminalMobileAccessoryState('1')};
+            const oneShotTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
+            const oneShotKey = handleTerminalData('1', 'a');
+            const oneShotAfter = {...terminalMobileAccessoryState('1')};
+            const oneShotFrames = window.__mobileModifierFrames.filter(frame => frame.type === 'input');
+            window.__mobileModifierFrames = [];
             const firstTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
             const secondTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
             const lockedHtml = terminalMobileAccessoryHtml('1');
@@ -5362,7 +5401,7 @@ def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browse
             const lockedAfterKeys = {...terminalMobileAccessoryState('1')};
             const offTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
             const offState = {...terminalMobileAccessoryState('1')};
-            return {firstTap, secondTap, firstKey, secondKey, offTap, lockedBefore, lockedAfterKeys, offState, lockedHtml, frames: window.__mobileModifierFrames, errors: window.__bootErrors || []};
+            return {persistentBeforeModifier, oneShotTap, oneShotKey, oneShotAfter, oneShotFrames, firstTap, secondTap, firstKey, secondKey, offTap, lockedBefore, lockedAfterKeys, offState, lockedHtml, frames: window.__mobileModifierFrames, errors: window.__bootErrors || []};
             """
         )
     finally:
@@ -5370,12 +5409,17 @@ def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browse
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
     assert metrics["errors"] == [], metrics
+    assert metrics["persistentBeforeModifier"]["open"] is True, metrics
+    assert metrics["oneShotTap"] is True and metrics["oneShotKey"] is True, metrics
+    assert metrics["oneShotFrames"] == [{"type": "input", "data": "\x01"}], metrics
+    assert metrics["oneShotAfter"]["open"] is True and metrics["oneShotAfter"]["ctrl"] is False, metrics
     assert metrics["firstTap"] is True and metrics["secondTap"] is True, metrics
     assert metrics["lockedBefore"]["ctrl"] is True and metrics["lockedBefore"]["ctrlLocked"] is True, metrics
     assert re.search(r'class="[^"]*\bactive\b[^"]*\blocked\b[^"]*\bmobile-terminal-key--ctrl\b[^"]*"[^>]*data-terminal-mobile-key="ctrl"', metrics["lockedHtml"]), metrics
     assert metrics["firstKey"] is True and metrics["secondKey"] is True, metrics
     assert metrics["frames"] == [{"type": "input", "data": "\x01"}, {"type": "input", "data": "\x02"}], metrics
     assert metrics["lockedAfterKeys"]["ctrl"] is True and metrics["lockedAfterKeys"]["ctrlLocked"] is True, metrics
+    assert metrics["lockedAfterKeys"]["open"] is True, metrics
     assert metrics["offTap"] is True, metrics
     assert metrics["offState"]["ctrl"] is False and metrics["offState"]["ctrlLocked"] is False, metrics
 

@@ -50,6 +50,47 @@ def test_tls_default_is_self_signed_https(monkeypatch, tmp_path):
     assert context is expected_context
     assert loaded == {"certfile": str(cert_path), "keyfile": str(key_path)}
     assert "self-signed HTTPS certificate" in message
+    assert "SAN:" in message
+    assert "tools/setup-tls.sh" in message
+
+
+def test_self_signed_san_includes_localhost_hostname_and_interface_ips(monkeypatch):
+    monkeypatch.setattr(cli, "SERVER_HOSTNAME", "yolomux-host")
+    monkeypatch.setattr(cli, "self_signed_interface_ips", lambda: ("10.110.42.35", "192.168.50.9"))
+
+    assert cli.self_signed_san().split(",") == [
+        "DNS:localhost",
+        "IP:127.0.0.1",
+        "DNS:yolomux-host",
+        "IP:10.110.42.35",
+        "IP:192.168.50.9",
+    ]
+
+
+def test_setup_tls_dry_run_uses_shared_san_and_state_dir(tmp_path):
+    if not cli.shutil.which("openssl"):
+        pytest.skip("openssl is required for the TLS setup contract")
+    state_dir = tmp_path / "state"
+
+    result = subprocess.run(
+        [
+            "bash",
+            "tools/setup-tls.sh",
+            "--dry-run",
+            "--no-trust",
+            "--san",
+            "192.168.50.10",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**cli.os.environ, "YOLOMUX_STATE_DIR": str(state_dir)},
+    )
+
+    assert "DNS:localhost" in result.stdout
+    assert "IP:127.0.0.1" in result.stdout
+    assert "IP:192.168.50.10" in result.stdout
+    assert f"leaf ->    {state_dir}/tls/self-signed.{{crt,key}}" in result.stdout
 
 
 def test_tls_requires_cert_and_key_together():
@@ -295,6 +336,7 @@ def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, ca
 def test_self_signed_cert_generation_is_persistent(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
     monkeypatch.setattr(cli.shutil, "which", lambda name: "/usr/bin/openssl")
+    monkeypatch.setattr(cli, "self_signed_interface_ips", lambda: ("10.110.42.35",))
     calls = []
 
     def fake_run(command, check, stdout, stderr, text):

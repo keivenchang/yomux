@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -114,19 +115,81 @@ def self_signed_cert_paths() -> tuple[Path, Path]:
     return tls_dir / "self-signed.crt", tls_dir / "self-signed.key"
 
 
+def self_signed_interface_ips() -> tuple[str, ...]:
+    addresses: list[str] = []
+
+    def add(value: str, interface: str = "") -> None:
+        if interface.startswith(("docker", "br-", "veth")):
+            return
+        candidate = value.split("%", 1)[0]
+        try:
+            parsed = ipaddress.ip_address(candidate)
+        except ValueError:
+            return
+        if parsed.is_loopback or parsed.is_unspecified or candidate in addresses:
+            return
+        addresses.append(candidate)
+
+    for family, target in (
+        (socket.AF_INET, ("10.255.255.255", 1)),
+        (socket.AF_INET6, ("2001:db8::1", 1, 0, 0)),
+    ):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe:
+                probe.connect(target)
+                add(probe.getsockname()[0])
+        except OSError:
+            pass
+    try:
+        for iface_addr in socket.getaddrinfo(socket.gethostname(), None):
+            add(iface_addr[4][0])
+    except OSError:
+        pass
+    ip_command = shutil.which("ip")
+    if ip_command:
+        try:
+            result = subprocess.run(
+                [ip_command, "-j", "address", "show"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for interface in json.loads(result.stdout):
+                for addr_info in interface.get("addr_info", []):
+                    add(str(addr_info.get("local", "")), str(interface.get("ifname", "")))
+        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, TypeError):
+            pass
+    ifconfig_command = shutil.which("ifconfig")
+    if ifconfig_command:
+        try:
+            result = subprocess.run(
+                [ifconfig_command],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            interface = ""
+            for line in result.stdout.splitlines():
+                if line and not line[0].isspace():
+                    interface = line.split(":", 1)[0]
+                for match in re.finditer(r"\binet6?\s+(?:addr:)?([^\s]+)", line):
+                    add(match.group(1), interface)
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return tuple(addresses)
+
+
 def self_signed_san() -> str:
     names = ["DNS:localhost", "IP:127.0.0.1"]
     if SERVER_HOSTNAME and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", SERVER_HOSTNAME):
         if SERVER_HOSTNAME != "localhost":
             names.append(f"DNS:{SERVER_HOSTNAME}")
-    try:
-        for iface_addrs in socket.getaddrinfo(socket.gethostname(), None):
-            ip = iface_addrs[4][0]
-            entry = f"IP:{ip}"
-            if entry not in names:
-                names.append(entry)
-    except OSError:
-        pass
+    for ip in self_signed_interface_ips():
+        entry = f"IP:{ip}"
+        if entry not in names:
+            names.append(entry)
     return ",".join(names)
 
 
@@ -210,7 +273,11 @@ def tls_context_for_args(args: argparse.Namespace) -> tuple[ssl.SSLContext | Non
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     if generated:
-        return context, f"Using self-signed HTTPS certificate {cert_path}"
+        return context, (
+            f"Using self-signed HTTPS certificate {cert_path} (SAN: {self_signed_san()}). "
+            "Clients reaching this by an IP/hostname not in the SAN will get certificate errors; "
+            "run tools/setup-tls.sh and import the CA on each client."
+        )
     return context, f"Using HTTPS certificate {cert_path}"
 
 

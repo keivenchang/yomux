@@ -2020,7 +2020,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
               shortcutsText: shortcuts?.textContent || '',
                   tabPopoverText: tabPopover?.textContent || '',
                   tabPopoverRect: appRect(tabPopover),
-                  tabPopoverStyle: {left: tabPopover?.style?.left || '', top: tabPopover?.style?.top || '', height: tabPopover?.style?.height || ''},
+                  tabPopoverStyle: {left: tabPopover?.style?.left || '', top: tabPopover?.style?.top || '', width: tabPopover?.style?.width || '', height: tabPopover?.style?.height || ''},
                   tabPopoverDebug: {
                     popover: computedBox(tabPopover),
                     overlay: computedBox(root?.querySelector?.('#appOverlayRoot')),
@@ -2456,7 +2456,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     const popoverRect = appSpaceRect(popover);
                     return publish('tab-hover-popover', {
                       tabPopoverRect: {left: Math.round(popoverRect.left), top: Math.round(popoverRect.top), width: Math.round(popoverRect.width), height: Math.round(popoverRect.height)},
-                      tabPopoverStyle: {left: popover.style.left || '', top: popover.style.top || '', height: popover.style.height || ''},
+                      tabPopoverStyle: {left: popover.style.left || '', top: popover.style.top || '', width: popover.style.width || '', height: popover.style.height || ''},
                     });
                   },
                   async repoPopover() {
@@ -2671,6 +2671,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                 assert abs(int(actual_rect[key]) - int(expected_rect[key])) <= 2, json.dumps(tab, indent=2, sort_keys=True)
             assert tab["tabPopoverStyle"].get("left") == tab["detail"]["tabPopoverStyle"]["left"], tab
             assert tab["tabPopoverStyle"].get("top") == tab["detail"]["tabPopoverStyle"]["top"], tab
+            assert tab["tabPopoverStyle"].get("width") == tab["detail"]["tabPopoverStyle"]["width"], tab
             actual_height = float(str(tab["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
             expected_height = float(str(tab["detail"]["tabPopoverStyle"].get("height") or "0").removesuffix("px"))
             assert abs(actual_height - expected_height) <= 2, tab

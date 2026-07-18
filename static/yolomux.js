@@ -35652,9 +35652,11 @@ function positionPaneTabPopover(tab, popover = null) {
     ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
     : null;
   const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
-  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep file
-  // previews content-sized, but let every session surface share the full owning-pane geometry.
-  const sessionPane = !tabberPane && !popover?.classList?.contains?.('file-popover')
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep its
+  // pane-based anchor, but size it from content so it can span neighbors. File previews retain
+  // their existing content-sized path.
+  const filePopover = popover?.classList?.contains?.('file-popover') === true;
+  const sessionPane = !tabberPane && !filePopover
     ? paneTabPopoverOwningPane(tab)
     : null;
   const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
@@ -35670,11 +35672,21 @@ function positionPaneTabPopover(tab, popover = null) {
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
+  if (!filePopover && !useAvailableInlineWidth && popover?.style) {
+    popover.style.width = 'max-content';
+    popover.style.maxWidth = `${Math.round(maxInline)}px`;
+  }
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
   const paneGutter = sessionPaneRect ? edgeGap : 0;
+  const contentWidth = measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline;
   const width = useAvailableInlineWidth
     ? maxInline
-    : Math.min(maxInline, Math.max(0, (paneRect?.width || 0) - (2 * paneGutter)) || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+    : Math.min(maxInline, contentWidth);
+  const inlineSize = `${Math.round(width)}px`;
+  if (popover?.style) {
+    popover.style.width = inlineSize;
+    popover.style.maxWidth = (!filePopover || useAvailableInlineWidth) ? inlineSize : '';
+  }
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
@@ -35686,14 +35698,11 @@ function positionPaneTabPopover(tab, popover = null) {
   );
   const top = `${Math.round(position.top)}px`;
   const left = `${Math.round(position.left)}px`;
-  const inlineSize = `${Math.round(width)}px`;
   document.documentElement.style.setProperty('--pane-tab-popover-top', top);
   document.documentElement.style.setProperty('--pane-tab-popover-left', left);
   if (popover?.style) {
     popover.style.top = top;
     popover.style.left = left;
-    popover.style.width = inlineSize;
-    popover.style.maxWidth = (paneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }
@@ -67284,7 +67293,6 @@ const terminalMobileAccessoryKeyPresses = new Map();
 const terminalMobileAccessorySuppressedClicks = new Map();
 const terminalMobileAccessoryPaneObservers = new Map();
 const terminalMobileAccessoryModifierTapTimes = new Map();
-let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
 let terminalMobileAccessorySurfaceObserver = null;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
@@ -67367,13 +67375,13 @@ const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
 const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-// Esc renders alone in the top-left corner. Paste fills the left utility column after Ctrl/Shift,
-// leaving the bottom navigation row available for the adjacent Alt/Cmd pair.
+// Esc renders alone in the top-left corner. Shift stays in the left utility column while Ctrl
+// anchors the bottom row before Alt/Cmd; Copy/Paste stack directly beside the navigation grid.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift', 'command-v']);
+const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
-const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
+const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -67759,13 +67767,14 @@ function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
   if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
   if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
-  if (key === 'open' && state.open !== true) {
-    dismissTerminalMobileAccessories(session);
+  if (key === 'open') {
+    if (state.open === true) return true;
     state.palettePlacement = null;
     state.more = false;
+    state.open = true;
+  } else {
+    state[key] = !state[key];
   }
-  state[key] = !state[key];
-  if (key === 'open' && state.open !== true) state.more = false;
   syncTerminalMobileAccessoryState(session);
   return state[key];
 }
@@ -67779,27 +67788,6 @@ function dismissTerminalMobileAccessory(session) {
   state.launcherPress = null;
   syncTerminalMobileAccessoryState(session);
   return true;
-}
-
-function dismissTerminalMobileAccessories(exceptSession = '') {
-  let dismissed = false;
-  for (const session of terminalMobileAccessoryStates.keys()) {
-    if (session === String(exceptSession || '')) continue;
-    dismissed = dismissTerminalMobileAccessory(session) || dismissed;
-  }
-  return dismissed;
-}
-
-function installTerminalMobileAccessoryDismissal() {
-  if (terminalMobileAccessoryDismissalInstalled) return;
-  terminalMobileAccessoryDismissalInstalled = true;
-  // The key palette is an on-demand aid, not persistent pane chrome. A touch outside its own
-  // launcher/palette means the user has resumed another terminal or app action, so close it.
-  document.addEventListener('pointerdown', event => {
-    const target = event.target;
-    if (target?.closest?.('[data-terminal-mobile-keybar], [data-terminal-mobile-toggle]')) return;
-    dismissTerminalMobileAccessories();
-  }, {capture: true, passive: true});
 }
 
 function installTerminalMobileAccessoryResizeSync() {
@@ -67898,7 +67886,6 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   // suppression must not eat this new intentional tap; suppression is only for the immediate
   // click following the drag release that set it.
   state.suppressLauncherClick = false;
-  dismissTerminalMobileAccessories(session);
   const paneRect = pane.getBoundingClientRect();
   const launcherRect = button.getBoundingClientRect();
   const startX = Number.isFinite(state.x) ? state.x : launcherRect.left - paneRect.left;
@@ -68167,6 +68154,7 @@ function sendTerminalMobileAccessoryInput(session, action) {
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
+  if (action === 'close') return dismissTerminalMobileAccessory(session);
   if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
@@ -70770,7 +70758,7 @@ function bindPanelControls(panel, session) {
   delegate(panel, 'click', '[data-terminal-mobile-close]', (event, button) => {
     event.preventDefault();
     event.stopPropagation();
-    sendTerminalMobileAccessoryInput(button.dataset.terminalMobileClose || session, 'open');
+    sendTerminalMobileAccessoryInput(button.dataset.terminalMobileClose || session, 'close');
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
     beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
@@ -72396,7 +72384,6 @@ function bindTerminalContainerForSession(session, term, container) {
   if (!session || !term || !container) return;
   if (container.dataset?.terminalHandlersBound === session) return;
   if (container.dataset) container.dataset.terminalHandlersBound = session;
-  installTerminalMobileAccessoryDismissal();
   installTerminalMobileAccessoryResizeSync();
   installTerminalMobileAccessorySurfaceSync();
   installTerminalContextMenu(session, term, container);
@@ -72414,15 +72401,12 @@ function bindTerminalContainerForSession(session, term, container) {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
   container.addEventListener('keydown', () => {
-    dismissTerminalMobileAccessory(session);
     noteTerminalExplicitInput(session);
   }, {capture: true});
   container.addEventListener('paste', () => {
-    dismissTerminalMobileAccessory(session);
     noteTerminalExplicitInput(session);
   }, {capture: true});
   container.addEventListener('beforeinput', () => {
-    dismissTerminalMobileAccessory(session);
     noteTerminalExplicitInput(session);
   }, {capture: true});
 }

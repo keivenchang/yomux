@@ -905,9 +905,11 @@ function positionPaneTabPopover(tab, popover = null) {
     ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
     : null;
   const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
-  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep file
-  // previews content-sized, but let every session surface share the full owning-pane geometry.
-  const sessionPane = !tabberPane && !popover?.classList?.contains?.('file-popover')
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep its
+  // pane-based anchor, but size it from content so it can span neighbors. File previews retain
+  // their existing content-sized path.
+  const filePopover = popover?.classList?.contains?.('file-popover') === true;
+  const sessionPane = !tabberPane && !filePopover
     ? paneTabPopoverOwningPane(tab)
     : null;
   const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
@@ -923,11 +925,21 @@ function positionPaneTabPopover(tab, popover = null) {
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
+  if (!filePopover && !useAvailableInlineWidth && popover?.style) {
+    popover.style.width = 'max-content';
+    popover.style.maxWidth = `${Math.round(maxInline)}px`;
+  }
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
   const paneGutter = sessionPaneRect ? edgeGap : 0;
+  const contentWidth = measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline;
   const width = useAvailableInlineWidth
     ? maxInline
-    : Math.min(maxInline, Math.max(0, (paneRect?.width || 0) - (2 * paneGutter)) || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+    : Math.min(maxInline, contentWidth);
+  const inlineSize = `${Math.round(width)}px`;
+  if (popover?.style) {
+    popover.style.width = inlineSize;
+    popover.style.maxWidth = (!filePopover || useAvailableInlineWidth) ? inlineSize : '';
+  }
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
@@ -939,14 +951,11 @@ function positionPaneTabPopover(tab, popover = null) {
   );
   const top = `${Math.round(position.top)}px`;
   const left = `${Math.round(position.left)}px`;
-  const inlineSize = `${Math.round(width)}px`;
   document.documentElement.style.setProperty('--pane-tab-popover-top', top);
   document.documentElement.style.setProperty('--pane-tab-popover-left', left);
   if (popover?.style) {
     popover.style.top = top;
     popover.style.left = left;
-    popover.style.width = inlineSize;
-    popover.style.maxWidth = (paneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }

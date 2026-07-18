@@ -246,7 +246,7 @@ Production and development instances can run side-by-side. The project does not 
 | prod | Production checkout | Stable HTTPS port | Stable copy, synced from dev after verification |
 | dev | Any development checkout or git worktree | Non-conflicting HTTPS port | Active development server |
 
-Development servers are self-signed HTTPS by default. Launch them with `--dang --dev` on the port you selected; `--self-signed` remains a redundant compatibility flag, `--cert`/`--key` supplies a certificate, and `--http` is the explicit plain-HTTP test path. If OpenSSL is unavailable and no certificate was supplied, startup warns and falls back to HTTP rather than silently failing. `--dev` enables the browser `/api/dev-reload` stream, so an open tab reloads when `static_build.py` rewrites `static/yolomux.css` or `static/yolomux.js`.
+Development servers are self-signed HTTPS by default. Launch them with `--dang --dev` on the port you selected; `--self-signed` remains a redundant compatibility flag, `--cert`/`--key` supplies a certificate, and `--http` is the explicit plain-HTTP test path. If OpenSSL is unavailable and no certificate was supplied, startup warns and falls back to HTTP rather than silently failing. For warning-free LAN HTTPS, run `tools/setup-tls.sh` once and import its local CA once on each client; rerun the script when adding a new `--san` hostname or IP. `--dev` enables the browser `/api/dev-reload` stream, so an open tab reloads when `static_build.py` rewrites `static/yolomux.css` or `static/yolomux.js`.
 
 For an ad hoc dev run:
 

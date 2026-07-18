@@ -1474,7 +1474,7 @@ globalThis.__layoutTestApi = {
     return state ? {...state} : null;
   },
   toggleTerminalMobileAccessoryStateForTest: toggleTerminalMobileAccessoryState,
-  dismissTerminalMobileAccessoriesForTest: dismissTerminalMobileAccessories,
+  dismissTerminalMobileAccessoryForTest: dismissTerminalMobileAccessory,
   beginTerminalMobileAccessoryLauncherPressForTest: beginTerminalMobileAccessoryLauncherPress,
   moveTerminalMobileAccessoryLauncherPressForTest: moveTerminalMobileAccessoryLauncherPress,
   endTerminalMobileAccessoryLauncherPressForTest: endTerminalMobileAccessoryLauncherPress,

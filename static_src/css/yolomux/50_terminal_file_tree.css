@@ -113,7 +113,7 @@
 .mobile-terminal-key-content[hidden] {
   display: none;
 }
-/* Esc sits alone in the top-left corner. Ctrl/Shift/Paste stay directly below it. */
+/* Esc sits alone in the top-left corner. Shift stays below it; Ctrl anchors the bottom row. */
 .mobile-terminal-key-content > .mobile-terminal-key--escape {
   grid-column: 1;
   grid-row: 1;
@@ -135,6 +135,8 @@
   min-width: 36px;
   padding: 0;
 }
+.mobile-terminal-key-side .mobile-terminal-key--shift { grid-row: 2; }
+.mobile-terminal-key-side .mobile-terminal-key--ctrl { grid-row: 3; }
 .mobile-terminal-keyrow {
   display: flex;
   min-width: 0;
@@ -225,6 +227,7 @@
   touch-action: manipulation;
 }
 .mobile-terminal-key-dpad .mobile-terminal-key--copy { grid-column: 1; grid-row: 1; }
+.mobile-terminal-key-dpad .mobile-terminal-key--command-v { grid-column: 1; grid-row: 2; }
 .mobile-terminal-key-dpad .mobile-terminal-key--alt { grid-column: 1; grid-row: 3; }
 .mobile-terminal-key-dpad .mobile-terminal-key--cmd { grid-column: 2; grid-row: 3; }
 .mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-up { grid-column: 5; grid-row: 1; }
