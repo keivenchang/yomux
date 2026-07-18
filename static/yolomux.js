@@ -50598,6 +50598,7 @@ const debugSystemLocalServiceFields = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu'},
   {key: 'memory', labelKey: 'debug.system.localServices.field.memory'},
   {key: 'clients', labelKey: 'debug.system.localServices.field.clients'},
+  {key: 'generation', labelKey: 'debug.system.localServices.field.generation'},
   {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
   {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
   {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
@@ -50699,6 +50700,7 @@ function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSe
   if (fieldKey === 'cpu') return valueOrPrevious({display: resources.cpu_percent == null ? '—' : `${debugSystemNumber(resources.cpu_percent, 1)}%`, identity: String(resources.cpu_percent ?? '')});
   if (fieldKey === 'memory') return valueOrPrevious({display: resources.rss_bytes == null ? '—' : debugGraphTerseBytesText(resources.rss_bytes), identity: String(resources.rss_bytes ?? '')});
   if (fieldKey === 'clients') return valueOrPrevious({display: service.clients == null ? '—' : debugSystemNumber(service.clients), identity: String(service.clients ?? '')});
+  if (fieldKey === 'generation') return valueOrPrevious({display: service.generation == null ? '—' : debugSystemNumber(service.generation), identity: String(service.generation ?? '')});
   if (fieldKey === 'activeTask') return valueOrPrevious({display: service.active_task || '—', identity: String(service.active_task || '')});
   if (fieldKey === 'lastFailure') return valueOrPrevious({display: service.last_failure || '—', identity: String(service.last_failure || '')});
   if (fieldKey === 'queues') {
