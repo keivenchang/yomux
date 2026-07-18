@@ -118,6 +118,11 @@ def test_two_web_apps_forward_one_shared_statusd_snapshot_without_local_build(mo
     second_app = TmuxWebtermApp(["1"])
     first_app.status_client = StatusClient(socket_path)
     second_app.status_client = StatusClient(socket_path)
+    # Isolate the shared-snapshot forwarding invariant from the read-path attention-ack
+    # merge (which legitimately invalidates statusd when a peer ack is pending). With no
+    # peer acks the merge is a no-op, so both reads share one daemon build.
+    monkeypatch.setattr(first_app, "merge_shared_attention_acks", lambda: False)
+    monkeypatch.setattr(second_app, "merge_shared_attention_acks", lambda: False)
     monkeypatch.setattr(first_app, "build_auto_approve_status", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("first web app built status")))
     monkeypatch.setattr(second_app, "build_auto_approve_status", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("second web app built status")))
     try:
