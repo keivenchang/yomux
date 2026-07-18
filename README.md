@@ -32,7 +32,7 @@ Open `https://localhost:9998/`. The first launch shows a setup page — see [Fir
 
 ## Runtime architecture
 
-YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one supervised `statsd`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. The current YO!stats architecture makes `statsd` the sole database writer and history-serving owner: it stores original observations, usage atoms, coverage epochs, and unavailable spans in schema-versioned `stats-v5.sqlite3`, builds immutable `1s/10s/60s/300s` layers asynchronously, and serves exact cached snapshots/deltas while web processes only authenticate and forward. A normal stats + Quick Open session has three Python processes (`yolomux.py`, `statsd`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one supervised `statsd`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, one lazy `statusd`, and zero or one `approvald` while YO targets are enabled. The current YO!stats architecture makes `statsd` the sole database writer and history-serving owner: it stores original observations, usage atoms, coverage epochs, and unavailable spans in schema-versioned `stats-v5.sqlite3`, builds immutable `1s/10s/60s/300s` layers asynchronously, and serves exact cached snapshots/deltas while web processes only authenticate and forward. `statusd` is the sole owner of the shared public session/agent-status snapshot (lightweight tmux discovery, pane classification, encoded auto-approve bytes) and a private session-inventory contract that other daemon-owned products key work on; web processes only forward its bytes. `jobd` is a bounded CPU broker for stateless registered tasks and typed materialized products (`transcript_view`, `session_files_view`) that serve last-known-good bytes while a newer generation builds. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `indexd`, `statusd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
 
 ```mermaid
 flowchart TB
@@ -60,8 +60,9 @@ flowchart TB
     direction TB
     statsd["statsd\nSTATE_DIR/services/statsd.sock\nsole SQLite writer\nasync four-layer materializer\nexact snapshot/delta cache"]
     indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
-    jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\n60s idle when queue empty"]
+    jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\nlast-known-good product store\n60s idle when queue empty"]
     execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
+    statusd["statusd\nSTATE_DIR/services/statusd.sock\nshared session/agent-status snapshot\nprivate session-inventory contract\n60s idle after leases"]
     approvald["approvald\nSTATE_DIR/services/approvald.sock\ntarget AutoApproveWorker threads\n60s idle after targets stop"]
     jobd --> execs
   end
@@ -98,6 +99,7 @@ flowchart TB
   app <--> statsd
   app <--> indexd
   app <--> jobd
+  app <--> statusd
   app <--> approvald
   statsd <--> statsdb
   indexd --> indexdb
@@ -122,7 +124,7 @@ flowchart TB
   class events,native,signals,owner,caches worker
   class bridge request
   class attach,tmuxctl,tmuxd,pane,fs child
-  class control,statsd,indexd,jobd,execs,approvald local
+  class control,statsd,indexd,jobd,execs,statusd,approvald local
   class statsdb,indexdb,locks,caches_state database
 ```
 
@@ -175,6 +177,7 @@ flowchart TB
     statsd2["statsd\nservices/statsd.sock\nsole writer + materializer\nexact cache"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
+    statusd3["statusd\nservices/statusd.sock\nshared status snapshot\n60s idle"]
     approvald2["approvald\nservices/approvald.sock\nexits when no targets"]
   end
 
@@ -194,6 +197,8 @@ flowchart TB
   app2 --> indexer
   app1 --> jobd2
   app2 --> jobd2
+  app1 --> statusd3
+  app2 --> statusd3
   app1 --> approvald2
   app2 --> approvald2
   statsd2 <--> statsdb
@@ -208,7 +213,7 @@ flowchart TB
   class app1,app2 process
   class sock1,sock2 socket
   class ownerlock,ownerjson,records,statsdb,indexes,caches durable
-  class statsd2,indexer,jobd2,approvald2 localChild
+  class statsd2,indexer,jobd2,statusd3,approvald2 localChild
 ```
 
 | Communication path | Used for | Transport |
