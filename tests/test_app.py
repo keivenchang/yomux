@@ -2683,6 +2683,40 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     assert git_calls == []
 
 
+def test_cached_agent_window_git_inventory_skips_spawn_on_unchanged_watcher_generation(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["mock"])
+    try:
+        calls: list[str] = []
+
+        def fake_inventory(root):
+            calls.append(root)
+            return {"root": root, "branch": "main"}
+
+        monkeypatch.setattr(app_module, "git_inventory", fake_inventory)
+        monkeypatch.setattr(webapp, "watcher_covers_repo", lambda repo: True)
+        generation = {"value": 5}
+        monkeypatch.setattr(webapp, "repo_dirty_generation", lambda root: generation["value"])
+
+        first = webapp.cached_agent_window_git_inventory("/repo")
+        second = webapp.cached_agent_window_git_inventory("/repo")
+        assert first == second == {"root": "/repo", "branch": "main"}
+        # A warm refresh over an unchanged dirty generation reuses the cached inventory (no git spawn).
+        assert calls == ["/repo"]
+
+        generation["value"] = 6
+        webapp.cached_agent_window_git_inventory("/repo")
+        # A dirty-generation bump re-spawns git_inventory.
+        assert calls == ["/repo", "/repo"]
+
+        monkeypatch.setattr(webapp, "watcher_covers_repo", lambda repo: False)
+        webapp.cached_agent_window_git_inventory("/repo")
+        webapp.cached_agent_window_git_inventory("/repo")
+        # An uncovered repo is never cached and always re-spawns, preserving always-fresh behavior.
+        assert len(calls) == 4
+    finally:
+        webapp.control_server.stop()
+
+
 def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(monkeypatch, tmp_path):
     claude_capture = yaml.safe_load((PROMOTED_CAPTURE_DIR / "working_visible_counter__claude-code-2.1.183_20260620.yaml").read_text(encoding="utf-8"))["raw_capture"]
     codex_capture = yaml.safe_load((PROMOTED_CAPTURE_DIR / "working_command_counter__codex-cli-0.141.0_20260620.yaml").read_text(encoding="utf-8"))["raw_capture"]

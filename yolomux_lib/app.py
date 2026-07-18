@@ -368,6 +368,11 @@ ATTENTION_ACK_TTL_SECONDS = 7 * 24 * 3600
 ATTENTION_INSTANCE_MAX_ENTRIES = 2048
 SESSION_FILES_CACHE_MAX_ITEMS = 64
 SESSION_FILES_CACHE_SECONDS = 30.0
+# Agent-window git inventory (branch/dirty/ahead-behind rendered in Tabber/Info Bar) is re-spawned
+# per repo on every tabber/auto-approve refresh. Cache it by the watcher dirty generation so a warm
+# refresh over an unchanged repo skips the `git` spawn, with a short time backstop for watcher misses.
+AGENT_WINDOW_GIT_INVENTORY_MAX_AGE_SECONDS = 10.0
+AGENT_WINDOW_GIT_INVENTORY_CACHE_MAX = 128
 # jobd `session_files_view` product wait budget for the owner-side background refresh worker. The
 # worker runs in a dedicated thread, so a bounded block-poll here keeps the git/discovery CPU in the
 # jobd worker process without ever touching an HTTP request thread.
@@ -1663,6 +1668,8 @@ class TmuxWebtermApp:
         self.activity_heartbeat_next_rotate_at = 0.0
         self.input_heartbeat_record = InputHeartbeatRecord()
         self.session_files_service = SessionFilesService()
+        self.agent_window_git_inventory_cache: dict[str, tuple[int, float, dict[str, Any] | None]] = {}
+        self.agent_window_git_inventory_cache_lock = threading.Lock()
         self.activity_transcript_service = ActivityTranscriptService()
         self.client_watch_service = ClientWatchService()
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
@@ -12249,11 +12256,37 @@ class TmuxWebtermApp:
         if not root:
             return None
         if root not in cache:
-            cache[root] = git_inventory(root)
+            cache[root] = self.cached_agent_window_git_inventory(root)
         git_data = cache[root]
         if not isinstance(git_data, dict):
             return None
         return copy.deepcopy(git_data)
+
+    def cached_agent_window_git_inventory(self, root: str) -> dict[str, Any] | None:
+        # Reuse the session-files watcher generation: when the fs watcher covers the repo, its dirty
+        # generation is authoritative, so an unchanged generation lets a warm refresh skip the git
+        # spawn. A short time backstop bounds staleness if the watcher misses a change; an uncovered
+        # repo always re-spawns (never cached), preserving today's always-fresh behavior there.
+        covers = False
+        try:
+            covers = self.watcher_covers_repo(Path(root))
+        except (OSError, ValueError):
+            covers = False
+        generation = self.repo_dirty_generation(root) if covers else None
+        now = time.monotonic()
+        if generation is not None:
+            with self.agent_window_git_inventory_cache_lock:
+                cached = self.agent_window_git_inventory_cache.get(root)
+                if cached is not None and cached[0] == generation and now - cached[1] <= AGENT_WINDOW_GIT_INVENTORY_MAX_AGE_SECONDS:
+                    return cached[2]
+        git_data = git_inventory(root)
+        if generation is not None:
+            with self.agent_window_git_inventory_cache_lock:
+                self.agent_window_git_inventory_cache[root] = (generation, now, git_data)
+                if len(self.agent_window_git_inventory_cache) > AGENT_WINDOW_GIT_INVENTORY_CACHE_MAX:
+                    oldest = min(self.agent_window_git_inventory_cache, key=lambda key: self.agent_window_git_inventory_cache[key][1])
+                    self.agent_window_git_inventory_cache.pop(oldest, None)
+        return git_data
 
     def agent_window_path_records(
         self,
