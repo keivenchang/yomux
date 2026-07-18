@@ -530,6 +530,13 @@ def test_jobd_product_serves_last_known_good_bytes_across_the_state_taxonomy(tmp
     service.latest_generation["k"] = 2
     meta, body = service._product({"coalesce_key": "k"})
     assert meta["state"] == "stale" and meta["generation"] == 1 and body == b'{"a":1}'
+    # The diagnostics surface (checkbox 10 age/stale-state) counts this honestly.
+    assert service.common_status()["cache"]["products_stale"] == 1
+
+    # Once the newer generation completes, the stored product is current again.
+    newer.future.set_result(b'{"a":2}')
+    service._pump()
+    assert service.common_status()["cache"]["products_stale"] == 0
 
 
 def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_path):

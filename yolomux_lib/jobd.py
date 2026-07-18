@@ -488,7 +488,14 @@ class PersistentJobBroker:
             "worker_count": self.worker_count,
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
-            "cache": {"records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS, "products": len(self.latest_product)},
+            "cache": {
+                "records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS,
+                "products": len(self.latest_product),
+                # A stored product is "stale" when a newer generation for the same coalesce_key has
+                # since been observed (queued, running, or already completed elsewhere) -- an honest
+                # age/staleness signal without exposing raw product bytes/keys in diagnostics.
+                "products_stale": sum(1 for key, (generation, _body, _stored_at) in self.latest_product.items() if self.latest_generation.get(key, generation) > generation),
+            },
             "product_counters": {task: dict(counters) for task, counters in self.product_counters.items()},
             "product_runtime_ms": {
                 task: {"count": int(stats["count"]), "total_ms": round(stats["total_ms"], 3), "max_ms": round(stats["max_ms"], 3), "avg_ms": round(stats["total_ms"] / stats["count"], 3) if stats["count"] else 0.0}
