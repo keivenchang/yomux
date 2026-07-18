@@ -2658,12 +2658,13 @@ async function runShareThemeSuite() {
     assert.equal(popoverLeft, 10);
     assert.equal(popoverForPosition.style.left, '10px', 'session tab popovers align to the owning pane gutter instead of the narrow tab label');
     assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
-    assert.equal(popoverForPosition.style.width, '520px', 'session tab popovers use measured content width even when it exceeds the owning pane');
-    assert.equal(popoverForPosition.style.maxWidth, '520px', 'session content width remains capped through the replayable inline maximum');
+    assert.equal(popoverForPosition.style.width, '520px', 'session tab popovers may use a small amount beyond the owning pane when content needs it');
+    assert.equal(popoverForPosition.style.maxWidth, '520px', 'the bounded session width remains the replayable inline maximum');
     assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
     assert.ok(Number.parseInt(popoverForPosition.style.width, 10) > panelForPopover.getBoundingClientRect().width);
+    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width + 64);
     const tabberPaneForPopover = {
       getBoundingClientRect() {
         return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};

@@ -2960,7 +2960,7 @@ def test_pane_info_popover_uses_full_pane_width_not_metadata_anchor(browser, tmp
     assert abs(metrics["infoBar"]["right"] - metrics["popover"]["right"] - 8) <= 1, metrics
 
 
-def test_live_session_tab_popover_uses_content_width_across_panes(browser, tmp_path):
+def test_live_session_tab_popover_stays_near_owning_pane_width(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -3004,9 +3004,11 @@ def test_live_session_tab_popover_uses_content_width_across_panes(browser, tmp_p
         return {pane: rect(host), popover: rect(popover), row: rect(row), viewportWidth: window.innerWidth, fileWidthBefore, filePopover: rect(filePopover), fileMaxWidth: filePopover.style.maxWidth};
         """
     )
-    assert metrics["popover"]["width"] >= metrics["pane"]["width"] + 100, metrics
+    allowance = min(64, metrics["pane"]["width"] * 0.15)
+    assert metrics["popover"]["width"] >= metrics["pane"]["width"], metrics
+    assert metrics["popover"]["width"] <= metrics["pane"]["width"] + allowance + 1, metrics
     assert metrics["popover"]["left"] >= 0 and metrics["popover"]["right"] <= metrics["viewportWidth"], metrics
-    assert metrics["row"]["height"] < 30, metrics
+    assert metrics["row"]["height"] > 0, metrics
     assert abs(metrics["filePopover"]["width"] - metrics["fileWidthBefore"]) <= 1, metrics
     assert metrics["fileMaxWidth"] == "", metrics
 

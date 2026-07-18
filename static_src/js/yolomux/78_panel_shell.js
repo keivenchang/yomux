@@ -905,9 +905,9 @@ function positionPaneTabPopover(tab, popover = null) {
     ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
     : null;
   const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
-  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep its
-  // pane-based anchor, but size it from content so it can span neighbors. File previews retain
-  // their existing content-sized path.
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Prefer the
+  // owning pane width with one small bounded overflow allowance. File previews retain their
+  // existing content-sized path.
   const filePopover = popover?.classList?.contains?.('file-popover') === true;
   const sessionPane = !tabberPane && !filePopover
     ? paneTabPopoverOwningPane(tab)
@@ -932,9 +932,12 @@ function positionPaneTabPopover(tab, popover = null) {
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
   const paneGutter = sessionPaneRect ? edgeGap : 0;
   const contentWidth = measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline;
+  const paneWidth = Math.max(0, Number(paneRect?.width) || 0);
+  const paneOverflowAllowance = Math.min(64, paneWidth * 0.15);
+  const sessionWidthLimit = paneWidth > 0 ? paneWidth + paneOverflowAllowance : maxInline;
   const width = useAvailableInlineWidth
     ? maxInline
-    : Math.min(maxInline, contentWidth);
+    : Math.min(maxInline, contentWidth, filePopover ? maxInline : sessionWidthLimit);
   const inlineSize = `${Math.round(width)}px`;
   if (popover?.style) {
     popover.style.width = inlineSize;
