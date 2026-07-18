@@ -387,6 +387,32 @@ class SessionFilesJobdUnavailable(RuntimeError):
     Raised out of the owner-side compute so the single-flight record is released and NOTHING stale is
     cached; the next request re-triggers. It never falls back to inline git in the caller's thread.
     """
+TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS = 15_000
+TABBER_ACTIVITY_JOBD_WAIT_SECONDS = 20.0
+TABBER_ACTIVITY_JOBD_POLL_SECONDS = 0.05
+
+
+class TabberActivityJobdUnavailable(RuntimeError):
+    """jobd could not materialize a tabber-activity product for the changed-session batch.
+
+    Raised so the caller can serve last-known-good per-session rows (or the bounded empty shape)
+    instead of falling back to an in-process rebuild of the batch.
+    """
+
+
+METADATA_WARM_JOBD_JOB_DEADLINE_MS = 30_000
+METADATA_WARM_JOBD_WAIT_SECONDS = 25.0
+METADATA_WARM_JOBD_POLL_SECONDS = 0.05
+
+
+class MetadataWarmJobdUnavailable(RuntimeError):
+    """jobd could not materialize a metadata-warm product for the session batch.
+
+    Raised so the caller skips this warm cycle entirely (the periodic warmer retries later) instead
+    of falling back to an in-process GitHub/Linear network fetch or git spawn.
+    """
+
+
 SESSION_FILES_CACHE_VERSION = 1
 SESSION_FILES_CACHE_KEY_VERSION = 4
 SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
@@ -9000,6 +9026,91 @@ class TmuxWebtermApp:
         }
         return self.stable_client_event_payload_signature(signature_payload)
 
+    def tabber_activity_view_coalesce_identity(self, scope: str, bounded_hours: float, source_signature: str) -> tuple[str, int]:
+        """Cross-port product identity for `tabber_activity_view`, derived from the existing
+        per-refresh `source_signature` rather than a new persisted schema field, so this reuses the
+        TabberActivityCacheRecord's current reuse/staleness contract unchanged."""
+        coalesce_key = f"tabber_activity:{scope}:{bounded_hours}:{source_signature}"[:256]
+        generation = int(hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:12], 16)
+        return coalesce_key, generation
+
+    def compute_tabber_activity_rows_via_jobd(
+        self,
+        changed_sessions: dict[str, SessionInfo],
+        *,
+        discovered_sessions: dict[str, SessionInfo],
+        session_files_by_session: dict[str, Any],
+        activity_snapshot: dict[str, Any],
+        preclassified_by_session: dict[str, dict[str, dict[str, Any]]],
+        owned_agent_rows: dict[tuple[str, str, str], dict[str, Any]],
+        snapshot_revision: int,
+        scope: str,
+        bounded_hours: float,
+        source_signature: str,
+        locale: str = "en",
+    ) -> dict[str, dict[str, Any]]:
+        """Gather impure per-session inputs (tmux screen state, attention/cooldown, path/git) in the
+        web owner, then submit the WHOLE changed-session batch to jobd for pure assembly in one call.
+
+        All gathering happens here (a jobd spawn worker has no tmux/app-state access); the worker only
+        reconstructs SessionInfo and runs assemble_agent_window_rows/build_recent_agents_payload.
+        Raises TabberActivityJobdUnavailable (never falls back to inline assembly here) when jobd
+        cannot produce a matching product within the bounded wait; the caller decides the fallback.
+        """
+        if not changed_sessions:
+            return {}
+        sessions_payload: dict[str, Any] = {}
+        for session, info in changed_sessions.items():
+            files_payload = session_files_by_session.get(session, {})
+            transcript_views_by_path: dict[str, dict[str, Any]] = {}
+            for agent in info.agents:
+                if not agent.transcript:
+                    continue
+                view_payload, view_status = self.transcript_compact_view(session, 80, info=info, agent_override=agent)
+                if view_status == HTTPStatus.OK:
+                    transcript_views_by_path[str(agent.transcript)] = view_payload
+            gathered_agents = self.agent_window_gathered_agents(
+                session,
+                info=info,
+                discovered_sessions=discovered_sessions,
+                activity_snapshot=activity_snapshot,
+                preclassified_by_target=preclassified_by_session.get(session),
+                files_payload=files_payload,
+                owned_rows_by_target=owned_agent_rows,
+            )
+            sessions_payload[session] = {
+                "info": asdict(info),
+                "gathered_agents": gathered_agents,
+                "files_payload": files_payload,
+                "transcript_views_by_path": transcript_views_by_path,
+            }
+        coalesce_key, generation = self.tabber_activity_view_coalesce_identity(scope, bounded_hours, source_signature)
+        response = self.job_client.submit(
+            "tabber_activity_view",
+            {"sessions": sessions_payload, "locale": locale, "snapshot_revision": snapshot_revision},
+            priority="freshness",
+            generation=generation,
+            coalesce_key=coalesce_key,
+            deadline_ms=TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS,
+        )
+        if not response.get("ok"):
+            raise TabberActivityJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+        deadline = time.monotonic() + TABBER_ACTIVITY_JOBD_WAIT_SECONDS
+        while True:
+            meta, body = self.job_client.product(coalesce_key)
+            if not meta.get("ok"):
+                raise TabberActivityJobdUnavailable("jobd product rpc unavailable")
+            state = str(meta.get("state") or "")
+            if body and state in {"ready", "stale"} and int(meta.get("generation") or 0) >= generation:
+                data = json.loads(body.decode("utf-8"))
+                rows = data.get("session_rows") if isinstance(data, dict) else None
+                if not isinstance(rows, dict):
+                    raise TabberActivityJobdUnavailable("malformed jobd tabber-activity product")
+                return rows
+            if time.monotonic() >= deadline:
+                raise TabberActivityJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+            time.sleep(TABBER_ACTIVITY_JOBD_POLL_SECONDS)
+
     def build_activity_payload(self, session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
         session_names, scope_errors, scope = self.activity_session_names(session_scope)
         bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
@@ -9045,8 +9156,8 @@ class TmuxWebtermApp:
             previous_signatures = dict(record.session_signatures) if can_reuse else {}
             previous_rows = copy.deepcopy(record.session_rows) if can_reuse else {}
         session_rows: dict[str, dict[str, Any]] = {}
-        rebuilt = 0
         reused = 0
+        changed_sessions: dict[str, SessionInfo] = {}
         for session, info in agent_infos.items():
             signature = session_signatures[session]
             previous = previous_rows.get(session)
@@ -9054,33 +9165,37 @@ class TmuxWebtermApp:
                 session_rows[session] = previous
                 reused += 1
                 continue
-            files_payload = session_files_by_session.get(session, {})
-            transcript_views_by_path: dict[str, dict[str, Any]] = {}
-            for agent in info.agents:
-                if not agent.transcript:
-                    continue
-                view_payload, view_status = self.transcript_compact_view(session, 80, info=info, agent_override=agent)
-                if view_status == HTTPStatus.OK:
-                    transcript_views_by_path[str(agent.transcript)] = view_payload
-            session_rows[session] = {
-                "agents": build_recent_agents_payload(
-                    {session: info},
-                    [session],
-                    session_files_by_session={session: files_payload},
-                    transcript_views_by_path=transcript_views_by_path,
-                ),
-                "agent_windows": self.agent_window_status_payloads(
-                    session,
-                    info=info,
+            changed_sessions[session] = info
+        rebuilt = 0
+        if changed_sessions:
+            try:
+                jobd_rows = self.compute_tabber_activity_rows_via_jobd(
+                    changed_sessions,
                     discovered_sessions=sessions,
+                    session_files_by_session=session_files_by_session,
                     activity_snapshot=activity_snapshot,
-                    preclassified_by_target=preclassified_by_session.get(session),
-                    files_payload=files_payload,
-                    owned_rows_by_target=owned_agent_rows,
+                    preclassified_by_session=preclassified_by_session,
+                    owned_agent_rows=owned_agent_rows,
                     snapshot_revision=snapshot_revision,
-                ),
-            }
-            rebuilt += 1
+                    scope=scope,
+                    bounded_hours=bounded_hours,
+                    source_signature=self.stable_client_event_payload_signature(sorted(session_signatures.items())),
+                )
+                for session in changed_sessions:
+                    row = jobd_rows.get(session)
+                    if isinstance(row, dict):
+                        session_rows[session] = row
+                        rebuilt += 1
+            except TabberActivityJobdUnavailable as exc:
+                logger.info("tabber activity batch refresh deferred (jobd) for %d session(s): %s", len(changed_sessions), exc)
+            # A changed session jobd could not (re)compute keeps serving its last-known-good rows
+            # (stale) rather than substituting an empty payload; a genuinely new session with no
+            # prior rows gets an explicit empty shape instead of vanishing from the response.
+            for session in changed_sessions:
+                if session in session_rows:
+                    continue
+                previous = previous_rows.get(session)
+                session_rows[session] = previous if isinstance(previous, dict) else {"agents": [], "agent_windows": []}
         agents = [
             agent
             for session in ordered_sessions
@@ -10316,6 +10431,54 @@ class TmuxWebtermApp:
 
         common.start_thread_with_rollback(worker, rollback)
 
+    def metadata_warm_view_coalesce_identity(self, source_signature: str) -> tuple[str, int]:
+        """Cross-port product identity for `metadata_warm_view`, so two web ports warming the same
+        unchanged session set dedupe to one worker execution instead of two GitHub/Linear round trips."""
+        coalesce_key = f"metadata_warm:{source_signature}"[:256]
+        generation = int(hashlib.sha256(source_signature.encode("utf-8")).hexdigest()[:12], 16)
+        return coalesce_key, generation
+
+    def warm_metadata_cache_via_jobd(self, sessions: dict[str, SessionInfo]) -> None:
+        """Materialize GitHub/Linear/git metadata for `sessions` in a jobd worker, then replay the
+        returned cache entries into `self.metadata_cache`.
+
+        ALL network calls and git spawns happen in the jobd worker. Raises
+        `MetadataWarmJobdUnavailable` (never falls back to an inline network fetch) so the caller
+        skips this warm cycle and the next periodic warm retries.
+        """
+        sessions_payload = {name: asdict(info) for name, info in sessions.items()}
+        source_signature = self.stable_client_event_payload_signature(sessions_payload)
+        coalesce_key, generation = self.metadata_warm_view_coalesce_identity(source_signature)
+        response = self.job_client.submit(
+            "metadata_warm_view",
+            {"sessions": sessions_payload},
+            priority="maintenance",
+            generation=generation,
+            coalesce_key=coalesce_key,
+            deadline_ms=METADATA_WARM_JOBD_JOB_DEADLINE_MS,
+        )
+        if not response.get("ok"):
+            raise MetadataWarmJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+        deadline = time.monotonic() + METADATA_WARM_JOBD_WAIT_SECONDS
+        while True:
+            meta, body = self.job_client.product(coalesce_key)
+            if not meta.get("ok"):
+                raise MetadataWarmJobdUnavailable("jobd product rpc unavailable")
+            state = str(meta.get("state") or "")
+            if body and state in {"ready", "stale"} and int(meta.get("generation") or 0) >= generation:
+                data = json.loads(body.decode("utf-8"))
+                entries = data.get("entries") if isinstance(data, dict) else None
+                if not isinstance(entries, dict):
+                    raise MetadataWarmJobdUnavailable("malformed jobd metadata-warm product")
+                for key, entry in entries.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    self.metadata_cache.set(key, entry.get("value"), ttl=self.float_value(entry.get("ttl_remaining"), 0.0))
+                return
+            if time.monotonic() >= deadline:
+                raise MetadataWarmJobdUnavailable(f"jobd product not ready (state={state or 'none'})")
+            time.sleep(METADATA_WARM_JOBD_POLL_SECONDS)
+
     def warm_metadata_cache(self, sessions: dict[str, SessionInfo], stop_event: threading.Event) -> None:
         refresh_needed = False
         try:
@@ -10323,11 +10486,18 @@ class TmuxWebtermApp:
                 for info in sessions.values():
                     if stop_event.is_set():
                         break
-                    session_work_graph(info, self.metadata_cache, allow_network=True)
+                    # One jobd round trip per session (not one batched submission for the whole
+                    # sessions dict) so a demotion between sessions stops here, before the NEXT
+                    # session's network/git work is ever submitted -- the same between-session
+                    # granularity the old inline loop had.
+                    try:
+                        self.warm_metadata_cache_via_jobd({info.session: info})
+                    except MetadataWarmJobdUnavailable as exc:
+                        logger.info("metadata warm deferred (jobd) for session %s: %s", info.session, exc)
                     if stop_event.is_set():
                         break
-                    # The foreground payload intentionally avoids GitHub work. Once this worker
-                    # fills that cache, rebuild only when the canonical graph actually changed;
+                    # The foreground payload intentionally avoids GitHub work. Once the jobd warm
+                    # above fills the cache, rebuild only when the canonical graph actually changed;
                     # otherwise a warm build would leave YO!info showing its stale no-PR graph
                     # until a later unrelated refresh, or continuously schedule itself.
                     enriched_graph = session_work_graph(info, self.metadata_cache, allow_network=False)
@@ -12385,6 +12555,37 @@ class TmuxWebtermApp:
         owned_rows_by_target: dict[tuple[str, str, str], dict[str, Any]] | None = None,
         snapshot_revision: int = 0,
     ) -> list[dict[str, Any]]:
+        gathered_agents = self.agent_window_gathered_agents(
+            session,
+            info=info,
+            discovered_sessions=discovered_sessions,
+            activity_snapshot=activity_snapshot,
+            preclassified_by_target=preclassified_by_target,
+            files_payload=files_payload,
+            include_path_metadata=include_path_metadata,
+            owned_rows_by_target=owned_rows_by_target,
+        )
+        return assemble_agent_window_rows(gathered_agents, snapshot_revision=snapshot_revision)
+
+    def agent_window_gathered_agents(
+        self,
+        session: str,
+        *,
+        info: SessionInfo | None = None,
+        discovered_sessions: dict[str, SessionInfo] | None = None,
+        activity_snapshot: dict[str, Any] | None = None,
+        preclassified_by_target: dict[str, dict[str, Any]] | None = None,
+        files_payload: dict[str, Any] | None = None,
+        include_path_metadata: bool = True,
+        owned_rows_by_target: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Impure per-agent gathering: tmux screen state, attention/cooldown, path/git.
+
+        Returns the same JSON-serializable `gathered_agents` shape `assemble_agent_window_rows`
+        consumes, so a caller may either assemble it locally (the default,
+        `agent_window_status_payloads`) or batch it into a jobd `tabber_activity_view` submission
+        for sessions whose signature changed, deferring only the pure assembly/sort to the worker.
+        """
         if info is None:
             info = discovered_sessions.get(session) if discovered_sessions is not None else None
         if info is None:
@@ -12482,7 +12683,7 @@ class TmuxWebtermApp:
                 "cooldown_acknowledged_at": self.attention_acknowledged_at(cooldown_attention_key) if cooldown_attention_key else None,
                 "owned": (owned_rows_by_target or {}).get((session, str(agent.pane_target or ""), kind)),
             })
-        return assemble_agent_window_rows(gathered_agents, snapshot_revision=snapshot_revision)
+        return gathered_agents
 
     def auto_approve_session_status(
         self,

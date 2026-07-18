@@ -9,8 +9,14 @@ from pathlib import Path
 
 import pytest
 
+from yolomux_lib import activity_summary
+from yolomux_lib import github_client
 from yolomux_lib import jobd
+from yolomux_lib import metadata as metadata_module
 from yolomux_lib import session_files
+from yolomux_lib.common import AgentInfo
+from yolomux_lib.common import PaneInfo
+from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import TmuxPaneInfo
@@ -123,6 +129,127 @@ def test_session_files_view_bounding_trims_files_and_sets_truncated_flag():
     assert truncated is True
     assert len(json.dumps(payload, separators=(",", ":")).encode("utf-8")) <= 4096
     assert len(payload["files"]) < 200
+
+
+def _sample_gathered_agent(session, *, screen_text=""):
+    return {
+        "kind": "claude", "state": "idle", "window": "0", "window_index": 0, "window_name": "w", "window_label": "0:claude",
+        "pane": "0", "pane_target": f"{session}:0.0", "pid": 1, "window_is_current": True, "paths": [], "path_entries": [], "fallback_path": "",
+        "git": None, "transcript": "", "transcript_id": "", "agent_session_id": "", "elapsed": -1.0, "last_active_ts": 0.0,
+        "working_stopped_ts": 0.0, "observed_ts": 1.0, "screen_text": screen_text, "status_tokens": None, "agent_index": 0,
+        "attention_key": "", "attention_acknowledged": None, "attention_acknowledged_at": None,
+        "cooldown_attention_key": "", "cooldown_acknowledged": None, "cooldown_acknowledged_at": None, "owned": None,
+    }
+
+
+def _sample_tabber_session_payload(session):
+    pane = PaneInfo(session=session, window="0", window_name="w", pane="0", pane_id=f"%{session}", target=f"{session}:0.0", current_path="/repo", command="claude", active=True, window_active=True, title="claude", pid=1)
+    agent = AgentInfo(session, "claude", 1, f"{session}:0.0", "claude", "/repo", None, None, None, None)
+    info = SessionInfo(session=session, panes=[pane], selected_pane=pane, agents=[agent])
+    return {
+        "info": asdict(info),
+        "gathered_agents": [_sample_gathered_agent(session, screen_text="secret prompt text should never leak into diagnostics")],
+        "files_payload": {},
+        "transcript_views_by_path": {},
+    }
+
+
+def test_tabber_activity_view_task_is_pure_and_produces_deterministic_rows():
+    payload = {"sessions": {"1": _sample_tabber_session_payload("1")}, "locale": "en", "snapshot_revision": 7}
+    result = json.loads(jobd.run_registered_task("tabber_activity_view", json.dumps(payload).encode("utf-8")))
+
+    assert result["truncated"] is False
+    assert set(result["session_rows"]) == {"1"}
+    assert result["session_rows"]["1"]["agent_windows"][0]["kind"] == "claude"
+    assert len(result["session_rows"]["1"]["agents"]) == 1
+    # Running it again with identical input is byte-for-byte identical (pure function).
+    again = json.loads(jobd.run_registered_task("tabber_activity_view", json.dumps(payload).encode("utf-8")))
+    assert again == result
+
+
+def test_tabber_activity_view_task_rejects_malformed_or_oversized_payload():
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("tabber_activity_view", json.dumps({"sessions": "not-an-object"}).encode("utf-8"))
+    too_many = {str(index): _sample_tabber_session_payload(str(index)) for index in range(activity_summary.TABBER_ACTIVITY_VIEW_MAX_SESSIONS + 1)}
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("tabber_activity_view", json.dumps({"sessions": too_many}).encode("utf-8"))
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("tabber_activity_view", b"{" + b" " * (jobd.JOBD_MAX_PAYLOAD_BYTES + 1))
+
+
+def test_tabber_activity_view_task_never_leaks_live_screen_text_beyond_its_own_field():
+    # The worker is pure assembly: it must not fabricate or duplicate screen text into any other
+    # field, and must not require/perform any tmux/attention read of its own.
+    payload = {"sessions": {"1": _sample_tabber_session_payload("1")}, "locale": "en", "snapshot_revision": 1}
+    result = json.loads(jobd.run_registered_task("tabber_activity_view", json.dumps(payload).encode("utf-8")))
+    row = result["session_rows"]["1"]["agent_windows"][0]
+    assert row["screen_text"] == "secret prompt text should never leak into diagnostics"
+    # The recent-agents row (a different display surface) must not carry the raw screen text.
+    assert "secret prompt text" not in json.dumps(result["session_rows"]["1"]["agents"])
+
+
+def test_tabber_activity_view_task_bounds_result_by_evicting_whole_sessions():
+    sessions = {str(index): _sample_tabber_session_payload(str(index)) for index in range(20)}
+    payload = {"sessions": sessions, "locale": "en", "snapshot_revision": 1}
+    result = activity_summary.tabber_activity_view_result(payload, max_bytes=2048)
+    assert result["truncated"] is True
+    assert len(result["session_rows"]) < 20
+    assert len(json.dumps(result, separators=(",", ":")).encode("utf-8")) <= 2048
+
+
+def test_metadata_warm_view_task_populates_cache_entries_from_a_real_session_work_graph(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    git(repo, "remote", "add", "origin", "git@github.com:acme/repo.git")
+    git(repo, "checkout", "-b", "feature/one")
+
+    def fake_branch_payload(repo_dict, branch):
+        if branch != "feature/one":
+            return []
+        return [{"number": 5, "state": "open", "draft": True, "title": "a PR", "html_url": ""}]
+
+    monkeypatch.setattr(github_client, "github_pull_requests_by_branch_payload", fake_branch_payload)
+    payload = {"sessions": {"1": _session_info_json("1", repo)}}
+    result = json.loads(jobd.run_registered_task("metadata_warm_view", json.dumps(payload).encode("utf-8")))
+
+    assert result["truncated"] is False
+    matches = {key: value for key, value in result["entries"].items() if key.startswith("github-pr-branch:acme/repo:feature/one")}
+    assert matches
+    entry = next(iter(matches.values()))
+    assert entry["value"][0]["number"] == 5
+    assert 0 < entry["ttl_remaining"] <= metadata_module.METADATA_CACHE_TTL_SECONDS
+    # Running it again with the same fake network response reproduces the same materialized value
+    # (a fresh worker-local cache each run, never carried over from a prior invocation).
+    again = json.loads(jobd.run_registered_task("metadata_warm_view", json.dumps(payload).encode("utf-8")))
+    again_matches = {key: value for key, value in again["entries"].items() if key.startswith("github-pr-branch:acme/repo:feature/one")}
+    assert next(iter(again_matches.values()))["value"] == entry["value"]
+
+
+def test_metadata_warm_view_task_rejects_malformed_or_oversized_payload():
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("metadata_warm_view", json.dumps({"sessions": "not-an-object"}).encode("utf-8"))
+    too_many = {str(index): {} for index in range(metadata_module.METADATA_WARM_VIEW_MAX_SESSIONS + 1)}
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("metadata_warm_view", json.dumps({"sessions": too_many}).encode("utf-8"))
+    with pytest.raises(ValueError):
+        jobd.run_registered_task("metadata_warm_view", b"{" + b" " * (jobd.JOBD_MAX_PAYLOAD_BYTES + 1))
+
+
+def test_metadata_warm_view_bounds_result_by_evicting_lowest_ttl_entries_first(monkeypatch):
+    def fake_session_work_graph(info, cache, allow_network=True):
+        for index in range(200):
+            cache.set(f"github-pr:acme/repo:{info.session}:{index}", {"number": index, "title": "x" * 128}, ttl=10.0 + index)
+        return {}
+
+    monkeypatch.setattr(metadata_module, "session_work_graph", fake_session_work_graph)
+    payload = {"sessions": {"1": _session_info_json("1", "/repo")}}
+    result = metadata_module.metadata_warm_view_result(payload, max_bytes=2048)
+
+    assert result["truncated"] is True
+    assert len(result["entries"]) < 200
+    assert len(json.dumps(result, separators=(",", ":")).encode("utf-8")) <= 2048
+    # The lowest-remaining-TTL entries (index 0, 1, ...) are the ones evicted first.
+    assert "github-pr:acme/repo:1:0" not in result["entries"]
 
 
 def _wait_for_result(client: jobd.JobClient, job_id: str) -> dict:
@@ -498,8 +625,12 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
 def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v3 added the materialized-product layer (product RPC + last-known-good store + counters).
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
-    assert jobd.JOBD_PROTOCOL_VERSION == 4
+    # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
+    # v6 registered the `metadata_warm_view` task; the fence retires a v5 daemon that lacks it.
+    assert jobd.JOBD_PROTOCOL_VERSION == 6
     assert "session_files_view" in jobd.REGISTERED_TASKS
+    assert "tabber_activity_view" in jobd.REGISTERED_TASKS
+    assert "metadata_warm_view" in jobd.REGISTERED_TASKS
     assert jobd.JOBD_PROTOCOL_VERSION != jobd.LOCAL_RPC_VERSION
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import re
 import threading
@@ -36,6 +37,7 @@ from .github_client import summarize_github_checks  # noqa: F401 - re-exported f
 from .linear_client import linear_issue_metadata
 from .locales import message_fields
 from .session_files import scan_agent_changes
+from .session_files import session_info_from_json
 from .session_files import session_touched_dirs
 from .settings import settings_payload
 from .workdir import numbered_session_workdir
@@ -1402,6 +1404,48 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
     annotate_worktree_activity(graph)
     validate_work_graph(graph)
     return graph
+
+
+METADATA_WARM_VIEW_MAX_SESSIONS = 64
+
+
+def metadata_warm_view_result(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    """Warm the GitHub/Linear/git metadata cache for a batch of sessions in a worker.
+
+    Runs the exact network/subprocess work `session_work_graph(..., allow_network=True)` does today
+    on the web process's background thread, but against a fresh, worker-local `MetadataCache` instead
+    of the shared in-process one. Returns every cache entry the run populated (key, value, remaining
+    TTL) so the caller can replay them into its own long-lived `MetadataCache` via `.set(key, value,
+    ttl=...)`, reproducing an in-process warm without the web process ever making a network call or
+    git spawn itself.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("metadata_warm_view payload must be an object")
+    raw_sessions = payload.get("sessions")
+    if not isinstance(raw_sessions, dict):
+        raise ValueError("metadata_warm_view sessions must be an object")
+    if len(raw_sessions) > METADATA_WARM_VIEW_MAX_SESSIONS:
+        raise ValueError("metadata_warm_view sessions exceed the bounded session limit")
+    cache = MetadataCache()
+    for info_data in raw_sessions.values():
+        if not isinstance(info_data, dict):
+            continue
+        info = session_info_from_json(info_data)
+        session_work_graph(info, cache, allow_network=True)
+    now = time.time()
+    entries = {
+        key: {"value": value, "ttl_remaining": max(0.0, expires_at - now)}
+        for key, (expires_at, value) in cache.values.items()
+    }
+    result = {"entries": entries, "truncated": False}
+    # A pathological fan-out of branches/PRs/Linear issues is bounded by evicting the
+    # lowest-remaining-TTL entries first -- those are the ones a caller can most safely defer
+    # re-fetching, since they were already closest to a natural cache expiry.
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > max_bytes and entries:
+        oldest_key = min(entries, key=lambda key: entries[key].get("ttl_remaining", 0.0))
+        entries.pop(oldest_key, None)
+        result["truncated"] = True
+    return result
 
 
 def validate_work_graph(graph: dict[str, Any]) -> None:

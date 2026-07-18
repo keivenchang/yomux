@@ -13,6 +13,7 @@ from yolomux_lib import background_owner as background_owner_module
 from yolomux_lib import control as control_module
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
+from yolomux_lib import metadata as metadata_module
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SESSION_FILES
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SEARCH_INDEX
 from yolomux_lib.background_owner import BACKGROUND_ROLE_STATS_SAMPLER
@@ -826,7 +827,32 @@ def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch
             second_release.wait(timeout=2.0)
         return {}
 
+    # The network/git warm itself now runs inside a jobd `metadata_warm_view` task (one
+    # submission per session, so a demotion between sessions still stops here before the NEXT
+    # session's job is ever submitted). `metadata.session_work_graph` is the name that task calls;
+    # `app_module.session_work_graph` is only the (unrelated) allow_network=False comparison call.
     monkeypatch.setattr(app_module, "session_work_graph", graph)
+    monkeypatch.setattr(metadata_module, "session_work_graph", graph)
+    coalesce_keys = set()
+    payloads_by_key = {}
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "metadata_warm_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        payloads_by_key[coalesce_key] = payload
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        result = metadata_module.metadata_warm_view_result(payloads_by_key[coalesce_key], max_bytes=512 * 1024)
+        return {"ok": True, "state": "ready", "generation": 2**62}, json.dumps(result).encode("utf-8")
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
     sessions = {
         name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
         for name in ("first", "second")

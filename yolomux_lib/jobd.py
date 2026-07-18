@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import session_files
+from .activity_summary import tabber_activity_view_result
 from .common import STATE_DIR
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
@@ -37,6 +38,7 @@ from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
 from .local_services.client import LocalServiceClient
 from .metadata import _discover_indexed_repo_roots
+from .metadata import metadata_warm_view_result
 from .transcripts import compact_transcript_items
 from .transcripts import compact_transcript_items_since
 from .transcripts import compact_transcript_lines
@@ -49,7 +51,9 @@ from .transcripts import transcript_activity_state_from_text
 # registered task/result contract changes so a newly restarted web process retires an older daemon.
 # v3: added the materialized-product layer (last-known-good store + `product` RPC + per-product counters).
 # v4: registered the `session_files_view` task; a v3 daemon lacks it, so the fence retires the old one.
-JOBD_PROTOCOL_VERSION = 4
+# v5: registered the `tabber_activity_view` task; a v4 daemon lacks it, so the fence retires the old one.
+# v6: registered the `metadata_warm_view` task; a v5 daemon lacks it, so the fence retires the old one.
+JOBD_PROTOCOL_VERSION = 6
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_MAX_WORKERS = 2
 JOBD_MAX_QUEUE = 64
@@ -186,10 +190,36 @@ def _session_files_view(payload: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _tabber_activity_view(payload: bytes) -> bytes:
+    """Assemble bounded Tabber rows for changed sessions from pre-gathered data in a worker.
+
+    Pure assembly only (dict merge/sort) -- the web owner does all impure gathering (tmux capture,
+    live attention/cooldown, git) before submitting. The orchestrator lives in ``activity_summary``
+    (import-safe, no app/web) so it is unit-testable without a broker socket.
+    """
+    value = json.loads(payload.decode("utf-8"))
+    result = tabber_activity_view_result(value, max_bytes=JOBD_MAX_RESULT_BYTES - 4096)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _metadata_warm_view(payload: bytes) -> bytes:
+    """Warm GitHub/Linear PR status and Linear issue metadata for a batch of sessions in a worker.
+
+    ALL GitHub/Linear network calls and git spawns happen here, never on the web process's
+    background thread. The orchestrator lives in ``metadata`` (import-safe, no app/web) so it is
+    unit-testable without a broker socket.
+    """
+    value = json.loads(payload.decode("utf-8"))
+    result = metadata_warm_view_result(value, max_bytes=JOBD_MAX_RESULT_BYTES - 4096)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 REGISTERED_TASKS = {
     "indexed_repo_roots": _indexed_repo_roots,
     "json_compact": _json_compact,
+    "metadata_warm_view": _metadata_warm_view,
     "session_files_view": _session_files_view,
+    "tabber_activity_view": _tabber_activity_view,
     "text_facts": _text_facts,
     "transcript_view": _transcript_view,
 }

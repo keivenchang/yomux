@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import pytest
 import yaml
 
+from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
 from yolomux_lib import common
 from yolomux_lib import metadata
@@ -3252,6 +3253,7 @@ def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monke
         return {session: {"files": [], "repos": []} for session in infos}
 
     webapp.cached_session_files_payloads_for_infos = fake_cached_session_files_payloads
+    _install_fake_tabber_activity_jobd(monkeypatch, webapp)
     try:
         activity = webapp.build_activity_payload()
         updated = []
@@ -3312,6 +3314,7 @@ def test_activity_payload_all_scope_uses_visible_tmux_sessions(monkeypatch):
         return {session: {"files": [], "repos": []} for session in infos}
 
     webapp.cached_session_files_payloads_for_infos = fake_cached_session_files_payloads_for_infos
+    _install_fake_tabber_activity_jobd(monkeypatch, webapp)
     try:
         configured = webapp.build_activity_payload()
         all_sessions = webapp.build_activity_payload(session_scope="all", hours=0.5)
@@ -3340,28 +3343,18 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     }
     current_infos = dict(infos)
     screens = {"%1": {"key": "idle", "text": ""}, "%2": {"key": "idle", "text": ""}}
-    row_builds = []
-    recent_builds = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({session: current_infos[session] for session in sessions if session in current_infos}, []))
-    monkeypatch.setattr(
-        app_module,
-        "build_recent_agents_payload",
-        lambda sessions, ordered, session_files_by_session=None, **_kwargs: recent_builds.append(tuple(ordered)) or [{"session": ordered[0]}],
-    )
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: [session for session in ("2", "1") if session in (session_names or [])]
     webapp.cached_session_files_payloads_for_infos = lambda agent_infos, hours=24.0: {session: {"files": [], "repos": [], "errors": []} for session in agent_infos}
     webapp.activity_snapshot_with_recency = lambda snapshot=None: {"1": {"last_user_input_ts": 10}, "2": {"last_user_input_ts": 20}}
     webapp.agent_window_screen_state = lambda agent, preclassified_by_target=None: dict(screens[agent.pane_target])
     webapp.merge_shared_attention_acks = lambda: False
-
-    def build_windows(session, **kwargs):
-        row_builds.append(session)
-        screen = kwargs["preclassified_by_target"][f"%{session}"]
-        return [{"session": session, "state": webapp.agent_window_state_from_screen(screen)}]
-
-    webapp.agent_window_status_payloads = build_windows
+    # `compute_tabber_activity_rows_via_jobd` submits one batch per `build_activity_payload()` call
+    # containing every session whose signature changed since the last call, so this replaces the
+    # old per-session `row_builds`/`recent_builds` tracking (now internal to the jobd task).
+    submitted_session_batches = _install_fake_tabber_activity_jobd(monkeypatch, webapp)
     try:
         first = webapp.build_activity_payload()
         second = webapp.build_activity_payload()
@@ -3381,8 +3374,7 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     assert "2" not in deleted["agent_windows"]
     assert "2" not in webapp.activity_transcript_service.tabber_cache_record.session_rows
     assert acknowledged["agent_windows"]["1"][0]["state"] == "idle"
-    assert row_builds == ["2", "1", "2", "1"]
-    assert recent_builds == [("2",), ("1",), ("2",), ("1",)]
+    assert submitted_session_batches == [["1", "2"], ["2"], ["1"]]
 
 
 def test_session_files_and_tabber_refreshes_are_per_target_single_flight(monkeypatch, tmp_path):
@@ -3786,10 +3778,13 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
 
     def fake_session_work_graph(_info, _cache, allow_network=True):
         calls.append(allow_network)
-        return enriched_graph if not allow_network else metadata.empty_work_graph()
+        return enriched_graph
 
     monkeypatch.setattr(app_module, "session_work_graph", fake_session_work_graph)
     webapp = app_module.TmuxWebtermApp(["5"])
+    # The jobd network/git warm itself is tested independently (test_jobd.py); here only the
+    # downstream "did the graph actually change" comparison is under test.
+    monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions: calls.append("jobd"))
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
         monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
@@ -3797,7 +3792,7 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
     finally:
         webapp.control_server.stop()
 
-    assert calls == [True, False]
+    assert calls == ["jobd", False]
     assert refreshes == [(True, True)]
 
 
@@ -3815,6 +3810,7 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
 
     monkeypatch.setattr(app_module, "session_work_graph", fake_session_work_graph)
     webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions: None)
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
         monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
@@ -3823,6 +3819,38 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
         webapp.control_server.stop()
 
     assert refreshes == []
+
+
+def test_warm_metadata_cache_via_jobd_replays_product_entries_into_metadata_cache(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
+
+    def fake_session_work_graph(_info, cache, allow_network=True):
+        cache.set("github-pr-branch:acme/repo:main", {"number": 9, "state": "open"}, ttl=120.0)
+        return metadata.empty_work_graph()
+
+    monkeypatch.setattr(metadata, "session_work_graph", fake_session_work_graph)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    submitted = _install_fake_metadata_warm_jobd(monkeypatch, webapp)
+    try:
+        webapp.warm_metadata_cache_via_jobd({"5": info})
+    finally:
+        webapp.control_server.stop()
+
+    assert submitted == [["5"]]
+    assert webapp.metadata_cache.get("github-pr-branch:acme/repo:main") == {"number": 9, "state": "open"}
+
+
+def test_warm_metadata_cache_via_jobd_raises_when_jobd_submit_is_rejected(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp.job_client, "submit", lambda *args, **kwargs: {"ok": False, "error": "queue full"})
+    try:
+        with pytest.raises(app_module.MetadataWarmJobdUnavailable):
+            webapp.warm_metadata_cache_via_jobd({"5": info})
+    finally:
+        webapp.control_server.stop()
 
 
 def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatch):
@@ -4250,6 +4278,77 @@ def _install_fake_session_files_jobd(monkeypatch, webapp, response):
     monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
     monkeypatch.setattr(webapp.job_client, "product", fake_product)
     return calls
+
+
+def _install_fake_tabber_activity_jobd(monkeypatch, webapp):
+    """Mock only the `tabber_activity_view` jobd product; every other task still goes through the
+    real job_client. Runs the REAL activity_summary.tabber_activity_view_result end-to-end (an
+    honest simulation, not canned data), so the web-side gathering (agent_window_gathered_agents,
+    which still uses whatever screen-state/discover_sessions mocks the calling test installed)
+    feeds a real pure assembly. Returns the list of session names submitted per call, in order,
+    so a test can assert which sessions were rebuilt without reaching into the old in-process call
+    points that this migration retired."""
+    submitted_session_batches: list[list[str]] = []
+    coalesce_keys: set[str] = set()
+    payloads_by_key: dict[str, dict] = {}
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "tabber_activity_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        payloads_by_key[coalesce_key] = payload
+        submitted_session_batches.append(sorted(payload.get("sessions", {}).keys()))
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        # compute_tabber_activity_rows_via_jobd reads {"session_rows": ...} directly from the
+        # product body -- unlike session_files_view, there is no {"payload": ..., "status": ...}
+        # envelope for this product.
+        result = activity_summary.tabber_activity_view_result(payloads_by_key[coalesce_key], max_bytes=512 * 1024)
+        body = json.dumps(result).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
+    return submitted_session_batches
+
+
+def _install_fake_metadata_warm_jobd(monkeypatch, webapp):
+    """Mock only the `metadata_warm_view` jobd product; every other task still goes through the
+    real job_client. Runs the REAL metadata.metadata_warm_view_result end-to-end (a session's live
+    `session_work_graph(..., allow_network=True)` call happens for real against whatever
+    `metadata.session_work_graph`/network mocks the calling test installed), proving the returned
+    entries actually replay into `webapp.metadata_cache`."""
+    submitted_session_batches: list[list[str]] = []
+    coalesce_keys: set[str] = set()
+    payloads_by_key: dict[str, dict] = {}
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "metadata_warm_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        payloads_by_key[coalesce_key] = payload
+        submitted_session_batches.append(sorted(payload.get("sessions", {}).keys()))
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        # compute reads {"entries": ...} directly from the product body -- no {"payload": ...,
+        # "status": ...} envelope, matching the tabber_activity_view convention.
+        result = metadata.metadata_warm_view_result(payloads_by_key[coalesce_key], max_bytes=512 * 1024)
+        body = json.dumps(result).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
+    return submitted_session_batches
 
 
 def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp_path):

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from .common import SessionInfo
 from .common import is_generated_upload_name
 from .common import tail_file_lines
 from .common import truncate_text
+from .session_files import session_info_from_json
 from .transcripts import compact_transcript_items
 from .transcripts import newest_transcript_activity_timestamp
 from .transcripts import session_transcript_activity_state
@@ -412,6 +414,59 @@ def build_recent_agents_payload(
         item.pop("_session_order", None)
         item.pop("_agent_order", None)
     return rows
+
+
+TABBER_ACTIVITY_VIEW_MAX_SESSIONS = 64
+
+
+def tabber_activity_view_result(payload: dict[str, Any], *, max_bytes: int) -> dict[str, Any]:
+    """Assemble bounded Tabber rows for a batch of CHANGED sessions from pre-gathered data.
+
+    This task is deliberately pure: it never captures a tmux pane, reads live attention/cooldown
+    state, or spawns git -- the web owner gathers all of that (impure, cannot run in a spawn worker)
+    and this worker only reconstructs SessionInfo from JSON, then runs the same pure
+    `build_recent_agents_payload` + `assemble_agent_window_rows` the web process used before this
+    migration. The caller merges the returned changed-session rows with its own locally-retained
+    reused-session rows; this task never sees unchanged sessions.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("tabber_activity_view payload must be an object")
+    raw_sessions = payload.get("sessions")
+    if not isinstance(raw_sessions, dict):
+        raise ValueError("tabber_activity_view sessions must be an object")
+    if len(raw_sessions) > TABBER_ACTIVITY_VIEW_MAX_SESSIONS:
+        raise ValueError("tabber_activity_view sessions exceed the bounded session limit")
+    locale = str(payload.get("locale") or "en")
+    snapshot_revision = int(payload.get("snapshot_revision") or 0)
+    session_rows: dict[str, Any] = {}
+    for session, raw in raw_sessions.items():
+        if not isinstance(raw, dict):
+            continue
+        info_data = raw.get("info")
+        if not isinstance(info_data, dict):
+            continue
+        info = session_info_from_json(info_data)
+        gathered_agents = raw.get("gathered_agents")
+        files_payload = raw.get("files_payload") if isinstance(raw.get("files_payload"), dict) else {}
+        transcript_views_by_path = raw.get("transcript_views_by_path") if isinstance(raw.get("transcript_views_by_path"), dict) else {}
+        session_rows[str(session)] = {
+            "agents": build_recent_agents_payload(
+                {session: info},
+                [session],
+                session_files_by_session={session: files_payload},
+                transcript_views_by_path=transcript_views_by_path,
+                locale=locale,
+            ),
+            "agent_windows": assemble_agent_window_rows(gathered_agents if isinstance(gathered_agents, list) else [], snapshot_revision=snapshot_revision),
+        }
+    result = {"session_rows": session_rows}
+    truncated = False
+    while len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > max_bytes and session_rows:
+        oldest_session = next(iter(session_rows))
+        session_rows.pop(oldest_session, None)
+        truncated = True
+    result["truncated"] = truncated
+    return result
 
 
 def activity_signature(info: SessionInfo, work: dict[str, Any], files_payload: dict[str, Any]) -> dict[str, Any]:
