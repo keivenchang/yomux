@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import types
 from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
 from pathlib import Path
 from threading import Thread
 
@@ -216,3 +217,58 @@ def test_web_status_byte_forwarder_never_calls_in_process_status_builder(monkeyp
 
     assert body is encoded
     assert status == 200
+
+
+def test_web_read_returns_service_unavailable_without_building_when_statusd_down(monkeypatch):
+    # Case A: statusd reports unavailable. The web read must forward a structured 503 and never fall
+    # back to building status in the web process.
+    app = TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app, "merge_shared_attention_acks", lambda: False)
+    monkeypatch.setattr(app.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: ({"ok": False, "status": int(HTTPStatus.SERVICE_UNAVAILABLE), "error": "unavailable"}, b""))
+    monkeypatch.setattr(app, "build_auto_approve_status", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("web must not build status when statusd is down")))
+    try:
+        body, status = app.auto_approve_status_bytes()
+    finally:
+        app.control_server.stop()
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert body == b'{"error":"status service unavailable"}'
+
+
+def test_web_read_forwards_stale_bytes_when_statusd_build_fails_after_invalidation(monkeypatch, tmp_path):
+    # Case B: a real statusd builds once, is invalidated, then its next build fails. The web read must
+    # forward the retained stale bytes (stale=True) without the web process building anything, and
+    # statusd's successful build_count must stay at 1.
+    FakeStatusApp.builds = 0
+    FakeStatusApp.fail = False
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
+    socket_path = tmp_path / "services" / "statusd.sock"
+    service = statusd.PersistentStatusService(socket_path, idle_seconds=60.0)
+    thread = Thread(target=service.run, daemon=True)
+    thread.start()
+    web_app = TmuxWebtermApp(["1"])
+    web_app.status_client = StatusClient(socket_path)
+    monkeypatch.setattr(web_app, "merge_shared_attention_acks", lambda: False)
+    monkeypatch.setattr(web_app, "build_auto_approve_status", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("web must not build status")))
+    try:
+        fresh_body, fresh_status = web_app.auto_approve_status_bytes()
+        assert fresh_status == 200
+        assert service.status()["build_count"] == 1
+
+        web_app.status_client.invalidate("auto_approve")
+        FakeStatusApp.fail = True
+
+        response, raw_body = web_app.status_client.snapshot(["1"])
+        stale_body, stale_status = web_app.auto_approve_status_bytes()
+    finally:
+        web_app.control_server.stop()
+        web_app.status_client.request({"action": "shutdown"})
+        thread.join(timeout=2.0)
+
+    assert response["ok"] is True
+    assert response["stale"] is True
+    assert raw_body == fresh_body
+    assert stale_status == 200
+    assert stale_body == fresh_body
+    assert service.status()["build_count"] == 1
+    assert thread.is_alive() is False

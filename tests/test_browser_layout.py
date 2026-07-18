@@ -5874,7 +5874,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         claude_prompted, claude_pane = wait_for_claude_plan_prompt(sessions["claude"])
         assert claude_prompted, f"Claude did not render the real plan approval prompt:\n{claude_pane}"
 
-        prompted_status_payload, prompted_status = app.auto_approve_status()
+        prompted_status_payload, prompted_status = app.build_auto_approve_status()
         assert prompted_status == HTTPStatus.OK, prompted_status_payload
         prompted_payloads = {
             agent: prompted_status_payload["sessions"][session]

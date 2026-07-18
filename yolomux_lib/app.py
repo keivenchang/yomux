@@ -304,17 +304,6 @@ class MetadataWarmRecord:
     stop_event: threading.Event = field(default_factory=threading.Event)
 
 
-@dataclass
-class AutoApproveCacheRecord:
-    payload: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]] | None = None
-    worker: object | None = None
-    generation: int = 0
-    # Agent-window state is classified while building the auto-approve roster.  Consumers
-    # must be able to identify that immutable classification rather than independently
-    # reclassifying the same tmux screen during the same refresh.
-    agent_window_snapshot_revision: int = 0
-
-
 @dataclass(frozen=True)
 class AgentWindowAttentionInstance:
     cooldown_generation: int = 0
@@ -416,7 +405,6 @@ SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-
 SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 1.5
 SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
-AUTO_APPROVE_CACHE_MAX_AGE_SECONDS = 5.003
 # Stats can safely use the last agent-status snapshot while the existing asynchronous refresher
 # collects the next one. This keeps collection from synchronously recapturing every tmux pane.
 AUTO_APPROVE_STATS_CACHE_MAX_AGE_SECONDS = 15.0
@@ -1665,8 +1653,6 @@ class TmuxWebtermApp:
         self.session_files_service = SessionFilesService()
         self.activity_transcript_service = ActivityTranscriptService()
         self.client_watch_service = ClientWatchService()
-        self.auto_approve_cache_condition = threading.Condition(threading.RLock())
-        self.auto_approve_cache_record = AutoApproveCacheRecord()
         self.tmux_signal_cache = TtlCache(TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS, max_entries=1)
         self.tmux_signal_event_watcher: TmuxSignalEventWatcher | None = None
         self.client_watch_service.tmux_signal_payload: dict[str, Any] | None = None
@@ -1895,21 +1881,6 @@ class TmuxWebtermApp:
         except (StatusProtocolError, UnicodeDecodeError, json.JSONDecodeError):
             return None
         return payload if isinstance(payload, dict) else None
-
-    def fresh_auto_approve_payload_for_stats(self) -> AutoApproveStatusPayload | None:
-        with self.auto_approve_cache_condition:
-            cached = self.auto_approve_cache_record.payload
-            if cached is None:
-                return None
-            stored_at, (payload, status) = cached
-            if status != HTTPStatus.OK:
-                return None
-            age_seconds = time.monotonic() - stored_at
-            if not isinstance(payload, dict):
-                return None
-        if age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS:
-            self.start_auto_approve_cache_refresh()
-        return copy.deepcopy(payload)
 
     @staticmethod
     def agent_window_snapshot_rows_by_target(payload: AutoApproveStatusPayload) -> tuple[int, dict[tuple[str, str, str], dict[str, Any]]]:
@@ -12000,12 +11971,8 @@ class TmuxWebtermApp:
         return acknowledged_at if acknowledged_at > 0 else None
 
     def invalidate_auto_approve_cache(self) -> None:
-        with self.auto_approve_cache_condition:
-            record = self.auto_approve_cache_record
-            record.payload = None
-            record.worker = None
-            record.generation += 1
-            self.auto_approve_cache_condition.notify_all()
+        # statusd owns the retained status bytes; the web process only tells the daemon to
+        # rebuild on the next snapshot. There is no in-web status cache to clear anymore.
         self.status_client.invalidate("auto_approve")
 
     def _read_shared_attention_acks_locked(self) -> tuple[dict[str, float], int]:
@@ -12511,122 +12478,15 @@ class TmuxWebtermApp:
             payload["timings"] = dict(timings)
         return payload, HTTPStatus.OK
 
-    def auto_approve_cache_payload(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
-        _, (payload, status) = cached
-        age_seconds = self.auto_approve_cache_age_seconds(cached)
-        result = copy.deepcopy(payload)
-        result["cache"] = {
-            "age_seconds": round(age_seconds, 3),
-            "max_age_seconds": AUTO_APPROVE_CACHE_MAX_AGE_SECONDS,
-            "refreshing": self.auto_approve_cache_record.worker is not None,
-            "stale": age_seconds > AUTO_APPROVE_CACHE_MAX_AGE_SECONDS,
-        }
-        return result, status
-
-    def auto_approve_cache_age_seconds(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> float:
-        return max(0.0, time.monotonic() - cached[0])
-
-    def auto_approve_cache_is_fresh(self, cached: tuple[float, tuple[AutoApproveStatusPayload, HTTPStatus]]) -> bool:
-        return self.auto_approve_cache_age_seconds(cached) <= AUTO_APPROVE_CACHE_MAX_AGE_SECONDS
-
-    def set_auto_approve_cache(self, payload: AutoApproveStatusPayload, status: HTTPStatus, generation: int, worker: object) -> bool:
-        with self.auto_approve_cache_condition:
-            record = self.auto_approve_cache_record
-            if record.generation != generation or record.worker is not worker:
-                return False
-            cached_payload = copy.deepcopy(payload)
-            if status == HTTPStatus.OK:
-                record.agent_window_snapshot_revision += 1
-                cached_payload["agent_window_snapshot_revision"] = record.agent_window_snapshot_revision
-            record.payload = (time.monotonic(), (cached_payload, status))
-            record.worker = None
-            self.auto_approve_cache_condition.notify_all()
-            return True
-
-    def finish_auto_approve_cache_refresh(self, generation: int, worker: object) -> bool:
-        with self.auto_approve_cache_condition:
-            record = self.auto_approve_cache_record
-            if record.generation != generation or record.worker is not worker:
-                return False
-            record.worker = None
-            self.auto_approve_cache_condition.notify_all()
-            return True
-
-    def run_auto_approve_cache_refresh(self, generation: int, worker: object) -> None:
-        try:
-            timings: dict[str, float] = {}
-            payload, status = self.build_auto_approve_status(timings=timings)
-            if isinstance(payload, dict):
-                payload["timings"] = dict(timings)
-            self.set_auto_approve_cache(payload, status, generation, worker)
-        except Exception:
-            logger.exception("auto-approve cache refresh failed")
-            self.finish_auto_approve_cache_refresh(generation, worker)
-
-    def start_auto_approve_cache_refresh(self) -> bool:
-        with self.auto_approve_cache_condition:
-            record = self.auto_approve_cache_record
-            if record.worker is not None:
-                return False
-            record.generation += 1
-            generation = record.generation
-            worker = object()
-            record.worker = worker
-        thread = threading.Thread(target=self.run_auto_approve_cache_refresh, args=(generation, worker), name="auto-approve-cache-refresh", daemon=True)
-        try:
-            thread.start()
-        except Exception:
-            self.finish_auto_approve_cache_refresh(generation, worker)
-            raise
-        return True
-
-    def refresh_auto_approve_cache_sync(self, require_fresh: bool = False) -> tuple[AutoApproveStatusPayload, HTTPStatus]:
-        while True:
-            with self.auto_approve_cache_condition:
-                record = self.auto_approve_cache_record
-                while record.worker is not None and (record.payload is None or (require_fresh and not self.auto_approve_cache_is_fresh(record.payload))):
-                    self.auto_approve_cache_condition.wait(timeout=0.5)
-                if record.payload is not None and (not require_fresh or self.auto_approve_cache_is_fresh(record.payload)):
-                    return self.auto_approve_cache_payload(record.payload)
-                record.generation += 1
-                generation = record.generation
-                worker = object()
-                record.worker = worker
-            try:
-                timings: dict[str, float] = {}
-                payload, status = self.build_auto_approve_status(timings=timings)
-                if isinstance(payload, dict):
-                    payload["timings"] = dict(timings)
-                if not self.set_auto_approve_cache(payload, status, generation, worker):
-                    continue
-                with self.auto_approve_cache_condition:
-                    cached = self.auto_approve_cache_record.payload
-                    assert cached is not None
-                    return self.auto_approve_cache_payload(cached)
-            except Exception:
-                self.finish_auto_approve_cache_refresh(generation, worker)
-                raise
-
-    def auto_approve_status(self, session: str | None = None) -> tuple[AutoApproveState | AutoApproveStatusPayload, HTTPStatus]:
-        # Cross-process push and SSE polling are latency optimizations, not correctness boundaries.
-        # A peer can miss both while disconnected, so every explicit status read must first observe
-        # the shared acknowledgement revision and discard a cache built before that revision.
-        if self.merge_shared_attention_acks():
-            self.invalidate_auto_approve_cache()
-        if session is not None:
-            timings: dict[str, float] = {}
-            return self.build_auto_approve_status(session, timings=timings)
-        with self.auto_approve_cache_condition:
-            cached = self.auto_approve_cache_record.payload
-            if cached is not None:
-                if not self.auto_approve_cache_is_fresh(cached):
-                    self.start_auto_approve_cache_refresh()
-                return self.auto_approve_cache_payload(cached)
-        return self.refresh_auto_approve_cache_sync()
-
     def auto_approve_status_bytes(self, session: str | None = None) -> tuple[bytes, HTTPStatus]:
         """Return daemon-owned status bytes without web-side discovery or encoding."""
 
+        # Attention-ack ownership stays in WEB, not statusd. Cross-process push and SSE polling
+        # are latency optimizations, not correctness boundaries: a peer can miss both while
+        # disconnected. Merge the shared acknowledgement revision on every explicit read and, when
+        # it advances, invalidate statusd so the next snapshot rebuilds against the acked revision.
+        if self.merge_shared_attention_acks():
+            self.status_client.invalidate("auto_approve")
         response, body = self.status_client.snapshot(self.sessions, session=session, timeout=1.0)
         if response.get("ok") is not True or not body:
             status = int(response.get("status") or HTTPStatus.SERVICE_UNAVAILABLE)

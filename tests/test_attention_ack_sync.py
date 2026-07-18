@@ -72,22 +72,24 @@ def test_auto_approve_read_merges_peer_ack_without_event_subscriber(monkeypatch,
     key = first.attention_ack_key("prompt", "1", "cross-port-read")
     first.acknowledge_attention({"keys": [key]})
 
-    monkeypatch.setattr(second, "refresh_sessions", lambda maintenance=False: [])
-    monkeypatch.setattr(second, "sync_auto_approve_agent_workers", lambda takeover=False: None)
-    monkeypatch.setattr(second, "activity_snapshot_with_recency", lambda snapshot=None: {})
-    monkeypatch.setattr(second, "prompt_and_screen_status", lambda *args, **kwargs: (
-        {"visible": True, "signature": "cross-port-read", "text": "Needs input"},
-        {"key": "needs-input", "text": "Needs input"},
+    # The byte-forwarder GET path owns the merge-on-read: statusd builds the bytes, but the web
+    # process must still observe the peer's acknowledgement revision even with no SSE subscriber.
+    invalidations = []
+    monkeypatch.setattr(second.status_client, "invalidate", lambda reason: invalidations.append(reason) or {"ok": True})
+    monkeypatch.setattr(second.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: (
+        {"ok": True, "protocol_version": 1, "generation": 3, "status": int(HTTPStatus.OK), "stale": False, "built_at": 1.0},
+        b'{"target":"1"}',
     ))
-    monkeypatch.setattr(second, "agent_window_status_payloads", lambda *args, **kwargs: [])
 
-    payload, status = second.auto_approve_status("1")
+    assert second.attention_acknowledged(key) is False
+
+    body, status = second.auto_approve_status_bytes("1")
 
     assert status == HTTPStatus.OK
-    assert payload["prompt_attention_key"] == key
-    assert payload["prompt_attention_acknowledged"] is True
-    assert "attention_acks" not in payload
-    assert payload["attention_ack_revision"] >= 1
+    assert body == b'{"target":"1"}'
+    assert second.attention_acknowledged(key) is True
+    assert second.client_watch_service.attention_ack_rev >= 1
+    assert invalidations == ["auto_approve"]
 
 
 def test_auto_approve_change_invalidates_local_cache_and_pushes_to_peer_without_poll(monkeypatch, tmp_path, make_app):
@@ -100,8 +102,10 @@ def test_auto_approve_change_invalidates_local_cache_and_pushes_to_peer_without_
         status_session=lambda session: [{"target": "%1", "enabled": True}] if session == "1" else [],
         stop_session=lambda session: {"ok": session == "1"},
     )
-    first.auto_approve_cache_record.payload = (time.monotonic(), ({"sessions": {"1": {"enabled": True}}}, HTTPStatus.OK))
-    second.auto_approve_cache_record.payload = (time.monotonic(), ({"sessions": {"1": {"enabled": True}}}, HTTPStatus.OK))
+    first_invalidations = []
+    second_invalidations = []
+    monkeypatch.setattr(first.status_client, "invalidate", lambda reason: first_invalidations.append(reason) or {"ok": True})
+    monkeypatch.setattr(second.status_client, "invalidate", lambda reason: second_invalidations.append(reason) or {"ok": True})
     monkeypatch.setattr(first, "auto_approve_session_status", lambda session: {"session": session, "enabled": False})
     monkeypatch.setattr(first, "log_event", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -114,8 +118,10 @@ def test_auto_approve_change_invalidates_local_cache_and_pushes_to_peer_without_
 
     assert status == HTTPStatus.OK
     assert payload["enabled"] is False
-    assert first.auto_approve_cache_record.payload is None
-    assert second.auto_approve_cache_record.payload is None
+    # No in-web cache remains: both the acting process and the peer follower invalidate statusd,
+    # and the peer's SSE subscriber still gets the change without polling.
+    assert first_invalidations == ["auto_approve"]
+    assert second_invalidations == ["auto_approve"]
     assert subscriber_queue.get_nowait()["type"] == "auto_approve_changed"
 
 
@@ -143,25 +149,27 @@ def test_auto_approve_roster_read_discards_cache_from_before_peer_ack(monkeypatc
     second = make_app()
     key = first.attention_ack_key("prompt", "1", "cross-port-cached-read")
 
-    monkeypatch.setattr(second, "refresh_sessions", lambda maintenance=False: [])
-    monkeypatch.setattr(second, "sync_auto_approve_agent_workers", lambda takeover=False: None)
-    monkeypatch.setattr(second, "activity_snapshot_with_recency", lambda snapshot=None: {})
-    monkeypatch.setattr(second, "prompt_and_screen_status", lambda *args, **kwargs: (
-        {"visible": True, "signature": "cross-port-cached-read", "text": "Needs input"},
-        {"key": "needs-input", "text": "Needs input"},
+    # A roster read taken before the peer ack must not leave the peer serving a statusd generation
+    # built before that ack: the next explicit read merges the new revision and invalidates statusd.
+    invalidations = []
+    monkeypatch.setattr(second.status_client, "invalidate", lambda reason: invalidations.append(reason) or {"ok": True})
+    monkeypatch.setattr(second.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: (
+        {"ok": True, "protocol_version": 1, "generation": 1, "status": int(HTTPStatus.OK), "stale": False, "built_at": 1.0},
+        b'{"session_order":["1"],"sessions":{}}',
     ))
-    monkeypatch.setattr(second, "agent_window_status_payloads", lambda *args, **kwargs: [])
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
 
-    before, before_status = second.auto_approve_status()
+    _before, before_status = second.auto_approve_status_bytes()
+    assert before_status == HTTPStatus.OK
+    assert invalidations == []
+    assert second.attention_acknowledged(key) is False
+
     first.acknowledge_attention({"keys": [key]})
-    after, after_status = second.auto_approve_status()
+    _after, after_status = second.auto_approve_status_bytes()
 
-    assert before_status == after_status == HTTPStatus.OK
-    assert before["sessions"]["1"]["prompt_attention_acknowledged"] is False
-    assert after["sessions"]["1"]["prompt_attention_acknowledged"] is True
-    assert "attention_acks" not in after["sessions"]["1"]
-    assert after["sessions"]["1"]["attention_ack_revision"] >= 1
+    assert after_status == HTTPStatus.OK
+    assert invalidations == ["auto_approve"]
+    assert second.attention_acknowledged(key) is True
+    assert second.client_watch_service.attention_ack_rev >= 1
 
 
 def test_attention_ack_union_does_not_clobber_peer_keys(monkeypatch, tmp_path, make_app):
