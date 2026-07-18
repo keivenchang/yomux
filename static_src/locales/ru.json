@@ -375,6 +375,7 @@
   "debug.system.localServices.field.generation": "Generation",
   "debug.system.localServices.field.lastFailure": "Last failure",
   "debug.system.localServices.field.lastRan": "Last ran",
+  "debug.system.localServices.field.lastSuccess": "Last success",
   "debug.system.localServices.field.memory": "Memory",
   "debug.system.localServices.field.pid": "PID",
   "debug.system.localServices.field.products": "Products",

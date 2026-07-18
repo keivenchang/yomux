@@ -632,6 +632,7 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "debug.system.localServices.field.generation",
     "debug.system.localServices.field.lastFailure",
     "debug.system.localServices.field.lastRan",
+    "debug.system.localServices.field.lastSuccess",
     "debug.system.localServices.field.memory",
     "debug.system.localServices.field.pid",
     "debug.system.localServices.field.products",
@@ -682,6 +683,7 @@ I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
 I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
 I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"debug.summary", "searchHistory.summary", "transcript.role.summary"}): "view labels and a transcript role need different grammar",
+    frozenset({"debug.system.localServices.field.lastSuccess", "debug.system.sampler.header.lastOk.full"}): "daemon diagnostic field and sampler-family table header are different display contexts",
     frozenset({"dialog.delete.kindFile", "popover.kind.file", "yolo.rule.source.file"}): "file kind, popover metadata, and rule source need different grammar",
     frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
     frozenset({"debug.cost.cache", "debug.system.localServices.field.cache"}): "token-cost cache row and local-service record cache are different concepts",

@@ -50600,6 +50600,7 @@ const debugSystemLocalServiceFields = Object.freeze([
   {key: 'clients', labelKey: 'debug.system.localServices.field.clients'},
   {key: 'generation', labelKey: 'debug.system.localServices.field.generation'},
   {key: 'activeTask', labelKey: 'debug.system.localServices.field.activeTask'},
+  {key: 'lastSuccess', labelKey: 'debug.system.localServices.field.lastSuccess'},
   {key: 'lastFailure', labelKey: 'debug.system.localServices.field.lastFailure'},
   {key: 'queues', labelKey: 'debug.system.localServices.field.queues'},
   {key: 'cache', labelKey: 'debug.system.localServices.field.cache'},
@@ -50711,6 +50712,10 @@ function debugSystemLocalServiceFieldValue(service = {}, record, fieldKey, nowSe
   if (fieldKey === 'generation') return valueOrPrevious({display: service.generation == null ? '—' : debugSystemNumber(service.generation), identity: String(service.generation ?? '')});
   if (fieldKey === 'activeTask') return valueOrPrevious({display: service.active_task || '—', identity: String(service.active_task || '')});
   if (fieldKey === 'lastFailure') return valueOrPrevious({display: service.last_failure || '—', identity: String(service.last_failure || '')});
+  if (fieldKey === 'lastSuccess') {
+    const lastSuccess = Number(service.last_success || 0);
+    return valueOrPrevious(lastSuccess > 0 ? {display: relativeTimeFormat(Math.max(0, nowSeconds - lastSuccess)), identity: String(lastSuccess), dynamic: true} : {display: '—', identity: 'empty'});
+  }
   if (fieldKey === 'queues') {
     const queueText = debugSystemQueueText(service);
     return valueOrPrevious({display: queueText || '—', identity: queueText});

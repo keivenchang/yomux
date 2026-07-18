@@ -247,9 +247,10 @@ def test_runtime_local_services_jobd_row_exposes_product_counters_and_cache(monk
         })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
             "service": "jobd", "pid": 4242, "resources": {},
-            "cache": {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2},
+            "cache": {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2, "products_stale": 1},
             "product_counters": {"transcript_view": {"accepted": 5, "coalesced": 2, "completed": 4, "failed": 0, "superseded": 1}},
             "product_runtime_ms": {"transcript_view": {"count": 4, "total_ms": 240.0, "max_ms": 90.0, "avg_ms": 60.0}},
+            "last_success": 1784386100.0,
         })
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()["services"]
@@ -257,7 +258,8 @@ def test_runtime_local_services_jobd_row_exposes_product_counters_and_cache(monk
         webapp.control_server.stop()
 
     jobd_row = next(row for row in services if row["service"] == "jobd")
-    assert jobd_row["cache"] == {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2}
+    assert jobd_row["cache"] == {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2, "products_stale": 1}
+    assert jobd_row["last_success"] == 1784386100.0
     assert jobd_row["product_counters"]["transcript_view"]["completed"] == 4
     assert jobd_row["product_counters"]["transcript_view"]["accepted"] == 5
     # Checkbox 10: per-product runtime totals/maxima reach the same diagnostics surface.
