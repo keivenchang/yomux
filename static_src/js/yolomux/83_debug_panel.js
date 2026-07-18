@@ -431,7 +431,7 @@ const jsDebugStatsFamilyByModelTokenDimension = Object.freeze(Object.fromEntries
   .filter(([, entry]) => entry.modelTokenDimension).map(([family, entry]) => [entry.modelTokenDimension, family])));
 const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Servers load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Daemons load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
@@ -2917,7 +2917,7 @@ function debugGraphNiceAxisMax(value, unit) {
   if (unit === 'bytesPerSecond') return debugGraphNiceBytesPerSecondAxisMax(value);
   if (unit === 'tokens') return Math.max(1, debugGraphNiceCeil(value));
   if (unit === 'tokensPerMinute') return Math.max(1, debugGraphNiceCeil(value));
-  // Percent charts without a fixed 0-100 axis (e.g. Servers Load, where a single
+  // Percent charts without a fixed 0-100 axis (e.g. Daemons load, where a single
   // multi-core service can exceed 100%) still need round tick steps. A 1/2/5
   // ceil keeps the max and its half-step both round (100->50, 50->25, 20->10)
   // instead of the raw data max (the 88.3% / 44.1% ticks in the report).

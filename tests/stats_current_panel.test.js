@@ -92,7 +92,7 @@ test('CPU promotes the newest sampled owner instead of covering it with a duplic
 });
 
 test('all established chart controls and semantic renderers remain present', () => {
-  for (const label of ['CPU', 'Servers load', 'Sys mem', 'Agent #', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
+  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agent #', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
     assert.ok(source.includes(`toggleLabelEn: '${label}'`), label);
   }
   for (const token of ['data-js-debug-range-slider', 'data-js-debug-resolution-override', 'data-js-debug-chart-layout', 'data-js-debug-chart-close']) {

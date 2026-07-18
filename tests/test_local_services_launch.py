@@ -172,7 +172,7 @@ def test_parse_ps_cpu_seconds_covers_ps_time_shapes():
 
 def test_registry_resources_reads_cpu_and_rss_via_ps_without_proc(tmp_path, monkeypatch):
     # macOS/BSD have no /proc; the per-service CPU/RSS probe was Linux-only, so
-    # every service reported `—` and the Servers Load chart was empty on macOS.
+    # every service reported `—` and the Daemons load chart was empty on macOS.
     monkeypatch.setattr(registry_mod.platform, "system", lambda: "Darwin")
     outputs = iter(["  2048   0:01.00\n", "  4096   0:03.00\n"])
 

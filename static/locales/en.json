@@ -274,7 +274,7 @@
   "debug.graph.chart.memory.desc": "Host system memory in use against total capacity, sampled by the server.",
   "debug.graph.chart.modelTokens": "Model tokens/min",
   "debug.graph.chart.modelTokens.desc": "Model token throughput per minute by billable/cache token dimension from recorded usage.",
-  "debug.graph.chart.serversLoad": "Servers Load",
+  "debug.graph.chart.serversLoad": "Daemons load",
   "debug.graph.chart.serversLoad.desc": "CPU percent for each local YOLOmux service, sampled every 10 seconds.",
   "debug.graph.clientWork": "Client work | animations {animations} | long tasks {tasks}{timing}",
   "debug.graph.clientWorkTiming": " avg {average}ms max {max}ms",

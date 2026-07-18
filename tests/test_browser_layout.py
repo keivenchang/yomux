@@ -692,7 +692,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "range": True,
         "resolution": True,
         "toggles": 12,
-        "toggleLabels": ["CPU", "Servers load", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
+        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],

@@ -476,7 +476,7 @@ class LocalServiceRegistry:
         Linux reads /proc directly; macOS/BSD have no /proc, so an existing pid's
         cumulative CPU time and RSS come from a bounded `ps` read (not a worker
         restart). Without this branch every service reported `—` CPU/Memory and
-        the Servers Load chart was empty on macOS.
+        the Daemons load chart was empty on macOS.
         """
         if pid <= 0:
             return {"cpu_percent": None, "rss_bytes": None}

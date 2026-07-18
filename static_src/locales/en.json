@@ -271,7 +271,7 @@
   "debug.graph.chart.latency.desc": "Browser to YOLOmux round-trip latency in milliseconds from lightweight ping samples.",
   "debug.graph.chart.memory": "System memory",
   "debug.graph.chart.memory.desc": "Host system memory in use against total capacity, sampled by the server.",
-  "debug.graph.chart.serversLoad": "Servers Load",
+  "debug.graph.chart.serversLoad": "Daemons load",
   "debug.graph.chart.serversLoad.desc": "CPU percent for each local YOLOmux service, sampled every 10 seconds.",
   "debug.graph.chart.modelTokens": "Model tokens/min",
   "debug.graph.chart.modelTokens.desc": "Model token throughput per minute by billable/cache token dimension from recorded usage.",
