@@ -36,6 +36,13 @@ from .statusd_client import default_socket_path
 
 STATUSD_MAX_SESSIONS = 256
 
+# Working/idle classification changes on every agent turn transition, and nothing about that
+# transition (no approval prompt, no attention-ack) triggers an explicit invalidate() call. Without
+# a bounded max age, a snapshot built while an agent was busy would be served forever, leaving tab
+# status dots stuck on "running" long after the agent actually stopped. Mirrors the pre-statusd
+# AUTO_APPROVE_CACHE_MAX_AGE_SECONDS safety net removed when this daemon replaced that cache.
+STATUSD_SNAPSHOT_MAX_AGE_SECONDS = 5.003
+
 
 class PersistentStatusService(LocalRpcServiceState):
     """One per-state-directory status owner with retained immutable bytes."""
@@ -162,6 +169,8 @@ class PersistentStatusService(LocalRpcServiceState):
         with self.build_lock:
             with self.lock:
                 reusable = self.snapshot if sessions == self.session_names and not self.invalidation_reason else None
+                if reusable is not None and time.time() - reusable[0].built_at > STATUSD_SNAPSHOT_MAX_AGE_SECONDS:
+                    reusable = None
             if reusable is None:
                 try:
                     metadata, body = self._build(sessions)

@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 import json
+import shutil
 import types
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from pathlib import Path
 from threading import Thread
 
+import pytest
+
+from test_mock_agents import case_command_name
+from test_mock_agents import root_inventory_cases
+from test_mock_agents import short_tmux_socket_path
+from test_mock_agents import tmux_cmd
+from test_mock_agents import wait_for_mockcase_render
+from test_mock_agents import REPO_ROOT
 from yolomux_lib import sessions as sessions_mod
 from yolomux_lib import statusd
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.statusd_client import StatusClient
 from yolomux_lib.statusd_protocol import validate_inventory
+from yolomux_lib.statusd_protocol import StatusSnapshotMetadata
+from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
 class FakeStatusApp:
@@ -49,6 +61,103 @@ def test_statusd_reuses_one_encoded_snapshot_and_retains_stale_bytes(monkeypatch
     assert stale["stale"] is True
     assert stale_bytes == first_bytes
     assert service.status()["build_count"] == 1
+
+
+def test_statusd_rebuilds_after_max_age_even_without_explicit_invalidate(monkeypatch, tmp_path):
+    # Regression: a plain working->idle pane transition never calls invalidate() (no approval
+    # prompt, no attention-ack), so without a bounded max age the snapshot built while an agent
+    # was busy would be served forever and tab status dots would stay stuck on "running".
+    FakeStatusApp.builds = 0
+    FakeStatusApp.fail = False
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    request = {"action": "snapshot", "protocol_version": 1, "sessions": ["1"]}
+
+    first, _ = service.handle(request)
+    assert FakeStatusApp.builds == 1
+
+    with service.lock:
+        metadata, body = service.snapshot
+        service.snapshot = (
+            StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0),
+            body,
+        )
+
+    second, _ = service.handle(request)
+    assert FakeStatusApp.builds == 2
+    assert second["generation"] == first["generation"] + 1
+
+
+def _find_claude_case(case_name):
+    for case in root_inventory_cases():
+        data = case["data"]
+        if str(data.get("agent") or "") == "claude" and str(data.get("case_name") or "") == case_name:
+            return case
+    raise AssertionError(f"no claude fixture case named {case_name!r}")
+
+
+def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalidate(monkeypatch, tmp_path):
+    # End-to-end regression for the stuck-green-RUN-dot bug: a real mock Claude pane genuinely
+    # transitions from working -> idle (no approval prompt, no attention-ack), which never calls
+    # statusd.invalidate(). Before the fix, statusd would keep serving the "working" classification
+    # forever. This drives real tmux + real agent_screen_state() classification, not a mock app.
+    tmux_binary = shutil.which("tmux")
+    if not tmux_binary:
+        pytest.skip("tmux is not installed")
+    working_case = _find_claude_case("working_visible_counter")
+    idle_case = _find_claude_case("try_suggestion_idle")
+    socket_path = short_tmux_socket_path("yostatusd")
+    session = f"ymock-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    created = tmux_cmd(
+        tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "78", "-y", "35",
+        f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+    )
+    assert created.returncode == 0, created.stderr or created.stdout
+    try:
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, 'Try "fix typecheck errors"')
+        assert rendered, pane
+
+        tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", f"{session}:", f"fixture {case_command_name(working_case)}", "Enter")
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, working_case["text"])
+        assert rendered, f"pane never rendered working fixture:\n{pane}"
+
+        service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+        request = {"action": "snapshot", "protocol_version": 1, "sessions": [session]}
+        service.handle(request)
+        assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "working"
+
+        # The mock TUI ignores keystrokes while "working" (matching real Claude behavior of not
+        # accepting input mid-turn), so switch fixtures by respawning the pane's process rather
+        # than typing into a composer that isn't accepting input.
+        respawned = tmux_cmd(
+            tmux_binary, socket_path, "respawn-pane", "-k", "-t", f"{session}:",
+            f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+        )
+        assert respawned.returncode == 0, respawned.stderr or respawned.stdout
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, 'Try "fix typecheck errors"')
+        assert rendered, f"pane never re-rendered after respawn:\n{pane}"
+        tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", f"{session}:", f"fixture {case_command_name(idle_case)}", "Enter")
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, idle_case["text"])
+        assert rendered, f"pane never rendered idle fixture:\n{pane}"
+
+        # Immediately after the real pane went idle, with no invalidate() fired, statusd still
+        # serves the stale "working" snapshot from before the fix's TTL kicks in.
+        service.handle(request)
+        assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "working"
+
+        with service.lock:
+            metadata, body = service.snapshot
+            service.snapshot = (
+                StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0),
+                body,
+            )
+
+        service.handle(request)
+        assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "idle"
+    finally:
+        tmux_cmd(tmux_binary, socket_path, "kill-server")
+        shutil.rmtree(socket_path.parent, ignore_errors=True)
 
 
 def test_statusd_rejects_invalid_session_input_without_building(monkeypatch, tmp_path):
