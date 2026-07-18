@@ -686,7 +686,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         )
     )
     assert metrics == {
-        "labels": ["Graph", "API/SSE", "System", "Logs"],
+        "labels": ["Graphs", "API/SSE", "Services", "Logs"],
         "keys": ["graph", "events", "system", "logs"],
         "primitive": False,
         "range": True,
@@ -883,9 +883,9 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
     )
     assert metrics.get("error") is None, metrics
     assert metrics["order"] == [
-        {"key": "graph", "label": "Graph"},
+        {"key": "graph", "label": "Graphs"},
         {"key": "events", "label": "API / SSE"},
-        {"key": "system", "label": "System"},
+        {"key": "system", "label": "Services"},
         {"key": "logs", "label": "Logs"},
     ], metrics
     assert metrics["systemImmediatelyRightOfEvents"] is True, metrics

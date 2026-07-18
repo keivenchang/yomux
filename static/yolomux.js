@@ -45169,7 +45169,7 @@ function debugSubTabsHtml() {
   return `<div class="js-debug-subtabs" role="tablist" aria-label="${esc(t('tab.debug'))}">
     ${debugSubTabButtonHtml('graph', t('debug.tab.graph'))}
     ${debugSubTabButtonHtml('events', t('debug.tab.events'))}
-    ${debugSubTabButtonHtml('system', t('common.theme.system'))}
+    ${debugSubTabButtonHtml('system', t('debug.tab.services'))}
     ${debugSubTabButtonHtml('logs', t('debug.tab.logs'))}
   </div>`;
 }

@@ -396,6 +396,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "กราฟ",
   "debug.tab.logs": "บันทึก",
+  "debug.tab.services": "บริการ",
   "debug.waitingForServerStats": "กำลังรอสถิติเซิร์ฟเวอร์",
   "det.noActivity": "ยังไม่มีกิจกรรม AI agent",
   "det.noBackend": "ไม่มี backend AI ตอบกลับ; กำลังแสดงบริบทกิจกรรม ตั้งค่าหรือเข้าสู่ระบบ backend Claude/Codex ใน Preferences เพื่อแชต",

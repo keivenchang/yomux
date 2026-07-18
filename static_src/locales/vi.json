@@ -376,6 +376,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Đồ thị",
+  "debug.tab.services": "Dịch vụ",
   "debug.tab.logs": "Nhật ký",
   "debug.waitingForServerStats": "Đang chờ số liệu máy chủ",
   "det.noActivity": "Chưa có hoạt động AI agent.",

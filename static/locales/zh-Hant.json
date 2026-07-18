@@ -396,6 +396,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "圖表",
   "debug.tab.logs": "日誌",
+  "debug.tab.services": "服務",
   "debug.waitingForServerStats": "正在等待伺服器統計資料",
   "det.noActivity": "目前尚無可用的 AI 代理活動。",
   "det.noBackend": "沒有 AI 後端在回應；正在顯示活動摘要。請在偏好設定中設定或登入 Claude/Codex 後端以聊天。",
