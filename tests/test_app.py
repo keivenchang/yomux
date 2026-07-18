@@ -6213,6 +6213,44 @@ def test_publish_session_files_ready_events_on_fs_watch_routes_through_jobd_not_
     assert events == ["session_files_ready"]
     assert published == ["session_files_ready"]
     assert calls == [("1", ("1",), 24.0, None, None, None)]  # jobd was submitted, inline never called
+    # Checkbox 10: the trigger that drove this jobd-backed refresh is counted as a
+    # dependency invalidation, bounded by trigger reason.
+    assert webapp.client_watch_service.invalidation_counts == {"fs_changed": 1}
+
+
+def test_dependency_invalidation_counts_are_bounded_by_trigger_not_by_event_volume(monkeypatch):
+    info_one = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    info_two = SessionInfo(session="2", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info_one, "2": info_two}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("must not call inline compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    _install_fake_session_files_jobd(monkeypatch, webapp, lambda call: {"session": call[0], "hours": call[2], "files": [], "repos": [], "errors": []})
+    # Use distinct hours per round so each round's cache_key is genuinely new -- the 30-second
+    # in-process freshness window on the SAME key is an intentional anti-duplicate-work debounce
+    # (compute_session_files_cache_entry), not something this counter test should fight.
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], [
+        {"session": "1", "hours": 24.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+        {"session": "2", "hours": 24.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+    ], []))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: None)
+    try:
+        webapp.publish_session_files_ready_events(trigger="fs_changed")
+        webapp.client_watch_service.snapshot = lambda: ([], [
+            {"session": "1", "hours": 25.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+            {"session": "2", "hours": 25.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+        ], [])
+        webapp.publish_session_files_ready_events(trigger="transcripts_changed")
+    finally:
+        webapp.control_server.stop()
+
+    # Two sessions x two trigger calls = one entry per DISTINCT trigger reason, summed across
+    # both sessions and both calls -- never one entry per event/session.
+    assert webapp.client_watch_service.invalidation_counts == {"fs_changed": 2, "transcripts_changed": 2}
 
 
 def test_poll_client_events_once_refreshes_session_files_on_transcript_change(monkeypatch):

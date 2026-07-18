@@ -5400,6 +5400,14 @@ class TmuxWebtermApp:
             return []
         return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
 
+    def record_dependency_invalidation(self, trigger: str) -> None:
+        # Bounded by trigger reason (fs_changed, transcripts_changed, transcript_content_changed,
+        # watch), never by event/session count, so this dict cannot grow with traffic volume.
+        key = str(trigger or "watch")
+        with self.client_watch_service.lock:
+            counts = self.client_watch_service.invalidation_counts
+            counts[key] = counts.get(key, 0) + 1
+
     def publish_context_items_ready_events(self, trigger: str = "watch") -> list[str]:
         context_items, _session_files, _activity = self.client_watch_service.snapshot()
         events: list[str] = []
@@ -5414,6 +5422,7 @@ class TmuxWebtermApp:
                 self.client_watch_service.context_item_payload_signatures[key] = signature
             if previous_signature == signature:
                 continue
+            self.record_dependency_invalidation(trigger)
             self.publish_client_event(
                 "context_items_ready",
                 event_payload,
@@ -5475,6 +5484,7 @@ class TmuxWebtermApp:
                 self.client_watch_service.session_file_payload_signatures[key] = signature
             if previous_signature == signature:
                 continue
+            self.record_dependency_invalidation(trigger)
             self.publish_client_event(
                 "session_files_ready",
                 event_payload,
@@ -8471,6 +8481,8 @@ class TmuxWebtermApp:
             tabber_warmer_running = self.activity_transcript_service.tabber_warmer_record.running
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             transcripts_payload_refreshing = self.activity_transcript_service.transcripts_payload_cache_record.worker is not None
+        with self.client_watch_service.lock:
+            dependency_invalidations = dict(self.client_watch_service.invalidation_counts)
         return {
             "roles": background_status.get("roles", {}) if isinstance(background_status, dict) else {},
             "counters": background_status.get("counters", {}) if isinstance(background_status, dict) else {},
@@ -8481,6 +8493,10 @@ class TmuxWebtermApp:
                 "tabber_warmer": tabber_warmer_running,
                 "transcripts_payload": transcripts_payload_refreshing,
             },
+            # Bounded by trigger reason (fs_changed, transcripts_changed, ...), not by event volume:
+            # how many jobd-product-backed refreshes the server-side watch loop actually published,
+            # by the source that drove each one (checkbox 8/10 dependency-invalidation diagnostics).
+            "dependency_invalidations": dependency_invalidations,
         }
 
     def runtime_owner_debug_summary(self, owner_debug: dict[str, Any] | None) -> dict[str, Any]:

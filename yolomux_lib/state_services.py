@@ -303,6 +303,10 @@ class ClientWatchService:
     filesystem_history: list[dict[str, Any]] = field(default_factory=list)
     filesystem_last_full_at: float = 0.0
     event_watcher_record: ClientEventWatcherRecord = field(default_factory=ClientEventWatcherRecord)
+    # Bounded (one entry per trigger reason, not per event) count of jobd-product-backed refreshes
+    # actually published by the server-side watch loop, keyed by the same `trigger` strings already
+    # passed to publish_session_files_ready_events/publish_context_items_ready_events.
+    invalidation_counts: dict[str, int] = field(default_factory=dict)
 
     def snapshot(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         with self.lock:
