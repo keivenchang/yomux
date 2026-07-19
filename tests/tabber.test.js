@@ -1432,7 +1432,7 @@ async function runTabberSuite() {
     assert.ok(/\.file-tree-row:is\(\.tabber-active-window, \.tabber-active-tab\):not\(\.selected\) \.file-tree-name\s*\{[\s\S]*font-weight:\s*800/.test(css), 'active Tabber windows and non-tmux tabs share one bold row emphasis');
     const sharedPaneTabCss = css.match(/\.pane-tab,\s*\.tmux-pane-tab-token\s*\{([\s\S]*?)\}/)?.[1] || '';
     assert.ok(/height:\s*var\(--pane-tab-height\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the shared pane-tab height');
-    assert.ok(/padding:\s*var\(--space-1\) var\(--space-5\) 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab padding');
+    assert.ok(/padding:\s*var\(--space-1\) var\(--pane-tab-inline-end-padding\) 0 var\(--space-5\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the tab-scoped end padding');
     assert.ok(/border:\s*1px solid var\(--pane-inactive-tab-border\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use the shared pane-tab border token');
     assert.ok(/border-radius:\s*var\(--pane-tab-top-radius\) var\(--pane-tab-top-radius\) 0 0/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab top radius');
     assert.ok(/font-family:\s*var\(--tab-font\)/.test(sharedPaneTabCss), 'A2: compact tmux tab tokens use pane-tab font');

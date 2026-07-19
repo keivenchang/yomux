@@ -25,6 +25,8 @@ import fcntl
 import json
 import os
 import platform
+import re
+import resource
 import shlex
 import subprocess
 import sys
@@ -37,6 +39,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yolomux_lib.background_owner import pid_is_alive
+from tools.test_catalog import PYTEST_PHASE_FILES, pytest_files
 
 DEFAULT_TOOL_LOCK_PATH = Path(
     os.environ.get("YOLOMUX_TOOL_LOCK_PATH", str(Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"))
@@ -71,6 +74,18 @@ class LaneResult:
     ok: bool
     seconds: float
     output: str
+    steps: tuple["StepResult", ...] = ()
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """One completed command within a check lane."""
+
+    label: str
+    command: str
+    seconds: float
+    returncode: int
+    slow_tests: tuple[dict[str, object], ...] = ()
 
 
 def py_compile_files() -> list[str]:
@@ -167,29 +182,36 @@ def lanes(*, serial: bool = False) -> list[Lane]:
             # fast unit failure surfaces immediately and the two pools do not thrash each other's cores.
             # Exclude browser too: Selenium tests are a separate `pytest-browser` lane so browser-only
             # script errors and timing flakes do not hide inside the generic pytest lane.
-            (Step("pytest non-browser", ["python3", "-m", "pytest", "tests", *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not e2e and not browser", "-q"]),),
+            (Step("pytest non-browser", ["python3", "-m", "pytest", *pytest_files("nonbrowser"), *pytest_xdist_args(nonbrowser_workers, serial=serial), "-m", "not node_bridge and not e2e and not browser", "-q"]),),
             True,
         ),
         Lane(
             "pytest-boot",
             "pytest boot smoke",
-            (Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),),
+            (Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),),
         ),
         Lane(
             "pytest-browser",
             "pytest browser",
             (
-                Step("pytest boot smoke", ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]),
+                Step("pytest boot smoke", ["python3", "-m", "pytest", *pytest_files("boot"), "-m", "boot", "-q"]),
                 # Browser durations vary enough that xdist's initial load assignment leaves a long
                 # tail even with valid slow-first hints. Two same-code A/B pairs made work stealing
                 # repeatably faster, while boot smoke stays serial and separate above. Local visual
                 # goldens compare rendered pixels against reviewed machine baselines, so they run in
                 # a separate serial step: parallel Chrome font/compositor pressure can otherwise add
                 # enough non-product raster variation to cross the RMS threshold.
-                Step("pytest browser", ["python3", "-m", "pytest", "tests", *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
-                Step("pytest browser visual goldens", ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]),
+                Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
+                Step("pytest browser visual goldens", ["python3", "-m", "pytest", *pytest_files("golden"), "-m", "visual_golden", "-q"]),
             ),
             True,
+        ),
+        Lane(
+            "pytest-browser-behavior",
+            "pytest browser behavior",
+            (
+                Step("pytest browser", ["python3", "-m", "pytest", *pytest_files("browser"), *pytest_xdist_args(browser_workers, serial=serial, worksteal=True), "-m", "browser and not e2e and not boot and not visual_golden", "-q"]),
+            ),
         ),
         Lane(
             "pytest-e2e",
@@ -198,7 +220,7 @@ def lanes(*, serial: bool = False) -> list[Lane]:
             # bounded: `-n auto` can launch dozens of tmux/mock-agent subprocesses while the browser and
             # unit pools are also running, which slows the whole default gate down and makes flakes harder
             # to diagnose.
-            (Step("pytest e2e", ["python3", "-m", "pytest", "tests", *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),),
+            (Step("pytest e2e", ["python3", "-m", "pytest", *pytest_files("e2e"), *pytest_xdist_args(e2e_workers, serial=serial), "-m", "e2e", "-q"]),),
             True,
         ),
         Lane(
@@ -327,10 +349,13 @@ def expensive_tool_lock(enabled: bool = True, lock_path: Path = DEFAULT_TOOL_LOC
 def run_lane(lane: Lane) -> LaneResult:
     started = time.monotonic()
     chunks: list[str] = []
+    step_results: list[StepResult] = []
     ok = True
     for step in lane.steps:
         chunks.append(f"$ {command_text(step.args)}\n")
+        step_started = time.monotonic()
         result = subprocess.run(step.args, cwd=REPO_ROOT, capture_output=True, text=True)
+        step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_slowest_calls(result.stdout)))
         if result.stdout:
             chunks.append(result.stdout)
             if not result.stdout.endswith("\n"):
@@ -344,7 +369,102 @@ def run_lane(lane: Lane) -> LaneResult:
             ok = False
             break
     seconds = time.monotonic() - started
-    return LaneResult(lane.name, lane.label, ok, seconds, "".join(chunks))
+    return LaneResult(lane.name, lane.label, ok, seconds, "".join(chunks), tuple(step_results))
+
+
+def child_usage_snapshot() -> dict[str, float | int | str]:
+    """Return portable aggregate direct-child accounting for an entire gate."""
+
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return {
+        "user_seconds": usage.ru_utime,
+        "system_seconds": usage.ru_stime,
+        "max_rss": usage.ru_maxrss,
+        "max_rss_unit": "bytes" if platform.system() == "Darwin" else "KiB",
+    }
+
+
+_PYTEST_SLOW_CALL_RE = re.compile(r"^\s*([0-9.]+)s\s+(?:call|setup|teardown)\s+(.+)$", re.MULTILINE)
+
+
+def pytest_slowest_calls(output: str, *, limit: int = 10) -> tuple[dict[str, object], ...]:
+    """Extract bounded pytest duration rows when a performance run requested them."""
+
+    return tuple(
+        {"seconds": float(seconds), "nodeid": nodeid.strip()}
+        for seconds, nodeid in _PYTEST_SLOW_CALL_RE.findall(output)[:limit]
+    )
+
+
+def instrument_lane_for_performance(lane: Lane) -> Lane:
+    """Ask pytest for a bounded timing table only in opt-in reporting mode."""
+
+    steps = tuple(
+        Step(step.label, [*step.args, "--durations=10"] if step.args[:3] == ["python3", "-m", "pytest"] else step.args)
+        for step in lane.steps
+    )
+    return Lane(lane.name, lane.label, steps, lane.default)
+
+
+def child_usage_delta(before: dict[str, float | int | str], after: dict[str, float | int | str]) -> dict[str, float | int | str]:
+    """Calculate gate child CPU totals; RSS remains the high-water mark."""
+
+    return {
+        "user_seconds": round(float(after["user_seconds"]) - float(before["user_seconds"]), 6),
+        "system_seconds": round(float(after["system_seconds"]) - float(before["system_seconds"]), 6),
+        "max_rss": after["max_rss"],
+        "max_rss_unit": after["max_rss_unit"],
+    }
+
+
+def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False) -> dict[str, object]:
+    """Create stable opt-in machine output without adding noise to normal checks."""
+
+    worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial), strict=True))
+    return {
+        "schema": 1,
+        "interrupted": interrupted,
+        "mode": "serial" if serial else "parallel",
+        "wall_seconds": round(elapsed, 6),
+        "pytest_workers": worker_counts,
+        "child_usage": child_usage,
+        "lanes": [
+            {
+                "name": result.name,
+                "label": result.label,
+                "ok": result.ok,
+                "wall_seconds": round(result.seconds, 6),
+                "steps": [
+                    {
+                        "label": step.label,
+                        "command": step.command,
+                        "wall_seconds": round(step.seconds, 6),
+                        "returncode": step.returncode,
+                        "slow_tests": step.slow_tests,
+                    }
+                    for step in result.steps
+                ],
+            }
+            for result in results
+        ],
+        "selected_lanes": [lane.name for lane in selected],
+    }
+
+
+def performance_report_path(value: str) -> Path:
+    """Limit raw machine evidence to /tmp, never the source tree or docs."""
+
+    path = Path(value) if value else Path("/tmp") / f"yolomux-check-{os.getpid()}.json"
+    resolved = path.resolve()
+    tmp_root = Path("/tmp").resolve()
+    if not resolved.is_relative_to(tmp_root):
+        raise ValueError("--performance-report must be under /tmp")
+    return resolved
+
+
+def write_performance_report(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def print_result(result: LaneResult) -> None:
@@ -383,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
     parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")
+    parser.add_argument("--performance-report", nargs="?", const="", metavar="/tmp/REPORT.json", help="write opt-in timing and child-resource JSON under /tmp")
     args = parser.parse_args(argv)
 
     if args.serial:
@@ -399,10 +520,21 @@ def main(argv: list[str] | None = None) -> int:
         print("no lanes selected", file=sys.stderr)
         return 2
 
+    try:
+        report_path = performance_report_path(args.performance_report) if args.performance_report is not None else None
+    except ValueError as exc:
+        print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
+        return 2
+    if report_path is not None:
+        selected = [instrument_lane_for_performance(lane) for lane in selected]
+
     guard_enabled = selected_needs_tool_guard(selected, args.lane) and not args.no_tool_guard
     if guard_enabled:
         print(f"Acquiring YOLOmux expensive-tool lock: {DEFAULT_TOOL_LOCK_PATH}", flush=True)
     started = time.monotonic()
+    usage_before = child_usage_snapshot()
+    results: list[LaneResult] = []
+    interrupted = False
     try:
         with expensive_tool_lock(enabled=guard_enabled):
             if guard_enabled:
@@ -417,6 +549,18 @@ def main(argv: list[str] | None = None) -> int:
     except ToolGuardBusy as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 3
+    except KeyboardInterrupt:
+        interrupted = True
+        elapsed = time.monotonic() - started
+        print("CHECK INTERRUPTED", file=sys.stderr, flush=True)
+        if report_path is not None:
+            write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True))
+            print(f"Performance report: {report_path}", file=sys.stderr, flush=True)
+        return 130
+
+    if report_path is not None:
+        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot())))
+        print(f"Performance report: {report_path}", flush=True)
 
     failed = [result.label for result in results if not result.ok]
     print("\n" + ("=" * 40))

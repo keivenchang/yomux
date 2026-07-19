@@ -9,7 +9,13 @@ else
   platform_default_port=7770
 fi
 primary_port="${YOLOMUX_PORT:-$platform_default_port}"
-background_owner_primary_port="${YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT:-$primary_port}"
+# An explicit port names this launcher's primary owner. Do not let an inherited server's owner
+# port redirect a separately configured test/dev launch; without YOLOMUX_PORT, retain the override.
+if [[ -n "${YOLOMUX_PORT:-}" ]]; then
+  background_owner_primary_port="$primary_port"
+else
+  background_owner_primary_port="${YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT:-$primary_port}"
+fi
 default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
@@ -202,7 +208,9 @@ shell_command_for() {
   # socket still travels through YOLOMUX_TMUX_SOCKET below.
   printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
-    printf ' %q' "$item"
+    local key="${item%%=*}"
+    local value="${item#*=}"
+    printf ' %s=%q' "$key" "$value"
   done
   printf ' %q %q' "$python_bin" "${repo_root}/yolomux.py"
   for item in "${server_args[@]}"; do

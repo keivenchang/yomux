@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from tests.source_inventory import parsed_python_source
+from tests.source_inventory import python_source_paths
 from yolomux_lib import agent_tui
 from yolomux_lib import app
 from yolomux_lib import common
@@ -33,8 +35,7 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
         },
     }
     for relative, names in owners.items():
-        source = (root / relative).read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=relative)
+        source, tree = parsed_python_source(root / relative)
         functions = {
             node.name: ast.get_source_segment(source, node) or ""
             for node in ast.walk(tree)
@@ -59,8 +60,7 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
 def test_main_process_cpu_work_has_named_allowlist():
     root = Path(common.PROJECT_ROOT)
     app_path = root / "yolomux_lib" / "app.py"
-    source = app_path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(app_path))
+    source, tree = parsed_python_source(app_path)
     parents = {
         child: parent
         for parent in ast.walk(tree)
@@ -160,8 +160,8 @@ def test_backend_primitive_consumers_share_the_canonical_owners():
 def test_backend_primitive_implementation_bodies_have_one_owner():
     root = Path(common.PROJECT_ROOT) / "yolomux_lib"
     functions = []
-    for path in root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for path in python_source_paths(str(root)):
+        _source, tree = parsed_python_source(path)
         functions.extend((path, node) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
 
     owner_names = {

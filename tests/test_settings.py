@@ -148,7 +148,10 @@ def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp
     real_safe_load = settings_module.yaml.safe_load
 
     def counting_safe_load(text):
-        calls.append(text)
+        # yaml.safe_load is process-global. Background work in the same xdist worker may parse
+        # another YAML file while this test temporarily spies on it; count only this unique path.
+        if text == path.read_text(encoding="utf-8"):
+            calls.append(text)
         return real_safe_load(text)
 
     monkeypatch.setattr(settings_module.yaml, "safe_load", counting_safe_load)

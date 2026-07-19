@@ -2,6 +2,7 @@ import json
 import re
 from pathlib import Path
 
+from tests.browser_helpers import browser_layout as browser_layout_module
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tools.static_build import build_asset
@@ -11,6 +12,66 @@ def test_browser_wait_timeout_has_one_xdist_only_floor():
     assert browser_wait_timeout(5, worker="gw0") == XDIST_BROWSER_WAIT_FLOOR_SECONDS
     assert browser_wait_timeout(15, worker="gw0") == 15
     assert browser_wait_timeout(5, worker="") == 5
+
+
+def test_session_scoped_browser_reuse_is_an_explicit_experiment(monkeypatch):
+    monkeypatch.delenv(SESSION_SCOPED_BROWSER_REUSE_ENV, raising=False)
+    assert browser_layout_module._browser_fixture_scope(fixture_name="browser", config=None) == "module"
+    monkeypatch.setenv(SESSION_SCOPED_BROWSER_REUSE_ENV, "1")
+    assert browser_layout_module._browser_fixture_scope(fixture_name="browser", config=None) == "session"
+
+
+def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch):
+    calls = []
+
+    class SwitchTo:
+        def window(self, handle):
+            calls.append(("switch", handle))
+
+    class Driver:
+        window_handles = ["primary", "popout"]
+        current_window_handle = "primary"
+        _yolomux_primary_window_handle = "primary"
+        switch_to = SwitchTo()
+
+        def close(self):
+            calls.append(("close",))
+
+        def execute_cdp_cmd(self, command, params):
+            calls.append(("cdp", command, params))
+
+        def execute_script(self, source):
+            calls.append(("script", source))
+            return "http://current.test" if source == "return location.origin;" else None
+
+        def delete_all_cookies(self):
+            calls.append(("cookies",))
+
+        def get_log(self, kind):
+            calls.append(("log", kind))
+            return []
+
+        def get(self, url):
+            calls.append(("get", url))
+
+        def set_window_size(self, width, height):
+            calls.append(("size", width, height))
+
+    monkeypatch.setattr(browser_layout_module, "_FIXTURE_HTTP_BASE", "http://fixture.test")
+    monkeypatch.setattr(browser_layout_module, "remove_browser_test_new_document_scripts", lambda driver: calls.append(("scripts",)))
+    browser_layout_module._reset_reused_browser_state(Driver())
+
+    assert ("close",) in calls
+    assert ("get", "about:blank") in calls
+    assert ("log", "browser") in calls
+    assert ("size", *DEFAULT_BROWSER_WINDOW_SIZE) in calls
+    cdp = [(call[1], call[2]) for call in calls if call[0] == "cdp"]
+    assert ("Browser.resetPermissions", {}) in cdp
+    assert ("Browser.setDownloadBehavior", {"behavior": "deny"}) in cdp
+    assert ("Emulation.clearDeviceMetricsOverride", {}) in cdp
+    assert ("Emulation.setEmulatedMedia", {"features": []}) in cdp
+    assert ("Storage.clearDataForOrigin", {"origin": "http://current.test", "storageTypes": "all"}) in cdp
+    assert ("Storage.clearDataForOrigin", {"origin": "http://fixture.test", "storageTypes": "all"}) in cdp
 
 
 def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path):
@@ -137,25 +198,73 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
-def test_info_order_by_popup_has_unique_public_dimension_names(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
-    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return typeof infoGroupingControlsHtml === 'function'"))
-    metrics = browser.execute_script(
+def test_tab_minimize_spacing_keeps_its_hit_target_and_gives_titles_the_compact_available_width(browser, tmp_path):
+    tab_inner = """
+      <span class="pane-tab-core"><span class="session-button-prefix">[yo7771]</span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">Fix an intentionally long tab title before ellipsis truncation</span></span></span>
+      <button type="button" class="pane-tab-close pc-window-control pc-minimize" data-close></button>
+    """
+    load_static_html_fixture(
+        browser,
+        tmp_path,
+        "tab-minimize-spacing.html",
+        page_html(
+            f"""
+            <section class="tab-spacing-fixture">
+              <div class="pane-tab classic-tab" role="button">{tab_inner}</div>
+              <div class="yolomux-dockview"><div class="dv-tab"><div class="pane-tab dockview-pane-tab" role="button">{tab_inner}</div></div></div>
+            </section>
+            """,
+            extra_css=".tab-spacing-fixture { width: 360px; } .tab-spacing-fixture .pane-tab { margin-block: 8px; }",
+        ),
+    )
+    browser.execute_script("document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => button.dataset.clicked = 'yes'));")
+
+    for width in (172, 128):
+        metrics = browser.execute_script(
+            """
+            const width = arguments[0];
+            return [...document.querySelectorAll('.classic-tab, .dockview-pane-tab')].map(tab => {
+              tab.style.setProperty('--pane-tab-width', `${width}px`);
+              const dockviewTab = tab.closest('.dv-tab');
+              dockviewTab?.style.setProperty('--pane-tab-width', `${width}px`);
+              const close = tab.querySelector('[data-close]');
+              const title = tab.querySelector('.tab-inline-detail');
+              const rect = node => { const value = node.getBoundingClientRect(); return {left: value.left, top: value.top, right: value.right, width: value.width, height: value.height}; };
+              const closeRect = rect(close);
+              if (![closeRect.left, closeRect.top, closeRect.width, closeRect.height].every(Number.isFinite)) throw new Error(`non-finite close rectangle: ${JSON.stringify(closeRect)}`);
+              const hit = document.elementFromPoint(closeRect.left + closeRect.width / 2, closeRect.top + closeRect.height / 2);
+              hit.click();
+              return {
+                kind: tab.classList.contains('dockview-pane-tab') ? 'dockview' : 'classic',
+                title: rect(title),
+                close: closeRect,
+                tab: rect(tab),
+                gap: Number.parseFloat(getComputedStyle(tab).gap),
+                clicked: close.dataset.clicked === 'yes',
+              };
+            });
+            """,
+            width,
+        )
+        assert {row["kind"] for row in metrics} == {"classic", "dockview"}, metrics
+        for row in metrics:
+            assert row["gap"] == 1, row
+            assert row["close"]["width"] == row["close"]["height"] == 18, row
+            assert row["clicked"] is True, row
+            assert row["title"]["right"] <= row["close"]["left"] - 0.9, row
+            assert row["title"]["width"] > 0, row
+
+    touch_metrics = browser.execute_script(
         """
-        const root = document.createElement('div');
-        root.innerHTML = infoGroupingControlsHtml();
-        return [...root.querySelectorAll('[data-info-group-level]')].map(select => ({
-          values: [...select.options].map(option => option.value),
-          labels: [...select.options].map(option => option.textContent.trim()),
-        }));
+        document.body.classList.add('app-topbar-touch-compact');
+        const close = document.querySelector('.classic-tab [data-close]');
+        const rect = close.getBoundingClientRect();
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        hit.click();
+        return {width: rect.width, height: rect.height, clicked: close.dataset.clicked === 'yes'};
         """
     )
-
-    assert len(metrics) == 4, metrics
-    for level in metrics:
-        assert len(level["labels"]) == len(set(level["labels"])), metrics
-    hidden_dimensions = {"tmux-session", "tmux-pane", "git-worktree", "local-repository", "hosted-repository"}
-    assert not hidden_dimensions.intersection(metrics[0]["values"]), metrics
+    assert touch_metrics == {"width": 36, "height": 36, "clicked": True}, touch_metrics
 
 
 def test_pane_width_fixture_keeps_the_production_tab_row_contract(browser, tmp_path):
@@ -1716,6 +1825,123 @@ def test_working_agent_glyphs_show_static_symbol_and_opacity_pulse_in_tabs_windo
             rest_opacity = float(animated_property_at_progress(browser, f"{selector}-dot", "opacity", 0))
             peak_opacity = float(animated_property_at_progress(browser, f"{selector}-dot", "opacity", 0.5))
             assert peak_opacity - rest_opacity >= 0.1, {"label": label, "rest": rest_opacity, "peak": peak_opacity}
+
+
+def test_adjacent_subwindow_run_glyphs_share_geometry_and_global_phase_after_replacement(browser, tmp_path):
+    """The original adjacent Codex/Claude RUN rows must stay visually identical as the DOM refreshes."""
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=1",
+        sessions=["1"],
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return typeof agentWindowActivityIconHtml === 'function' && typeof setAttentionAnimationClockDelay === 'function'"
+        )
+    )
+    browser.execute_script(
+        """
+        agentStatusPulsePeriodMs = 1550;
+        document.documentElement.style.setProperty('--pulse-duration', '1.55s');
+        document.documentElement.style.setProperty('--status-pulse-step-count', '12');
+        setAttentionAnimationClockDelay();
+        const fixture = document.createElement('section');
+        fixture.id = 'fixture';
+        fixture.className = 'adjacent-subwindow-run-glyphs';
+        fixture.style.cssText = 'display:grid;gap:10px;position:fixed;left:300px;top:100px;padding:18px;background:#1d2532;border:2px solid #75d000;color:#e8eef8;z-index:2147483647;isolation:isolate;transform:scale(3);transform-origin:top left';
+        document.body.appendChild(fixture);
+        const runHtml = kind => agentWindowActivityIconHtml(kind, 'working', 0, {
+          item: agentWindowStatusSampleItem('working', {pulse: true, label: `${kind} working`}),
+          subwindowGlyphPulse: true,
+        });
+        fixture.innerHTML = ['codex', 'claude'].map((kind, index) => `
+          <button type="button" class="tmux-window-button" data-run-kind="${kind}">
+            <span class="tmux-window-name-label">${runHtml(kind)}<span class="tmux-window-name-text">${index}:${kind}</span></span>
+          </button>`).join('');
+        scheduleAgentWindowActivityAnimationSync(fixture);
+        """
+    )
+
+    def read_rows():
+        return browser.execute_script(
+            """
+            const read = row => {
+              const dot = row.querySelector('.agent-window-status-dot');
+              const style = getComputedStyle(dot);
+              const before = getComputedStyle(dot, '::before');
+              const after = getComputedStyle(dot, '::after');
+              const animation = dot.getAnimations().find(item => item.animationName === 'agent-status-opacity-pulse');
+              const timing = animation?.effect?.getComputedTiming?.() || {};
+              return {
+                kind: row.dataset.runKind,
+                dot: {width: dot.getBoundingClientRect().width, height: dot.getBoundingClientRect().height},
+                before: {width: parseFloat(before.width) || 0, height: parseFloat(before.height) || 0},
+                after: {width: parseFloat(after.width) || 0, height: parseFloat(after.height) || 0},
+                animationName: style.animationName,
+                duration: style.animationDuration,
+                delay: style.animationDelay,
+                timingFunction: style.animationTimingFunction,
+                playState: animation?.playState || '',
+                progress: Number(timing.progress),
+                opacity: Number(style.opacity),
+              };
+            };
+            return [...document.querySelectorAll('[data-run-kind]')].map(read);
+            """
+        )
+
+    layouts = {}
+    for width, label in ((1200, "normal"), (520, "narrow"), (375, "mobile")):
+        browser.set_window_size(width, 800)
+        browser.execute_async_script(
+            """
+            const done = arguments[0];
+            requestAnimationFrame(() => requestAnimationFrame(done));
+            """
+        )
+        rows = read_rows()
+        layouts[label] = rows
+        assert len(rows) == 2, layouts
+        codex, claude = rows
+        for field in ("width", "height"):
+            assert abs(codex["dot"][field] - claude["dot"][field]) <= 0.1, layouts
+            assert abs(codex["before"][field] - claude["before"][field]) <= 0.1, layouts
+            assert abs(codex["after"][field] - claude["after"][field]) <= 0.1, layouts
+        assert all(row["animationName"] == "agent-status-opacity-pulse" for row in rows), layouts
+        assert all(row["duration"] == "1.55s" and row["timingFunction"].startswith("steps(12") for row in rows), layouts
+        assert all(row["playState"] in {"pending", "running"} for row in rows), layouts
+        assert abs(codex["progress"] - claude["progress"]) < 0.04, layouts
+        if label == "normal":
+            browser.save_screenshot("/tmp/yolomux-subwindow-run-sync.png")
+
+    replacement = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const fixture = document.getElementById('fixture');
+        const row = fixture.querySelector('[data-run-kind="claude"]');
+        const before = row.querySelector('.agent-window-status-dot');
+        const runHtml = agentWindowActivityIconHtml('claude', 'working', 0, {
+          item: agentWindowStatusSampleItem('working', {pulse: true, label: 'claude working'}),
+          subwindowGlyphPulse: true,
+        });
+        row.querySelector('.tmux-window-name-label').innerHTML = `${runHtml}<span class="tmux-window-name-text">1:claude</span>`;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const dots = [...fixture.querySelectorAll('.agent-window-status-dot')];
+          const details = dots.map(dot => {
+            const animation = dot.getAnimations().find(item => item.animationName === 'agent-status-opacity-pulse');
+            const timing = animation?.effect?.getComputedTiming?.() || {};
+            return {delay: getComputedStyle(dot).animationDelay, progress: Number(timing.progress), playState: animation?.playState || ''};
+          });
+          done({replaced: before !== row.querySelector('.agent-window-status-dot'), details});
+        }));
+        """
+    )
+    assert replacement["replaced"] is True, replacement
+    assert len(replacement["details"]) == 2, replacement
+    assert all(item["playState"] in {"pending", "running"} for item in replacement["details"]), replacement
+    assert len({item["delay"] for item in replacement["details"]}) == 1, replacement
+    assert abs(replacement["details"][0]["progress"] - replacement["details"][1]["progress"]) < 0.04, replacement
 
 
 def test_working_status_ball_is_filled_green_with_a_border_and_no_glow(browser, tmp_path):
@@ -8027,13 +8253,17 @@ def test_tmux_window_switch_stalls_only_when_the_select_post_hangs_with_retry_an
             const stalePost = releasePost;
             if (stalePost) stalePost({ok: true}); // the hung POST resolving late must be inert
 
-            // A second hung switch can be cancelled back to the authoritative window.
+            // Keep one real elapsed-time timeout above. The second path is the independent
+            // cancellation contract, so drive its test-only deadline through the same state
+            // owner instead of paying a second four-second browser timeout.
             releasePost = null;
             tmuxWindow('1', {windowIndex: 2}, 'tmux sub-window 2:bash');
-            await window.__yolomuxTestWaitFor(
-              () => maskNode()?.dataset.terminalConnectionState === 'switch-stalled',
-              {timeoutMs: 7000, intervalMs: 25, description: 'second hung switch stalls'}
-            );
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const secondLoading = tmuxWindowSwitchLoading('1');
+            const secondStalled = stallTmuxWindowSwitchLoading('1', secondLoading?.sequence);
+            if (!secondStalled || maskNode()?.dataset.terminalConnectionState !== 'switch-stalled') {
+              throw new Error('test-only second switch deadline did not reach the shared stalled state');
+            }
             maskNode().querySelector('[data-terminal-connection-cancel]').click();
             await window.__yolomuxTestWaitFor(() => !maskNode(), {timeoutMs: 3000, intervalMs: 10, description: 'cancel clears the mask'});
             await window.__yolomuxTestWaitFor(() => activeWindowButtons().join(',') === '1', {timeoutMs: 3000, intervalMs: 10, description: 'cancel returns to the authoritative window'});

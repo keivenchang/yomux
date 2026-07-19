@@ -9,6 +9,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from tests.source_inventory import parsed_python_source
+from tests.source_inventory import python_source_paths
 from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
 
 
@@ -33,12 +37,10 @@ def test_python_imports_are_module_scoped():
         REPO_ROOT / "tools",
         REPO_ROOT / "tests",
     ]
-    paths = []
-    for root in roots:
-        paths.extend(sorted(root.rglob("*.py")) if root.is_dir() else [root])
+    paths = [path for root in roots for path in python_source_paths(str(root))]
     violations = []
     for path in paths:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        _source, tree = parsed_python_source(path)
         parents = {
             child: parent
             for parent in ast.walk(tree)
@@ -59,8 +61,8 @@ def test_runtime_and_tool_function_bodies_are_not_exact_duplicates():
     functions = {}
     duplicates = []
     for root in (REPO_ROOT / "yolomux_lib", REPO_ROOT / "tools"):
-        for path in sorted(root.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for path in python_source_paths(str(root)):
+            _source, tree = parsed_python_source(path)
             for node in ast.walk(tree):
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(node.body) < 2:
                     continue
@@ -95,18 +97,18 @@ def test_default_check_lanes_keep_full_pytest_gate():
     # it ran that ~20s node suite twice concurrently), e2e tests launch real tmux + mock agents, and
     # browser tests need Selenium/Chrome. Each slow class has its own default lane so failures name the
     # failing subsystem instead of hiding under "pytest full".
-    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", nonbrowser_workers, "-m", "not node_bridge and not e2e and not browser", "-q"]
+    assert pytest_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("nonbrowser"), "-n", nonbrowser_workers, "-m", "not node_bridge and not e2e and not browser", "-q"]
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
     assert boot_lane.default is False
-    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
+    assert boot_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
     browser_lane = next(lane for lane in lanes if lane.name == "pytest-browser")
     assert browser_lane.default is True
-    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-m", "boot", "-q"]
-    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", "tests", "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
-    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", "tests", "-m", "visual_golden", "-q"]
+    assert browser_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("boot"), "-m", "boot", "-q"]
+    assert browser_lane.steps[1].args == ["python3", "-m", "pytest", *check.pytest_files("browser"), "-n", browser_workers, "--dist", "worksteal", "-m", "browser and not e2e and not boot and not visual_golden", "-q"]
+    assert browser_lane.steps[2].args == ["python3", "-m", "pytest", *check.pytest_files("golden"), "-m", "visual_golden", "-q"]
     e2e_lane = next(lane for lane in lanes if lane.name == "pytest-e2e")
     assert e2e_lane.default is True
-    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", "tests", "-n", e2e_workers, "-m", "e2e", "-q"]
+    assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
 
@@ -139,7 +141,7 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "python3",
         "-m",
         "pytest",
-        "tests",
+        *check.pytest_files("boot"),
         "-m",
         "boot",
         "-q",
@@ -148,7 +150,7 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "python3",
         "-m",
         "pytest",
-        "tests",
+        *check.pytest_files("browser"),
         "-n",
         browser_workers,
         "--dist",
@@ -161,16 +163,18 @@ def test_focused_pytest_lanes_keep_expected_filters():
         "python3",
         "-m",
         "pytest",
-        "tests",
+        *check.pytest_files("golden"),
         "-m",
         "visual_golden",
         "-q",
     ]
+    assert lanes["pytest-browser-behavior"].default is False
+    assert lanes["pytest-browser-behavior"].steps == (lanes["pytest-browser"].steps[1],)
     assert lanes["pytest-boot"].steps[0].args == [
         "python3",
         "-m",
         "pytest",
-        "tests",
+        *check.pytest_files("boot"),
         "-m",
         "boot",
         "-q",
@@ -249,22 +253,52 @@ def test_expensive_tool_lock_refuses_independent_contender_without_queueing(tmp_
         holder.wait(timeout=5)
 
 
-def test_every_slowest_first_base_node_id_resolves_in_collection():
+def test_canonical_catalog_covers_every_collected_node_once(tmp_path):
     test_config = sys.modules["conftest"]
+    output_path = tmp_path / "collection.json"
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q", "tests"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "-p",
+            "tools.pytest_catalog_plugin",
+            f"--yolomux-catalog-output={output_path}",
+            "tests",
+        ],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,
         check=True,
     )
-    collected = {
-        line.split("[", 1)[0]
-        for line in result.stdout.splitlines()
-        if line.startswith("tests/") and "::" in line
-    }
-    missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected]
+    collection_rows = json.loads(output_path.read_text(encoding="utf-8"))
+    collected = {row["nodeid"] for row in collection_rows}
+    collected_base = {nodeid.split("[", 1)[0] for nodeid in collected}
+    missing = [nodeid for nodeid in test_config.SLOWEST_FIRST_TESTS if nodeid not in collected_base]
     assert missing == []
+    check = load_check_module()
+    expected_phase_by_marker = (
+        ("node_bridge", "node_bridge"),
+        ("e2e", "e2e"),
+        ("visual_golden", "golden"),
+        ("boot", "boot"),
+        ("browser", "browser"),
+    )
+    catalog_files = {phase: set(paths) for phase, paths in check.PYTEST_PHASE_FILES.items()}
+    phase_rows = {phase: [] for phase in catalog_files}
+    for row in collection_rows:
+        phase = next((candidate for marker, candidate in expected_phase_by_marker if marker in row["markers"]), "nonbrowser")
+        phase_rows[phase].append(row["nodeid"])
+    ownership_errors = []
+    for phase, nodeids in phase_rows.items():
+        for nodeid in nodeids:
+            path = nodeid.split("::", 1)[0]
+            if path not in catalog_files[phase]:
+                ownership_errors.append(f"{nodeid} belongs to {phase}, but {path} is absent from its catalog")
+    assert ownership_errors == []
+    assert set().union(*map(set, phase_rows.values())) == collected
 
 
 def test_non_drag_browser_actions_use_the_shared_fast_pointer_helper():
@@ -343,3 +377,61 @@ def test_focused_cheap_lane_skips_live_server_priority_work(monkeypatch):
     assert check.main(["--lane", "whitespace"]) == 0
 
     assert events == [("lock", False)]
+
+
+def test_performance_report_captures_steps_resources_and_worker_budget(tmp_path):
+    check = load_check_module()
+    lane = check.Lane("demo", "demo lane", ())
+    result = check.LaneResult(
+        "demo",
+        "demo lane",
+        True,
+        1.25,
+        "",
+        (check.StepResult("demo step", "python3 -m demo", 0.75, 0),),
+    )
+
+    payload = check.performance_report_payload(
+        selected=[lane],
+        results=[result],
+        serial=False,
+        elapsed=1.5,
+        child_usage={"user_seconds": 0.5, "system_seconds": 0.25, "max_rss": 1024, "max_rss_unit": "KiB"},
+    )
+    path = tmp_path / "report.json"
+    check.write_performance_report(path, payload)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "child_usage": {"max_rss": 1024, "max_rss_unit": "KiB", "system_seconds": 0.25, "user_seconds": 0.5},
+        "interrupted": False,
+        "lanes": [{"label": "demo lane", "name": "demo", "ok": True, "steps": [{"command": "python3 -m demo", "label": "demo step", "returncode": 0, "slow_tests": [], "wall_seconds": 0.75}], "wall_seconds": 1.25}],
+        "mode": "parallel",
+        "pytest_workers": {"browser": check.pytest_worker_counts()[1], "e2e": check.pytest_worker_counts()[2], "nonbrowser": check.pytest_worker_counts()[0]},
+        "schema": 1,
+        "selected_lanes": ["demo"],
+        "wall_seconds": 1.5,
+    }
+
+
+def test_performance_report_path_is_tmp_only(monkeypatch):
+    check = load_check_module()
+    monkeypatch.setattr(check.os, "getpid", lambda: 4321)
+
+    assert check.performance_report_path("") == Path("/tmp/yolomux-check-4321.json")
+    assert check.performance_report_path("/tmp/yolomux-report.json") == Path("/tmp/yolomux-report.json")
+    with pytest.raises(ValueError, match="under /tmp"):
+        check.performance_report_path("report.json")
+
+
+def test_performance_instrumentation_adds_bounded_pytest_durations_and_parses_them():
+    check = load_check_module()
+    lane = check.Lane("demo", "demo", (check.Step("pytest", ["python3", "-m", "pytest", "tests", "-q"]), check.Step("node", ["node", "--check", "static/yolomux.js"])))
+
+    instrumented = check.instrument_lane_for_performance(lane)
+
+    assert instrumented.steps[0].args[-1] == "--durations=10"
+    assert instrumented.steps[1] == lane.steps[1]
+    assert check.pytest_slowest_calls("0.52s call tests/test_demo.py::test_fast\n0.11s setup tests/test_demo.py::test_fast\n") == (
+        {"seconds": 0.52, "nodeid": "tests/test_demo.py::test_fast"},
+        {"seconds": 0.11, "nodeid": "tests/test_demo.py::test_fast"},
+    )

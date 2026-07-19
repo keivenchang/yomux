@@ -739,7 +739,22 @@ function refreshOpenTabsMenuRows() {
   if (!popover) return false;
   const tabsMenu = appMenuTree().find(menu => menu.id === 'tabs');
   if (!tabsMenu) return false;
+  // A metadata refresh replaces only this menu's command rows. Preserve the host-owned hover/focus
+  // marker on its matching command so DOM replay does not send an open Tabs menu without its active row.
+  const activeCommandKeys = new Set(
+    Array.from(popover.querySelectorAll('.app-menu-command.share-mirror-active'))
+      .map(command => String(command.dataset.menuTargetItem || command.getAttribute('aria-label') || ''))
+      .filter(Boolean)
+  );
   popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
+  if (activeCommandKeys.size) {
+    for (const command of popover.querySelectorAll('.app-menu-command')) {
+      const commandKey = String(command.dataset.menuTargetItem || command.getAttribute('aria-label') || '');
+      if (activeCommandKeys.has(commandKey)) {
+        command.classList.add('share-mirror-active');
+      }
+    }
+  }
   fitAppMenuPopover(popover);
   scheduleSharePopupLayerPublish({immediate: true});
   return true;
@@ -1785,7 +1800,10 @@ function createAppMenuCommand(item, options = {}) {
     disabled: item.disabled,
     ariaLabel,
     title: item.title,
-    dataset: (item.checked !== undefined || item.partial === true) ? {checked: item.checked ? 'true' : 'false', partial: item.partial === true ? 'true' : 'false'} : undefined,
+    dataset: (item.checked !== undefined || item.partial === true || item.targetItem) ? {
+      ...(item.checked !== undefined || item.partial === true ? {checked: item.checked ? 'true' : 'false', partial: item.partial === true ? 'true' : 'false'} : {}),
+      ...(item.targetItem ? {menuTargetItem: item.targetItem} : {}),
+    } : undefined,
     html: `<span class="app-menu-check" aria-hidden="true"></span><span class="app-menu-content">${contentHtml}${detailHtml}</span>${options.asSubmenu ? '<span class="app-menu-submenu-arrow" aria-hidden="true">&gt;</span>' : ''}`,
   });
   if (!options.asSubmenu) {

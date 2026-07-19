@@ -593,6 +593,10 @@
   --lt-code-control: var(--lt-code-keyword);
   --tab-line-height: 1;
   --pane-tab-width: 172px;
+  /* Pane tabs keep their 18px desktop / 36px touch minimize target, but do not inherit the
+     wider generic toolbar end padding or inter-control gap. */
+  --pane-tab-close-gap: var(--space-1);
+  --pane-tab-inline-end-padding: var(--space-1);
   --three-row-panel-layout: auto auto minmax(0, 1fr);
   /* Top-corner rounding shared by dockview tabs and pane-strip tabs, scaled off the tab font. */
   --pane-tab-top-radius-scale: 0.7;

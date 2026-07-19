@@ -1298,10 +1298,10 @@ body.layout-resizing {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--pane-tab-close-gap);
   min-width: 0;
   height: var(--pane-tab-height);
-  padding: var(--space-1) var(--space-5) 0;
+  padding: var(--space-1) var(--pane-tab-inline-end-padding) 0 var(--space-5);
   color: var(--pane-tab-text);
   background: var(--pane-inactive-tab-bg);
   border: 1px solid var(--pane-inactive-tab-border);
@@ -1804,6 +1804,12 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   --agent-status-ball-size: var(--agent-status-ball-size-base);
   --subwindow-status-glyph-scale: 0.66;
   --subwindow-status-slot-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale));
+  /* RUN/ASK/paused share these exact dimensions everywhere this renderer is embedded. Keeping
+     the shape geometry here prevents a Tabber/popup font context from changing one triangle. */
+  --subwindow-status-glyph-inline-size: calc(var(--subwindow-status-slot-size) * 0.94);
+  --subwindow-status-glyph-block-size: calc(var(--subwindow-status-slot-size) * 0.88);
+  --subwindow-status-glyph-inner-inline-size: calc(var(--subwindow-status-glyph-inline-size) - 2px);
+  --subwindow-status-glyph-inner-block-size: calc(var(--subwindow-status-glyph-block-size) - 2px);
   margin-inline-start: 0;
   margin-inline-end: 0;
 }
@@ -1872,8 +1878,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   filter: none;
 }
 .agent-window-activity--subwindow .agent-window-status-dot.status-indicator--working::before {
-  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.94);
-  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.88);
+  inline-size: var(--subwindow-status-glyph-inline-size);
+  block-size: var(--subwindow-status-glyph-block-size);
   background: var(--subwindow-status-glyph-border-color);
   clip-path: polygon(8% 0, 100% 50%, 8% 100%);
 }
@@ -1882,8 +1888,8 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
   position: absolute;
   inset-block-start: 50%;
   inset-inline-start: 50%;
-  inline-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.94 - 2px);
-  block-size: calc(var(--agent-status-ball-size) * var(--subwindow-status-glyph-scale) * 0.88 - 2px);
+  inline-size: var(--subwindow-status-glyph-inner-inline-size);
+  block-size: var(--subwindow-status-glyph-inner-block-size);
   background: var(--subwindow-status-glyph-fill);
   clip-path: polygon(8% 0, 100% 50%, 8% 100%);
   transform: translate(-50%, -50%);

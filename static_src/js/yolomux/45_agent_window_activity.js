@@ -464,7 +464,10 @@ function agentWindowActivityRecord(key, create = false) {
 const agentWindowActivityAcknowledgeDelayMs = 700;
 let agentWindowActivityAnimationSyncFrame = 0;
 let agentWindowActivityMutationObserver = null;
-const agentWindowActivityPulseSelector = '.agent-window-activity, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse';
+// Include the dot itself as well as its wrapper. A renderer can replace only the status marker
+// inside a retained window row; observing/synchronizing just the wrapper would then leave that
+// new play/stop/pause animation on its own start time for a frame.
+const agentWindowActivityPulseSelector = '.agent-window-activity, .agent-window-status-dot, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse';
 const agentWindowActivityPulseAnimationNames = new Set([
   'attention-ring-fade',
   'agent-status-acknowledgement-fade',
@@ -542,16 +545,18 @@ function clearAgentWindowTransitionPulseRefresh(key) {
 function mutationTouchesAgentWindowActivity(mutation) {
   for (const node of mutation?.addedNodes || []) {
     if (node?.classList?.contains?.('agent-window-activity')) return true;
+    if (node?.classList?.contains?.('agent-window-status-dot')) return true;
     if (node?.classList?.contains?.('js-debug-live-pulse')) return true;
     if (node?.classList?.contains?.('status-indicator') && (node.classList.contains('heartbeat-pulse') || node.classList.contains('attention-pulse'))) return true;
     if (node?.querySelector?.('.agent-window-activity')) return true;
-    if (node?.querySelector?.('.status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse')) return true;
+    if (node?.querySelector?.('.agent-window-status-dot, .status-indicator.heartbeat-pulse, .status-indicator.attention-pulse, .js-debug-live-pulse')) return true;
   }
   return false;
 }
 
 function ensureAgentWindowActivityMutationObserver() {
-  if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) return;
+  // Green RUN markers keep pulsing even when the optional broad attention pulse is disabled,
+  // so replacement markers still need the common wall-clock synchronizer in that mode.
   if (agentWindowActivityMutationObserver || typeof MutationObserver !== 'function' || !document?.body) return;
   agentWindowActivityMutationObserver = new MutationObserver(mutations => {
     if (mutations.some(mutationTouchesAgentWindowActivity)) scheduleAgentWindowActivityAnimationSync();
@@ -590,13 +595,24 @@ function syncAgentWindowActivityAnimationDelays(root = document) {
   const scope = root?.querySelectorAll ? root : document;
   const nodes = Array.from(scope?.querySelectorAll?.(agentWindowActivityPulseSelector) || []);
   if (!nodes.length) return;
+  const broadPulseEnabled = typeof statusPulseAnimationEnabled !== 'function' || statusPulseAnimationEnabled();
   const nowMs = Date.now();
   const delay = typeof attentionAnimationClockDelay === 'function'
     ? attentionAnimationClockDelay(nowMs)
     : attentionAnimationDelay(nowMs);
   for (const node of nodes) {
     if (!node?.style) continue;
-    if (!node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
+    if (!node.classList?.contains?.('agent-window-status-dot') && !node.classList?.contains?.('status-indicator') && !node.classList?.contains?.('js-debug-live-pulse') && !node.querySelector?.('.agent-window-status-dot')) continue;
+    // Ordinary balls retain the fresh per-render delay stamped by their renderer while the broad
+    // pulse is disabled. Replacing it with the old root delay would shift the wall-clock phase;
+    // RUN glyphs and the Preferences comparison sample are deliberate exceptions because they
+    // continue to demonstrate one shared global phase in that mode.
+    const subwindowGlyph = node.classList?.contains?.('agent-window-activity--subwindow')
+      || node.closest?.('.agent-window-activity--subwindow')
+      || node.querySelector?.('.agent-window-activity--subwindow');
+    const preferencesPreview = node.closest?.('.preferences-status-pulse-example')
+      || node.querySelector?.('.preferences-status-pulse-example');
+    if (!broadPulseEnabled && !subwindowGlyph && !preferencesPreview) continue;
     const localDelay = node.style.getPropertyValue('--attention-animation-delay').trim();
     if (localDelay) node.style.removeProperty('--attention-animation-delay');
     syncAgentWindowPulseAnimationCurrentTime(node, nowMs);
@@ -618,7 +634,6 @@ function restartAgentWindowActivityPulseAnimations(root = document) {
 }
 
 function scheduleAgentWindowActivityAnimationSync(root = document) {
-  if (typeof statusPulseAnimationEnabled === 'function' && !statusPulseAnimationEnabled()) disconnectAgentWindowActivityMutationObserver();
   ensureAgentWindowActivityMutationObserver();
   syncAgentWindowActivityAnimationDelays(root);
   if (agentWindowActivityAnimationSyncFrame && typeof cancelAnimationFrame === 'function') {

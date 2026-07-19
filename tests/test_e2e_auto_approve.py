@@ -13,10 +13,9 @@ blocks local sockets/tmux).
 
 import os
 import shutil
-import subprocess
-import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +27,8 @@ import yolomux_lib.yoagent.conversation as yoagent_conversation_module
 import yolomux_lib.yoagent.transports as transport_module
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import wait_for_isolated_tmux_panes
 
 pytestmark = [pytest.mark.e2e, pytest.mark.socket]
 
@@ -35,28 +36,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _tmux(socket_path, *args, timeout=8):
-    return subprocess.run(
-        ["tmux", "-S", str(socket_path), *args],
-        capture_output=True,
-        text=True,
+    runtime = SimpleNamespace(tmux_binary="tmux", socket_path=socket_path)
+    return run_isolated_tmux(runtime, *args, timeout=timeout)
+
+
+def wait_for_e2e_tmux_pane(socket_path, session, predicate, timeout):
+    runtime = SimpleNamespace(tmux_binary="tmux", socket_path=socket_path)
+    ready, panes = wait_for_isolated_tmux_panes(
+        runtime,
+        [session],
+        lambda captures: predicate(captures[session]),
         timeout=timeout,
-        check=False,
     )
-
-
-def _capture(socket_path, session):
-    return _tmux(socket_path, "capture-pane", "-p", "-t", f"{session}:").stdout or ""
-
-
-def _wait_until(socket_path, session, predicate, timeout):
-    deadline = time.time() + timeout
-    last = ""
-    while time.time() < deadline:
-        last = _capture(socket_path, session)
-        if predicate(last):
-            return True, last
-        time.sleep(0.4)
-    return False, last
+    return ready, panes.get(session, "")
 
 
 def _stop_app(app):
@@ -112,10 +104,10 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, a
 
     app = None
     try:
-        booted, pane = _wait_until(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
+        booted, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
         assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
         _tmux(socket_path, "send-keys", "-t", f"{session}:", f"yesno {steps}", "Enter")
-        prompted, pane = _wait_until(
+        prompted, pane = wait_for_e2e_tmux_pane(
             socket_path, session,
             lambda t: "do you want to proceed" in t.lower() or "run the following command" in t.lower(),
             20,
@@ -156,10 +148,10 @@ def test_e2e_mock_codex_sleep_10_uses_working_turn_without_approval(monkeypatch,
 
     app = None
     try:
-        booted, pane = _wait_until(socket_path, session, lambda t: "›" in t, 20)
+        booted, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda t: "›" in t, 20)
         assert booted, f"codex.py --mock did not boot to an input prompt:\n{pane}"
         _tmux(socket_path, "send-keys", "-t", f"{session}:", "sleep 10", "Enter")
-        working, pane = _wait_until(
+        working, pane = wait_for_e2e_tmux_pane(
             socket_path, session,
             lambda t: "• Running sleep 10 now." in t and "• Working" in t,
             20,
@@ -203,7 +195,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
     app = None
     try:
         for agent, session in sessions.items():
-            booted, pane = _wait_until(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
+            booted, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
             assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
 
         app = TmuxWebtermApp(list(sessions.values()), dangerously_yolo=False)
@@ -234,7 +226,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
         assert {item["session"] for item in waiting} == set(sessions.values())
 
         for agent, session in sessions.items():
-            prompted, pane = _wait_until(
+            prompted, pane = wait_for_e2e_tmux_pane(
                 socket_path,
                 session,
                 lambda t: "Do you want to proceed?" in t or "Would you like to run the following command?" in t,
@@ -242,7 +234,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
             )
             assert prompted, f"{agent}.py --mock did not render a permission prompt for date:\n{pane}"
             _tmux(socket_path, "send-keys", "-t", f"{session}:", "1")
-            completed, pane = _wait_until(socket_path, session, lambda t: "Bash(date)" in t, 20)
+            completed, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda t: "Bash(date)" in t, 20)
             assert completed, f"{agent}.py --mock did not show date output after approval:\n{pane}"
 
         for agent, (preview, marker) in sent.items():
@@ -299,7 +291,7 @@ def test_e2e_yoagent_roster_job_sends_exact_command_once(monkeypatch, tmp_path):
     monkeypatch.setattr(transport_module, "send_prompt", recording_send)
     try:
         for session in sessions:
-            booted, pane = _wait_until(socket_path, session, lambda text: "❯" in text, 20)
+            booted, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda text: "❯" in text, 20)
             assert booted, f"claude.py --mock did not boot session {session}:\n{pane}"
         app = TmuxWebtermApp(sessions, dangerously_yolo=False)
         created, status = app.yoagent_controller.create_yoagent_job({
@@ -309,7 +301,7 @@ def test_e2e_yoagent_roster_job_sends_exact_command_once(monkeypatch, tmp_path):
             "quiet_seconds": 0,
         })
         fired = app.yoagent_controller.poll_yoagent_jobs_once()
-        arrived, pane = _wait_until(socket_path, "1", lambda text: 'I don\'t know how to handle "/dyn-tps-report 1 2 3 4 EOD"' in text, 20)
+        arrived, pane = wait_for_e2e_tmux_pane(socket_path, "1", lambda text: 'I don\'t know how to handle "/dyn-tps-report 1 2 3 4 EOD"' in text, 20)
         jobs, jobs_status = app.yoagent_controller.yoagent_jobs_payload()
     finally:
         _stop_app(app)
@@ -355,10 +347,10 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
     try:
         # Wait for the mock to reach its input prompt (real Claude renders ❯, real Codex ›), then drive
         # the queued Yes/No sequence.
-        booted, pane = _wait_until(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
+        booted, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda t: "❯" in t or "›" in t, 20)
         assert booted, f"{agent}.py --mock did not boot to an input prompt:\n{pane}"
         _tmux(socket_path, "send-keys", "-t", f"{session}:", f"yesno {steps}", "Enter")
-        prompted, pane = _wait_until(
+        prompted, pane = wait_for_e2e_tmux_pane(
             socket_path, session,
             lambda t: "do you want to proceed" in t.lower() or "run the following command" in t.lower(),
             20,
@@ -372,7 +364,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
 
         # Claude can paint its completion line before the worker observes the final queued prompt.
         # Completion is only useful evidence once the requested hands-free approvals arrived too.
-        completed, pane = _wait_until(socket_path, session, lambda t: "complete" in t.lower() and worker.approved >= steps, 60)
+        completed, pane = wait_for_e2e_tmux_pane(socket_path, session, lambda t: "complete" in t.lower() and worker.approved >= steps, 60)
         assert completed, (
             f"YO did not auto-approve {agent}.py --mock hands-free; "
             f"approved={worker.approved} blocked={worker.blocked} last_action={worker.last_action!r}\n{pane}"

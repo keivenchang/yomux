@@ -807,8 +807,8 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
     assert {call["source"] for call in metrics["calls"]} == {"graph TD; A-->B;"}, metrics
     assert metrics["config"]["startOnLoad"] is False, metrics
     assert metrics["config"]["securityLevel"] == "strict", metrics
-    assert metrics["config"]["htmlLabels"] is True, metrics
-    assert metrics["config"]["flowchart"]["htmlLabels"] is True, metrics
+    assert metrics["config"]["htmlLabels"] is False, metrics
+    assert metrics["config"]["flowchart"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -875,6 +875,117 @@ def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser,
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+def test_direct_mermaid_network_topology_uses_native_svg_labels(browser, tmp_path):
+    browser.set_window_size(1200, 900)
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    mermaid_uri = fixture_asset_url("static", "vendor", "mermaid.min.js")
+    linux_port = str(7769 + 1)
+    linux_port_range = f"{linux_port}-{int(linux_port) + 3}"
+    mac_port_range = f"{int(linux_port) + 1110}-{int(linux_port) + 1113}"
+    mermaid_source = f"""flowchart TB
+    relay[\"ereview.com relay<br/>account: conway\"]
+    linux[\"keivenc-linux1<br/>YOLOmux: 127.0.0.1:{linux_port_range}<br/>yo{linux_port}-yo{int(linux_port) + 3}\"]
+    mac[\"Mac<br/>YOLOmux: 0.0.0.0:{mac_port_range}<br/>yo{int(linux_port) + 1110}-yo{int(linux_port) + 1113}\"]
+    macForward[\"Mac Linux-forward listener<br/>localhost/LAN:{linux_port_range}\"]
+    home[\"Home client<br/>192.168.1.x\"]
+    internet[\"Internet client\"]
+
+    linux -->|\"autossh -R: ereview:{linux_port_range}\"| relay
+    mac -->|\"autossh -R: ereview:{mac_port_range}\"| relay
+    macForward -->|\"autossh -L direct, no relay: Linux 127.0.0.1:{linux_port_range}\"| linux
+    mac --- macForward
+    home --> mac
+    home --> linux
+    internet --> relay
+    """
+    metrics = browser.execute_async_script(
+        """
+        const mermaidUri = arguments[0];
+        const mermaidSource = arguments[1];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const waitFor = window.__yolomuxTestWaitFor;
+            const waitImage = image => new Promise(resolve => {
+              if (!image) return resolve(false);
+              if (image.complete && image.naturalWidth > 0) return resolve(true);
+              image.addEventListener('load', () => resolve(image.naturalWidth > 0), {once: true});
+              image.addEventListener('error', () => resolve(false), {once: true});
+            });
+            const readBlobText = url => new Promise((resolve, reject) => {
+              const request = new XMLHttpRequest();
+              request.open('GET', url);
+              request.onload = () => resolve(String(request.responseText || ''));
+              request.onerror = () => reject(new Error('failed to read preview SVG'));
+              request.send();
+            });
+            await new Promise((resolve, reject) => {
+              const script = document.createElement('script');
+              script.src = mermaidUri;
+              script.onload = resolve;
+              script.onerror = () => reject(new Error('failed to load Mermaid'));
+              document.head.append(script);
+            });
+            window.mermaid.initialize(mermaidPreviewConfig());
+            const raw = await window.mermaid.render('yolomux-network-topology-probe', mermaidSource);
+            const rawSvg = typeof raw === 'string' ? raw : raw?.svg || '';
+            const path = '/home/test/repo/docs/network-topology.mmd';
+            const item = fileEditorItemFor(path);
+            setFileState(path, {kind: 'text', content: mermaidSource, original: mermaidSource, dirty: false, language: 'mermaid'});
+            setFileEditorViewMode(path, 'preview', item);
+            addFileEditorTabItem(path, item);
+            const panel = createFileEditorPanel(item);
+            panel.classList.add('active-pane');
+            panel.style.width = '960px';
+            panel.style.height = '620px';
+            panelNodes.set(item, panel);
+            document.getElementById('grid').replaceChildren(panel);
+            renderFileEditorPanel(panel, item);
+            const preview = panel.querySelector('.file-editor-preview-pane-panel');
+            if (preview._previewAsync) await preview._previewAsync;
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            await waitFor(
+              () => !preview.classList.contains('file-editor-preview-zoom-measuring'),
+              {description: 'network topology Mermaid preview reveal'}
+            );
+            const image = preview.querySelector('img.mermaid-preview-image');
+            await waitImage(image);
+            const previewSvg = image?.src ? await readBlobText(image.src) : '';
+            const previewNativeLabelTexts = Array.from(new DOMParser().parseFromString(previewSvg, 'image/svg+xml').querySelectorAll('text'))
+              .map(node => String(node.textContent || '').replace(/\\s+/g, ' ').trim())
+              .filter(Boolean);
+            done({
+              rawForeignObjects: (rawSvg.match(/<foreignObject\\b/gi) || []).length,
+              previewForeignObjects: (previewSvg.match(/<foreignObject\\b/gi) || []).length,
+              previewHasCollapsedMacLabel: previewSvg.includes('MacYOLOmux:'),
+              previewHasCollapsedForwardLabel: previewSvg.includes('Mac Linux-forward listenerlocalhost/LAN'),
+              previewNativeLabelTexts,
+              naturalWidth: image?.naturalWidth || 0,
+              naturalHeight: image?.naturalHeight || 0,
+              errors: window.__bootErrors,
+              rejections: window.__bootRejections,
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || ''});
+          }
+        })();
+        """,
+        mermaid_uri,
+        mermaid_source,
+    )
+    browser.save_screenshot("/tmp/yolomux-mermaid-network-topology-after.png")
+    assert "error" not in metrics, metrics
+    assert metrics["rawForeignObjects"] == 0, metrics
+    assert metrics["previewForeignObjects"] == 0, metrics
+    assert metrics["previewHasCollapsedMacLabel"] is False, metrics
+    assert metrics["previewHasCollapsedForwardLabel"] is False, metrics
+    preview_label_text = " ".join(metrics["previewNativeLabelTexts"]).replace(" ", "")
+    assert "Homeclient" in preview_label_text, metrics
+    assert "Internetclient" in preview_label_text, metrics
+    assert metrics["naturalWidth"] > 0 and metrics["naturalHeight"] > 0, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_path):
     browser.set_window_size(1200, 900)
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
@@ -925,6 +1036,9 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             window.mermaid.initialize(mermaidPreviewConfig());
             const probeResult = await window.mermaid.render('yolomux-mermaid-probe', mermaidSource);
             const probeSvgText = typeof probeResult === 'string' ? probeResult : probeResult?.svg || '';
+            const probeNativeLabelTexts = Array.from(new DOMParser().parseFromString(probeSvgText, 'image/svg+xml').querySelectorAll('text'))
+              .map(node => String(node.textContent || '').trim())
+              .filter(Boolean);
             const path = '/home/test/repo/docs/preview-samples/14-mermaid.mmd';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: mermaidSource, original: mermaidSource, dirty: false, language: 'mermaid'});
@@ -955,6 +1069,9 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             await frame();
             const idempotentRerender = Boolean(preview.querySelector('img.mermaid-preview-image[data-idem-tag="keep"]'));
             const svgText = image?.src ? await readBlobText(image.src) : '';
+            const previewNativeLabelTexts = Array.from(new DOMParser().parseFromString(svgText, 'image/svg+xml').querySelectorAll('text'))
+              .map(node => String(node.textContent || '').replace(/[\\t\\r\\n ]+/g, ' ').trim())
+              .filter(Boolean);
             const viewport = preview.querySelector('.file-editor-preview-zoom-viewport');
             const zoomIn = preview.querySelector('[data-preview-zoom-action="in"]');
             const zoomActual = preview.querySelector('[data-preview-zoom-action="actual"]');
@@ -1154,6 +1271,8 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
               },
               svgText,
               probeSvgText,
+              probeNativeLabelTexts,
+              previewNativeLabelTexts,
               config: window.mermaid?.mermaidAPI?.getConfig?.() || {},
               errors: window.__bootErrors,
               rejections: window.__bootRejections,
@@ -1249,15 +1368,17 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
         metrics["split"]["panAfter"]["scrollLeft"] > metrics["split"]["panStart"]["scrollLeft"]
         or metrics["split"]["panAfter"]["scrollTop"] > metrics["split"]["panStart"]["scrollTop"]
     ), metrics
+    probe_label_text = " ".join(metrics["probeNativeLabelTexts"])
     for label in ("Markdown pipeline", "Mermaid pipeline", "Media pipeline", "Preview pane", "Visible result"):
-        assert label in metrics["probeSvgText"], metrics
+        assert label.replace(" ", "") in probe_label_text.replace(" ", ""), metrics
     assert "<foreignObject" not in metrics["svgText"], metrics
+    preview_label_text = " ".join(metrics["previewNativeLabelTexts"])
     for label in ("Markdown pipeline", "Mermaid pipeline", "Media pipeline", "Preview pane", "Visible result"):
-        assert label in metrics["svgText"], metrics
+        assert label.replace(" ", "") in preview_label_text.replace(" ", ""), metrics
     assert "font-family:" in metrics["svgText"], metrics
     assert "font-weight:400" in metrics["svgText"], metrics
     assert re.search(r'fill="(?:#[0-9a-fA-F]{3,8}|rgb)', metrics["svgText"]), metrics
-    assert metrics["config"]["htmlLabels"] is True, metrics
+    assert metrics["config"]["htmlLabels"] is False, metrics
     # Dark-on-dark readability: every node label must contrast with its node's own background fill.
     # This catches the bug where default (dark-fill) nodes rendered dark text -> invisible, while the
     # label-presence/font assertions above still passed. Both light-on-dark and dark-on-light qualify.
@@ -1801,8 +1922,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["mermaid"]["config"]["startOnLoad"] is False, metrics
     assert metrics["mermaid"]["config"]["securityLevel"] == "strict", metrics
     assert metrics["mermaid"]["config"]["deterministicIds"] is True, metrics
-    assert metrics["mermaid"]["config"]["htmlLabels"] is True, metrics
-    assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is True, metrics
+    assert metrics["mermaid"]["config"]["htmlLabels"] is False, metrics
+    assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 
@@ -2138,8 +2259,8 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
     assert "stroke:#e4e8ee" in metrics["mermaidSvgText"], metrics
     assert "font-weight:400" in metrics["mermaidSvgText"], metrics
     assert "stroke:none" in metrics["mermaidSvgText"], metrics
-    assert metrics["mermaidConfig"]["flowchart"]["htmlLabels"] is True, metrics
-    assert metrics["mermaidConfig"]["htmlLabels"] is True, metrics
+    assert metrics["mermaidConfig"]["flowchart"]["htmlLabels"] is False, metrics
+    assert metrics["mermaidConfig"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
 

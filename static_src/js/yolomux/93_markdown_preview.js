@@ -378,9 +378,9 @@ function mermaidPreviewConfig() {
     deterministicIds: true,
     deterministicIDSeed: 'yolomux-preview',
     theme: 'base',
-    htmlLabels: true,
+    htmlLabels: false,
     flowchart: {
-      htmlLabels: true,
+      htmlLabels: false,
       useMaxWidth: true,
       nodeSpacing: 72,
       rankSpacing: 72,

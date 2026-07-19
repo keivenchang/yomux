@@ -2256,7 +2256,9 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     if (!wrapper) throw new Error(`missing menu ${menuId}`);
                     wrapper.querySelector(':scope > .app-menu-button')?.click();
                     await frame();
-                    wrapper.querySelector(':scope > .app-menu-popover .app-menu-command:not([disabled])')?.dispatchEvent(new PointerEvent('pointerenter', {bubbles: true}));
+                    const activeCommand = wrapper.querySelector(':scope > .app-menu-popover .app-menu-command:not([disabled])');
+                    activeCommand?.focus();
+                    activeCommand?.dispatchEvent(new PointerEvent('pointerenter', {bubbles: true}));
                     await frame();
                     const commands = Array.from(wrapper.querySelectorAll(':scope > .app-menu-popover .app-menu-command'));
                     return publish(`menu-${menuId}`, {

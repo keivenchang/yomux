@@ -35,7 +35,11 @@ from yolomux_lib import server_auth
 from yolomux_lib.locales import locale_registry_payload
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.server import TmuxWebtermHTTPServer
-from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
+from tests.tmux_runtime import capture_isolated_tmux_pane
+from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import start_isolated_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
+from tests.tmux_runtime import wait_for_isolated_tmux_panes
 
 pytestmark = [pytest.mark.browser, pytest.mark.socket]
 
@@ -44,11 +48,13 @@ webdriver = pytest.importorskip("selenium.webdriver")
 ActionChains = pytest.importorskip("selenium.webdriver.common.action_chains").ActionChains
 Options = pytest.importorskip("selenium.webdriver.chrome.options").Options
 TimeoutException = pytest.importorskip("selenium.common.exceptions").TimeoutException
+WebDriverException = pytest.importorskip("selenium.common.exceptions").WebDriverException
 SeleniumWebDriverWait = pytest.importorskip("selenium.webdriver.support.ui").WebDriverWait
 
 
 XDIST_BROWSER_WAIT_FLOOR_SECONDS = 10.0
 DEFAULT_BROWSER_WINDOW_SIZE = (1000, 700)
+SESSION_SCOPED_BROWSER_REUSE_ENV = "YOLOMUX_SESSION_SCOPED_BROWSER"
 GOLDEN_UPDATE_ENV = "YOLOMUX_UPDATE_GOLDENS"
 GOLDEN_DIR_ENV = "YOLOMUX_GOLDEN_DIR"
 LIVE_RUNTIME_BUNDLE_SENTINEL = "__yolomuxLiveRuntimeBundleLoaded"
@@ -310,6 +316,7 @@ def new_chrome_driver(window_size: str | tuple[int, int] | None = None):
     window_size_arg = ",".join(str(value) for value in requested_size) if isinstance(requested_size, tuple) else str(requested_size)
     options.add_argument(f"--window-size={window_size_arg}")
     driver = webdriver.Chrome(options=options)
+    driver._yolomux_primary_window_handle = driver.current_window_handle
     register_browser_new_document_script(driver, BROWSER_WAIT_HELPER_SOURCE, reset_after_test=False)
     driver.execute_script(BROWSER_WAIT_HELPER_SOURCE)
     return driver
@@ -654,78 +661,6 @@ def cleanup_isolated_browser_runtime_paths(paths):
     shutil.rmtree(paths.control_socket_dir, ignore_errors=True)
 
 
-def run_isolated_tmux(runtime, *args, timeout=8):
-    return subprocess.run(
-        [runtime.tmux_binary, "-S", str(runtime.socket_path), *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-
-
-def capture_isolated_tmux_pane(runtime, session, timeout=8):
-    return run_isolated_tmux(runtime, "capture-pane", "-p", "-t", f"{session}:", timeout=timeout).stdout or ""
-
-
-def wait_for_isolated_tmux_panes(runtime, sessions, predicate, timeout=20, poll_interval=0.4):
-    session_names = list(sessions)
-    deadline = time.monotonic() + timeout
-    panes = {}
-    while time.monotonic() < deadline:
-        panes = {session: capture_isolated_tmux_pane(runtime, session) for session in session_names}
-        if predicate(panes):
-            return True, panes
-        time.sleep(poll_interval)
-    return False, panes
-
-
-def start_isolated_tmux_runtime(
-    monkeypatch,
-    tmp_path,
-    session_count=1,
-    *,
-    session_commands=None,
-    columns=120,
-    rows=36,
-):
-    tmux_binary = shutil.which("tmux")
-    if not tmux_binary:
-        pytest.skip("tmux is not installed")
-    socket_dir = Path("/tmp") / f"yts-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    socket_dir.mkdir(mode=0o700)
-    socket_path = socket_dir / "s"
-    commands = dict(session_commands or {})
-    session_names = list(commands) if session_commands is not None else [f"yt-{os.getpid()}-{uuid.uuid4().hex[:10]}-{index + 1}" for index in range(session_count)]
-    if not session_names:
-        shutil.rmtree(socket_dir, ignore_errors=True)
-        raise ValueError("at least one isolated tmux session is required")
-    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
-    runtime = SimpleNamespace(tmux_binary=tmux_binary, socket_path=socket_path, socket_dir=socket_dir, sessions=session_names)
-    try:
-        for session in session_names:
-            args = ["new-session", "-d", "-s", session, "-x", str(columns), "-y", str(rows)]
-            command = commands.get(session)
-            if command is not None:
-                args.append(command)
-            result = run_isolated_tmux(runtime, *args, timeout=10)
-            if result.returncode != 0:
-                raise AssertionError(f"isolated tmux session failed: {result.stderr or result.stdout}")
-            if command is None:
-                run_isolated_tmux(runtime, "send-keys", "-t", f"{session}:", f"printf 'isolated {session}\\n'", "Enter", timeout=5)
-        return runtime
-    except Exception:
-        stop_isolated_tmux_runtime(runtime)
-        raise
-
-
-def stop_isolated_tmux_runtime(runtime):
-    if runtime is None:
-        return
-    run_isolated_tmux(runtime, "kill-server", timeout=5)
-    shutil.rmtree(runtime.socket_dir, ignore_errors=True)
-
-
 def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True):
     paths = None
     tmux_runtime = None
@@ -816,44 +751,130 @@ def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
     return matches, samples
 
 
-@pytest.fixture(scope="module")
+def _browser_fixture_scope(*, fixture_name, config):
+    """Keep the production fixture behavior unless the worker-reuse experiment is explicit."""
+    del fixture_name, config
+    return "session" if os.environ.get(SESSION_SCOPED_BROWSER_REUSE_ENV) == "1" else "module"
+
+
+class _BrowserDriverLease:
+    """Stable fixture object whose worker-local Chrome may be replaced after a crash."""
+
+    def __init__(self, driver):
+        object.__setattr__(self, "_driver", driver)
+
+    def __getattr__(self, name):
+        return getattr(self._driver, name)
+
+    def __setattr__(self, name, value):
+        if name == "_driver":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._driver, name, value)
+
+    def get(self, url):
+        parsed = urlsplit(str(url))
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            origins = set(getattr(self._driver, "_yolomux_test_origins", set()))
+            origins.add(f"{parsed.scheme}://{parsed.netloc}")
+            self._driver._yolomux_test_origins = origins
+        return self._driver.get(url)
+
+    def replace_after_invalid_session(self):
+        previous = self._driver
+        try:
+            previous.quit()
+        except WebDriverException:
+            pass
+        self._driver = new_chrome_driver()
+
+    def quit(self):
+        self._driver.quit()
+
+
+def _reset_browser_windows(driver):
+    """Close fixture-created popouts before clearing profile-scoped state."""
+    handles = list(driver.window_handles)
+    if not handles:
+        raise WebDriverException("Chrome has no remaining top-level window")
+    primary = getattr(driver, "_yolomux_primary_window_handle", None)
+    if primary not in handles:
+        primary = handles[0]
+        driver._yolomux_primary_window_handle = primary
+    for handle in handles:
+        if handle == primary:
+            continue
+        driver.switch_to.window(handle)
+        driver.close()
+    driver.switch_to.window(primary)
+
+
+def _reset_reused_browser_state(driver):
+    """Return a worker-reused browser to a known blank, profile-clean state."""
+    _reset_browser_windows(driver)
+    remove_browser_test_new_document_scripts(driver)
+    origin = driver.execute_script("return location.origin;")
+    origins = set(getattr(driver, "_yolomux_test_origins", set()))
+    if origin and origin != "null":
+        origins.add(origin)
+    fixture_origin = _FIXTURE_HTTP_BASE
+    if fixture_origin:
+        origins.add(fixture_origin)
+    for storage_origin in sorted(origins):
+        driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": storage_origin, "storageTypes": "all"})
+    driver._yolomux_test_origins = set()
+    driver.delete_all_cookies()
+    driver.execute_cdp_cmd("Browser.resetPermissions", {})
+    driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
+    driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+    driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
+    driver.get_log("browser")
+    driver.get("about:blank")
+    driver.execute_script("document.body.tabIndex = -1; document.body.focus();")
+    driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
+
+
+def _invalid_browser_session(error):
+    message = str(error).lower()
+    return any(marker in message for marker in (
+        "invalid session id",
+        "session deleted",
+        "disconnected",
+        "not reachable",
+        "target window already closed",
+        "no remaining top-level window",
+    ))
+
+
+@pytest.fixture(scope=_browser_fixture_scope)
 def browser():
-    # Module-scoped: launch headless Chrome ONCE for the whole file instead of per-test (~38 launches).
-    # Each test does its own browser.get(fresh file:// fixture); _reset_browser_state clears storage/cookies
-    # between tests so the reused driver can't leak state.
-    driver = new_chrome_driver()
+    # Default module scope is the established baseline. The opt-in session scope creates exactly
+    # one lease per pytest-xdist worker, while the autouse teardown removes cross-test state.
+    lease = _BrowserDriverLease(new_chrome_driver())
     try:
-        yield driver
+        yield lease
     finally:
-        driver.quit()
+        lease.quit()
 
 
 @pytest.fixture(autouse=True)
 def _reset_browser_state(request):
-    # Reset the reused module-scoped driver after each test so per-page state (localStorage, cookies,
-    # window size) does not bleed into the next test. No-op for tests that don't use the browser.
+    # Reset the reused driver after each test so a module- or session-scoped lease cannot leak state.
+    # No-op for tests that don't use the browser.
     yield
-    driver = request.node.funcargs.get("browser")
-    if driver is None:
+    lease = request.node.funcargs.get("browser")
+    if lease is None:
         return
     try:
-        remove_browser_test_new_document_scripts(driver)
-        driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
-        driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
-        driver.delete_all_cookies()
-        driver.execute_script("try { localStorage.clear(); sessionStorage.clear(); } catch (e) {}")
-        # Fixtures are now served from ONE http origin (Chrome 150 file:// fix), so unlike the
-        # old per-file opaque file:// origins, IndexedDB / CacheStorage / service-worker state
-        # would bleed across tests in the reused driver. Clear ALL storage types for the origin.
-        try:
-            origin = driver.execute_script("return location.origin;")
-            if origin and origin != "null":
-                driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": origin, "storageTypes": "all"})
-        except Exception:
-            pass
-        driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
-    except Exception:
-        pass
+        _reset_reused_browser_state(lease)
+    except WebDriverException as error:
+        if not _invalid_browser_session(error):
+            raise
+        lease.replace_after_invalid_session()
+        pytest.fail(
+            "Chrome became invalid during this test; replaced the worker-local driver for later tests "
+            f"without concealing the failure: {error}"
+        )
 
 
 def pane_fixture_html(width):
