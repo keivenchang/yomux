@@ -5536,6 +5536,9 @@ async function runShareThemeSuite() {
     assert.equal(sessionActions.some(item => item.disabled), false);
     assert.equal(sessionActions.find(item => item.label === "Rename tmux session '1'").detail, '');
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+    const tabContextMenuStart = source.indexOf('function showTabContextMenu(');
+    const tabContextMenuEnd = source.indexOf('function showSessionContextMenu(', tabContextMenuStart);
+    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('sessionTabDescription(item, info)'), 'tab action descriptions reuse the metadata-safe tab description instead of showing Loading for an interactive terminal');
     api.showSessionContextMenu('1', 10, 10);
     const contextMenu = contextMenuNode();
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');

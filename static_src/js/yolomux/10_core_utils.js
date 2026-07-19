@@ -4547,7 +4547,7 @@ function showTabContextMenu(item, x, y, options = {}) {
     const info = transcriptMetadataState.payload.sessions?.[item];
     const tab = itemLabel(item);
     const rawDescription = isTmuxSession(item)
-      ? sessionWorkDescription(item, info, 0)
+      ? sessionTabDescription(item, info)
       : tabMenuDetailText(item, info);
     const description = rawDescription && rawDescription !== tab ? rawDescription : t('common.notAvailable');
     const text = t('tab.actions.moreDescription', {tab, description});
