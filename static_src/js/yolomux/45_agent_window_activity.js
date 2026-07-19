@@ -305,6 +305,11 @@ function sessionAgentWindowScreenIsWorking(payload) {
   return String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
+function agentWindowSnapshotRevision(payload) {
+  const revision = Number(payload?.agent_window_snapshot_revision || 0);
+  return Number.isInteger(revision) && revision > 0 ? revision : 0;
+}
+
 function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
@@ -312,13 +317,20 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     : null;
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
+  const stateRevision = agentWindowSnapshotRevision(statePayload);
+  const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
+  // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
+  // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
+  // not. Old clients have no revision and retain the established compatibility behavior.
+  const revisionMismatch = stateRows.length > 0 && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
+  const trustedActivityRows = revisionMismatch ? [] : activityRows;
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
   // metadata can identify a window and enrich its path/git details, but never provide a
   // color, transition, or acknowledgement when the canonical status is unavailable.
   const source = stateRows.length
     ? stateRows
-    : mergedAgentWindowMetadataRows(activityRows, infoRows, info);
+    : mergedAgentWindowMetadataRows(trustedActivityRows, infoRows, info);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -333,7 +345,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     }));
   const activeIndex = activeTmuxWindowIndexFromInfo(info);
   const agents = fallback
-    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows]))
+    .map(agent => mergeAgentWindowPayload(agent, [trustedActivityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
@@ -356,7 +368,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const effectiveAgents = proxyIndex >= 0
     ? agents.map((agent, index) => (index === proxyIndex ? {...agent, state: STATE_KEY.working, screen_working_proxy: true} : agent))
     : agents;
-  return {agents: effectiveAgents, hasAttributedWindows, screenWorking, screenProxyIndex: proxyIndex};
+  return {agents: effectiveAgents, hasAttributedWindows, screenWorking, screenProxyIndex: proxyIndex, stale: revisionMismatch, stateRevision, activityRevision};
 }
 
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {

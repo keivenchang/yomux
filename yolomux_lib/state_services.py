@@ -15,9 +15,16 @@ from .types import SessionFilesPayload
 
 
 @dataclass
-class ClientWatchFileRecord:
+class ClientWatchDescriptor:
+    """One browser's watch demand, owned by its client-event stream lifecycle."""
+
     expires_at: float
-    background: bool
+    roots: tuple[str, ...] = ()
+    files: tuple[str, ...] = ()
+    background_files: tuple[str, ...] = ()
+    context_items: tuple[dict[str, Any], ...] = ()
+    session_files: tuple[dict[str, Any], ...] = ()
+    activity_summary: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -26,6 +33,11 @@ class ClientEventWatcherRecord:
     directory_poll_worker: threading.Thread | None = None
     filesystem_worker: threading.Thread | None = None
     snapshot_worker: threading.Thread | None = None
+    status_generation_worker: threading.Thread | None = None
+    status_generation_stop_event: threading.Event = field(default_factory=threading.Event)
+    status_generation_lease_id: str = ""
+    status_generation: int = 0
+    status_generation_retry_at: float = 0.0
     wake_event: threading.Event = field(default_factory=threading.Event)
     stop_event: threading.Event = field(default_factory=threading.Event)
     filesystem_stop_event: threading.Event = field(default_factory=threading.Event)
@@ -39,11 +51,14 @@ class ClientEventWatcherRecord:
     next_signature_poll_at: float = 0.0
     next_file_poll_at: float = 0.0
     next_background_file_poll_at: float = 0.0
-    next_auto_poll_at: float = 0.0
     next_attention_ack_poll_at: float = 0.0
     next_tmux_signal_poll_at: float = 0.0
+    tmux_signal_refresh_at: float = 0.0
     next_watched_pr_poll_at: float = 0.0
     next_yoagent_job_poll_at: float = 0.0
+    # Fixed-vocabulary recurring-work diagnostics. Keys are supplied only by the
+    # app's static catalog, so a caller can never create path/user/cardinality state.
+    recurring_work: dict[str, dict[str, float | int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -79,6 +94,10 @@ class TabberActivityCacheRecord:
     stored_at: float | None = None
     payload: dict[str, Any] | None = None
     source_signature: str = ""
+    # The background owner publishes a compact invalidation only after a new
+    # cache generation is readable. Keep that one delivery watermark beside the
+    # cache rather than a parallel app-level signature map.
+    published_source_signature: str = ""
     refresh_worker: threading.Thread | None = None
     session_signatures: dict[str, str] = field(default_factory=dict)
     session_rows: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -114,6 +133,8 @@ class TabberActivityWarmerRecord:
     thread: threading.Thread | None = None
     running: bool = False
     consumer_until: float = 0.0
+    refresh_due_at: float = 0.0
+    refresh_triggers: set[str] = field(default_factory=set)
     # Set by a returning consumer (or teardown) to unpark a warmer that idled
     # out of demand; parking instead of exiting keeps one thread and zero
     # recurring work with no request-path thread creation.
@@ -247,6 +268,8 @@ class IndexedRepoDiscoveryRecord:
     worker: threading.Thread | None = None
     refreshed_at: float = 0.0
     retry_at: float = 0.0
+    root_generations: dict[str, int] = field(default_factory=dict)
+    completed_generation_signature: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass
@@ -278,10 +301,10 @@ class ClientWatchService:
     """Own watcher snapshots, revisions, and lifecycle records independently of HTTP routes."""
 
     lock: threading.RLock = field(default_factory=threading.RLock)
-    file_records: dict[str, ClientWatchFileRecord] = field(default_factory=dict)
-    context_items: list[dict[str, Any]] = field(default_factory=list)
-    session_files: list[dict[str, Any]] = field(default_factory=list)
-    activity_summary: dict[str, Any] = field(default_factory=dict)
+    # Every descriptor is keyed by the browser's existing client-event client_id.
+    # Keeping the demand here rather than in route-local globals prevents one tab's
+    # Finder state from replacing another tab's watch set.
+    descriptors: dict[str, ClientWatchDescriptor] = field(default_factory=dict)
     initialized: bool = False
     settings_signature: tuple[Any, ...] | None = None
     transcripts_signature: tuple[Any, ...] | None = None
@@ -308,6 +331,32 @@ class ClientWatchService:
     # passed to publish_session_files_ready_events/publish_context_items_ready_events.
     invalidation_counts: dict[str, int] = field(default_factory=dict)
 
-    def snapshot(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    def snapshot(self, now: float | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
         with self.lock:
-            return [dict(item) for item in self.context_items], [dict(item) for item in self.session_files], dict(self.activity_summary)
+            expired = [client_id for client_id, descriptor in self.descriptors.items() if now is not None and descriptor.expires_at <= now]
+            for client_id in expired:
+                self.descriptors.pop(client_id, None)
+            descriptors = [self.descriptors[client_id] for client_id in sorted(self.descriptors)]
+            context_items: list[dict[str, Any]] = []
+            session_files: list[dict[str, Any]] = []
+            seen_context: set[tuple[str, int]] = set()
+            seen_session_files: set[str] = set()
+            activity_summaries = [dict(descriptor.activity_summary) for descriptor in descriptors if descriptor.activity_summary.get("visible") is True]
+            for descriptor in descriptors:
+                for item in descriptor.context_items:
+                    key = (str(item.get("session") or ""), int(item.get("messages") or 0))
+                    if not key[0] or key in seen_context:
+                        continue
+                    seen_context.add(key)
+                    context_items.append(dict(item))
+                for item in descriptor.session_files:
+                    key = repr(sorted(item.items()))
+                    if key in seen_session_files:
+                        continue
+                    seen_session_files.add(key)
+                    session_files.append(dict(item))
+            # The current activity payload has one broadcast locale/scope. Preserve that
+            # existing contract deterministically while the descriptor collection prevents
+            # unrelated clients from clearing visible demand.
+            activity_summary = activity_summaries[0] if activity_summaries else {}
+            return context_items, session_files, activity_summary

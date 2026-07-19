@@ -13,6 +13,7 @@ import os
 import signal
 import socket
 import struct
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -159,13 +160,16 @@ def run_local_rpc_service(
     on_client: Callable[[], None],
     on_start: Callable[[], None] | None = None,
     on_shutdown: Callable[[], None] | None = None,
+    concurrent_handlers: int = 0,
 ) -> int:
     """Run one bounded local service socket until stopped or idle.
 
     ``handle`` owns typed service semantics.  The common listener owns only
     Unix-domain socket permissions, singleton locking, framing, response
     correlation, and cleanup.  Returning ``True`` from ``on_idle`` requests a
-    bounded idle shutdown after the listener timeout.
+    bounded idle shutdown after the listener timeout. ``concurrent_handlers``
+    is opt-in for services whose handler contract is explicitly lock-safe;
+    most local daemons remain serial by default.
     """
     previous_handlers = install_stop_signal_handlers(stop_event)
     requested_socket_path = socket_path
@@ -211,20 +215,19 @@ def run_local_rpc_service(
                 # listener publication.  A losing contender must never open or
                 # migrate the winner's database before discovering the lock.
                 on_start()
-            try:
-                while not stop_event.is_set():
-                    try:
-                        connection, _address = server.accept()
-                    except TimeoutError:
-                        if on_idle():
-                            stop_event.set()
-                        continue
+            handler_limit = max(0, int(concurrent_handlers))
+            handler_slots = threading.BoundedSemaphore(handler_limit) if handler_limit else None
+            handler_threads: set[threading.Thread] = set()
+            handler_threads_lock = threading.Lock()
+
+            def serve_connection(connection: socket.socket) -> None:
+                try:
                     with connection:
                         connection.settimeout(LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS)
                         uid = peer_uid(connection)
                         if uid is not None and uid != os.getuid():
                             write_message(connection, None, {"ok": False, "error": "peer uid mismatch"}, legacy=True)
-                            continue
+                            return
                         on_client()
                         try:
                             envelope, payload, _binary, legacy = read_message(connection)
@@ -253,11 +256,43 @@ def run_local_rpc_service(
                                     write_message(connection, None, {"ok": False, "error": "response too large"}, legacy=True)
                                 except OSError:
                                     pass
+                finally:
+                    if handler_slots is not None:
+                        handler_slots.release()
+                    with handler_threads_lock:
+                        handler_threads.discard(threading.current_thread())
+
+            try:
+                while not stop_event.is_set():
+                    try:
+                        connection, _address = server.accept()
+                    except TimeoutError:
+                        if on_idle():
+                            stop_event.set()
+                        continue
+                    if handler_slots is None:
+                        serve_connection(connection)
+                    elif not handler_slots.acquire(blocking=False):
+                        with connection:
+                            try:
+                                write_message(connection, None, {"ok": False, "error": "service busy"}, legacy=True)
+                            except OSError:
+                                pass
+                    else:
+                        worker = threading.Thread(target=serve_connection, args=(connection,), name=f"{service_name}-rpc", daemon=True)
+                        with handler_threads_lock:
+                            handler_threads.add(worker)
+                        worker.start()
                     # A completed request may have more clients queued behind it.
                     # Maintenance runs only after an actual accept timeout so
                     # background work cannot jump ahead of interactive RPCs.
             except KeyboardInterrupt:
                 stop_event.set()
+            finally:
+                with handler_threads_lock:
+                    workers = tuple(handler_threads)
+                for worker in workers:
+                    worker.join(timeout=0.1)
         finally:
             server.close()
     finally:

@@ -888,22 +888,22 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
-      'docs/preview-samples/10-markdown.md': 'markdown',
-      'docs/preview-samples/11-html.html': 'html',
-      'docs/preview-samples/12-image.svg': 'image',
-      'docs/preview-samples/14-mermaid.mmd': 'mermaid',
-      'docs/preview-samples/15-structured.json': 'structured',
-      'docs/preview-samples/16-structured.jsonl': 'json-lines-table',
-      'docs/preview-samples/17-notebook.ipynb': 'structured',
-      'docs/preview-samples/18-structured.yaml': 'structured',
-      'docs/preview-samples/19-structured.toml': 'structured',
-      'docs/preview-samples/20-structured.drawio': 'structured',
-      'docs/preview-samples/21-config.properties': 'structured',
-      'docs/preview-samples/22-table.csv': 'table',
-      'docs/preview-samples/23-table.tsv': 'table',
+      'tests/fixtures/preview-samples/10-markdown.md': 'markdown',
+      'tests/fixtures/preview-samples/11-html.html': 'html',
+      'tests/fixtures/preview-samples/12-image.svg': 'image',
+      'tests/fixtures/preview-samples/14-mermaid.mmd': 'mermaid',
+      'tests/fixtures/preview-samples/15-structured.json': 'structured',
+      'tests/fixtures/preview-samples/16-structured.jsonl': 'json-lines-table',
+      'tests/fixtures/preview-samples/17-notebook.ipynb': 'structured',
+      'tests/fixtures/preview-samples/18-structured.yaml': 'structured',
+      'tests/fixtures/preview-samples/19-structured.toml': 'structured',
+      'tests/fixtures/preview-samples/20-structured.drawio': 'structured',
+      'tests/fixtures/preview-samples/21-config.properties': 'structured',
+      'tests/fixtures/preview-samples/22-table.csv': 'table',
+      'tests/fixtures/preview-samples/23-table.tsv': 'table',
     };
     for (const [samplePath, rendererId] of Object.entries(previewRendererSamples)) {
-      assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a docs/preview-samples fixture`);
+      assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a preview-samples fixture`);
       assert.equal(api.previewRendererForPath(`/repo/${samplePath}`).id, rendererId, `${samplePath} routes to ${rendererId}`);
     }
     const transcriptPreview = api.jsonLinesTablePreview('/repo/transcript.jsonl', [
@@ -929,18 +929,18 @@ async function runLayoutRestoreSuite() {
     assert.equal(wideJsonl.columns.length, 40, 'JSONL column count is capped');
     assert.equal(wideJsonl.overflowColumns.length, 4, 'JSONL retains overflow keys behind one affordance');
     [
-      'docs/preview-samples/13-pdf.pdf',
-      'docs/preview-samples/24-audio.wav',
-      'docs/preview-samples/25-video.mp4',
-      'docs/preview-samples/26-text.log',
-      'docs/preview-samples/27-diff.patch',
-      'docs/preview-samples/28-diagram.dot',
-      'docs/preview-samples/29-plantuml.puml',
-      'docs/preview-samples/30-unsupported-image.tiff',
-      'docs/preview-samples/31-unsupported-document.xlsx',
-      'docs/preview-samples/32-unsupported-data.parquet',
-      'docs/preview-samples/33-unsupported-archive.zip',
-      'docs/preview-samples/34-unsupported.unknown',
+      'tests/fixtures/preview-samples/13-pdf.pdf',
+      'tests/fixtures/preview-samples/24-audio.wav',
+      'tests/fixtures/preview-samples/25-video.mp4',
+      'tests/fixtures/preview-samples/26-text.log',
+      'tests/fixtures/preview-samples/27-diff.patch',
+      'tests/fixtures/preview-samples/28-diagram.dot',
+      'tests/fixtures/preview-samples/29-plantuml.puml',
+      'tests/fixtures/preview-samples/30-unsupported-image.tiff',
+      'tests/fixtures/preview-samples/31-unsupported-document.xlsx',
+      'tests/fixtures/preview-samples/32-unsupported-data.parquet',
+      'tests/fixtures/preview-samples/33-unsupported-archive.zip',
+      'tests/fixtures/preview-samples/34-unsupported.unknown',
     ].forEach(samplePath => {
       assert.equal(fs.existsSync(samplePath), false, `${samplePath} stays out of the curated preview sample set`);
     });
@@ -1084,8 +1084,8 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
     assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), false, 'CodeMirror API validation rejects bundles without line-wrapping support');
     assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
-    const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package.json', 'utf8'));
-    const codeMirrorBundleLock = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package-lock.json', 'utf8'));
+    const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package.json', 'utf8'));
+    const codeMirrorBundleLock = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package-lock.json', 'utf8'));
     const codeMirrorDirectVersions = {
       '@codemirror/commands': '6.10.3',
       '@codemirror/lang-css': '6.3.1',
@@ -1113,7 +1113,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(codeMirrorBundleLock.packages['node_modules/@lezer/highlight'].version, '1.2.3', 'Lezer highlight version is recorded');
     assert.equal(codeMirrorBundleLock.packages['node_modules/style-mod'].version, '4.1.3', 'style-mod version is recorded');
     assert.equal(codeMirrorBundleLock.packages['node_modules/w3c-keyname'].version, '2.2.8', 'w3c-keyname version is recorded');
-    assert.ok(fs.readFileSync('prototypes/codemirror-entry.js', 'utf8').includes('cd prototypes/codemirror-bundle'), 'CodeMirror rebuild instructions use the checked-in bundle manifest');
+    assert.ok(fs.readFileSync('tools/codemirror-bundle/codemirror-entry.js', 'utf8').includes('cd tools/codemirror-bundle'), 'CodeMirror rebuild instructions use the checked-in bundle manifest');
     const parserCrashApi = {
       EditorState: {
         create(config) {
@@ -1375,6 +1375,30 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.runtimeIntervalDelay(0), 1);
   });
 
+  test('every production runtime interval has one source-of-truth classification', () => {
+    const api = loadYolomux('', ['1']);
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const names = Array.from(source.matchAll(/resetRuntimeInterval\('([^']+)'/g), match => match[1]);
+    const expected = [
+      'latency', 'events-fallback', 'auto-approve', 'tabber-activity-fallback', 'file-index-refresh',
+      'file-index-building', 'debug-stats', 'debug-system', 'debug-logs',
+      'share-geometry-digest', 'chat-relative-times', 'share-status',
+    ].sort();
+    assert.deepStrictEqual([...new Set(names)].sort(), expected, 'the source audit must name every production resetRuntimeInterval owner');
+    for (const name of expected) {
+      const entry = canonical(api.runtimeIntervalCatalogForTest(name));
+      assert.ok(entry, `${name} has an explicit timer classification`);
+      assert.ok(Array.isArray(entry.classes) && entry.classes.length > 0, `${name} names at least one reason`);
+      for (const timerClass of entry.classes) assert.ok(api.runtimeTimerClassCatalogForTest()[timerClass], `${name} uses a named timer class`);
+      assert.equal(typeof entry.source, 'string');
+      assert.ok(entry.source.length > 20, `${name} records its source of truth`);
+    }
+    for (const timerClass of ['poll:no-change', 'sample', 'lease', 'external-reconcile', 'repair', 'fallback', 'local-display']) {
+      assert.equal(typeof api.runtimeTimerClassCatalogForTest()[timerClass], 'string', `${timerClass} remains a distinct timer class`);
+    }
+    assert.deepStrictEqual(canonical(api.runtimeIntervalCatalogForTest('events')), null, 'the normal event-log discovery loop remains retired');
+  });
+
   await testAsync('named runtime intervals wait for async work before scheduling the next run', async () => {
     const scheduled = [];
     const cleared = new Set();
@@ -1411,6 +1435,37 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.clearRuntimeIntervalForTest('unit-runtime-loop'), true);
     assert.equal(api.runtimeIntervalActiveForTest('unit-runtime-loop'), false);
     assert.equal(cleared.has(afterSettle[1].timer), true, 'clearing the named loop cancels its pending timer');
+  });
+
+  await testAsync('runtime interval diagnostics distinguish useful work from no-change work', async () => {
+    const scheduled = [];
+    let nextTimer = 1;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = nextTimer++;
+        scheduled.push({timer, callback, delay});
+        return timer;
+      },
+      clearTimeout() {},
+    });
+    api.resetRuntimeIntervalForTest('latency', () => null, 10);
+    const first = scheduled.filter(item => item.delay === 10);
+    assert.equal(first.length, 1);
+    first[0].callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    let diagnostic = canonical(api.runtimeIntervalDiagnosticsForTest('latency')[0]);
+    assert.equal(diagnostic.lastResult, 'no-change');
+    assert.equal(diagnostic.lastUsefulAtMs, 0);
+    api.resetRuntimeIntervalForTest('latency', () => ({latencyMs: 3}), 10);
+    const second = scheduled.filter(item => item.delay === 10);
+    assert.equal(second.length, 2);
+    second[1].callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    diagnostic = canonical(api.runtimeIntervalDiagnosticsForTest('latency')[0]);
+    assert.equal(diagnostic.lastResult, 'useful');
+    assert.ok(diagnostic.lastUsefulAtMs > 0);
   });
 
   test('CodeMirror search supports literal and regexp options', () => {
@@ -1628,7 +1683,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
     assert.ok(/function createTopbarCenterTools\(\)[\s\S]*createTopbarSearch\(\)/.test(source) && /renderSessionButtons[\s\S]*appendChild\(createTopbarCenterTools\(\)\)/.test(source), 'the topbar search is mounted in the shared menubar middle group');
     assert.ok(/refreshFileIndexStatus[\s\S]{0,400}\/api\/fs\/index-status\?root=/.test(source), '#30/#31: the client warms the backend index and tracks build status via /api/fs/index-status');
-    assert.ok(source.includes("status === 'too_large' ? '!' : t('finder.index.indexed')"), 'the indexed badge uses a readable localized label while preserving partial coverage');
+    assert.ok(source.includes("status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed'))"), 'the indexed badge distinguishes partial coverage and terminal index errors');
     assert.equal(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), false, '#31: Date/Ago rows retain the readable index status beside the date');
     assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?status === 'too_large'[\s\S]*?finder\.index\.partial/.test(source), 'the indexed badge title reports partial coverage');
     assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.too_large === true[\s\S]*payload\.ready === true[\s\S]*payload\.ready_elsewhere === true/.test(source), 'partial coverage wins over the generic ready state');

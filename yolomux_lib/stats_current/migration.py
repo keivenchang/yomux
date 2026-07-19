@@ -17,6 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from yolomux_lib.atomic_file import atomic_write_text
 from yolomux_lib.atomic_file import file_lock
@@ -28,6 +29,8 @@ from .families import FamilyValidationError
 from .families import validate_payload
 from .storage import APPLICATION_ID
 from .storage import DATABASE_FILENAME
+from .storage import MIN_WRITER_BUILD
+from .storage import MIN_WRITER_PROTOCOL
 from .storage import SCHEMA_VERSION
 from .storage import CoverageEpoch
 from .storage import MigrationReconciliation
@@ -58,6 +61,32 @@ RETIREMENT_JOURNAL_FILENAME = ".stats-v5-retirement.json"
 RETIREMENT_MANIFEST_MEMBER = "manifest.json"
 RETIREMENT_FORMAT = 1
 RETIRED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
+V5_DATABASE_FILENAME = "stats-v5.sqlite3"
+V5_SCHEMA_VERSION = 5
+V5_SCHEMA_META_COLUMNS = (
+    "singleton", "minimum_writer_protocol", "minimum_writer_build", "source_generation",
+)
+V5_TABLE_COLUMNS = {
+    "coverage_epochs": (
+        "family", "source_id", "epoch_id", "started_at", "ended_at",
+        "native_cadence_seconds", "owner_generation",
+    ),
+    "migration_reconciliation": (
+        "migration_id", "completed_at", "source_digest", "details_json",
+    ),
+    "observations": (
+        "event_id", "family", "source_id", "observed_at", "epoch_id", "owner_generation",
+        "payload_json",
+    ),
+    "schema_meta": V5_SCHEMA_META_COLUMNS,
+    "unavailable_spans": (
+        "family", "source_id", "epoch_id", "started_at", "ended_at",
+        "native_cadence_seconds", "reason", "owner_generation",
+    ),
+    "usage_atoms": (
+        "event_id", "direction", "modality", "cache_role", "unit", "observed_at", "payload_json",
+    ),
+}
 LEGACY_SERVER_FIELDS = (
     "cpu_total_percent", "cpu_count", "system_cpu_total_percent", "system_cpu_count",
     "ask_agent_total", "run_agent_total", "transition_agent_total", "idle_agent_total",
@@ -193,6 +222,9 @@ def migrate(
     if target.exists():
         report = _active_report(target)
         return _retire_sources_beside_existing_current(state_dir, legacy, target, report)
+    v5_source = state_dir / V5_DATABASE_FILENAME
+    if v5_source.is_file():
+        return _migrate_current_v5_database(state_dir, target, v5_source)
     target.parent.mkdir(parents=True, exist_ok=True)
     recovered = _Recovered()
     digest = hashlib.sha256()
@@ -312,6 +344,107 @@ def migrate(
         report.usage_atoms, report.unavailable_spans, tuple(recovered.issues),
         len(recovered.issues), False,
     )
+
+
+def _migrate_current_v5_database(state_dir: Path, target: Path, source: Path) -> MigrationReport:
+    """Atomically copy the frozen schema-5 current store into the schema-6 store.
+
+    Schema 5 is a former *current* database, not a retired aggregate format.  Keep this narrow
+    copier separate from `_read_database`: all fact tables already have the exact current shape, so
+    re-materializing them would be slow and could change identities.  The new metadata column starts
+    at zero, causing the first eligible idle maintenance cycle to compact the v6 file.
+    """
+    with tempfile.TemporaryDirectory(prefix=".stats-v6-migration-", dir=target.parent) as temporary:
+        work = Path(temporary)
+        source_digest = hashlib.sha256()
+        copied_source = _copy_database(source, work / "source", source_digest)
+        _validate_current_v5_database(copied_source)
+        shadow = work / DATABASE_FILENAME
+        with Store.open(shadow) as store:
+            connection = store._connection()
+            connection.execute("ATTACH DATABASE ? AS source_v5", (str(copied_source),))
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                for table in (
+                    "observations", "coverage_epochs", "unavailable_spans", "usage_atoms",
+                    "migration_reconciliation",
+                ):
+                    columns = ", ".join(V5_TABLE_COLUMNS[table])
+                    connection.execute(
+                        f"INSERT INTO {table}({columns}) SELECT {columns} FROM source_v5.{table}"
+                    )
+                source_generation = int(connection.execute(
+                    "SELECT source_generation FROM source_v5.schema_meta WHERE singleton = 1"
+                ).fetchone()[0])
+                connection.execute(
+                    "UPDATE schema_meta SET minimum_writer_protocol = ?, minimum_writer_build = ?, "
+                    "source_generation = ?, last_vacuumed_at = 0 WHERE singleton = 1",
+                    (MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, source_generation),
+                )
+                connection.execute("COMMIT")
+            except sqlite3.Error:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.execute("DETACH DATABASE source_v5")
+            Store._validate_schema_shape(connection)
+        _validate_database(shadow)
+        _compact_database(shadow)
+        _validate_database(shadow)
+        require_compatible_writer(target)
+        if target.exists():
+            raise MigrationError("current database appeared during schema-5 migration")
+        _activate_database(shadow, target)
+        _fsync_directory(target.parent)
+        with Store.open(target):
+            pass
+    report = _active_report(target)
+    return MigrationReport(
+        report.active_database,
+        source_digest.hexdigest(),
+        report.observations,
+        report.coverage_epochs,
+        report.usage_atoms,
+        report.unavailable_spans,
+        (MigrationIssue("current_schema", source.name, str(V5_SCHEMA_VERSION)),),
+        1,
+        False,
+    )
+
+
+def _validate_current_v5_database(path: Path) -> None:
+    """Validate the exact frozen v5 shape before any v6 shadow is created."""
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True)
+        if int(connection.execute("PRAGMA application_id").fetchone()[0]) != APPLICATION_ID:
+            raise MigrationError("schema-5 source has the wrong application id")
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) != V5_SCHEMA_VERSION:
+            raise MigrationError("schema-5 source has the wrong schema version")
+        tables = {
+            str(row[0]) for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        if tables != set(V5_TABLE_COLUMNS):
+            raise MigrationError("schema-5 source has an unexpected table set")
+        columns = {
+            table: tuple(str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})"))
+            for table in tables
+        }
+        if columns != V5_TABLE_COLUMNS:
+            raise MigrationError("schema-5 source has an unexpected table shape")
+        row = connection.execute(
+            "SELECT minimum_writer_protocol, minimum_writer_build, source_generation "
+            "FROM schema_meta WHERE singleton = 1"
+        ).fetchone()
+        if row is None or int(row[0]) != MIN_WRITER_PROTOCOL or int(row[1]) != MIN_WRITER_BUILD or int(row[2]) < 0:
+            raise MigrationError("schema-5 source has incompatible writer metadata")
+    except (OSError, sqlite3.Error, ValueError) as error:
+        raise MigrationError(f"schema-5 source cannot be read: {error}") from error
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def _active_report(path: Path) -> MigrationReport:

@@ -3,7 +3,7 @@
   "name": "yolomux-codemirror-bundle",
   "description": "Pinned dependency manifest for rebuilding static/codemirror.js.",
   "scripts": {
-    "build": "esbuild ../codemirror-entry.js --bundle --format=iife --global-name=YOLOmuxCodeMirrorBundle --outfile=../../static/codemirror.js --minify"
+    "build": "esbuild codemirror-entry.js --bundle --format=iife --global-name=YOLOmuxCodeMirrorBundle --outfile=../../static/codemirror.js --minify"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.3",

@@ -1,5 +1,8 @@
 import json
+import multiprocessing
 import os
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import Future
@@ -49,6 +52,20 @@ def _init_repo_with_commit(repo):
     git(repo, "commit", "-m", "init")
 
 
+def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text, started, ready):
+    """Exercise the private cache from an independent spawned worker process."""
+    session_files.common.STATE_DIR = Path(state_dir_text)
+
+    def build(_repo, _from_ref, _to_ref):
+        with Path(counter_text).open("a", encoding="utf-8") as handle:
+            handle.write("build\n")
+        started.set()
+        ready.wait(timeout=5.0)
+        return {"statuses": {}}
+
+    session_files.cached_repository_snapshot(Path(repo_text), None, None, 9, build)
+
+
 def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_text(tmp_path):
     repo = tmp_path / "repo"
     _init_repo_with_commit(repo)
@@ -71,7 +88,7 @@ def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_
     result_bytes = jobd.run_registered_task("session_files_view", json.dumps(payload).encode("utf-8"))
     assert len(result_bytes) <= jobd.JOBD_MAX_RESULT_BYTES
     result = json.loads(result_bytes.decode("utf-8"))
-    assert set(result) >= {"payload", "status", "truncated"}
+    assert set(result) >= {"payload", "status", "truncated", "profile"}
     assert result["status"] == 200
     assert result["truncated"] is False
     # The git-tracked modification is attributed to the editing agent.
@@ -81,6 +98,10 @@ def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_
     # The bounded product carries structured facts only; no raw transcript bytes ever cross the wire.
     assert "SENTINEL_MUST_NOT_LEAK" not in result_bytes.decode("utf-8")
     assert "tool_use" not in result_bytes.decode("utf-8")
+    assert set(result["profile"]) == {"phases", "work", "source"}
+    assert set(result["profile"]["phases"]) <= session_files.SESSION_FILES_VIEW_PHASES
+    assert result["profile"]["work"]["sessions"] == 1
+    assert result["profile"]["work"]["git_snapshots"] == 1
 
 
 def test_session_files_view_task_rejects_malformed_or_oversized_payload():
@@ -121,6 +142,263 @@ def test_session_files_view_memoizes_git_snapshot_per_repo(tmp_path, monkeypatch
     result = session_files.session_files_view_result(payload, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
     assert result["status"] == 200
     assert len(calls) == 1
+
+
+def test_session_files_view_reuses_watcher_generation_across_metadata_only_products(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    (repo / "one.py").write_text("x = 4\n", encoding="utf-8")
+    calls: list[str] = []
+    real_build = session_files.build_git_snapshot
+
+    def counting_build(path, from_ref=None, to_ref=None):
+        calls.append(str(path))
+        return real_build(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "build_git_snapshot", counting_build)
+    base = {"session": "a", "infos": {"a": _session_info_json("a", repo)}, "hours": 24.0, "include_cross_session_attribution": False, "repository_states": [{"path": str(repo), "generation": 7}]}
+    first = session_files.session_files_view_result(base, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    changed_metadata = {**base, "infos": {"a": _session_info_json("a", repo, kind="codex")}}
+    second = session_files.session_files_view_result(changed_metadata, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    assert first["status"] == second["status"] == 200
+    assert calls == [str(repo)]
+
+    changed_repository = {**base, "repository_states": [{"path": str(repo), "generation": 8}]}
+    third = session_files.session_files_view_result(changed_repository, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    assert third["status"] == 200
+    assert calls == [str(repo), str(repo)]
+
+
+def test_session_files_view_canonicalizes_repository_state_keys_across_worktree_aliases(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    (repo / "one.py").write_text("x = 4\n", encoding="utf-8")
+    alias = tmp_path / "repo-alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    calls: list[str] = []
+    real_build = session_files.build_git_snapshot
+
+    def counting_build(path, from_ref=None, to_ref=None):
+        calls.append(str(path.resolve()))
+        return real_build(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "build_git_snapshot", counting_build)
+    base = {"session": "a", "infos": {"a": _session_info_json("a", repo)}, "hours": 24.0, "include_cross_session_attribution": False}
+    canonical = {**base, "repository_states": [{"path": str(repo), "generation": 7}]}
+    via_alias = {**base, "repository_states": [{"path": str(alias), "generation": 7}]}
+
+    assert session_files.session_files_view_result(canonical, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)["status"] == 200
+    assert session_files.session_files_view_result(via_alias, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)["status"] == 200
+    assert calls == [str(repo.resolve())]
+
+
+def test_session_files_view_keeps_topology_and_ref_overrides_separate_per_repository(tmp_path, monkeypatch):
+    """Candidate roots/ref overrides are repository planning inputs, not volatile view metadata."""
+    first_repo = tmp_path / "first"
+    second_repo = tmp_path / "second"
+    _init_repo_with_commit(first_repo)
+    _init_repo_with_commit(second_repo)
+    for repo in (first_repo, second_repo):
+        (repo / "one.py").write_text("x = 2\n", encoding="utf-8")
+        git(repo, "add", "one.py")
+        git(repo, "commit", "-m", "next")
+    first_alias = tmp_path / "first-alias"
+    first_alias.symlink_to(first_repo, target_is_directory=True)
+    calls: list[tuple[str, str | None, str | None]] = []
+    real_build = session_files.build_git_snapshot
+
+    def counting_build(path, from_ref=None, to_ref=None):
+        calls.append((str(path.resolve()), from_ref, to_ref))
+        return real_build(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "build_git_snapshot", counting_build)
+    payload = {
+        "session": "",
+        "infos": {
+            "first": _session_info_json("first", first_repo),
+            "second": _session_info_json("second", second_repo),
+        },
+        "hours": 24.0,
+        "include_cross_session_attribution": True,
+        "repository_states": [
+            {"path": str(first_alias), "generation": 7},
+            {"path": str(second_repo), "generation": 11},
+        ],
+        "repo_refs": {
+            str(first_alias): {"from": "HEAD~1", "to": "HEAD"},
+            str(second_repo): {"from": "HEAD", "to": "HEAD"},
+        },
+    }
+    assert session_files.session_files_view_result(payload, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)["status"] == 200
+    assert session_files.session_files_view_result(payload, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)["status"] == 200
+    assert calls == [
+        (str(first_repo.resolve()), "HEAD~1", "HEAD"),
+        (str(second_repo.resolve()), "HEAD", "HEAD"),
+    ]
+
+    changed_second_ref = json.loads(json.dumps(payload))
+    changed_second_ref["repo_refs"][str(second_repo)]["from"] = "HEAD~1"
+    assert session_files.session_files_view_result(changed_second_ref, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)["status"] == 200
+    assert calls[-1] == (str(second_repo.resolve()), "HEAD~1", "HEAD")
+    assert len(calls) == 3
+
+
+def test_session_files_view_regression_matrix_reuses_git_snapshot_until_repo_generation_changes(tmp_path, monkeypatch):
+    """Volatile browser/watch inputs may rebuild attribution, never the Git snapshot.
+
+    This is the CPU-regression matrix for repeated harmless filesystem notifications, rapid
+    agent status/transcript churn, and Finder selection toggles.  They deliberately produce
+    distinct view products; the shared repository snapshot must remain one build until the
+    watcher reports a real repository generation change, when it must rebuild exactly once.
+    """
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    (repo / "one.py").write_text("x = 4\n", encoding="utf-8")
+    transcript = tmp_path / "agent.jsonl"
+    transcript.write_text(json.dumps({"type": "user", "message": "first"}) + "\n", encoding="utf-8")
+    calls: list[str] = []
+    real_build = session_files.build_git_snapshot
+
+    def counting_build(path, from_ref=None, to_ref=None):
+        calls.append(str(path))
+        return real_build(path, from_ref, to_ref)
+
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "build_git_snapshot", counting_build)
+    base = {
+        "session": "a",
+        "infos": {"a": _session_info_json("a", repo, transcript)},
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+        "repository_states": [{"path": str(repo), "generation": 7}],
+    }
+
+    # Same repository generation, but each pass represents an independent volatile view input:
+    # duplicate watcher event, a status change, transcript append, and Finder's selected session.
+    unchanged_watch = json.loads(json.dumps(base))
+    status_changed = json.loads(json.dumps(base))
+    status_changed["infos"]["a"]["agents"][0]["status"] = "working"
+    transcript.write_text(transcript.read_text(encoding="utf-8") + json.dumps({"type": "user", "message": "second"}) + "\n", encoding="utf-8")
+    transcript_changed = json.loads(json.dumps(status_changed))
+    finder_toggle = json.loads(json.dumps(transcript_changed))
+    finder_toggle["session"] = ""
+    finder_toggle["include_cross_session_attribution"] = True
+    for payload in (base, unchanged_watch, status_changed, transcript_changed, finder_toggle, status_changed):
+        result = session_files.session_files_view_result(payload, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+        assert result["status"] == 200
+    assert calls == [str(repo)]
+
+    changed_repository = {**base, "repository_states": [{"path": str(repo), "generation": 8}]}
+    first_after_change = session_files.session_files_view_result(changed_repository, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    second_after_change = session_files.session_files_view_result(changed_repository, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+    assert first_after_change["status"] == second_after_change["status"] == 200
+    assert calls == [str(repo), str(repo)]
+
+
+def test_repository_snapshot_cache_single_flights_across_spawned_workers(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    context = multiprocessing.get_context("spawn")
+    started = context.Event()
+    release = context.Event()
+    counter = tmp_path / "build-count.txt"
+    args = (str(repo), str(tmp_path / "state"), str(counter), started, release)
+    first = context.Process(target=_build_repository_snapshot_in_child, args=args)
+    second = context.Process(target=_build_repository_snapshot_in_child, args=args)
+    first.start()
+    assert started.wait(timeout=5.0), "first worker never entered the snapshot builder"
+    second.start()
+    release.set()
+    first.join(timeout=10.0)
+    second.join(timeout=10.0)
+    assert first.exitcode == second.exitcode == 0
+    assert counter.read_text(encoding="utf-8").splitlines() == ["build"]
+
+
+def test_repository_snapshot_cache_keeps_ref_comparisons_separate(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    calls = []
+
+    def build(path, from_ref, to_ref):
+        calls.append((str(path), from_ref, to_ref))
+        return {"statuses": {}}
+
+    session_files.cached_repository_snapshot(repo, "HEAD~1", "HEAD", 9, build)
+    session_files.cached_repository_snapshot(repo, "HEAD", "current", 9, build)
+    session_files.cached_repository_snapshot(repo, "HEAD~1", "HEAD", 9, build)
+    assert calls == [
+        (str(repo), "HEAD~1", "HEAD"),
+        (str(repo), "HEAD", "current"),
+    ]
+
+
+def test_repository_snapshot_cache_revalidates_after_the_healthy_watcher_safety_window(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    now = [1000.0]
+    monkeypatch.setattr(session_files.time, "time", lambda: now[0])
+    calls = []
+
+    def build(path, from_ref, to_ref):
+        calls.append((str(path), from_ref, to_ref))
+        return {"statuses": {}}
+
+    session_files.cached_repository_snapshot(repo, None, None, 9, build)
+    now[0] += session_files._REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS - 1
+    session_files.cached_repository_snapshot(repo, None, None, 9, build)
+    now[0] += 2
+    session_files.cached_repository_snapshot(repo, None, None, 9, build)
+    assert calls == [(str(repo), None, None), (str(repo), None, None)]
+
+
+def test_repository_snapshot_cache_rebuilds_corrupt_records_and_propagates_git_failures(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    path = session_files.repository_snapshot_cache_path(repo, None, None, 1)
+    path.parent.mkdir(parents=True)
+    path.write_text("not json", encoding="utf-8")
+    calls = []
+
+    def build(path, from_ref, to_ref):
+        calls.append(str(path))
+        return {"statuses": {}}
+
+    snapshot, hit = session_files.cached_repository_snapshot(repo, None, None, 1, build)
+    assert snapshot == {"statuses": {}}
+    assert hit is False
+    assert calls == [str(repo)]
+
+    def fail(path, from_ref, to_ref):
+        raise RuntimeError("git failed")
+
+    with pytest.raises(RuntimeError, match="git failed"):
+        session_files.cached_repository_snapshot(repo, None, None, 2, fail)
+
+
+def test_repository_snapshot_cache_prunes_only_expired_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(session_files, "_repository_snapshot_cache_last_pruned_at", 0.0)
+    directory = tmp_path / "state" / session_files._REPOSITORY_SNAPSHOT_CACHE_DIRNAME
+    directory.mkdir(parents=True)
+    expired = directory / "expired.json"
+    current = directory / "current.json"
+    expired.write_text("{}", encoding="utf-8")
+    current.write_text("{}", encoding="utf-8")
+    now = 10_000.0
+    os.utime(expired, (now - session_files._REPOSITORY_SNAPSHOT_CACHE_PRUNE_MAX_AGE_SECONDS - 1, now - session_files._REPOSITORY_SNAPSHOT_CACHE_PRUNE_MAX_AGE_SECONDS - 1))
+    os.utime(current, (now - 1, now - 1))
+
+    assert session_files.prune_repository_snapshot_cache(now) == 1
+    assert not expired.exists()
+    assert current.exists()
+    assert session_files.prune_repository_snapshot_cache(now + 1) == 0
 
 
 def test_session_files_view_bounding_trims_files_and_sets_truncated_flag():
@@ -218,6 +496,10 @@ def test_metadata_warm_view_task_populates_cache_entries_from_a_real_session_wor
     entry = next(iter(matches.values()))
     assert entry["value"][0]["number"] == 5
     assert 0 < entry["ttl_remaining"] <= metadata_module.METADATA_CACHE_TTL_SECONDS
+    assert result["profile"]["work"]["sessions"] == 1
+    assert result["profile"]["work"]["git_spawns"] > 0
+    assert result["profile"]["work"]["github_http_calls"] == 0
+    assert result["profile"]["work"]["linear_http_calls"] == 0
     # Running it again with the same fake network response reproduces the same materialized value
     # (a fresh worker-local cache each run, never carried over from a prior invocation).
     again = json.loads(jobd.run_registered_task("metadata_warm_view", json.dumps(payload).encode("utf-8")))
@@ -252,8 +534,8 @@ def test_metadata_warm_view_bounds_result_by_evicting_lowest_ttl_entries_first(m
     assert "github-pr:acme/repo:1:0" not in result["entries"]
 
 
-def _wait_for_result(client: jobd.JobClient, job_id: str) -> dict:
-    deadline = time.monotonic() + 5.0
+def _wait_for_result(client: jobd.JobClient, job_id: str, *, timeout_seconds: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         response = client.request({"action": "result", "job_id": job_id})
         job = response.get("job") if isinstance(response.get("job"), dict) else {}
@@ -290,6 +572,76 @@ def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path
     assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
     worker.join(timeout=2.0)
     assert worker.is_alive() is False
+
+
+def test_registry_launched_jobd_executes_a_spawn_worker(tmp_path):
+    """The daemon's redirected stdio must remain valid for macOS spawn workers."""
+    client = jobd.JobClient(tmp_path / "jobd.sock")
+    assert client.start_for_scheduler() is True
+    coalesce_key = "registry-spawn-worker"
+    try:
+        submitted = client.submit(
+            "json_compact", {"z": 1, "a": [2]}, priority="interactive", generation=1, coalesce_key=coalesce_key,
+        )
+        assert submitted["ok"] is True
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            metadata, body = client.product(coalesce_key)
+            if body:
+                assert metadata["state"] == "ready"
+                assert json.loads(body) == {"a": [2], "z": 1}
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"registry-launched jobd did not complete: {client.request({'action': 'status'})}")
+    finally:
+        assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
+
+
+def test_registry_launched_jobd_spawn_worker_survives_closed_parent_stdin(tmp_path):
+    """A nohup/launchd-style closed stdin must not crash a macOS spawn worker."""
+    socket_path = tmp_path / "closed-stdin-jobd.sock"
+    script = """
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from yolomux_lib import jobd
+
+os.close(0)
+client = jobd.JobClient(Path(sys.argv[1]))
+if not client.start_for_scheduler():
+    raise SystemExit("jobd did not start")
+try:
+    response = client.submit("json_compact", {"z": 1, "a": [2]}, priority="interactive", generation=1, coalesce_key="closed-stdin")
+    if not response.get("ok"):
+        raise SystemExit(f"submit failed: {response}")
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        metadata, body = client.product("closed-stdin")
+        if body:
+            print(json.dumps({"metadata": metadata, "result": json.loads(body)}))
+            break
+        time.sleep(0.02)
+    else:
+        raise SystemExit(f"product did not complete: {client.request({'action': 'status'})}")
+finally:
+    client.request({"action": "shutdown"})
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(socket_path)],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["metadata"].items() >= {"ok": True, "state": "ready", "generation": 1, "inflight": False}.items()
+    assert result["result"] == {"a": [2], "z": 1}
 
 
 def test_transcript_view_returns_bounded_compact_facts_without_raw_text(tmp_path):
@@ -426,6 +778,46 @@ def test_two_ports_coalesce_one_worker_run_and_read_identical_product_bytes(tmp_
     # Both ports read byte-identical last-known-good product bytes for the shared key.
     assert body_a == body_b and body_a != b""
     assert json.loads(body_a)["items"][-1]["text"] == "shared product"
+
+
+def test_two_ports_coalesce_one_session_files_snapshot_product(tmp_path):
+    """Two web ports submit one session-files product and share one Git snapshot worker run."""
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    (repo / "one.py").write_text("x = 9\n", encoding="utf-8")
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    port_a = jobd.JobClient(socket_path)
+    port_b = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not port_a.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    payload = {
+        "session": "a",
+        "infos": {"a": _session_info_json("a", repo)},
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+        "repository_states": [{"path": str(repo), "generation": 4}],
+    }
+    product_key = "session-files:v1:two-ports"
+    first = port_a.submit("session_files_view", payload, generation=4, coalesce_key=product_key)
+    second = port_b.submit("session_files_view", payload, generation=4, coalesce_key=product_key)
+    _wait_for_result(port_a, first["job"]["job_id"], timeout_seconds=20.0)
+    meta_a, body_a = port_a.product(product_key)
+    meta_b, body_b = port_b.product(product_key)
+    status = port_a.request({"action": "status"})
+    assert port_a.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
+    worker.join(timeout=2.0)
+
+    assert first["coalesced"] is False
+    assert second["coalesced"] is True
+    assert status["product_counters"]["session_files_view"]["completed"] == 1
+    assert meta_a["state"] == meta_b["state"] == "ready"
+    assert body_a == body_b and body_a is not None
+    assert json.loads(body_a)["profile"]["work"]["git_snapshots"] == 1
 
 
 def test_jobd_supersedes_stale_queued_generations_and_keeps_payloads_bounded(tmp_path):
@@ -574,6 +966,8 @@ def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_ex
     service._pump()
 
     assert timed_out.status == "timed_out"
+    assert service.common_status()["product_counters"]["text_facts"]["timed_out"] == 1
+    assert service.common_status()["last_failure"] == "deadline exceeded while executing"
     assert waiting.status == "queued"
     timed_out.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
     service._pump()
@@ -626,8 +1020,9 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v3 added the materialized-product layer (product RPC + last-known-good store + counters).
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
-    # v6 registered the `metadata_warm_view` task; the fence retires a v5 daemon that lacks it.
-    assert jobd.JOBD_PROTOCOL_VERSION == 6
+    # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, and v11 exposes timeouts.
+    assert jobd.JOBD_PROTOCOL_VERSION == 11
     assert "session_files_view" in jobd.REGISTERED_TASKS
     assert "tabber_activity_view" in jobd.REGISTERED_TASKS
     assert "metadata_warm_view" in jobd.REGISTERED_TASKS
@@ -734,6 +1129,63 @@ def test_jobd_product_counters_track_accepted_coalesced_superseded_and_completed
     assert service.common_status()["product_counters"]["json_compact"]["completed"] == 1
 
 
+def test_jobd_status_lists_all_running_records_without_product_payloads(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    first = service._queue_record("json_compact", {"first": True}, "interactive", 1, "first")
+    second = service._queue_record("text_facts", {"second": True}, "freshness", 2, "second")
+    for record in (first, second):
+        record.status = "running"
+        record.future = Future()
+
+    status = service.common_status()
+
+    assert status["active_task"] == "json_compact"
+    assert [{key: item[key] for key in ("task", "priority", "generation", "status")} for item in status["active_records"]] == [
+        {"task": "json_compact", "priority": "interactive", "generation": 1, "status": "running"},
+        {"task": "text_facts", "priority": "freshness", "generation": 2, "status": "running"},
+    ]
+    assert status["worker_pids"] == []
+
+
+def test_jobd_status_exposes_bounded_request_action_counters(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock")
+
+    service.handle({"action": "ping"})
+    service.handle({"action": "status"})
+    service.handle({"action": "status"})
+    service.handle({"action": "unbounded-client-input"})
+
+    assert service.common_status()["request_counters"] == {"ping": 1, "status": 2, "unknown": 1}
+
+
+def test_jobd_runtime_status_aggregates_broker_and_reported_workers(tmp_path, monkeypatch):
+    client = jobd.JobClient(tmp_path / "jobd.sock")
+    monkeypatch.setattr(client.registry, "status", lambda: {
+        "healthy": True,
+        "status": {
+            "pid": 100,
+            "started_at": 123.0,
+            "worker_count": 2,
+            "worker_pids": [101, 102],
+        },
+    })
+    captured = {}
+    monkeypatch.setattr(
+        client.registry,
+        "resources_for_pids",
+        lambda parent_pid, worker_pids: captured.update(parent_pid=parent_pid, worker_pids=worker_pids) or {
+            "cpu_percent": 12.5, "rss_bytes": 300, "process_count": 3,
+        },
+    )
+
+    status = client.runtime_status()
+
+    assert captured == {"parent_pid": 100, "worker_pids": [101, 102]}
+    assert status["started_at"] == 123.0
+    assert status["worker_count"] == 2
+    assert status["resources"] == {"cpu_percent": 12.5, "rss_bytes": 300, "process_count": 3}
+
+
 def test_jobd_tracks_per_task_runtime_count_total_and_max(tmp_path, monkeypatch):
     # Per-product runtime totals/maxima (checkbox 10): pure execution duration, excluding queue
     # wait, tracked per task name and surfaced through common_status/runtime_status.
@@ -765,6 +1217,46 @@ def test_jobd_tracks_per_task_runtime_count_total_and_max(tmp_path, monkeypatch)
     status_stats = service.common_status()["product_runtime_ms"]["json_compact"]
     assert status_stats["count"] == 2
     assert status_stats["avg_ms"] == pytest.approx(125.0, abs=1.0)
+
+
+def test_jobd_records_only_bounded_session_files_phase_aggregates(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    record = service._queue_record("session_files_view", {}, "freshness", 1, "session-files")
+    record.status = "running"
+    record.future = Future()
+    record.future.set_result(json.dumps({
+        "payload": {}, "status": 200, "truncated": False,
+        "profile": {"phases": {
+            "git-snapshot": {"count": 2, "total_ms": 30.0, "max_ms": 20.0},
+            "unknown": {"count": 99, "total_ms": 1.0, "max_ms": 1.0},
+        }, "work": {"sessions": 2, "repositories": 1, "files": 4, "git_snapshots": 1, "result_bytes": 512}, "source": {"requester": "api-session-files", "stable_view": "stable", "info_signature": "one", "repo_signature": "one", "repo_dirty_generation_count": 1, "repo_dirty_generation_max": 4}},
+    }).encode("utf-8"))
+    service._pump()
+
+    phases = service.common_status()["product_phase_runtime_ms"]["session_files_view"]
+    assert phases == {"git-snapshot": {"count": 2, "total_ms": 30.0, "max_ms": 20.0, "avg_ms": 15.0}}
+    status = service.common_status()
+    assert status["product_work_totals"]["session_files_view"] == {"sessions": 2, "repositories": 1, "files": 4, "git_snapshots": 1, "result_bytes": 512}
+    assert status["source_change_counters"] == {"initial": 1}
+    assert status["session_files_requester_counters"] == {"api-session-files": 1}
+
+    service._record_phase_runtime_ms("metadata_warm_view", json.dumps({
+        "profile": {"work": {"sessions": 2, "entries": 5, "git_spawns": 7, "github_http_calls": 3, "linear_http_calls": 1, "result_bytes": 256, "unbounded": 99}},
+    }).encode("utf-8"))
+    assert service.common_status()["product_work_totals"]["metadata_warm_view"] == {
+        "sessions": 2, "entries": 5, "git_spawns": 7, "github_http_calls": 3, "linear_http_calls": 1, "result_bytes": 256,
+    }
+
+    changed = service._queue_record("session_files_view", {}, "freshness", 2, "session-files-changed")
+    changed.status = "running"
+    changed.future = Future()
+    changed.future.set_result(json.dumps({
+        "payload": {}, "status": 200, "truncated": False,
+        "profile": {"phases": {}, "work": {}, "source": {"requester": "not-a-public-label", "stable_view": "stable", "info_signature": "one", "repo_signature": "two", "repo_dirty_generation_count": 1, "repo_dirty_generation_max": 5}},
+    }).encode("utf-8"))
+    service._pump()
+    assert service.common_status()["source_change_counters"] == {"initial": 1, "repository-state": 1, "dirty-generation-changed": 1}
+    assert service.common_status()["session_files_requester_counters"] == {"api-session-files": 1, "unknown": 1}
 
 
 def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):

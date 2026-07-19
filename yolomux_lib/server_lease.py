@@ -50,7 +50,9 @@ def acquire_server_port_lease(port: int, state_dir: Path = STATE_DIR) -> ServerP
     except OSError:
         os.close(fd)
         return None
-    payload = json.dumps({"pid": os.getpid(), "port": clean_port}) + "\n"
+    # pgid rides along for the process-group ledger: when this owner dies, its
+    # recorded group is the only identity by which stale children can be found.
+    payload = json.dumps({"pid": os.getpid(), "pgid": os.getpgid(0), "port": clean_port}) + "\n"
     os.ftruncate(fd, 0)
     os.write(fd, payload.encode("utf-8"))
     os.fsync(fd)

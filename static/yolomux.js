@@ -688,6 +688,9 @@ const tabberActivityState = {
   loaded: false,
   request: null,
 };
+// One per-session owner for event-log HTTP repairs. SSE invalidations may arrive
+// in bursts; retain at most one follow-up fetch after the readable log changes.
+const eventLogRefreshRecords = new Map();
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 const fileExplorerSessionFilesState = {
@@ -703,6 +706,9 @@ const explicitPaneFocusState = {
   item: shareBootstrapFinderSession(),
   tmuxSession: shareBootstrapFinderSession(),
 };
+// Finder's root synchronization and Differ's changed-files query are independent surfaces. Keep
+// their explicit selections separate so choosing a Finder root never silently changes the Differ.
+let fileExplorerFinderSelectedSession = shareBootstrapFinderSession();
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
@@ -717,7 +723,8 @@ let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead"
 let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large' | 'error'
+const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
@@ -1655,6 +1662,8 @@ const clientEventTransportState = {
   demandSignature: '',
   demandTimer: null,
   queue: new Map(),
+  resourceEpoch: '',
+  resourceRevisions: new Map(),
   frame: 0,
   resyncTimer: null,
 };
@@ -1850,7 +1859,6 @@ const uiDelayMs = Object.freeze({
   shareViewerStatusBackupRefresh: 30001,
   shareHostStatusBackupRefresh: 3001,
   shareRemoteResizeAfterSocketOpen: 50,
-  serverWatchRenew: 60001,
   serverWatchDebounce: 300,
   tmuxWindowReadback: 120,
   tmuxWindowReadbackRetry: 80,
@@ -1873,7 +1881,6 @@ const yolomuxTiming = Object.freeze({
   shareViewerStatusBackupRefreshMs: uiDelayMs.shareViewerStatusBackupRefresh,
   shareHostStatusBackupRefreshMs: uiDelayMs.shareHostStatusBackupRefresh,
   shareRemoteResizeAfterSocketOpenMs: uiDelayMs.shareRemoteResizeAfterSocketOpen,
-  serverWatchRenewMs: uiDelayMs.serverWatchRenew,
   serverWatchDebounceMs: uiDelayMs.serverWatchDebounce,
   tmuxWindowReadbackMs: uiDelayMs.tmuxWindowReadback,
   tmuxWindowReadbackRetryMs: uiDelayMs.tmuxWindowReadbackRetry,
@@ -1909,7 +1916,6 @@ const {
   shareViewerStatusBackupRefreshMs,
   shareHostStatusBackupRefreshMs,
   shareRemoteResizeAfterSocketOpenMs,
-  serverWatchRenewMs,
   serverWatchDebounceMs,
   tmuxWindowReadbackMs,
   tmuxWindowReadbackRetryMs,
@@ -4376,6 +4382,11 @@ function syncFileExplorerHiddenButton(button) {
     labelOn: t('finder.toolbar.hideHidden'),
     labelOff: t('finder.toolbar.hidden'),
   });
+}
+
+function syncFileExplorerHiddenButtons() {
+  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
+  document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
 }
 
 function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateModeForView('finder')) {
@@ -8028,8 +8039,11 @@ function applyLayoutUrlFinderSeed(finder = {}) {
     if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
-    fileExplorerChangesSelectedSession = String(finder.session || '').trim();
-    setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
+    fileExplorerFinderSelectedSession = String(finder.session || '').trim();
+    setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true, renderMenu: false});
+  }
+  if ('differSession' in finder && isTmuxSession(String(finder.differSession || '').trim())) {
+    fileExplorerChangesSelectedSession = String(finder.differSession || '').trim();
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   applyFileExplorerViewSettingsSeed(finder);
@@ -16389,7 +16403,8 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
 }
 
 function displayedFileExplorerRoot() {
-  const input = fileExplorerPathInputs()[0];
+  const inputs = fileExplorerPathInputs();
+  const input = inputs.find(node => typeof node.getClientRects !== 'function' || node.getClientRects().length > 0) || inputs[0];
   const value = input ? ('value' in input ? input.value : input.textContent) : '';
   return normalizeDirectoryPath(expandUserPath(value || currentFileExplorerRoot()));
 }
@@ -18596,8 +18611,8 @@ function fileExplorerIndexBadgeText(path) {
   if (fileExplorerPathIsExcluded(path)) return t('finder.index.excluded');
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
-    const status = fileExplorerIndexStatus.get(normalized);
-    return status === 'building' ? '…' : (status === 'too_large' ? '!' : t('finder.index.indexed'));
+  const status = fileExplorerIndexStatus.get(normalized);
+  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed')));
   }
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
@@ -18609,6 +18624,7 @@ function fileExplorerIndexBadgeTitle(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   const status = fileExplorerIndexStatus.get(normalized);
   if (status === 'too_large') return t('finder.index.partial');
+  if (status === 'error') return t('common.errorDetail', {error: ''});
   return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
 }
 
@@ -18618,6 +18634,7 @@ function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
+  if (state === 'error' || payload.error) return 'error';
   if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
   return 'building';
 }
@@ -18651,16 +18668,13 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   return true;
 }
 
-async function refreshFileIndexStatus(root) {
+function applyFileIndexStatusPayload(root, payload) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
-  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  let payload;
-  try {
-    payload = await apiFetchJson(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
-  } catch (error) {
-    return;  // transient error: keep the prior badge, don't flip it
-  }
-  if (!fileExplorerIndexedDirs.has(normalized)) return;  // un-indexed while the request was in flight
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return false;
+  const generation = Number(payload?.generation || payload?.completed_generation || 0);
+  const accepted = Number(fileExplorerIndexGeneration.get(normalized) || 0);
+  if (Number.isSafeInteger(generation) && generation > 0 && generation < accepted) return false;
+  if (Number.isSafeInteger(generation) && generation > 0) fileExplorerIndexGeneration.set(normalized, generation);
   const status = fileIndexStatusFromPayload(payload);
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
@@ -18670,6 +18684,19 @@ async function refreshFileIndexStatus(root) {
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+  return true;
+}
+
+async function refreshFileIndexStatus(root) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
+  let payload;
+  try {
+    payload = await apiFetchJson(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
+  } catch (error) {
+    return;  // transient error: keep the prior badge, don't flip it
+  }
+  applyFileIndexStatusPayload(normalized, payload);
 }
 
 function refreshBuildingFileIndexStatuses() {
@@ -18684,7 +18711,7 @@ function refreshBuildingFileIndexStatuses() {
 }
 
 function syncFileIndexStatusPollInterval() {
-  if (!fileIndexStatusPollRoots.size) {
+  if (!fileIndexStatusPollRoots.size || clientEventTransportState.connected === true) {
     clearRuntimeInterval('file-index-building');
     return;
   }
@@ -18706,6 +18733,7 @@ function clearFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized) return;
   fileExplorerIndexStatus.delete(normalized);
+  fileExplorerIndexGeneration.delete(normalized);
   fileIndexStatusPollRoots.delete(normalized);
   fileIndexPartialWarningRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
@@ -19061,7 +19089,9 @@ function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Dat
 }
 
 function tabberActivityVisibleConsumer() {
-  return itemInLayout(tabberItemId) && document.visibilityState !== 'hidden';
+  // Legacy single-surface layouts set `fileExplorerMode`; Dockview owns three
+  // independent surfaces, where the active Tabber tab is the visibility truth.
+  return itemInLayout(tabberItemId) && (fileExplorerMode === 'tabber' || itemIsActivePaneTab(tabberItemId)) && document.visibilityState !== 'hidden';
 }
 
 function tabberActivityPayloadHasUsefulData(payload) {
@@ -20288,6 +20318,11 @@ function sessionAgentWindowScreenIsWorking(payload) {
   return String(payload?.screen?.key || '') === STATE_KEY.working;
 }
 
+function agentWindowSnapshotRevision(payload) {
+  const revision = Number(payload?.agent_window_snapshot_revision || 0);
+  return Number.isInteger(revision) && revision > 0 ? revision : 0;
+}
+
 function sessionAgentWindowStatusModel(session, info = null, autoPayload = null) {
   const statePayload = autoPayload || autoApproveStates.get(session) || {};
   const activityPayload = tabberActivityPayload?.agent_windows && typeof tabberActivityPayload.agent_windows === 'object'
@@ -20295,13 +20330,20 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     : null;
   const stateRows = agentWindowPayloadRows(statePayload.agent_windows);
   const activityRows = agentWindowPayloadRows(activityPayload);
+  const stateRevision = agentWindowSnapshotRevision(statePayload);
+  const activityRevision = agentWindowSnapshotRevision(tabberActivityPayload);
+  // A positive generation is an immutable statusd snapshot. Never enrich its rows from a
+  // different Tabber generation: stale metadata is acceptable, stale state-adjacent fields are
+  // not. Old clients have no revision and retain the established compatibility behavior.
+  const revisionMismatch = stateRows.length > 0 && stateRevision > 0 && activityRevision > 0 && stateRevision !== activityRevision;
+  const trustedActivityRows = revisionMismatch ? [] : activityRows;
   const infoRows = agentWindowPayloadRows(info?.agent_windows);
   // `/api/auto-approve` owns every visible agent-status field. Tabber and transcript
   // metadata can identify a window and enrich its path/git details, but never provide a
   // color, transition, or acknowledgement when the canonical status is unavailable.
   const source = stateRows.length
     ? stateRows
-    : mergedAgentWindowMetadataRows(activityRows, infoRows, info);
+    : mergedAgentWindowMetadataRows(trustedActivityRows, infoRows, info);
   const fallback = source.length ? source : (Array.isArray(info?.agents) ? info.agents : [])
     .map(agent => ({
       kind: agent?.kind || '',
@@ -20316,7 +20358,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
     }));
   const activeIndex = activeTmuxWindowIndexFromInfo(info);
   const agents = fallback
-    .map(agent => mergeAgentWindowPayload(agent, [activityRows, infoRows]))
+    .map(agent => mergeAgentWindowPayload(agent, [trustedActivityRows, infoRows]))
     .map(agent => agentWindowWithInfoActiveWindow(agent, activeIndex))
     .filter(agent => agent.kind);
   for (const visualAgent of agentWindowAcknowledgementVisualAgents(session)) {
@@ -20339,7 +20381,7 @@ function sessionAgentWindowStatusModel(session, info = null, autoPayload = null)
   const effectiveAgents = proxyIndex >= 0
     ? agents.map((agent, index) => (index === proxyIndex ? {...agent, state: STATE_KEY.working, screen_working_proxy: true} : agent))
     : agents;
-  return {agents: effectiveAgents, hasAttributedWindows, screenWorking, screenProxyIndex: proxyIndex};
+  return {agents: effectiveAgents, hasAttributedWindows, screenWorking, screenProxyIndex: proxyIndex, stale: revisionMismatch, stateRevision, activityRevision};
 }
 
 function sessionAgentWindowStatusPayloads(session, info = null, autoPayload = null) {
@@ -21273,6 +21315,47 @@ async function fetchDirectoryFileCount(path) {
   return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
 }
 
+function finderRelativeCopyEntryForSelection(path, info, options = {}) {
+  const finderRoot = normalizeDirectoryPath(options.finderRoot || currentFileExplorerRoot());
+  const displayRelativePath = pathRelativeToDirectory(path, finderRoot);
+  if (!displayRelativePath || displayRelativePath === path) return {available: false, text: '', reason: 'outside-finder-root', mode: 'finder'};
+  const finderRootRealpath = options.finderRootInfo?.realpath ? normalizeDirectoryPath(options.finderRootInfo.realpath) : '';
+  const targetRealpath = info?.realpath ? normalizeDirectoryPath(info.realpath) : '';
+  // Finder promises a relative path from its displayed root. If either realpath lookup failed,
+  // we cannot prove a symlink stayed below that root, so disable instead of copying a misleading path.
+  if (!finderRootRealpath || !targetRealpath) return {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'};
+  const resolvedRelativePath = pathRelativeToDirectory(targetRealpath, finderRootRealpath);
+  if (!resolvedRelativePath || resolvedRelativePath === targetRealpath) return {available: false, text: '', reason: 'outside-finder-root', mode: 'finder'};
+  return {available: true, text: displayRelativePath, reason: '', mode: 'finder'};
+}
+
+function repoRelativeCopyEntryForSelection(info) {
+  const text = String(info?.relative_path || '').trim();
+  if (!text) return {available: false, text: '', reason: 'missing-repo-relative-path', mode: 'repo'};
+  return {available: true, text, reason: '', mode: 'repo'};
+}
+
+function fileTreeRelativeCopyMode(row, options = {}) {
+  if (options.relativePathMode === 'repo' || options.relativePathMode === 'finder') return options.relativePathMode;
+  if (row?.closest?.('.file-explorer-changes-panel')) return 'repo';
+  return 'finder';
+}
+
+async function fileTreeRelativeCopyEntries(row, selectedPaths, infos, options = {}) {
+  const mode = fileTreeRelativeCopyMode(row, options);
+  if (mode === 'repo') return selectedPaths.map((_, index) => repoRelativeCopyEntryForSelection(infos[index]));
+  const finderRoot = normalizeDirectoryPath(options.finderRoot || currentFileExplorerRoot());
+  let finderRootInfo = options.finderRootInfo || null;
+  if (!finderRootInfo) {
+    try {
+      finderRootInfo = await fetchFilePathInfo(finderRoot, {fresh: true});
+    } catch (_error) {
+      finderRootInfo = null;
+    }
+  }
+  return selectedPaths.map((path, index) => finderRelativeCopyEntryForSelection(path, infos[index], {finderRoot, finderRootInfo}));
+}
+
 function fileExplorerIndexContextAction(path, entry) {
   if (!['dir', 'file'].includes(entry?.kind)) return null;
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
@@ -21306,11 +21389,12 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
     console.warn('fs info failed', path, error);
     return null;
   })));
+  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
-  const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
+  const relativePaths = relativeCopyEntries.filter(item => item?.available).map(item => item.text);
+  const menuState = fileContextMenuState(entry, selectedPaths, relativeCopyEntries);
   const multiple = selectedPaths.length > 1;
   const openInNewTab = typeof options.openInNewTab === 'function'
     ? options.openInNewTab
@@ -21338,11 +21422,14 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   fileContextMenu.open(menu, x, y);
 }
 
-function fileContextMenuState(entry, selectedPaths, relativePaths) {
+function fileContextMenuState(entry, selectedPaths, relativeCopyEntries) {
   const multiple = selectedPaths.length > 1;
   const indexAction = fileExplorerIndexContextAction(selectedPaths[0], entry);
+  const relativeEntries = Array.isArray(relativeCopyEntries)
+    ? relativeCopyEntries.map(item => typeof item === 'string' ? {available: Boolean(item)} : item)
+    : [];
   return {
-    copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
+    copyRelativeDisabled: relativeEntries.length !== selectedPaths.length || relativeEntries.some(item => !item?.available),
     // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
     // so the file-read affordances (open a file in a tab, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
@@ -21479,7 +21566,7 @@ async function triggerFolderZipDownload(path) {
 }
 
 function copyCurrentFileExplorerPath() {
-  copyFilePath(fileExplorerRoot || homePath || '/', 'path');
+  copyFilePath(displayedFileExplorerRoot() || fileExplorerRoot || homePath || '/', 'path');
 }
 
 function childNameToPath(root, name) {
@@ -21503,6 +21590,7 @@ async function createFileExplorerFile() {
       body: JSON.stringify({path, content: ''}),
     });
     statusEl.textContent = t('status.created', {name: basenameOf(path)});
+    invalidateFileExplorerRoots([dirnameOf(path)]);
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
@@ -21525,6 +21613,7 @@ async function createFileExplorerFolder() {
       body: JSON.stringify({path}),
     });
     statusEl.textContent = t('status.created', {name: basenameOf(path)});
+    invalidateFileExplorerRoots([dirnameOf(path)]);
     await refreshFileExplorerTrees();
   } catch (error) {
     statusErr(localizedHtml('status.newFolderFailed', {error}));
@@ -21749,6 +21838,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
+    invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
     await refreshFileExplorerTrees();
     if (typeof fetchSessionFiles === 'function') {
       await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -22104,6 +22194,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
     }
     statusEl.textContent = t('common.renamed', {oldName: currentName, newName: trimmed});
+    invalidateFileExplorerRoots([dirnameOf(fullPath), dirnameOf(newPath)]);
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
@@ -23535,6 +23626,9 @@ function clientServerWatchState() {
     };
   }
   const state = {
+    // This is the existing client-event identity, not a filesystem path. The
+    // server unions simultaneous tabs and releases this descriptor on SSE close.
+    client_id: String(shareClientId || ''),
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
@@ -23558,8 +23652,7 @@ function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true) || serverWatchRootsState.inFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
-  const renewDue = options.renew === true && Date.now() - serverWatchRootsState.syncedAt >= 240000;
-  if (signature === serverWatchRootsState.signature && !renewDue) return;
+  if (signature === serverWatchRootsState.signature && options.force !== true) return;
   serverWatchRootsState.signature = signature;
   serverWatchRootsState.inFlight = true;
   apiFetch('/api/watch/roots', {
@@ -23579,7 +23672,7 @@ function syncServerWatchRoots(options = {}) {
   serverWatchRootsState.pendingOptions = {
     ...serverWatchRootsState.pendingOptions,
     ...options,
-    renew: serverWatchRootsState.pendingOptions.renew === true || options.renew === true,
+    force: serverWatchRootsState.pendingOptions.force === true || options.force === true,
   };
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
@@ -26549,9 +26642,62 @@ async function refreshSettings(options = {}) {
 
 const runtimeIntervals = new Map();
 
+// One catalog names the truth source for every recurring browser callback. An entry is
+// deliberately a reason, not a scheduling policy: callers still own their visibility,
+// demand, and socket-health guards. Keep this in source (rather than a docs-only list) so
+// a future "remove polling" cleanup has to classify a new callback before treating it as
+// redundant discovery work.
+const runtimeTimerClassCatalog = Object.freeze({
+  'poll:no-change': 'A bounded reconciliation that can report no changed state.',
+  sample: 'A request or local observation that creates a new measurement.',
+  lease: 'A bounded liveness or ownership renewal.',
+  'external-reconcile': 'A bounded check against a system without an event source.',
+  repair: 'A bounded recovery action after a detected gap or divergence.',
+  fallback: 'A reduced-cadence recovery path while the primary event source is unavailable.',
+  'local-display': 'A local repaint that does not discover remote state.',
+});
+
+const runtimeIntervalCatalog = Object.freeze({
+  latency: Object.freeze({classes: Object.freeze(['sample']), source: 'A fresh /api/ping round trip is the latency measurement.'}),
+  'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
+  'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
+  'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'The index service owns staleness/rebuild state; a visible Finder/search periodically asks for that external state.'}),
+  'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
+  'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
+  'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
+  'debug-logs': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Debug log retention has no push revision; the visible Logs tab reconciles its bounded server snapshot.'}),
+  'share-geometry-digest': Object.freeze({classes: Object.freeze(['repair']), source: 'Host/viewer geometry comparison detects replay divergence; it is not state discovery.'}),
+  'chat-relative-times': Object.freeze({classes: Object.freeze(['local-display']), source: 'Existing message timestamps are repainted locally; no request is made.'}),
+  'share-status': Object.freeze({classes: Object.freeze(['local-display', 'fallback']), source: 'The share socket pushes status while healthy; the loop repaints local countdowns and repairs status only after socket loss.'}),
+});
+
+function runtimeIntervalCatalogEntry(name) {
+  return runtimeIntervalCatalog[name] || null;
+}
+
 function runtimeIntervalDelay(baseDelay) {
   const base = Math.max(1, Math.round(Number(baseDelay) || 1));
   return base;
+}
+
+function runtimeIntervalDiagnostics(name = '') {
+  const names = name ? [name] : [...runtimeIntervals.keys()].sort();
+  return names.map(intervalName => {
+    const state = runtimeIntervals.get(intervalName);
+    if (!state) return null;
+    const catalog = runtimeIntervalCatalogEntry(intervalName);
+    return {
+      name: intervalName,
+      classes: catalog?.classes || [],
+      source: catalog?.source || '',
+      active: state.active === true,
+      delay: state.delay,
+      lastStartedAtMs: state.lastStartedAtMs,
+      lastUsefulAtMs: state.lastUsefulAtMs,
+      lastResult: state.lastResult,
+    };
+  }).filter(Boolean);
 }
 
 function resetRuntimeInterval(name, callback, delay) {
@@ -26565,15 +26711,28 @@ function resetRuntimeInterval(name, callback, delay) {
     existing.active = false;
     clearTimeout(existing.timer);
   }
-  const state = {active: true, timer: null, delay: normalizedDelay, callback};
+  const state = {
+    active: true,
+    timer: null,
+    delay: normalizedDelay,
+    callback,
+    lastStartedAtMs: 0,
+    lastUsefulAtMs: 0,
+    lastResult: 'never',
+  };
   const scheduleNext = () => {
     if (!state.active) return;
     state.timer = setTimeout(run, runtimeIntervalDelay(state.delay));
   };
   const run = () => {
     if (!state.active) return;
+    state.lastStartedAtMs = Date.now();
     try {
       Promise.resolve(state.callback())
+        .then(result => {
+          state.lastResult = result === null ? 'no-change' : 'useful';
+          if (result !== null) state.lastUsefulAtMs = Date.now();
+        })
         .catch(error => console.warn('runtime interval failed', name, error))
         .finally(scheduleNext);
     } catch (error) {
@@ -26599,25 +26758,28 @@ function runtimeIntervalActive(name) {
   return runtimeIntervals.get(name)?.active === true;
 }
 
-function renewServerWatchRootsFromRuntime() {
-  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') {
-    syncServerWatchRoots({renew: true});
-  }
-}
-
 function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
-  resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
+  // Event-log writes publish `event_log_changed` over the shared SSE stream. Retain this
+  // interval solely as an outage repair path so an EventSource failure cannot leave an open Log
+  // pane permanently stale.
+  resetRuntimeInterval('events-fallback', () => {
+    if (clientEventTransportState.connected === true) return null;
+    return refreshOpenEventLogs();
+  }, eventLogRefreshMs);
+  clearRuntimeInterval('events');
   resetRuntimeInterval('auto-approve', () => {
     if (document.visibilityState === 'hidden') return null;
     if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
-  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
   if (itemInLayout(tabberItemId)) {
-    resetRuntimeInterval('tabber-activity', () => { if (itemInLayout(tabberItemId)) fetchTabberActivity(); }, tabberActivityRefreshMs);
+    resetRuntimeInterval('tabber-activity-fallback', () => {
+      if (clientEventTransportState.connected === true || !tabberActivityVisibleConsumer()) return null;
+      return fetchTabberActivity();
+    }, tabberActivityRefreshMs);
   } else {
-    clearRuntimeInterval('tabber-activity');
+    clearRuntimeInterval('tabber-activity-fallback');
   }
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);
@@ -26629,8 +26791,8 @@ function toggleHiddenFiles() {
   setFileExplorerManualRootMode();
   fileExplorerShowHidden = !fileExplorerShowHidden;
   storageSet(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0');
-  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
-  if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  syncFileExplorerHiddenButtons();
+  refreshFileExplorerTrees({force: true, preserveExpanded: true, preserveScroll: true});
 }
 
 function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
@@ -28168,7 +28330,12 @@ function pathRelativeToDirectory(path, directory) {
   if (!fullPath || !base || !fullPath.startsWith('/')) return fullPath;
   if (fullPath === base) return '.';
   if (base === '/') return fullPath.slice(1);
-  if (!fullPath.startsWith(`${base}/`)) return fullPath;
+  const fullParts = fullPath.slice(1).split('/').filter(Boolean);
+  const baseParts = base.slice(1).split('/').filter(Boolean);
+  if (fullParts.length < baseParts.length) return fullPath;
+  for (let index = 0; index < baseParts.length; index += 1) {
+    if (fullParts[index] !== baseParts[index]) return fullPath;
+  }
   return fullPath.slice(base.length + 1);
 }
 
@@ -33882,17 +34049,34 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
   let activeOnlyChange = false;
+  let layoutReloaded = false;
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
     const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
       dockviewLoadLayout(layoutSlots);
+      layoutReloaded = true;
     } else {
       dockviewLayoutState.lastAppliedLayoutSignature = signature;
       activeOnlyChange = true;
     }
   }
-  dockviewRefreshTabs();
-  dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
+  // dockviewLoadLayout already refreshes these once after fromJSON. Repeating
+  // the same mounted-panel walk on a whole-pane swap made the drop path a
+  // single long task even though Dockview reused every panel instance.
+  if (!layoutReloaded) {
+    const tabsPerf = clientPerfStart('dockviewRefreshTabs');
+    try {
+      dockviewRefreshTabs();
+    } finally {
+      clientPerfEnd(tabsPerf, {nodes: activePaneCount});
+    }
+    const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
+    try {
+      dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
+    } finally {
+      clientPerfEnd(mountedPerf, {nodes: activePaneCount});
+    }
+  }
   finishPanelLayoutRender(previousActive, options);
   return true;
 }
@@ -33913,10 +34097,26 @@ function dockviewLoadLayout(slots = layoutSlots) {
       dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
       return;
     }
-    api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
+    const loadPerf = clientPerfStart('dockviewFromJson');
+    try {
+      api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
+    } finally {
+      clientPerfEnd(loadPerf, {nodes: items.length});
+    }
     dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
     dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
-    dockviewSyncMountedPanels();
+    const tabsPerf = clientPerfStart('dockviewRefreshTabs');
+    try {
+      dockviewRefreshTabs();
+    } finally {
+      clientPerfEnd(tabsPerf, {nodes: items.length});
+    }
+    const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
+    try {
+      dockviewSyncMountedPanels();
+    } finally {
+      clientPerfEnd(mountedPerf, {nodes: items.length});
+    }
   } finally {
     dockviewLayoutState.applyingFromLayout = false;
   }
@@ -43401,7 +43601,7 @@ function bindPreferencesPanel(panel) {
     if (name.startsWith('agent_tokens_per_minute:')) return 'agent-tokens';
     if (name.startsWith('model_tokens_per_minute:output:')) return 'model-output-tokens';
     if (name.startsWith('model_tokens_per_minute:')) return 'model-usage';
-    if (['ask_agents', 'run_agents', 'transition_agents', 'idle_agents'].includes(name)) return 'agent-status';
+    if (['ask_agents', 'run_agents', 'transition_agents', 'idle_agents', 'ask_sessions', 'run_sessions', 'transition_sessions', 'idle_sessions'].includes(name)) return 'agent-status';
     if (name.startsWith('gpu_')) return 'gpu';
     if (name.startsWith('service_') || name.startsWith('system_memory_')) return 'system';
     if (name.startsWith('browser_')) return 'browser';
@@ -44176,6 +44376,7 @@ const jsDebugStatsPollState = {
   pendingForceGraphRefresh: false,
   firstSampleReceived: false,
   lastSampleAtMs: 0,
+  agentWindowSnapshotRevision: 0,
 };
 const jsDebugCurrentStatsClientState = {
   client: null,
@@ -44299,9 +44500,6 @@ const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
-// A real client-health observation has the same native cadence as the 10-second
-// host gauges. This fills a 10s chart without fabricating values in 1s cells.
-const jsDebugClientHealthPollMs = 10_000;
 // Full-retention background prefetch: one request spans the whole retention window and
 // (via the server's per-span tiers) returns a few hundred coarse buckets covering EVERY
 // range, so every range switch renders from cache. The current short range keeps its own
@@ -44410,18 +44608,28 @@ const jsDebugGraphClientMetrics = Object.freeze([
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugGraphModelTokenSeriesPrefix = 'modelToken:';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentSessionSeriesKeys = Object.freeze(['askSessions', 'workingSessions', 'transitionSessions', 'idleSessions']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentSessionLegendSeriesKeys = Object.freeze(['workingSessions', 'askSessions', 'transitionSessions', 'idleSessions']);
 const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
   askAgents: 'debug.graph.status.attention',
   workingAgents: 'state.working',
   transitionAgents: 'debug.graph.status.transition',
   idleAgents: 'state.idle',
+  askSessions: 'debug.graph.status.attention',
+  workingSessions: 'state.working',
+  transitionSessions: 'debug.graph.status.transition',
+  idleSessions: 'state.idle',
 });
 const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
   workingAgents: bucket => bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0,
   transitionAgents: bucket => bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0,
   idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
+  askSessions: bucket => bucket.agentActivitySamples ? bucket.askSessionTotal / bucket.agentActivitySamples : 0,
+  workingSessions: bucket => bucket.agentActivitySamples ? bucket.runSessionTotal / bucket.agentActivitySamples : 0,
+  transitionSessions: bucket => bucket.agentActivitySamples ? bucket.transitionSessionTotal / bucket.agentActivitySamples : 0,
+  idleSessions: bucket => bucket.agentActivitySamples ? bucket.idleSessionTotal / bucket.agentActivitySamples : 0,
 });
 function debugGraphAgentStatusSeriesDef(key) {
   return {
@@ -44479,6 +44687,7 @@ const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
+  ...jsDebugAgentSessionSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
   {
@@ -44502,7 +44711,7 @@ const jsDebugGraphSeries = Object.freeze([
 const jsDebugStatsFamilyManifest = Object.freeze({
   cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
   service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
-  agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
+  agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity', 'activitySessions']), series: Object.freeze([...jsDebugAgentStatusSeriesKeys, ...jsDebugAgentSessionSeriesKeys])}),
   agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
   cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
   gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
@@ -44516,7 +44725,8 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
   {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Daemons load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent windows', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
+  {key: 'activitySessions', label: 'Agent sessions', desc: 'One status per top-level tmux session: ask, run, transition, then idle.', toggleLabelEn: 'Agent sessions', series: jsDebugAgentSessionSeriesKeys, legendSeries: jsDebugAgentSessionLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
@@ -45500,6 +45710,10 @@ function debugGraphNewBucket(startMs, durationMs) {
     runAgentTotal: 0,
     transitionAgentTotal: 0,
     idleAgentTotal: 0,
+    askSessionTotal: 0,
+    runSessionTotal: 0,
+    transitionSessionTotal: 0,
+    idleSessionTotal: 0,
     activeAgentTotal: 0,
     inactiveAgentTotal: 0,
     agentActivitySamples: 0,
@@ -45862,6 +46076,10 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
   target.runAgentTotal += (source.runAgentTotal || 0) * scale;
   target.transitionAgentTotal += (source.transitionAgentTotal || 0) * scale;
   target.idleAgentTotal += (source.idleAgentTotal || 0) * scale;
+  target.askSessionTotal += (source.askSessionTotal || 0) * scale;
+  target.runSessionTotal += (source.runSessionTotal || 0) * scale;
+  target.transitionSessionTotal += (source.transitionSessionTotal || 0) * scale;
+  target.idleSessionTotal += (source.idleSessionTotal || 0) * scale;
   target.activeAgentTotal += (source.activeAgentTotal || 0) * scale;
   target.inactiveAgentTotal += (source.inactiveAgentTotal || 0) * scale;
   target.agentActivitySamples += (source.agentActivitySamples || 0) * scale;
@@ -46371,6 +46589,10 @@ function debugGraphAgentStatusSnapshot(record) {
   const runAgentTotal = Number(record?.run_agent_total);
   const transitionAgentTotal = Number(record?.transition_agent_total);
   const idleAgentTotal = Number(record?.idle_agent_total);
+  const askSessionTotal = Number(record?.ask_session_total);
+  const runSessionTotal = Number(record?.run_session_total);
+  const transitionSessionTotal = Number(record?.transition_session_total);
+  const idleSessionTotal = Number(record?.idle_session_total);
   const hasSplitAgentTotals = [askAgentTotal, runAgentTotal, transitionAgentTotal, idleAgentTotal].some(Number.isFinite);
   if (!hasSplitAgentTotals && !Number.isFinite(Number(record?.active_agent_total)) && !Number.isFinite(Number(record?.inactive_agent_total))) return null;
   const ask = hasSplitAgentTotals ? Math.max(0, askAgentTotal || 0) : 0;
@@ -46386,6 +46608,10 @@ function debugGraphAgentStatusSnapshot(record) {
     runAgentTotal: run,
     transitionAgentTotal: transition,
     idleAgentTotal: idle,
+    askSessionTotal: Math.max(0, askSessionTotal || 0),
+    runSessionTotal: Math.max(0, runSessionTotal || 0),
+    transitionSessionTotal: Math.max(0, transitionSessionTotal || 0),
+    idleSessionTotal: Math.max(0, idleSessionTotal || 0),
     activeAgentTotal: ask + run + transition,
     inactiveAgentTotal: idle,
     agentActivitySamples: Math.max(0, Number(record.agent_activity_samples || 0)),
@@ -48798,6 +49024,51 @@ function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now(
   return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
+function debugGraphLiveAgentWindowRows() {
+  const rows = [];
+  const seen = new Set();
+  const revisions = new Set();
+  for (const [session, payload] of autoApproveStates.entries()) {
+    const revision = agentWindowSnapshotRevision(payload);
+    if (revision > 0) revisions.add(revision);
+    for (const agent of agentWindowPayloadRows(payload?.agent_windows)) {
+      const kind = agentWindowKind(agent?.kind);
+      const physical = agentWindowPhysicalKey(agent);
+      if (!kind || !physical) continue;
+      const key = `${session}\u0000${physical}\u0000${kind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({session, agent, kind});
+    }
+  }
+  rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
+    || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
+    || left.kind.localeCompare(right.kind));
+  return {rows, revisions};
+}
+
+function debugGraphLiveAgentWindowDetailHtml() {
+  const chartRevision = Number(jsDebugStatsPollState.agentWindowSnapshotRevision) || 0;
+  const {rows, revisions} = debugGraphLiveAgentWindowRows();
+  if (!chartRevision || revisions.size !== 1 || !revisions.has(chartRevision)) {
+    return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail data-js-debug-agent-window-detail-state="changed">${esc('Live window details are waiting for the chart snapshot')}</div>`;
+  }
+  const sessions = new Set(rows.map(row => row.session));
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  const details = rows.map(({session, agent, kind}) => {
+    const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
+    const state = String(agent?.state || 'idle') === 'transition' ? 'cooldown' : String(agent?.state || 'idle');
+    return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
+  }).join('');
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail data-js-debug-agent-window-detail-state="current"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+}
+
+function refreshDebugAgentWindowLiveDetails() {
+  for (const detail of document.querySelectorAll('[data-js-debug-agent-window-detail]')) {
+    detail.outerHTML = debugGraphLiveAgentWindowDetailHtml();
+  }
+}
+
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
@@ -48853,13 +49124,14 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       }).join('')}</select></label>`
     : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${tokenAxis ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
-    <div class="js-debug-chart-head">
+      <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
         ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
+      ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml() : ''}
       ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
@@ -50258,6 +50530,11 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     else if (name === 'run_agents') record.run_agent_total = value;
     else if (name === 'transition_agents') record.transition_agent_total = value;
     else if (name === 'idle_agents') record.idle_agent_total = value;
+    else if (name === 'ask_sessions') record.ask_session_total = value;
+    else if (name === 'run_sessions') record.run_session_total = value;
+    else if (name === 'transition_sessions') record.transition_session_total = value;
+    else if (name === 'idle_sessions') record.idle_session_total = value;
+    else if (name === 'agent_window_snapshot_revision') record.agent_window_snapshot_revision = value;
     else if (name === 'system_memory_used_bytes') {
       record.host_metrics.system_memory_used_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
@@ -50325,6 +50602,15 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
   } else if (modelComponents.length) record.cost_summary = {components: modelComponents};
   if (includeRangeCost && rangeCost) record.cost_summary = {...(record.cost_summary || {}), ...jsDebugCurrentCostSummary(rangeCost), components: [...modelComponents, ...jsDebugCurrentCostSummary(rangeCost).components]};
   return record;
+}
+
+function jsDebugCurrentSnapshotAgentWindowRevision(snapshot = {}) {
+  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
+  for (const bucket of buckets.slice().reverse()) {
+    const revision = jsDebugCurrentSeriesValue(bucket?.series || {}, 'agent_window_snapshot_revision');
+    if (revision !== null && Number.isInteger(revision) && revision > 0) return revision;
+  }
+  return 0;
 }
 
 function jsDebugCurrentBucketHasFamilyData(bucket, family) {
@@ -50405,6 +50691,7 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
   jsDebugHistoryReadiness.loadedEndSeconds = snapshot.window_end;
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
+  jsDebugStatsPollState.agentWindowSnapshotRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
   const firstSample = !jsDebugStatsPollState.firstSampleReceived;
   jsDebugStatsPollState.lastSampleAtMs = Date.now();
   jsDebugStatsPollState.firstSampleReceived = true;
@@ -50508,42 +50795,42 @@ async function clearJsDebugServerHistory() {
 }
 
 function startJsDebugStatsPolling({pollNow = true} = {}) {
-  startJsDebugClientHealthPolling();
   syncJsDebugStatsPolling({pollNow});
 }
 
-const jsDebugClientHealthPollState = {inFlight: false};
+const jsDebugClientHealthMeasurementState = {inFlight: false, lastObservationAtMs: 0};
 
-async function pollJsDebugClientHealth() {
-  if (!jsDebugCollectionEnabled || jsDebugClientHealthPollState.inFlight || typeof apiFetchJsonQuiet !== 'function') return;
-  jsDebugClientHealthPollState.inFlight = true;
-  const url = `/api/ping?client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}`;
+async function measureClientHealth() {
+  if (document.visibilityState === 'hidden' || jsDebugClientHealthMeasurementState.inFlight || typeof apiFetchJson !== 'function') return null;
+  jsDebugClientHealthMeasurementState.inFlight = true;
+  const collect = jsDebugCollectionEnabled === true;
+  const url = collect ? `/api/ping?client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}` : `/api/ping?t=${Date.now()}`;
   const startedAt = performanceNow();
   try {
-    const payload = await apiFetchJsonQuiet(url, {cache: 'no-store'});
-    const latencyMs = Math.max(0, performanceNow() - startedAt);
-    const bandwidthBytes = jsDebugRequestBytes(url) + utf8ByteLength(JSON.stringify(payload || {}));
+    const payload = await apiFetchJson(url, {cache: 'no-store'});
+    const latencyMs = Math.max(1, Math.round(performanceNow() - startedAt));
+    latencySamples = [...latencySamples, latencyMs].slice(-latencySamplesMax);
+    renderLatency(latencyMs);
     const sampleTimeMs = Date.now();
+    if (!collect || sampleTimeMs - jsDebugClientHealthMeasurementState.lastObservationAtMs < jsDebugCurrentObservationBatchDelayMs) return {latencyMs, observed: false};
+    jsDebugClientHealthMeasurementState.lastObservationAtMs = sampleTimeMs;
+    const bandwidthBytes = jsDebugRequestBytes(url) + utf8ByteLength(JSON.stringify(payload || {}));
     if (jsDebugGraphExactResolutionEnabled) {
       recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleTimeMs);
-      return;
+      return {latencyMs, observed: true};
     }
     const bucketRef = debugGraphServerBucketRefForTime(sampleTimeMs, sampleTimeMs);
     const data = {heartbeatCount: 1, latencyMs, bandwidthBytes};
     debugGraphAddBucketData(debugGraphBucketForTime(sampleTimeMs, sampleTimeMs), data);
     debugGraphQueueServerDelta(bucketRef, data);
     compactJsDebugGraphBuckets(sampleTimeMs);
+    return {latencyMs, observed: true};
+  } catch (_) {
+    renderLatency(null);
+    return null;
   } finally {
-    jsDebugClientHealthPollState.inFlight = false;
+    jsDebugClientHealthMeasurementState.inFlight = false;
   }
-}
-
-function startJsDebugClientHealthPolling() {
-  if (!jsDebugCollectionEnabled || runtimeIntervalActive('debug-client-health')) return;
-  // A background health request is best-effort: an offline/browser-suspended page has no
-  // sample to contribute and must not surface an unhandled promise rejection.
-  void pollJsDebugClientHealth().catch(() => {});
-  resetRuntimeInterval('debug-client-health', () => { void pollJsDebugClientHealth().catch(() => {}); }, jsDebugClientHealthPollMs);
 }
 
 function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {}) {
@@ -50563,7 +50850,6 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
 }
 
 async function initializeJsDebugStatsBeforeStreams() {
-  startJsDebugClientHealthPolling();
   await primeJsDebugStatsBeforeLongLivedStreams();
   syncJsDebugStatsPolling({pollNow: false});
   return jsDebugStatsPollState.firstSampleReceived;
@@ -50696,8 +50982,14 @@ function debugSystemProductCountersText(service = {}) {
 
 function debugSystemProductRuntimeText(service = {}) {
   const runtime = service.product_runtime_ms && typeof service.product_runtime_ms === 'object' ? service.product_runtime_ms : {};
-  return Object.entries(runtime)
-    .map(([task, stats]) => `${task}: avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})`)
+  const work = service.product_work_totals && typeof service.product_work_totals === 'object' ? service.product_work_totals : {};
+  return [...new Set([...Object.keys(runtime), ...Object.keys(work)])]
+    .map(task => {
+      const stats = runtime[task];
+      const workText = debugSystemDictSummaryText(work[task]).split('\n').join(', ');
+      const runtimeText = stats ? `avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})` : '';
+      return `${task}: ${[runtimeText, workText].filter(Boolean).join(' · ')}`;
+    })
     .join('\n');
 }
 
@@ -50885,6 +51177,25 @@ function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
   </table></div>`;
 }
 
+function debugSystemRecurringWorkHtml(rows = [], nowSeconds = Date.now() / 1000) {
+  if (!Array.isArray(rows) || !rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table js-debug-system-fixed-table" data-js-debug-recurring-work>
+    <thead><tr><th>Owner</th><th>Class</th><th>Cadence</th><th>Demand</th><th>Attempt / useful / unchanged / failed</th><th>Last useful</th><th>Next due</th></tr></thead>
+    <tbody>${rows.map(row => {
+      const cadence = Math.max(0, Number(row?.cadence_seconds) || 0);
+      const lastUsefulAt = Math.max(0, Number(row?.last_useful_at) || 0);
+      const nextDue = Math.max(0, Number(row?.next_due_in_seconds) || 0);
+      return `<tr data-js-debug-recurring-work-owner="${esc(row?.owner || '')}">
+        <th scope="row">${esc(row?.owner || t('common.notAvailable'))}</th><td>${esc(row?.class || t('common.notAvailable'))}</td>
+        <td>${esc(cadence > 0 ? debugGraphTerseTimeText(cadence * 1000) : '—')}</td><td>${row?.demanded ? 'Yes' : 'No'}</td>
+        <td>${esc(`${debugSystemNumber(row?.attempts)} / ${debugSystemNumber(row?.useful)} / ${debugSystemNumber(row?.no_change)} / ${debugSystemNumber(row?.failures)}`)}</td>
+        <td>${esc(lastUsefulAt > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - lastUsefulAt)) : '—')}</td>
+        <td>${esc(nextDue > 0 ? debugGraphTerseTimeText(nextDue * 1000) : '—')}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
 function debugSystemSamplerFamilyEntries(value) {
   if (Array.isArray(value)) {
     return value.map((family, index) => [String(family?.family || family?.name || index), family || {}]);
@@ -51023,6 +51334,7 @@ function debugSystemInnerHtml() {
   const caches = payload.caches || {};
   const clientEvents = payload.client_events || {};
   const chat = payload.chat || {};
+  const recurringWork = Array.isArray(refresh.recurring_work) ? refresh.recurring_work : [];
   const totals = payload.local_services?.totals || {};
   const cpuBudget = payload.cpu_budget || {};
   const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
@@ -51058,6 +51370,7 @@ function debugSystemInnerHtml() {
       ['Delivered events', clientEvents.delivered_events],
       ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
     ])),
+    debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(recurringWork), {wide: true}),
     debugSystemStatsSamplerCardHtml(services),
     debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
     debugSystemLocalServicesCardHtml(),
@@ -53330,24 +53643,35 @@ function syncDiffRefControlValues(container) {
   if (resetBtn) resetBtn.hidden = refs.from === 'HEAD' && refs.to === 'current';
 }
 
+function fileExplorerSelectedSessionForView(view) {
+  const surface = normalizeFileExplorerView(view);
+  const selected = surface === 'finder' ? fileExplorerFinderSelectedSession : fileExplorerChangesSelectedSession;
+  if (selected && sessions.includes(selected)) return selected;
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  if (explicitSession) return explicitSession;
+  return '';
+}
+
+function fileExplorerFinderTargetSession() {
+  if (shareViewMode && !shareWriteMode) return fileExplorerSelectedSessionForView('finder');
+  const selected = fileExplorerSelectedSessionForView('finder');
+  if (selected) {
+    fileExplorerFinderSelectedSession = selected;
+    return selected;
+  }
+  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
+  return sessions[0] || '';
+}
+
 function fileExplorerSessionFilesTargetSession() {
   if (shareViewMode && !shareWriteMode) {
-    if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
-      return fileExplorerChangesSelectedSession;
-    }
-    const explicitSession = fileExplorerExplicitSyncSessionTarget();
-    if (explicitSession) {
-      return explicitSession;
-    }
-    return '';
+    return fileExplorerSelectedSessionForView('differ');
   }
-  if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
-    return fileExplorerChangesSelectedSession;
-  }
-  const explicitSession = fileExplorerExplicitSyncSessionTarget();
-  if (explicitSession) {
-    fileExplorerChangesSelectedSession = explicitSession;
-    return explicitSession;
+  const selected = fileExplorerSelectedSessionForView('differ');
+  if (selected) {
+    fileExplorerChangesSelectedSession = selected;
+    return selected;
   }
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
@@ -53451,8 +53775,23 @@ function switchFileExplorerChangesSession(session) {
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanel(panelNodes.get(differItemId));
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
+  // A cached session switch already has visible last-known-good rows. Let the server decide
+  // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
+  // that parent and submit a full session-files job for every tab switch.
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   scheduleShareTopologySnapshot('finder-session');
+}
+
+function switchFileExplorerFinderSession(session) {
+  if (!isTmuxSession(session) || !sessions.includes(session)) return false;
+  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
+  if (fileExplorerFinderSelectedSession === session) return false;
+  fileExplorerFinderSelectedSession = session;
+  rememberFileExplorerExplicitSyncSession(session);
+  scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  sharePublish('finder-mode', {mode: 'files', session});
+  scheduleShareTopologySnapshot('finder-session');
+  return true;
 }
 
 function noteFileExplorerChangesSessionInteraction(session) {
@@ -54289,13 +54628,15 @@ function sessionFilesSessionSelectHtml(target, options = {}) {
   return `<select${classes} data-session-files-session>${selectOptions}</select>`;
 }
 
-function fileExplorerDiffSessionControlHtml(session) {
-  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">${esc(t('common.sessionLabel'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
+function fileExplorerDiffSessionControlHtml(session, view = 'differ') {
+  const surface = normalizeFileExplorerView(view);
+  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control" data-file-explorer-session-surface="${esc(surface)}">${esc(t('common.sessionLabel'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
 }
 
 function syncFileExplorerDiffSessionControls() {
-  const session = fileExplorerSessionFilesTargetSession();
   for (const select of document.querySelectorAll('.file-explorer-diff-session-control [data-session-files-session]')) {
+    const surface = select.closest('[data-file-explorer-session-surface]')?.dataset.fileExplorerSessionSurface || 'differ';
+    const session = surface === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession();
     const options = Array.from(select.options || []);
     if (options.length !== sessions.length || !options.some(option => option.value === session)) {
       select.outerHTML = sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'});
@@ -54574,9 +54915,9 @@ function bindChangesPanel(panel) {
     if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
-      fileExplorerChangesSelectedSession = sessionSelect.value;
-      rememberFileExplorerExplicitSyncSession(fileExplorerChangesSelectedSession);
-      switchFileExplorerChangesSession(fileExplorerChangesSelectedSession);
+      const view = fileExplorerViewForItem(panel.dataset.panelItem) || 'finder';
+      if (view === 'finder') switchFileExplorerFinderSession(sessionSelect.value);
+      else switchFileExplorerChangesSession(sessionSelect.value);
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -55146,7 +55487,7 @@ function createFileExplorerPanel(item = finderItemId) {
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
   const finderToolbarHtml = view === 'finder' ? `<div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
-            ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
+            ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
             <span class="file-explorer-toolbar-spacer"></span>
             ${reloadButtonHtml}
           </div>
@@ -55166,7 +55507,7 @@ function createFileExplorerPanel(item = finderItemId) {
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
             </span>
           </div>
-        </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}</div></div>` : '';
+        </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession(), 'differ')}</div></div>` : '';
   panel.innerHTML = panelFrameHtml({
     item,
     headClass: 'file-explorer-head',
@@ -62573,7 +62914,8 @@ function shareFinderSeed() {
   return {
     root,
     rootMode: fileExplorerRootMode === 'fixed' ? 'fixed' : 'sync',
-    session: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
+    session: typeof fileExplorerFinderTargetSession === 'function' ? fileExplorerFinderTargetSession() : '',
+    differSession: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
   };
 }
 
@@ -62632,6 +62974,13 @@ function shareHostConnectionRecord(token, options = {}) {
 
 function shareHostConnectionSockets() {
   return shareSenderRecordEntries('connection').map(([, record]) => record.connection.socket).filter(Boolean);
+}
+
+function shareStatusSocketHealthy() {
+  const tokens = shareViewMode
+    ? [shareToken].filter(Boolean)
+    : activeShares.map(share => String(share?.token || '')).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token => shareHostConnectionRecord(token)?.socket?.readyState === WebSocket.OPEN);
 }
 
 function shareHostQueuedMessageCount(token) {
@@ -65035,17 +65384,21 @@ async function applyShareFinderState(finder = {}) {
   const session = String(finder.session || '').trim();
   const previousRoot = normalizeDirectoryPath(fileExplorerRoot || '');
   const previousExpandedSignature = shareSetSignature(fileExplorerExpanded);
-  // `finder.mode` is a legacy semantic frame field. Layout/tabs now name the independent Finder,
-  // Differ, and Tabber identities, so consuming this old field must never select a surface or
-  // rebuild every file panel. The rest of this state remains shared domain data.
+  // `finder.mode` is a legacy semantic frame field. New hosts send independent Finder and Differ
+  // selections, but old hosts used `mode: diff, session` to name the Differ target. Retain that
+  // narrow compatibility mapping so an old host cannot update a shared root while leaving its
+  // readonly viewer's Differ payload attached to the previous session.
   const legacyMode = 'mode' in finder ? normalizeFileExplorerMode(finder.mode) : '';
   void legacyMode;
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
-    fileExplorerChangesSelectedSession = session;
+    fileExplorerFinderSelectedSession = session;
     setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
+  const differSession = String(finder.differSession || '').trim();
+  if (isTmuxSession(differSession)) fileExplorerChangesSelectedSession = differSession;
+  else if (legacyMode === 'diff' && isTmuxSession(session)) fileExplorerChangesSelectedSession = session;
   applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
@@ -65059,8 +65412,7 @@ async function applyShareFinderState(finder = {}) {
   if ('tabberCollapsed' in finder) shareReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
   const expandedChanged = previousExpandedSignature !== shareSetSignature(fileExplorerExpanded);
   renderFileExplorerRootModeControls();
-  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
-  document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
+  syncFileExplorerHiddenButtons();
   syncFileExplorerTreeDateButtons();
   const root = String(finder.root || '').trim();
   const normalizedRoot = root ? normalizeDirectoryPath(expandUserPath(root)) : '';
@@ -65090,8 +65442,8 @@ async function applyShareFinderState(finder = {}) {
   }
   if (itemInLayout(differItemId)) {
     renderFileExplorerChangesPanels({force: true});
-    if (fileExplorerChangesSelectedSession) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerChangesSelectedSession, silent: true, force: false, background: true});
+    if (fileExplorerSessionFilesTargetSession()) {
+      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: false, background: true});
     }
   }
   if (itemInLayout(tabberItemId)) {
@@ -67129,7 +67481,7 @@ function startShareStatusRefresh() {
       updateShareViewerBanner();
       renderShareCountdowns();
     }
-    if (shareViewMode && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
+    if (shareViewMode && !shareStatusSocketHealthy() && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
       refreshShareViewerStatus({silent: true});
     } else if (shareHostStatusBackupPollDue()) {
       refreshActiveShare({silent: true});
@@ -67140,6 +67492,7 @@ function startShareStatusRefresh() {
 function shareHostStatusBackupPollDue(nowMs = Date.now()) {
   return !readOnlyMode
     && shareHasActiveShare()
+    && !shareStatusSocketHealthy()
     && nowMs - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs;
 }
 
@@ -69873,16 +70226,27 @@ function infoTabGroupStatusRecord(group = {}) {
 }
 
 function infoTabGroupLeadingActivityHtml(group = {}) {
+  const representative = infoGroupRepresentativeRecord(group);
   const status = infoTabGroupStatusRecord(group);
-  if (!status?.record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
-  const record = status.record;
+  const record = representative || status?.record;
+  if (!record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
+  const groupRecords = Array.isArray(group.records) ? group.records : [];
+  const representativeKind = String(record.aiKind || '').trim().toLowerCase();
+  const exactWindowSurface = representativeKind && groupRecords.every(item => String(item?.aiKind || '').trim().toLowerCase() === representativeKind);
+  const exactAgent = exactWindowSurface ? infoRecordCanonicalAgent(record) : null;
+  const exactActivityHtml = exactAgent
+    ? agentWindowActivityIconHtmlForStatus(exactAgent, record.aiKind, session, {statusOnly: true})
+    : '';
+  if (exactActivityHtml) {
+    return `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${exactActivityHtml}</span>`;
+  }
+  const summary = sessionAgentWindowStatusSummary(session, info, payload);
   const agent = summary?.agent || infoRecordDisplayAgent(record);
   const activityHtml = summary?.item
     ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
@@ -72140,6 +72504,7 @@ function activateTab(session, name, options = {}) {
   }
   if (name === 'summary') startSummaryStream(session);
   if (name === 'events') refreshEventLog(session);
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
   if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -72758,11 +73123,12 @@ async function setAutoApprove(session, enabled) {
   }
   try {
     const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    autoApproveStates.set(session, payload);
+    const state = autoApproveStateWithSnapshotRevision(payload);
+    autoApproveStates.set(session, state);
     updateDocumentTitle();
     updateSessionButtonStates();
     renderInfoPanel();
-    renderAutoApproveButton(session, payload);
+    renderAutoApproveButton(session, state);
     scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
     statusEl.innerHTML = payload.enabled
@@ -72772,10 +73138,11 @@ async function setAutoApprove(session, enabled) {
     const payload = error?.payload || {};
     if (error?.status) {
       if (payload?.target || payload?.session) {
-        autoApproveStates.set(session, payload);
+        const state = autoApproveStateWithSnapshotRevision(payload);
+        autoApproveStates.set(session, state);
         updateDocumentTitle();
         updateSessionButtonStates();
-        renderAutoApproveButton(session, payload);
+        renderAutoApproveButton(session, state);
         scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
@@ -72812,7 +73179,7 @@ function loadAutoStatuses(options = {}) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
         const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        autoApproveStates.set(session, payload);
+        autoApproveStates.set(session, autoApproveStateWithSnapshotRevision(payload));
       } catch (_) {}
     }
     result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
@@ -72830,11 +73197,19 @@ loadAutoStatuses.request = null;
 loadAutoStatuses.lastResult = null;
 loadAutoStatuses.updatedAt = 0;
 
+function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnapshotRevision(state)) {
+  if (!state || typeof state !== 'object') return state;
+  const normalizedRevision = Number(revision || 0);
+  if (!Number.isInteger(normalizedRevision) || normalizedRevision <= 0 || agentWindowSnapshotRevision(state) === normalizedRevision) return state;
+  return {...state, agent_window_snapshot_revision: normalizedRevision};
+}
+
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
   try {
     if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
     else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+    if (typeof refreshDebugAgentWindowLiveDetails === 'function') refreshDebugAgentWindowLiveDetails();
     updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
@@ -72860,8 +73235,9 @@ function applyAutoApprovePayload(payload, options = {}) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
   }
+  const snapshotRevision = agentWindowSnapshotRevision(payload);
   for (const session of sessions) {
-    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
+    const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
     autoApproveStates.set(session, state);
     reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
@@ -73297,7 +73673,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   renderPaneTabStrips();
   scheduleFileExplorerActiveTabSync();
-  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (!shareViewMode) scheduleShareUiStatePublish();
   trackSessionStateChanges();
   refreshOpenEventLogs();
@@ -73817,30 +74193,75 @@ function formatEventTime(value) {
   });
 }
 
-async function refreshEventLog(session) {
-  const node = document.getElementById(`events-${session}`);
-  if (!node) return;
-  delete node.dataset.localeTextKey;
-  try {
-    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
-    const events = Array.isArray(payload.events) ? payload.events : [];
-    node.innerHTML = events.length
-      ? events.slice().reverse().map(eventItemHtml).join('')
-      : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
-  } catch (error) {
-    if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
-      return;
-    }
-    node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
+function eventLogRefreshRecord(session) {
+  const key = String(session || '');
+  let record = eventLogRefreshRecords.get(key);
+  if (!record) {
+    record = {request: null, pending: false};
+    eventLogRefreshRecords.set(key, record);
   }
+  return record;
+}
+
+function refreshEventLog(session) {
+  const node = document.getElementById(`events-${session}`);
+  if (!node) return Promise.resolve(false);
+  const record = eventLogRefreshRecord(session);
+  if (record.request) {
+    record.pending = true;
+    return record.request;
+  }
+  delete node.dataset.localeTextKey;
+  const scrollTop = Number(node.scrollTop) || 0;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      node.innerHTML = events.length
+        ? events.slice().reverse().map(eventItemHtml).join('')
+        : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
+      // A push is an invalidation, not a command to move a reader away from
+      // the older page of the bounded tail they are inspecting.
+      node.scrollTop = scrollTop;
+      return true;
+    } catch (error) {
+      if (error?.status) {
+        node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
+        return false;
+      }
+      node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
+      return false;
+    } finally {
+      if (record.request === request) {
+        record.request = null;
+        if (record.pending) {
+          record.pending = false;
+          Promise.resolve().then(() => refreshEventLog(session));
+        }
+      }
+    }
+  })();
+  record.request = request;
+  return request;
 }
 
 function refreshOpenEventLogs() {
+  const refreshes = [];
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
+    if (pane?.classList.contains(CLS.active)) refreshes.push(refreshEventLog(session));
   }
+  return Promise.all(refreshes);
+}
+
+function refreshEventLogsFromPush(payload = {}) {
+  const session = String(payload.session || '');
+  if (session) {
+    const pane = document.getElementById(`events-pane-${session}`);
+    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
+    return;
+  }
+  refreshOpenEventLogs();
 }
 
 function postEvent(session, type, message, details = {}) {
@@ -73898,16 +74319,7 @@ function renderLatency(latestMs) {
 }
 
 async function updateLatency() {
-  if (document.visibilityState === 'hidden') return null;
-  const startedAt = performance.now();
-  try {
-    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
-    const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
-    latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
-    renderLatency(elapsedMs);
-  } catch (_) {
-    renderLatency(null);
-  }
+  return measureClientHealth();
 }
 
 function refreshAll() {
@@ -74072,6 +74484,92 @@ function clientEventPayloadFromEnvelope(envelope) {
   return envelope && typeof envelope === 'object' && envelope.payload && typeof envelope.payload === 'object'
     ? envelope.payload
     : envelope;
+}
+
+function applyClientEventReadyEnvelope(envelope = {}) {
+  const epoch = String(envelope.epoch || '');
+  if (!epoch) return false;
+  if (clientEventTransportState.resourceEpoch !== epoch) {
+    clientEventTransportState.resourceEpoch = epoch;
+    clientEventTransportState.resourceRevisions.clear();
+  }
+  // `ready` is a reconnect fence, not state.  Seeding accepted revisions here
+  // would discard queued frames without proving the corresponding panel read
+  // happened.  Channel-scoped repair below establishes readable state first.
+  return true;
+}
+
+function repairClientEventReadyChannels(channels) {
+  if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+  if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+  if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
+  if (channels.has('transcripts') && typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
+  if (channels.has('activity') && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true}).catch(error => console.warn('client-events ready activity refresh failed', error));
+  if (channels.has('events') && typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs().catch(error => console.warn('client-events ready event-log refresh failed', error));
+  if (channels.has('yoagent') && typeof loadYoagentConversation === 'function') loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: false}).catch(error => console.warn('client-events ready YO!agent refresh failed', error));
+}
+
+function repairReadyEventLogRevisions(resources, envelope) {
+  const eventLogResources = resources.filter(resource => /^event_log_changed/.test(resource));
+  if (!eventLogResources.length || typeof refreshOpenEventLogs !== 'function') return;
+  const epoch = String(envelope.epoch || '');
+  refreshOpenEventLogs().then(() => {
+    if (clientEventTransportState.resourceEpoch !== epoch) return;
+    for (const resource of eventLogResources) {
+      const revision = Number(envelope.resource_revisions?.[resource]);
+      if (Number.isFinite(revision)) clientEventTransportState.resourceRevisions.set(resource, revision);
+    }
+  }).catch(error => console.warn('client-events ready event-log refresh failed', error));
+}
+
+function clientEventRepairChannels(resources = []) {
+  const channels = new Set();
+  for (const rawResource of resources) {
+    const resource = String(rawResource || '');
+    if (/^(?:files_changed|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
+    else if (/^(?:auto_approve_changed|attention_acks_changed|tmux_signals_changed)/.test(resource)) channels.add('status');
+    else if (/^event_log_changed/.test(resource)) channels.add('events');
+    else if (/^(?:transcripts_changed|context_changed|context_items_ready)/.test(resource)) channels.add('transcripts');
+    else if (/^activity_summary_ready|background:tabber-activity/.test(resource)) channels.add('activity');
+    else if (/^yoagent_/.test(resource)) channels.add('yoagent');
+    else if (/^chat_/.test(resource)) channels.add('chat');
+    else channels.add('core');
+  }
+  return channels;
+}
+
+function repairClientEventResources(resources = []) {
+  const channels = clientEventRepairChannels(resources);
+  if (channels.size) repairClientEventReadyChannels(channels);
+}
+
+function clientEventReadyGapResources(envelope = {}) {
+  const revisions = envelope.resource_revisions;
+  if (!revisions || typeof revisions !== 'object') return [];
+  const gaps = [];
+  for (const [resource, rawRevision] of Object.entries(revisions)) {
+    const revision = Number(rawRevision);
+    if (!Number.isSafeInteger(revision) || revision < 1) continue;
+    if (revision > (clientEventTransportState.resourceRevisions.get(resource) || 0)) gaps.push(resource);
+  }
+  return gaps;
+}
+
+function clientEventEnvelopeIsCurrent(envelope = {}) {
+  const epoch = String(envelope.epoch || '');
+  const resource = String(envelope.resource || '');
+  const revision = Number(envelope.resource_revision);
+  // Older servers and direct unit-test calls remain valid until every dev server has re-execed.
+  if (!epoch || !resource || !Number.isSafeInteger(revision) || revision < 1) return true;
+  if (clientEventTransportState.resourceEpoch !== epoch) {
+    clientEventTransportState.resourceEpoch = epoch;
+    clientEventTransportState.resourceRevisions.clear();
+  }
+  const previous = clientEventTransportState.resourceRevisions.get(resource) || 0;
+  if (revision <= previous) return false;
+  clientEventTransportState.resourceRevisions.set(resource, revision);
+  return true;
 }
 
 function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
@@ -74275,6 +74773,18 @@ function clientPushEventSessionKey(payload = {}) {
   return String(payload.session || payload.request?.session || payload.data?.session || payload.data?.target || '');
 }
 
+// Keep EventSource registration and the browser dispatch owner on one typed contract. The server
+// still validates its authoritative set in ClientEventBroker; this prevents a browser-only typo or
+// a newly added handler from silently having no EventSource listener.
+const clientPushEventTypes = Object.freeze([
+  'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
+  'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
+  'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
+  'chat_messages_changed', 'chat_typing_changed',
+]);
+
 function clientPushEventCoalesceKey(type, payload = {}) {
   const key = String(type || 'event');
   const session = clientPushEventSessionKey(payload);
@@ -74282,9 +74792,9 @@ function clientPushEventCoalesceKey(type, payload = {}) {
   return key;
 }
 
-function queueClientPushEvent(type, payload = {}) {
+function queueClientPushEvent(type, payload = {}, envelope = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientEventTransportState.queue.set(key, {type, payload});
+  clientEventTransportState.queue.set(key, {type, payload, envelope});
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
@@ -74305,14 +74815,17 @@ function flushQueuedClientPushEvents() {
   const events = Array.from(clientEventTransportState.queue.values());
   clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
-  for (const event of events) handleClientPushEventNow(event.type, event.payload);
+  for (const event of events) handleClientPushEventNow(event.type, event.payload, event.envelope);
 }
 
-function handleClientPushEvent(type, payload = {}) {
-  queueClientPushEvent(type, payload);
+function handleClientPushEvent(type, payload = {}, envelope = {}) {
+  repairClientEventResources(envelope.repair_resources);
+  if (!clientEventEnvelopeIsCurrent(envelope)) return false;
+  queueClientPushEvent(type, payload, envelope);
+  return true;
 }
 
-function handleClientPushEventNow(type, payload = {}) {
+function handleClientPushEventNowByType(type, payload = {}) {
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
     return;
@@ -74321,6 +74834,10 @@ function handleClientPushEventNow(type, payload = {}) {
     if (payload.data && typeof payload.data === 'object') {
       applySettingsPayload(payload.data, {force: true});
     }
+    return;
+  }
+  if (type === 'pricing_catalog_changed') {
+    if (typeof refreshDebugCostPricingStatus === 'function') refreshDebugCostPricingStatus().catch(error => console.warn('pricing catalog refresh failed', error));
     return;
   }
   if (type === 'stats_sample') {
@@ -74342,13 +74859,25 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    } else if (typeof refreshAllIndexedDirsStatus === 'function') {
+      // A new owner may have rebuilt or invalidated an index while this client was
+      // following the previous owner. Revalidate only surfaces that are currently demanded.
+      refreshAllIndexedDirsStatus();
     }
+    return;
+  }
+  if (type === 'background_refresh_requested') {
+    refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('background refresh request status failed', error));
     return;
   }
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
-      if (payload.root) refreshFileIndexStatus(payload.root);
+      const applied = payload.root && typeof applyFileIndexStatusPayload === 'function'
+        ? applyFileIndexStatusPayload(payload.root, payload)
+        : false;
+      // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
+      // immediately recreates the retired building-index poll and can race a newer generation.
+      if (payload.root && !applied) refreshFileIndexStatus(payload.root);
       if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
         refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }
@@ -74358,6 +74887,9 @@ function handleClientPushEventNow(type, payload = {}) {
       if (!session || session === fileExplorerSessionFilesTargetSession()) {
         fetchSessionFiles({silent: true}).catch(error => console.warn('session-files refresh failed', error));
       }
+    }
+    if (payload.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab(tabberItemId) && document.visibilityState !== 'hidden') {
+      fetchTabberActivity().catch(error => console.warn('Tabber activity refresh failed', error));
     }
     return;
   }
@@ -74383,12 +74915,20 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'context_changed') {
+    if (typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events context refresh failed', error));
+    return;
+  }
   if (type === 'context_items_ready') {
     if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
     return;
   }
   if (type === 'activity_summary_ready') {
     if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'event_log_changed') {
+    refreshEventLogsFromPush(payload);
     return;
   }
   if (type === 'yoagent_conversation_changed') {
@@ -74434,7 +74974,20 @@ function handleClientPushEventNow(type, payload = {}) {
     if (typeof refreshFileExplorerFromPush === 'function') {
       refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
     }
+    return;
   }
+  if (type === 'roots_changed') {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  }
+}
+
+const clientPushEventHandlers = Object.freeze(Object.fromEntries(
+  clientPushEventTypes.map(type => [type, payload => handleClientPushEventNowByType(type, payload)])
+));
+
+function handleClientPushEventNow(type, payload = {}) {
+  const handler = clientPushEventHandlers[type];
+  if (handler) handler(payload);
 }
 
 function clientEventDemandDescriptor() {
@@ -74455,6 +75008,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.some(item => isTmuxSession(item) && panelActiveTabName(item) === 'events')) channels.add('events');
     if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
         && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
@@ -74516,11 +75070,23 @@ function openClientEventStream(descriptor) {
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
-    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
-    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
-    if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
+    const envelope = clientEventEnvelope(event);
+    const readyEpoch = String(envelope.epoch || '');
+    // Older servers did not include an epoch/revision summary. Treat that compatibility frame
+    // as an unknown reconnect and conservatively repair current demand rather than assuming it
+    // is the same generation with zero gaps.
+    const freshEpoch = !readyEpoch || clientEventTransportState.resourceEpoch !== readyEpoch;
+    applyClientEventReadyEnvelope(envelope);
+    recordSseDebugEvent('ready', envelope, event);
+    if (freshEpoch) {
+      repairClientEventReadyChannels(channels);
+    } else {
+      const gapResources = clientEventReadyGapResources(envelope);
+      repairReadyEventLogRevisions(gapResources, envelope);
+      const repairChannels = clientEventRepairChannels(gapResources);
+      repairChannels.delete('events');
+      repairClientEventReadyChannels(new Set([...repairChannels].filter(channel => channels.has(channel))));
+    }
   });
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
@@ -74533,14 +75099,14 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of Object.keys(clientPushEventHandlers)) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
-      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
+      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope), envelope);
     });
   }
   return source;

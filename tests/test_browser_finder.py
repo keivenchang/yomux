@@ -111,6 +111,698 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
     assert all(button["text"] != "Zip & download" for button in metrics["fileButtons"]), metrics
 
 
+def test_finder_copy_path_uses_the_visible_pending_root_input(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=files,1&layout=left&tabs=left:files", fs_entries={"/home/test": []})
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.file-explorer-path-inline') && document.querySelector('.file-explorer-path-copy-panel')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const copied = [];
+        Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => copied.push(text)}});
+        const input = Array.from(document.querySelectorAll('.file-explorer-path-inline')).find(node => node.getClientRects().length > 0);
+        input.value = '/home/test/pending-root';
+        document.querySelector('.file-explorer-path-copy-panel').click();
+        setTimeout(() => {
+          Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async () => { throw new Error('clipboard denied'); }}});
+          document.querySelector('.file-explorer-path-copy-panel').click();
+          setTimeout(() => done({
+            copied,
+            copyFailure: document.getElementById('status')?.textContent || '',
+            copyFailureIsVisible: Boolean(document.querySelector('#status .err')),
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          }), 0);
+        }, 0);
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["copied"] == ["/home/test/pending-root"]
+    assert metrics["copyFailureIsVisible"] is True and "copy failed" in metrics["copyFailure"].lower(), metrics
+
+
+def test_finder_reload_button_uses_the_delegated_force_refresh(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=files,1&layout=left&tabs=left:files", fs_entries={"/home/test": [{"name": "shown", "kind": "file"}]})
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.file-explorer-refresh-cluster') && document.querySelector('.file-tree-row[data-path=\"/home/test/shown\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const sessionFileFetches = () => window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+        const filesystemFetches = () => window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list').length;
+        const before = {sessionFiles: sessionFileFetches(), filesystem: filesystemFetches()};
+        document.querySelector('.file-explorer-refresh-cluster').click();
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const after = {sessionFiles: sessionFileFetches(), filesystem: filesystemFetches()};
+          if ((after.sessionFiles <= before.sessionFiles || after.filesystem <= before.filesystem) && performance.now() < deadline) {
+            requestAnimationFrame(inspect);
+            return;
+          }
+          done({before, after, errors: window.__bootErrors, rejections: window.__bootRejections});
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+    assert metrics["after"]["sessionFiles"] > metrics["before"]["sessionFiles"], metrics
+    assert metrics["after"]["filesystem"] > metrics["before"]["filesystem"], metrics
+
+
+def test_finder_tree_toolbar_and_disclosure_use_real_events(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "project", "kind": "dir"}, {"name": "note.txt", "kind": "file"}],
+        "/home/test/project": [{"name": "nested.txt", "kind": "file"}],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries=fs_entries,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.file-tree-row[data-path=\"/home/test/project\"]') && document.querySelector('[data-file-explorer-tree-sort]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('#panel-__finder__');
+        const tree = panel.querySelector('.file-explorer-tree-panel');
+        const projectPath = '/home/test/project';
+        const row = () => tree.querySelector(`.file-tree-row[data-path="${projectPath}"]`);
+        const child = () => tree.querySelector('.file-tree-row[data-path="/home/test/project/nested.txt"]');
+        const waitFor = (predicate, next, deadline = performance.now() + 2000) => {
+          if (predicate()) return next();
+          if (performance.now() >= deadline) return done({error: 'timed out waiting for toolbar action', state: snapshot()});
+          requestAnimationFrame(() => waitFor(predicate, next, deadline));
+        };
+        const snapshot = () => ({
+          sort: fileExplorerTreeSortModeForView('finder'),
+          date: fileExplorerTreeDateModeForView('finder'),
+          mode: fileExplorerRootModeValue(),
+          root: currentFileExplorerRoot(),
+          expandedPaths: Array.from(fileExplorerExpanded),
+          filesystemFetches: window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list'),
+          expanded: row()?.getAttribute('aria-expanded') || '',
+          child: Boolean(child()),
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+        });
+        const sort = panel.querySelector('[data-file-explorer-tree-sort]');
+        sort.value = 'newest';
+        sort.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        panel.querySelector('[data-file-explorer-tree-dates]').click();
+        panel.querySelector('[data-file-tree-expand-collapse-all="expand"]').click();
+        waitFor(() => child(), () => {
+          const expanded = snapshot();
+          panel.querySelector('[data-file-tree-expand-collapse-all="collapse"]').click();
+          waitFor(() => !child() && row()?.getAttribute('aria-expanded') === 'false', () => {
+            row().click();
+            waitFor(() => child() && row()?.getAttribute('aria-expanded') === 'true', () => done({expanded, final: snapshot()}));
+          });
+        });
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["expanded"]["sort"] == "newest", metrics
+    assert metrics["expanded"]["date"] != "none", metrics
+    assert metrics["expanded"]["expanded"] == "true" and metrics["expanded"]["child"] is True, metrics
+    assert metrics["final"]["expanded"] == "true" and metrics["final"]["child"] is True, metrics
+    assert metrics["final"]["errors"] == [] and metrics["final"]["rejections"] == [], metrics
+
+
+def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": []},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ [data-file-explorer-new-file]') && document.querySelector('#panel-__finder__ [data-file-explorer-new-folder]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('#panel-__finder__');
+        const originalFetch = window.fetch;
+        const originalPrompt = window.prompt;
+        const prompts = ['created.txt', 'created-dir', 'bad/name'];
+        const requests = [];
+        window.prompt = () => prompts.shift() || '';
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/write' || url.pathname === '/api/fs/mkdir') {
+            const body = JSON.parse(options.body || '{}');
+            requests.push({path: url.pathname, body});
+            const parent = body.path.slice(0, body.path.lastIndexOf('/')) || '/';
+            const name = body.path.slice(body.path.lastIndexOf('/') + 1);
+            const kind = url.pathname === '/api/fs/mkdir' ? 'dir' : 'file';
+            window.__fixtureFsEntries[parent] = [...(window.__fixtureFsEntries[parent] || []), {name, kind}];
+            if (kind === 'dir') window.__fixtureFsEntries[body.path] = [];
+            return new Response(JSON.stringify({path: body.path}), {headers: {'Content-Type': 'application/json'}});
+          }
+          if (url.pathname === '/api/fs/raw') return new Response('', {headers: {'Content-Type': 'text/plain'}});
+          return originalFetch(input, options);
+        };
+        const waitFor = (predicate, next, deadline = performance.now() + 2000) => {
+          if (predicate()) return next();
+          if (performance.now() >= deadline) return done({error: 'timed out waiting for create action', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+          requestAnimationFrame(() => waitFor(predicate, next, deadline));
+        };
+        panel.querySelector('[data-file-explorer-new-file]').click();
+        waitFor(() => requests.length === 1, () => {
+          panel.querySelector('[data-file-explorer-new-folder]').click();
+          waitFor(() => requests.length === 2 && panel.querySelector('.file-tree-row[data-path="/home/test/created.txt"]') && panel.querySelector('.file-tree-row[data-path="/home/test/created-dir"]'), () => {
+            panel.querySelector('[data-file-explorer-new-file]').click();
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              window.fetch = originalFetch;
+              window.prompt = originalPrompt;
+              done({requests, root: currentFileExplorerRoot(), errors: window.__bootErrors, rejections: window.__bootRejections});
+            }));
+          });
+        });
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["root"] == "/home/test", metrics
+    assert metrics["requests"] == [
+        {"path": "/api/fs/write", "body": {"path": "/home/test/created.txt", "content": ""}},
+        {"path": "/api/fs/mkdir", "body": {"path": "/home/test/created-dir"}},
+    ], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_file_context_menu_uses_the_real_right_click_and_copy_action(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "note.txt", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const copied = [];
+        Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => copied.push(text)}});
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/note.txt"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /copy full path/i.test(node.textContent));
+          if (!button && performance.now() < deadline) {
+            requestAnimationFrame(inspect);
+            return;
+          }
+          if (!button) return done({error: 'full-path button missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          button.click();
+          requestAnimationFrame(() => done({copied, menuOpen: Boolean(document.querySelector('.file-context-menu')), errors: window.__bootErrors, rejections: window.__bootRejections}));
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["copied"] == ["/home/test/note.txt"], metrics
+    assert metrics["menuOpen"] is False, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_rename_uses_the_real_input_submit_path(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "note.txt", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const requests = [];
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/rename') {
+            const body = JSON.parse(options.body || '{}');
+            requests.push(body);
+            window.__fixtureFsEntries['/home/test'] = [{name: body.new_name, kind: 'file'}];
+            return new Response(JSON.stringify({path: `/home/test/${body.new_name}`, reindex_roots: []}), {headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/note.txt"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const rename = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /^rename$/i.test(node.textContent.trim()));
+          if (!rename && performance.now() < deadline) return requestAnimationFrame(inspect);
+          if (!rename) return done({error: 'rename button missing', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+          rename.click();
+          requestAnimationFrame(() => {
+            const input = document.querySelector('#panel-__finder__ .file-tree-rename-input');
+            if (!input) return done({error: 'rename input missing', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+            input.value = 'renamed.txt';
+            input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+            const waitForRename = () => {
+              if (requests.length && document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/renamed.txt"]')) {
+                window.fetch = originalFetch;
+                return done({requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+              }
+              if (performance.now() >= deadline) return done({error: 'rename did not finish', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+              requestAnimationFrame(waitForRename);
+            };
+            requestAnimationFrame(waitForRename);
+          });
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["requests"] == [{"path": "/home/test/note.txt", "new_name": "renamed.txt"}], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "remove-me.txt", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/remove-me.txt\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const originalConfirm = window.confirm;
+        const requests = [];
+        window.confirm = () => true;
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/delete') {
+            const body = JSON.parse(options.body || '{}');
+            requests.push(body);
+            window.__fixtureFsEntries['/home/test'] = [];
+            return new Response(JSON.stringify({path: body.path}), {headers: {'Content-Type': 'application/json'}});
+          }
+          return originalFetch(input, options);
+        };
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/remove-me.txt"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const remove = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /^delete$/i.test(node.textContent.trim()));
+          if (!remove && performance.now() < deadline) return requestAnimationFrame(inspect);
+          if (!remove) return done({error: 'delete button missing', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+          remove.click();
+          const waitForDelete = () => {
+            if (requests.length && !document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/remove-me.txt"]')) {
+              window.fetch = originalFetch;
+              window.confirm = originalConfirm;
+              return done({requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+            }
+            if (performance.now() >= deadline) return done({error: 'delete did not refresh the Finder tree', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+            requestAnimationFrame(waitForDelete);
+          };
+          requestAnimationFrame(waitForDelete);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["requests"] == [{"path": "/home/test/remove-me.txt"}], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_keyboard_selection_drag_payload_and_readonly_context_are_real_paths(browser, tmp_path):
+    entries = {"/home/test": [{"name": "alpha.txt", "kind": "file"}, {"name": "beta.txt", "kind": "file"}]}
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries=entries,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelectorAll('#panel-__finder__ .file-tree-row[data-path]').length >= 2")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('#panel-__finder__');
+        const alpha = panel.querySelector('.file-tree-row[data-path="/home/test/alpha.txt"]');
+        const beta = panel.querySelector('.file-tree-row[data-path="/home/test/beta.txt"]');
+        alpha.click();
+        panel.querySelector('.file-explorer-tree-panel').dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true, cancelable: true}));
+        panel.querySelector('.file-explorer-tree-panel').dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowUp', shiftKey: true, bubbles: true, cancelable: true}));
+        const dataTransfer = new DataTransfer();
+        beta.dispatchEvent(new DragEvent('dragstart', {bubbles: true, cancelable: true, dataTransfer}));
+        const selection = Array.from(fileExplorerSelectedPaths).sort();
+        const drag = {plain: dataTransfer.getData('text/plain'), custom: JSON.parse(dataTransfer.getData('application/x-yolomux-file') || '{}')};
+        done({selection, lead: fileExplorerSelectionLead, drag, errors: window.__bootErrors, rejections: window.__bootRejections});
+        """
+    )
+    assert metrics["selection"] == ["/home/test/alpha.txt", "/home/test/beta.txt"], metrics
+    assert metrics["lead"] == "/home/test/alpha.txt", metrics
+    assert metrics["drag"] == {
+        "plain": "/home/test/alpha.txt\n/home/test/beta.txt",
+        "custom": {"path": "/home/test/beta.txt", "paths": ["/home/test/alpha.txt", "/home/test/beta.txt"], "kind": "file", "name": "beta.txt"},
+    }, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "locked.txt", "kind": "file"}]},
+        access_role="readonly",
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/locked.txt\"]')")
+    )
+    readonly = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/locked.txt"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const buttons = Array.from(document.querySelectorAll('.file-context-menu button')).map(button => ({text: button.textContent.trim(), disabled: button.disabled}));
+          if (!buttons.length && performance.now() < deadline) return requestAnimationFrame(inspect);
+          done({buttons, errors: window.__bootErrors, rejections: window.__bootRejections});
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    disabled = {button["text"]: button["disabled"] for button in readonly["buttons"]}
+    assert disabled["Rename"] is True and disabled["Delete"] is True and disabled["Download"] is True, readonly
+    assert readonly["errors"] == [] and readonly["rejections"] == [], readonly
+
+
+def test_finder_context_download_actions_use_the_selected_file_or_folder(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={
+            "/home/test": [{"name": "note.txt", "kind": "file"}, {"name": "project", "kind": "dir"}],
+            "/home/test/project": [{"name": "nested.txt", "kind": "file"}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]') && document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/project\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalDownload = triggerFileDownload;
+        const originalZip = triggerFolderZipDownload;
+        const calls = [];
+        triggerFileDownload = path => calls.push({kind: 'file', path});
+        triggerFolderZipDownload = path => calls.push({kind: 'folder', path});
+        const open = (path, label, next) => {
+          const row = document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${path}"]`);
+          row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+          const deadline = performance.now() + 2000;
+          const inspect = () => {
+            const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === label);
+            if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
+            if (!button) return done({error: `${label} missing`, calls, errors: window.__bootErrors, rejections: window.__bootRejections});
+            button.click();
+            requestAnimationFrame(next);
+          };
+          requestAnimationFrame(inspect);
+        };
+        open('/home/test/note.txt', 'Download', () => open('/home/test/project', 'Zip & download', () => {
+          triggerFileDownload = originalDownload;
+          triggerFolderZipDownload = originalZip;
+          done({calls, errors: window.__bootErrors, rejections: window.__bootRejections});
+        }));
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["calls"] == [{"kind": "file", "path": "/home/test/note.txt"}, {"kind": "folder", "path": "/home/test/project"}], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_index_action_and_nonimage_guard_use_real_menu_state(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "project", "kind": "dir"}, {"name": "note.txt", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/project\"]') && document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const open = (path, next) => {
+          document.querySelector(`#panel-__finder__ .file-tree-row[data-path="${path}"]`).dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+          const deadline = performance.now() + 2000;
+          const inspect = () => {
+            const buttons = Array.from(document.querySelectorAll('.file-context-menu button'));
+            if (!buttons.length && performance.now() < deadline) return requestAnimationFrame(inspect);
+            next(buttons);
+          };
+          requestAnimationFrame(inspect);
+        };
+        open('/home/test/project', buttons => {
+          const include = buttons.find(button => button.textContent.trim() === 'Include in index');
+          if (!include) return done({error: 'include action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          include.click();
+          requestAnimationFrame(() => open('/home/test/note.txt', fileButtons => done({
+            indexed: fileExplorerDirectoryIsIndexed('/home/test/project'),
+            fileButtons: fileButtons.map(button => ({text: button.textContent.trim(), disabled: button.disabled})),
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          })));
+        });
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["indexed"] is True, metrics
+    nonimage = next(button for button in metrics["fileButtons"] if button["text"] == "Copy image")
+    assert nonimage["disabled"] is True, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_open_new_tab_uses_the_selected_file(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "note.txt", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/note.txt\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/note.txt"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === 'Open in new tab');
+          if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
+          if (!button) return done({error: 'open action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          button.click();
+          const waitForOpen = () => {
+            if (openFiles.has('/home/test/note.txt')) return done({opened: true, errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (performance.now() >= deadline) return done({error: 'selected file did not open', errors: window.__bootErrors, rejections: window.__bootRejections});
+            requestAnimationFrame(waitForOpen);
+          };
+          requestAnimationFrame(waitForOpen);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["opened"] is True and metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_context_copy_image_fetches_bytes_and_writes_image_clipboard(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        fs_entries={"/home/test": [{"name": "diagram.png", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__finder__ .file-tree-row[data-path=\"/home/test/diagram.png\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const originalFetch = window.fetch;
+        const writes = [];
+        class FixtureClipboardItem { constructor(data) { this.data = data; } }
+        Object.defineProperty(window, 'ClipboardItem', {configurable: true, value: FixtureClipboardItem});
+        Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {write: async items => writes.push(items.map(item => Object.keys(item.data)))} });
+        window.fetch = async (input, options = {}) => {
+          const url = new URL(String(input), location.href);
+          if (url.pathname === '/api/fs/raw') return new Response(new Blob(['image'], {type: 'image/png'}), {headers: {'Content-Type': 'image/png'}});
+          return originalFetch(input, options);
+        };
+        const row = document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/diagram.png"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === 'Copy image');
+          if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
+          if (!button) return done({error: 'copy-image action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          button.click();
+          const waitForWrite = () => {
+            if (writes.length) {
+              window.fetch = originalFetch;
+              return done({writes, errors: window.__bootErrors, rejections: window.__bootRejections});
+            }
+            if (performance.now() >= deadline) return done({error: 'image clipboard write missing', writes, errors: window.__bootErrors, rejections: window.__bootRejections});
+            requestAnimationFrame(waitForWrite);
+          };
+          requestAnimationFrame(waitForWrite);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["writes"] == [[["image/png"]]], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_finder_hidden_button_uses_the_real_click_path(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        fs_entries={"/home/test": [{"name": ".hidden", "kind": "file"}, {"name": "shown", "kind": "file"}]},
+    )
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return document.querySelector('.file-explorer-hidden-toggle-panel') && document.querySelector('.file-tree-row[data-path=\"/home/test/shown\"]')"))
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const button = document.querySelector('.file-explorer-hidden-toggle-panel');
+        const before = button.getAttribute('aria-pressed');
+        button.click();
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const hiddenVisible = Boolean(document.querySelector('.file-tree-row[data-path="/home/test/.hidden"]'));
+          if (!hiddenVisible && performance.now() < deadline) {
+            requestAnimationFrame(inspect);
+            return;
+          }
+          done({
+            before,
+            pressed: document.querySelector('.file-explorer-hidden-toggle-panel')?.getAttribute('aria-pressed'),
+            hiddenVisible,
+            mode: fileExplorerRootModeValue(),
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          });
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+    assert metrics["before"] != metrics["pressed"] and metrics["hiddenVisible"] is True and metrics["mode"] == "fixed", metrics
+
+
+def test_finder_context_relative_copy_uses_visible_root_and_fails_closed(browser, tmp_path):
+    root = "/home/test/repo/docs"
+    selected = f"{root}/note.md"
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        fs_entries={
+            "/home/test": [{"name": "repo", "kind": "dir"}],
+            "/home/test/repo": [{"name": "docs", "kind": "dir"}],
+            root: [{"name": "note.md", "kind": "file"}],
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.file-explorer-path-inline') !== null")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        (async () => {
+          const root = '/home/test/repo/docs';
+          const selected = `${root}/note.md`;
+          const copied = [];
+          Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => copied.push(text)}});
+          const originalFetch = window.fetch;
+          let rejectRootInfo = false;
+          window.fetch = async (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/fs/batch') return originalFetch(input, options);
+            const requests = JSON.parse(options.body || '{}').requests || [];
+            const responses = requests.map(request => {
+              if (request.type === 'list') {
+                return {id: request.id, ok: true, status: 200, payload: {path: request.path, entries: window.__fixtureFsEntries[request.path] || []}};
+              }
+              if (rejectRootInfo && request.path === root) return {id: request.id, ok: false, status: 503, error: 'root info unavailable'};
+              return {id: request.id, ok: true, status: 200, payload: {
+                path: request.path,
+                name: request.path.split('/').filter(Boolean).pop() || '/',
+                kind: window.__fixtureFsEntries[request.path] ? 'dir' : 'file',
+                realpath: `/resolved${request.path}`,
+              }};
+            });
+            return new Response(JSON.stringify({responses}), {headers: {'Content-Type': 'application/json'}});
+          };
+          try {
+            await openFileExplorerManualRoot(root);
+            const row = document.querySelector(`.file-tree-row[data-path="${selected}"]`);
+            await showFileTreeContextMenu(row, selected, {kind: 'file', name: 'note.md'}, 32, 32);
+            const copyRelative = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /copy relative path/i.test(button.textContent));
+            const enabled = Boolean(copyRelative && !copyRelative.disabled);
+            copyRelative?.click();
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            closeFileContextMenu();
+
+            rejectRootInfo = true;
+            await showFileTreeContextMenu(row, selected, {kind: 'file', name: 'note.md'}, 32, 32);
+            const unavailable = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /copy relative path/i.test(button.textContent));
+            const disabledAfterRootFailure = Boolean(unavailable?.disabled);
+            closeFileContextMenu();
+            done({enabled, copied, disabledAfterRootFailure, errors: window.__bootErrors, rejections: window.__bootRejections});
+          } finally {
+            window.fetch = originalFetch;
+          }
+        })().catch(error => done({error: String(error?.stack || error), errors: window.__bootErrors, rejections: window.__bootRejections}));
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["enabled"] is True, metrics
+    assert metrics["copied"] == ["note.md"], metrics
+    assert metrics["disabledAfterRootFailure"] is True, metrics
+
+
 @pytest.mark.parametrize("legacy_token", ["changes", "__changes__"])
 def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
     load_live_runtime_boot_fixture(browser, tmp_path, f"?layout=left&tabs=left:{legacy_token}")
@@ -161,6 +853,167 @@ def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
     assert metrics["visibleReloadButtons"] == 1, metrics
     assert all(text != "1 1" for text in metrics["sessionOptionTexts"]), metrics
     assert metrics["sessionFilesFetches"] >= 1
+
+
+def test_differ_controls_use_real_session_reload_sort_and_date_events(browser, tmp_path):
+    payloads = {
+        "1": {"session": "1", "loaded": True, "errors": [], "repos": [], "files": []},
+        "2": {"session": "2", "loaded": True, "errors": [], "repos": [], "files": []},
+    }
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:__changes__", sessions=["1", "2"], session_files_payloads=payloads)
+    WebDriverWait(browser, 5).until(lambda driver: driver.execute_script("return document.querySelector('#panel-__differ__ [data-session-files-session]')"))
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('#panel-__differ__');
+        const fetches = () => window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+        const select = panel.querySelector('[data-session-files-session]');
+        const before = fetches();
+        select.value = '2';
+        select.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        const deadline = performance.now() + 2000;
+        const wait = () => {
+          if (fetches() <= before && performance.now() < deadline) return requestAnimationFrame(wait);
+          const sort = panel.querySelector('[data-file-explorer-tree-sort]');
+          sort.value = 'newest';
+          sort.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+          panel.querySelector('[data-file-explorer-tree-dates]').click();
+          panel.querySelector('[data-session-files-refresh]').click();
+          requestAnimationFrame(() => requestAnimationFrame(() => done({
+            session: fileExplorerSessionFilesTargetSession(),
+            fetches: fetches(), before,
+            sort: fileExplorerTreeSortModeForView('differ'),
+            date: fileExplorerTreeDateModeForView('differ'),
+            errors: window.__bootErrors, rejections: window.__bootRejections,
+          })));
+        };
+        requestAnimationFrame(wait);
+        """
+    )
+    assert metrics["session"] == "2" and metrics["fetches"] > metrics["before"], metrics
+    assert metrics["sort"] == "newest" and metrics["date"] != "none", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_differ_repo_folder_and_global_collapse_controls_use_real_events(browser, tmp_path):
+    payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/repo/app", "count": 2}],
+        "files": [
+            {"session": "1", "repo": "/repo/app", "path": "src/a.py", "abs_path": "/repo/app/src/a.py", "status": "M", "mtime": 100},
+            {"session": "1", "repo": "/repo/app", "path": "docs/b.md", "abs_path": "/repo/app/docs/b.md", "status": "A", "mtime": 101},
+        ],
+    }
+    load_live_runtime_boot_fixture(browser, tmp_path, "?layout=left&tabs=left:__changes__", sessions=["1"], session_files_payload=payload)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("const panel = document.querySelector('#panel-__differ__'); return panel?.querySelector('[data-changes-repo-toggle]') && panel.querySelector('[data-changes-folder-toggle]') && panel.querySelector('[data-file-tree-expand-collapse-all]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('#panel-__differ__');
+        const click = selector => panel.querySelector(selector).click();
+        const repo = '/repo/app';
+        const folder = '/repo/app/src';
+        click('[data-changes-repo-toggle]');
+        const repoCollapsed = changesRepoCollapsed.has(repo);
+        click('[data-changes-repo-toggle]');
+        const repoExpanded = !changesRepoCollapsed.has(repo);
+        click('[data-changes-folder-toggle="/repo/app/src"]');
+        const folderCollapsed = changesFolderCollapsed.has(folder);
+        click('[data-file-tree-expand-collapse-all="collapse"]');
+        const treesCollapsed = changesRepoCollapsed.has(repo) && changesFolderCollapsed.has(folder);
+        click('[data-file-tree-expand-collapse-all="expand"]');
+        requestAnimationFrame(() => done({
+          repoCollapsed, repoExpanded, folderCollapsed, treesCollapsed,
+          treesExpanded: !changesRepoCollapsed.size && !changesFolderCollapsed.size,
+          errors: window.__bootErrors, rejections: window.__bootRejections,
+        }));
+        """
+    )
+    assert metrics["repoCollapsed"] and metrics["repoExpanded"] and metrics["folderCollapsed"], metrics
+    assert metrics["treesCollapsed"] and metrics["treesExpanded"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_differ_ref_input_change_uses_its_own_repository_context(browser, tmp_path):
+    repo = "/repo/app"
+    payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "refs_by_repo": {repo: [{"ref": "abc123def456", "short": "abc123d", "subject": "older base"}]},
+        "repos": [{"repo": repo, "count": 1}],
+        "files": [{"session": "1", "repo": repo, "path": "src/a.py", "abs_path": "/repo/app/src/a.py", "status": "M", "mtime": 100}],
+    }
+    load_live_runtime_boot_fixture(browser, tmp_path, "?layout=left&tabs=left:__changes__", sessions=["1"], session_files_payload=payload)
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__differ__ [data-diff-ref-controls][data-diff-ref-repo=\"/repo/app\"] [data-diff-ref-from]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('#panel-__differ__');
+        const input = panel.querySelector('[data-diff-ref-controls][data-diff-ref-repo="/repo/app"] [data-diff-ref-from]');
+        const before = window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+        input.value = 'abc123def456';
+        input.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const selected = diffRefsByRepo['/repo/app']?.from || '';
+          const fetches = window.__bootFetches.filter(item => item.path === '/api/session-files').length;
+          if (selected === 'abc123def456' && fetches > before) return done({selected, before, fetches, errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (performance.now() >= deadline) return done({error: 'repo-scoped ref did not commit', selected, before, fetches, errors: window.__bootErrors, rejections: window.__bootRejections});
+          requestAnimationFrame(inspect);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["selected"] == "abc123def456" and metrics["fetches"] > metrics["before"], metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+def test_differ_directory_context_expands_the_target_in_finder(browser, tmp_path):
+    payload = {
+        "session": "1",
+        "loaded": True,
+        "errors": [],
+        "repos": [{"repo": "/repo/app", "count": 1}],
+        "files": [{"session": "1", "repo": "/repo/app", "path": "src/a.py", "abs_path": "/repo/app/src/a.py", "status": "M", "mtime": 100}],
+    }
+    load_live_runtime_boot_fixture(browser, tmp_path, "?layout=left&tabs=left:__changes__", sessions=["1"], session_files_payload=payload, fs_entries={"/repo/app/src": [{"name": "a.py", "kind": "file"}]})
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('#panel-__differ__ [data-open-change-directory=\"/repo/app/src\"]')")
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const row = document.querySelector('#panel-__differ__ [data-open-change-directory="/repo/app/src"]');
+        row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
+        const deadline = performance.now() + 2000;
+        const inspect = () => {
+          const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /expand.*finder/i.test(node.textContent));
+          if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
+          if (!button) return done({error: 'expand-in-Finder action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          button.click();
+          const waitForFinder = () => {
+            if (itemInLayout(finderItemId) && currentFileExplorerRoot() === '/repo/app/src') {
+              return done({finderOpen: true, root: currentFileExplorerRoot(), errors: window.__bootErrors, rejections: window.__bootRejections});
+            }
+            if (performance.now() >= deadline) return done({error: 'Finder did not open the changed directory', root: currentFileExplorerRoot(), errors: window.__bootErrors, rejections: window.__bootRejections});
+            requestAnimationFrame(waitForFinder);
+          };
+          requestAnimationFrame(waitForFinder);
+        };
+        requestAnimationFrame(inspect);
+        """
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["finderOpen"] is True and metrics["root"] == "/repo/app/src", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
 def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path):
@@ -637,7 +1490,7 @@ def test_sync_mode_active_file_reveal_keeps_manual_collapse(browser, tmp_path):
 
 def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, tmp_path):
     fs_entries = {
-        "/home/test/yolomux.dev3/docs/preview-samples": [
+        "/home/test/yolomux.dev3/tests/fixtures/preview-samples": [
             {"name": "03-mixed.md", "kind": "file", "size": 128, "mtime_ns": 1781300000000000000},
         ],
     }
@@ -645,7 +1498,7 @@ def test_fetch_file_entry_status_succeeds_for_existing_preview_sample(browser, t
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
-        fetchFileEntryStatus('/home/test/yolomux.dev3/docs/preview-samples/03-mixed.md')
+        fetchFileEntryStatus('/home/test/yolomux.dev3/tests/fixtures/preview-samples/03-mixed.md')
           .then(result => done({
             entry: result.entry,
             missing: result.missing,
@@ -1288,7 +2141,10 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
           fileExplorerUserIsActive = realUserActive;
           fetchFilesystemBatchItem = realFetchFilesystemBatchItem;
         };
-        selectSession('8002', {userInitiated: true}).then(() => {
+        const finderSessionSelect = Array.from(document.querySelectorAll('#panel-__finder__ [data-session-files-session]')).find(select => select.getClientRects().length > 0);
+        finderSessionSelect.value = '8002';
+        finderSessionSelect.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        Promise.resolve().then(() => {
           let attempts = 0;
           const waitForPending = () => {
             attempts += 1;
@@ -1457,7 +2313,12 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
         const input = document.querySelector('.file-explorer-path-inline');
         input.focus();
         input.value = '/home/test';
-        commitFileExplorerPathInput(input).then(() => {
+        input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
+        const waitForCommit = () => {
+          if (currentFileExplorerRoot() !== '/home/test') {
+            requestAnimationFrame(waitForCommit);
+            return;
+          }
           scheduleFileExplorerActiveTabSync();
           setSessionFilesPayloadForDestination('finder', {session: '5', loaded: true, errors: [], repos: [{repo: '/home/test/yolomux.dev'}], files: []});
           requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1470,7 +2331,8 @@ def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(bro
               syncPressed: document.querySelector('.file-explorer-root-mode-toggle-panel')?.getAttribute('aria-pressed') || '',
             });
           }));
-        }).catch(error => done({error: String(error)}));
+        };
+        requestAnimationFrame(waitForCommit);
         """
     )
     assert "error" not in manual_metrics, manual_metrics

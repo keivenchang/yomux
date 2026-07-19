@@ -50,6 +50,47 @@ async function fetchDirectoryFileCount(path) {
   return apiFetchJson(`/api/fs/count?path=${encodeURIComponent(normalized)}`);
 }
 
+function finderRelativeCopyEntryForSelection(path, info, options = {}) {
+  const finderRoot = normalizeDirectoryPath(options.finderRoot || currentFileExplorerRoot());
+  const displayRelativePath = pathRelativeToDirectory(path, finderRoot);
+  if (!displayRelativePath || displayRelativePath === path) return {available: false, text: '', reason: 'outside-finder-root', mode: 'finder'};
+  const finderRootRealpath = options.finderRootInfo?.realpath ? normalizeDirectoryPath(options.finderRootInfo.realpath) : '';
+  const targetRealpath = info?.realpath ? normalizeDirectoryPath(info.realpath) : '';
+  // Finder promises a relative path from its displayed root. If either realpath lookup failed,
+  // we cannot prove a symlink stayed below that root, so disable instead of copying a misleading path.
+  if (!finderRootRealpath || !targetRealpath) return {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'};
+  const resolvedRelativePath = pathRelativeToDirectory(targetRealpath, finderRootRealpath);
+  if (!resolvedRelativePath || resolvedRelativePath === targetRealpath) return {available: false, text: '', reason: 'outside-finder-root', mode: 'finder'};
+  return {available: true, text: displayRelativePath, reason: '', mode: 'finder'};
+}
+
+function repoRelativeCopyEntryForSelection(info) {
+  const text = String(info?.relative_path || '').trim();
+  if (!text) return {available: false, text: '', reason: 'missing-repo-relative-path', mode: 'repo'};
+  return {available: true, text, reason: '', mode: 'repo'};
+}
+
+function fileTreeRelativeCopyMode(row, options = {}) {
+  if (options.relativePathMode === 'repo' || options.relativePathMode === 'finder') return options.relativePathMode;
+  if (row?.closest?.('.file-explorer-changes-panel')) return 'repo';
+  return 'finder';
+}
+
+async function fileTreeRelativeCopyEntries(row, selectedPaths, infos, options = {}) {
+  const mode = fileTreeRelativeCopyMode(row, options);
+  if (mode === 'repo') return selectedPaths.map((_, index) => repoRelativeCopyEntryForSelection(infos[index]));
+  const finderRoot = normalizeDirectoryPath(options.finderRoot || currentFileExplorerRoot());
+  let finderRootInfo = options.finderRootInfo || null;
+  if (!finderRootInfo) {
+    try {
+      finderRootInfo = await fetchFilePathInfo(finderRoot, {fresh: true});
+    } catch (_error) {
+      finderRootInfo = null;
+    }
+  }
+  return selectedPaths.map((path, index) => finderRelativeCopyEntryForSelection(path, infos[index], {finderRoot, finderRootInfo}));
+}
+
 function fileExplorerIndexContextAction(path, entry) {
   if (!['dir', 'file'].includes(entry?.kind)) return null;
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
@@ -83,11 +124,12 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
     console.warn('fs info failed', path, error);
     return null;
   })));
+  const relativeCopyEntries = await fileTreeRelativeCopyEntries(row, selectedPaths, infos, options);
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  const relativePaths = infos.map(info => info?.relative_path || '').filter(Boolean);
-  const menuState = fileContextMenuState(entry, selectedPaths, relativePaths);
+  const relativePaths = relativeCopyEntries.filter(item => item?.available).map(item => item.text);
+  const menuState = fileContextMenuState(entry, selectedPaths, relativeCopyEntries);
   const multiple = selectedPaths.length > 1;
   const openInNewTab = typeof options.openInNewTab === 'function'
     ? options.openInNewTab
@@ -115,11 +157,14 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
   fileContextMenu.open(menu, x, y);
 }
 
-function fileContextMenuState(entry, selectedPaths, relativePaths) {
+function fileContextMenuState(entry, selectedPaths, relativeCopyEntries) {
   const multiple = selectedPaths.length > 1;
   const indexAction = fileExplorerIndexContextAction(selectedPaths[0], entry);
+  const relativeEntries = Array.isArray(relativeCopyEntries)
+    ? relativeCopyEntries.map(item => typeof item === 'string' ? {available: Boolean(item)} : item)
+    : [];
   return {
-    copyRelativeDisabled: relativePaths.length !== selectedPaths.length,
+    copyRelativeDisabled: relativeEntries.length !== selectedPaths.length || relativeEntries.some(item => !item?.available),
     // readonly is terminal-only — the server forbids every /api/fs/* read (raw/list/...),
     // so the file-read affordances (open a file in a tab, Download via /api/fs/raw) are
     // disabled in readonly to match the server, instead of offering a command that 403s.
@@ -256,7 +301,7 @@ async function triggerFolderZipDownload(path) {
 }
 
 function copyCurrentFileExplorerPath() {
-  copyFilePath(fileExplorerRoot || homePath || '/', 'path');
+  copyFilePath(displayedFileExplorerRoot() || fileExplorerRoot || homePath || '/', 'path');
 }
 
 function childNameToPath(root, name) {
@@ -280,6 +325,7 @@ async function createFileExplorerFile() {
       body: JSON.stringify({path, content: ''}),
     });
     statusEl.textContent = t('status.created', {name: basenameOf(path)});
+    invalidateFileExplorerRoots([dirnameOf(path)]);
     await refreshFileExplorerTrees();
     await openFileInEditor(path, {name: basenameOf(path)});
   } catch (error) {
@@ -302,6 +348,7 @@ async function createFileExplorerFolder() {
       body: JSON.stringify({path}),
     });
     statusEl.textContent = t('status.created', {name: basenameOf(path)});
+    invalidateFileExplorerRoots([dirnameOf(path)]);
     await refreshFileExplorerTrees();
   } catch (error) {
     statusErr(localizedHtml('status.newFolderFailed', {error}));
@@ -526,6 +573,7 @@ async function deleteFileTreePath(fullPath, entry, paths = null) {
     for (const path of deletePaths) fileExplorerSelectedPaths.delete(path);
     if (deletePaths.includes(fileExplorerSelectionAnchor)) fileExplorerSelectionAnchor = null;
     statusEl.textContent = tPlural('status.deleted', deletePaths.length, {name: basenameOf(deletePaths[0])});
+    invalidateFileExplorerRoots(deletePaths.map(dirnameOf));
     await refreshFileExplorerTrees();
     if (typeof fetchSessionFiles === 'function') {
       await fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
@@ -881,6 +929,7 @@ async function renameFileTreePath(fullPath, entry, newName) {
       else if (path.startsWith(`${fullPath}/`)) renameOpenFilePath(path, `${newPath}${path.slice(fullPath.length)}`);
     }
     statusEl.textContent = t('common.renamed', {oldName: currentName, newName: trimmed});
+    invalidateFileExplorerRoots([dirnameOf(fullPath), dirnameOf(newPath)]);
     await refreshFileExplorerTrees();
     return true;
   } catch (error) {
@@ -2312,6 +2361,9 @@ function clientServerWatchState() {
     };
   }
   const state = {
+    // This is the existing client-event identity, not a filesystem path. The
+    // server unions simultaneous tabs and releases this descriptor on SSE close.
+    client_id: String(shareClientId || ''),
     roots: clientServerWatchRoots(),
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
@@ -2335,8 +2387,7 @@ function syncServerWatchRootsNow(options = {}) {
   if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true) || serverWatchRootsState.inFlight) return;
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
-  const renewDue = options.renew === true && Date.now() - serverWatchRootsState.syncedAt >= 240000;
-  if (signature === serverWatchRootsState.signature && !renewDue) return;
+  if (signature === serverWatchRootsState.signature && options.force !== true) return;
   serverWatchRootsState.signature = signature;
   serverWatchRootsState.inFlight = true;
   apiFetch('/api/watch/roots', {
@@ -2356,7 +2407,7 @@ function syncServerWatchRoots(options = {}) {
   serverWatchRootsState.pendingOptions = {
     ...serverWatchRootsState.pendingOptions,
     ...options,
-    renew: serverWatchRootsState.pendingOptions.renew === true || options.renew === true,
+    force: serverWatchRootsState.pendingOptions.force === true || options.force === true,
   };
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
   const delay = options.immediate === true ? 0 : serverWatchDebounceMs;

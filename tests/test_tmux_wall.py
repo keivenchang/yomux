@@ -1,16 +1,16 @@
 from yolomux_lib.agent_tui import AgentTuiCapture
 
-from tmux_wall import PaneInfo
-from tmux_wall import Handler
-from tmux_wall import TmuxWallApp
-from tmux_wall import capture_pane_state
-from tmux_wall import container_helper_path
-from tmux_wall import html_page
-from tmux_wall import is_loopback_bind_host
-from tmux_wall import remote_bind_error
-from tmux_wall import state_message_fields
-from tmux_wall import tmux_wall_catalog
-from tmux_wall import tmux_wall_locale
+from tools.tmux_wall import PaneInfo
+from tools.tmux_wall import Handler
+from tools.tmux_wall import TmuxWallApp
+from tools.tmux_wall import capture_pane_state
+from tools.tmux_wall import container_helper_path
+from tools.tmux_wall import html_page
+from tools.tmux_wall import is_loopback_bind_host
+from tools.tmux_wall import remote_bind_error
+from tools.tmux_wall import state_message_fields
+from tools.tmux_wall import tmux_wall_catalog
+from tools.tmux_wall import tmux_wall_locale
 
 
 class FakeAgentPaneState:
@@ -72,10 +72,10 @@ def test_capture_pane_state_uses_agent_tui_shared_classification(monkeypatch):
         assert kwargs["capture_func"]("%1", visible_only=True) == "visible\n"
         return FakeAgentPaneState()
 
-    monkeypatch.setattr("tmux_wall.tmux_capture_pane", fake_tmux_capture)
-    monkeypatch.setattr("tmux_wall.tmux_capture_pane_styled", fake_tmux_capture_styled)
-    monkeypatch.setattr("tmux_wall.capture_agent_pane", fake_capture_agent_pane)
-    monkeypatch.setattr("tmux_wall.classify_agent_pane", fake_classify_agent_pane)
+    monkeypatch.setattr("tools.tmux_wall.tmux_capture_pane", fake_tmux_capture)
+    monkeypatch.setattr("tools.tmux_wall.tmux_capture_pane_styled", fake_tmux_capture_styled)
+    monkeypatch.setattr("tools.tmux_wall.capture_agent_pane", fake_capture_agent_pane)
+    monkeypatch.setattr("tools.tmux_wall.classify_agent_pane", fake_classify_agent_pane)
 
     text, error, state = capture_pane_state("project1:0.0", 90)
 
@@ -122,7 +122,7 @@ def test_snapshot_includes_shared_agent_state(monkeypatch):
         }
 
     monkeypatch.setattr(TmuxWallApp, "discover", fake_discover)
-    monkeypatch.setattr("tmux_wall.capture_pane_state", lambda _target, _lines: ("raw text", None, state))
+    monkeypatch.setattr("tools.tmux_wall.capture_pane_state", lambda _target, _lines: ("raw text", None, state))
 
     payload = TmuxWallApp([pane.target], slots=1, lines=25, interval=1.0).snapshot()
     slot = payload["slots"][0]
@@ -161,7 +161,7 @@ def test_tmux_wall_catalog_and_html_use_server_locale_parent(monkeypatch):
             value = value.replace("{" + name + "}", str(replacement))
         return value
 
-    monkeypatch.setattr("tmux_wall.server_string", fake_server_string)
+    monkeypatch.setattr("tools.tmux_wall.server_string", fake_server_string)
 
     catalog = tmux_wall_catalog("ar")
     body = html_page("ar")

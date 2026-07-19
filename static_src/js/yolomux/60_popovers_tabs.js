@@ -2,8 +2,8 @@ function toggleHiddenFiles() {
   setFileExplorerManualRootMode();
   fileExplorerShowHidden = !fileExplorerShowHidden;
   storageSet(fileExplorerHiddenStorageKey, fileExplorerShowHidden ? '1' : '0');
-  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
-  if (fileExplorerRoot) refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
+  syncFileExplorerHiddenButtons();
+  refreshFileExplorerTrees({force: true, preserveExpanded: true, preserveScroll: true});
 }
 
 function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
@@ -1541,7 +1541,12 @@ function pathRelativeToDirectory(path, directory) {
   if (!fullPath || !base || !fullPath.startsWith('/')) return fullPath;
   if (fullPath === base) return '.';
   if (base === '/') return fullPath.slice(1);
-  if (!fullPath.startsWith(`${base}/`)) return fullPath;
+  const fullParts = fullPath.slice(1).split('/').filter(Boolean);
+  const baseParts = base.slice(1).split('/').filter(Boolean);
+  if (fullParts.length < baseParts.length) return fullPath;
+  for (let index = 0; index < baseParts.length; index += 1) {
+    if (fullParts[index] !== baseParts[index]) return fullPath;
+  }
   return fullPath.slice(base.length + 1);
 }
 

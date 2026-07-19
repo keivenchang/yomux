@@ -9,6 +9,7 @@ from pathlib import Path
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
+from .common import path_mtime_or_zero
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
@@ -155,12 +156,7 @@ def server_plural(locale: str, key: str, count: object, **params: object) -> str
 
 def static_asset_version(asset: str) -> int:
     path = static_asset_path(asset)
-    if path is None:
-        return 0
-    try:
-        return int(path.stat().st_mtime)
-    except OSError:
-        return 0
+    return int(path_mtime_or_zero(path)) if path is not None else 0
 
 
 def static_asset_url(asset: str) -> str:

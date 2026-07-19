@@ -11,6 +11,9 @@ from .local_services.rpc import LOCAL_RPC_VERSION
 
 
 STATUSD_PROTOCOL_VERSION = 1
+# Same-protocol daemon behavior changed: a serial old statusd cannot serve a
+# generation waiter safely. LocalServiceRegistry retires differing revisions.
+STATUSD_CODE_REVISION = "statusd-generation-wait-v2"
 STATUSD_SERVICE_NAME = "statusd"
 STATUSD_MAX_WAIT_SECONDS = 30.0
 STATUSD_PRIVATE_FIELDS = frozenset({

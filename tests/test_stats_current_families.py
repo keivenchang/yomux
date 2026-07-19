@@ -57,7 +57,7 @@ def test_every_server_final_series_has_one_owner():
         ("cpu", {"process_percent": 12.5, "system_percent": 42.0}),
         ("agent_status", {"states": {
             "agent-a": "ask", "agent-b": "run", "agent-c": "transition", "agent-d": "idle",
-        }}),
+        }, "session_states": {"session-a": "ask", "session-b": "run"}}),
         ("agent_status", {"states": {}}),
         ("gpu", {
             "util_percent": 25.0, "memory_used_bytes": 1024,

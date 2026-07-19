@@ -15,6 +15,7 @@ from .common import GITHUB_API_ROOT
 from .common import HTTP_METADATA_TIMEOUT_SECONDS
 from .common import LINEAR_ID_RE
 from .common import _CACHE_MISS
+from .common import record_metadata_warm_http
 from .common import truncate_text
 
 # a failed/empty GitHub fetch (None) is cached only this long, so a transient error retries
@@ -28,6 +29,7 @@ def http_json(
     timeout: float,
     payload: dict[str, Any] | None = None,
 ) -> Any:
+    record_metadata_warm_http(url)
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     request = urllib.request.Request(url, data=data, headers=headers)
     try:

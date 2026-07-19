@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import time
 import types
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.statusd_client import StatusClient
 from yolomux_lib.statusd_protocol import validate_inventory
 from yolomux_lib.statusd_protocol import StatusSnapshotMetadata
+from yolomux_lib.statusd_protocol import stamped_request
 from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
@@ -47,7 +49,7 @@ def test_statusd_reuses_one_encoded_snapshot_and_retains_stale_bytes(monkeypatch
     FakeStatusApp.fail = False
     monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
-    request = {"action": "snapshot", "protocol_version": 1, "sessions": ["1"]}
+    request = {"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["1"]}
 
     first, first_bytes = service.handle(request)
     second, second_bytes = service.handle(request)
@@ -55,7 +57,7 @@ def test_statusd_reuses_one_encoded_snapshot_and_retains_stale_bytes(monkeypatch
     assert first["generation"] == second["generation"] == 1
     assert first_bytes == second_bytes
     assert FakeStatusApp.builds == 1
-    service.handle({"action": "invalidate", "protocol_version": 1, "reason": "settings"})
+    service.handle({"action": "invalidate", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "reason": "settings"})
     FakeStatusApp.fail = True
     stale, stale_bytes = service.handle(request)
     assert stale["stale"] is True
@@ -71,7 +73,7 @@ def test_statusd_rebuilds_after_max_age_even_without_explicit_invalidate(monkeyp
     FakeStatusApp.fail = False
     monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
-    request = {"action": "snapshot", "protocol_version": 1, "sessions": ["1"]}
+    request = {"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["1"]}
 
     first, _ = service.handle(request)
     assert FakeStatusApp.builds == 1
@@ -123,7 +125,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
         assert rendered, f"pane never rendered working fixture:\n{pane}"
 
         service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
-        request = {"action": "snapshot", "protocol_version": 1, "sessions": [session]}
+        request = {"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": [session]}
         service.handle(request)
         assert service.snapshot_payload["sessions"][session]["screen"]["key"] == "working"
 
@@ -160,12 +162,144 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
         shutil.rmtree(socket_path.parent, ignore_errors=True)
 
 
+def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity(monkeypatch, tmp_path):
+    """One real pane lifecycle must retain one statusd revision/identity across every consumer."""
+    tmux_binary = shutil.which("tmux")
+    if not tmux_binary:
+        pytest.skip("tmux is not installed")
+    working_case = _find_claude_case("working_visible_counter")
+    idle_case = _find_claude_case("try_suggestion_idle")
+    socket_path = short_tmux_socket_path("yoagent-window")
+    status_socket = tmp_path / "statusd.sock"
+    session = f"ymock-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
+    created = tmux_cmd(
+        tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "78", "-y", "35",
+        f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+    )
+    assert created.returncode == 0, created.stderr or created.stdout
+    service = statusd.PersistentStatusService(status_socket, idle_seconds=60.0)
+    service_thread = Thread(target=service.run, daemon=True)
+    service_thread.start()
+    client = StatusClient(status_socket)
+
+    def configured_app():
+        app = TmuxWebtermApp([session], status_service_mode=True)
+        app.status_client = client
+        app.notification_transition_seconds = lambda: 30.0
+        app.cached_session_files_payloads_for_infos = lambda infos, hours=24.0: {name: {"files": [], "repos": []} for name in infos}
+        app.compute_tabber_activity_rows_via_jobd = lambda infos, **_kwargs: {name: {"agents": [], "agent_windows": []} for name in infos}
+        return app
+
+    def snapshot():
+        response, body = client.snapshot([session])
+        assert response.get("ok") is True and body
+        return response, json.loads(body.decode("utf-8"))
+
+    def identity_rows(payload):
+        return {
+            (name, str(row.get("window_index")), str(row.get("pane_target")), str(row.get("kind"))): str(row.get("state"))
+            for name, record in payload.get("sessions", {}).items()
+            if isinstance(record, dict)
+            for row in record.get("agent_windows", [])
+            if isinstance(row, dict)
+        }
+
+    def stats_attempt(scheduled_at):
+        return types.SimpleNamespace(
+            epoch_id="test:agent-status:1",
+            epoch_started_at=scheduled_at,
+            scheduled_at=scheduled_at,
+            cadence_seconds=10,
+            owner_generation=1,
+        )
+
+    try:
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, 'Try "fix typecheck errors"')
+        assert rendered, pane
+        tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", f"{session}:", f"fixture {case_command_name(working_case)}", "Enter")
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, working_case["text"])
+        assert rendered, pane
+
+        working_response, working_payload = snapshot()
+        app = configured_app()
+        working_activity = app.build_activity_payload()
+        working_rows = identity_rows(working_payload)
+        assert working_rows and set(working_rows) == {
+            (session, str(row.get("window_index")), str(row.get("pane_target")), str(row.get("kind")))
+            for row in working_activity["agent_windows"][session]
+        }
+        assert working_activity["agent_window_snapshot_revision"] == working_response["generation"]
+        working_stats = app.collect_current_stats_agent_status(stats_attempt(time.time())).observations[0].payload
+        assert set(working_stats["states"]) == {"|".join(key) for key in working_rows}
+        assert set(working_stats["states"].values()) == {"run"}
+
+        respawned = tmux_cmd(
+            tmux_binary, socket_path, "respawn-pane", "-k", "-t", f"{session}:",
+            f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+        )
+        assert respawned.returncode == 0, respawned.stderr or respawned.stdout
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, 'Try "fix typecheck errors"')
+        assert rendered, pane
+        tmux_cmd(tmux_binary, socket_path, "send-keys", "-t", f"{session}:", f"fixture {case_command_name(idle_case)}", "Enter")
+        rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, idle_case["text"])
+        assert rendered, pane
+
+        with service.lock:
+            metadata, body = service.snapshot
+            service.snapshot = (StatusSnapshotMetadata(metadata.generation, metadata.status, metadata.stale, metadata.built_at - 60.0), body)
+        idle_response, idle_payload = snapshot()
+        assert idle_response["generation"] > working_response["generation"]
+        idle_rows = identity_rows(idle_payload)
+        assert set(idle_rows) == set(working_rows)
+        assert set(idle_rows.values()) == {"idle"}
+        idle_activity = app.build_activity_payload()
+        assert {
+            (session, str(row.get("window_index")), str(row.get("pane_target")), str(row.get("kind")))
+            for row in idle_activity["agent_windows"][session]
+        } == set(idle_rows)
+        assert idle_activity["agent_window_snapshot_revision"] == idle_response["generation"]
+        stopped_at = max(float(row.get("working_stopped_ts") or 0.0) for record in idle_payload["sessions"].values() for row in record["agent_windows"])
+        assert set(app.collect_current_stats_agent_status(stats_attempt(stopped_at + 1.0)).observations[0].payload["states"].values()) == {"transition"}
+        assert set(app.collect_current_stats_agent_status(stats_attempt(stopped_at + 31.0)).observations[0].payload["states"].values()) == {"idle"}
+
+        killed = tmux_cmd(tmux_binary, socket_path, "kill-session", "-t", session)
+        assert killed.returncode == 0, killed.stderr or killed.stdout
+        client.invalidate("tmux-topology")
+        _removed_response, removed_payload = snapshot()
+        assert identity_rows(removed_payload) == {}
+        assert app.build_activity_payload()["agent_windows"] == {}
+        refreshed_app = configured_app()
+        assert refreshed_app.build_activity_payload()["agent_windows"] == {}
+    finally:
+        client.request({"action": "shutdown"})
+        service_thread.join(timeout=2.0)
+        tmux_cmd(tmux_binary, socket_path, "kill-server")
+        shutil.rmtree(socket_path.parent, ignore_errors=True)
+def test_statusd_snapshot_body_carries_the_metadata_generation_for_full_and_session_reads(monkeypatch, tmp_path):
+    class SessionStatusApp(FakeStatusApp):
+        def build_auto_approve_status(self, *, timings, sync_workers):
+            assert sync_workers is False
+            timings["discover_sessions"] = 0.0
+            return {"session_order": list(self.sessions), "sessions": {"1": {"agent_windows": []}}, "errors": [], "rules": {}}, 200
+
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", SessionStatusApp)
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    request = {"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["1"]}
+
+    metadata, body = service.handle(request)
+    session_metadata, session_body = service.handle({**request, "session": "1"})
+
+    assert json.loads(body)["agent_window_snapshot_revision"] == metadata["generation"] == 1
+    assert json.loads(session_body)["agent_window_snapshot_revision"] == session_metadata["generation"] == 1
+
+
 def test_statusd_rejects_invalid_session_input_without_building(monkeypatch, tmp_path):
     FakeStatusApp.builds = 0
     monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
     service = statusd.PersistentStatusService(Path(tmp_path / "statusd.sock"))
 
-    response, body = service.handle({"action": "snapshot", "protocol_version": 1, "sessions": ["1", 2]})
+    response, body = service.handle({"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["1", 2]})
 
     assert response["ok"] is False
     assert body == b""
@@ -177,7 +311,7 @@ def test_statusd_concurrent_demand_builds_one_shared_generation(monkeypatch, tmp
     FakeStatusApp.fail = False
     monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
-    request = {"action": "snapshot", "protocol_version": 1, "sessions": ["1"]}
+    request = {"action": "snapshot", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["1"]}
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(service.handle, [request, request]))
@@ -213,6 +347,95 @@ def test_two_clients_share_one_statusd_pid_and_encoded_generation(monkeypatch, t
     assert first_pid == second_pid
     assert FakeStatusApp.builds == 1
     assert thread.is_alive() is False
+
+
+def test_statusd_generation_wait_does_not_starve_snapshot_or_invalidate(monkeypatch, tmp_path):
+    """A long generation wait must not monopolize statusd's Unix listener."""
+    FakeStatusApp.builds = 0
+    FakeStatusApp.fail = False
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
+    socket_path = tmp_path / "services" / "statusd.sock"
+    service = statusd.PersistentStatusService(socket_path, idle_seconds=60.0)
+    thread = Thread(target=service.run, daemon=True)
+    thread.start()
+    client = StatusClient(socket_path)
+    try:
+        assert client.ensure_started() is True
+        initial, _body = client.snapshot(["1"])
+        lease = client.acquire_generation_lease()
+        assert lease["ok"] is True
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            waiting = executor.submit(client.wait_generation, initial["generation"], 2.0)
+            time.sleep(0.05)
+            assert client.invalidate("test") ["ok"] is True
+            # This snapshot would time out with the former serial listener while
+            # the waiter owns the only accepted connection.
+            refreshed, _body = client.snapshot(["1"], timeout=1.0)
+            waited = waiting.result(timeout=2.0)
+        assert refreshed["generation"] > initial["generation"]
+        assert waited["changed"] is True
+        assert waited["generation"] == refreshed["generation"]
+    finally:
+        if 'lease' in locals() and lease.get("lease_id"):
+            client.release_generation_lease(lease["lease_id"])
+        client.request({"action": "shutdown"})
+        thread.join(timeout=2.0)
+
+    assert thread.is_alive() is False
+
+
+def test_statusd_refresh_worker_does_no_build_without_a_generation_lease(monkeypatch, tmp_path):
+    FakeStatusApp.builds = 0
+    FakeStatusApp.fail = False
+    monkeypatch.setattr(statusd, "TmuxWebtermApp", FakeStatusApp)
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
+    service.start_refresh_worker()
+    try:
+        time.sleep(0.15)
+        assert FakeStatusApp.builds == 0
+    finally:
+        service.stop_event.set()
+        with service.lock:
+            service.lock.notify_all()
+        worker = service.refresh_worker
+        if worker is not None:
+            worker.join(timeout=1.0)
+
+
+def test_statusd_idle_reaps_dead_client_leases(monkeypatch, tmp_path):
+    service = statusd.PersistentStatusService(tmp_path / "statusd.sock", idle_seconds=1.0)
+    service.leases["dead-client"] = 12345
+    service.last_client_at = time.monotonic() - 2.0
+    reaped = []
+
+    def fake_reap(leases):
+        reaped.extend(leases)
+        leases.clear()
+        return 1
+
+    monkeypatch.setattr(statusd, "reap_dead_client_leases", fake_reap)
+
+    assert service.idle_due() is True
+    assert reaped == ["dead-client"]
+    assert service.leases == {}
+
+
+def test_statusd_listener_exits_after_reaping_an_abandoned_lease(tmp_path):
+    socket_path = tmp_path / "services" / "statusd.sock"
+    service = statusd.PersistentStatusService(socket_path, idle_seconds=1.0)
+    thread = Thread(target=service.run, daemon=True)
+    thread.start()
+    client = StatusClient(socket_path)
+    try:
+        assert client.ensure_started() is True
+        lease = client.request(stamped_request("lease", client_pid=999_999_999))
+        assert lease["ok"] is True
+        thread.join(timeout=2.5)
+        assert thread.is_alive() is False
+    finally:
+        if thread.is_alive():
+            client.request({"action": "shutdown"})
+            thread.join(timeout=2.0)
 
 
 def test_two_web_apps_forward_one_shared_statusd_snapshot_without_local_build(monkeypatch, tmp_path):
@@ -268,7 +491,7 @@ def test_statusd_inventory_discovers_daemon_roster_and_bumps_generation_only_on_
     monkeypatch.setattr(sessions_mod, "discover_sessions", fake_discover)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
 
-    meta1, body1 = service.handle({"action": "inventory", "protocol_version": 1, "sessions": ["ignored"]})
+    meta1, body1 = service.handle({"action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["ignored"]})
     payload1 = json.loads(body1)
     assert payload1["roster"] == ["alpha"] and payload1["roster_source"] == "daemon"
     assert payload1["sessions"]["alpha"]["source_signature"]
@@ -276,12 +499,12 @@ def test_statusd_inventory_discovers_daemon_roster_and_bumps_generation_only_on_
     gen1 = meta1["inventory_generation"]
 
     # Unchanged topology reuses the same generation.
-    meta2, _ = service.handle({"action": "inventory", "protocol_version": 1})
+    meta2, _ = service.handle({"action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
     assert meta2["inventory_generation"] == gen1
 
     # A pane cwd change bumps the source signature and the inventory generation.
     state["cwd"] = "/repoB"
-    meta3, _ = service.handle({"action": "inventory", "protocol_version": 1})
+    meta3, _ = service.handle({"action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
     assert meta3["inventory_generation"] == gen1 + 1
 
 
@@ -296,7 +519,7 @@ def test_statusd_inventory_uses_lightweight_discovery_without_path_enrichment(mo
     monkeypatch.setattr(sessions_mod, "discover_sessions", fake_discover)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
 
-    meta, _ = service.handle({"action": "inventory", "protocol_version": 1})
+    meta, _ = service.handle({"action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION})
 
     assert meta["ok"] is True
     # The status/inventory path must never trigger heavy path enrichment.
@@ -313,7 +536,7 @@ def test_statusd_inventory_falls_back_to_web_hint_when_tmux_enumeration_fails(mo
     monkeypatch.setattr(sessions_mod, "discover_sessions", fake_discover)
     service = statusd.PersistentStatusService(tmp_path / "statusd.sock")
 
-    _meta, body = service.handle({"action": "inventory", "protocol_version": 1, "sessions": ["hinted"]})
+    _meta, body = service.handle({"action": "inventory", "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "sessions": ["hinted"]})
     payload = json.loads(body)
 
     assert payload["roster"] == ["hinted"] and payload["roster_source"] == "hint"
@@ -322,7 +545,7 @@ def test_statusd_inventory_falls_back_to_web_hint_when_tmux_enumeration_fails(mo
 def test_web_status_byte_forwarder_never_calls_in_process_status_builder(monkeypatch):
     app = TmuxWebtermApp(["1"])
     encoded = b'{"session_order":["1"],"sessions":{}}'
-    monkeypatch.setattr(app.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: ({"ok": True, "protocol_version": 1, "generation": 7, "status": 200, "stale": False, "built_at": 1.0}, encoded))
+    monkeypatch.setattr(app.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: ({"ok": True, "protocol_version": statusd.STATUSD_PROTOCOL_VERSION, "generation": 7, "status": 200, "stale": False, "built_at": 1.0}, encoded))
     monkeypatch.setattr(app, "build_auto_approve_status", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("web must not build status")))
     try:
         body, status = app.auto_approve_status_bytes()

@@ -50,7 +50,7 @@ def test_default_paths_are_schema_versioned_and_never_use_the_legacy_filename(tm
     client = client_module.StatsCurrentClient()
 
     assert client.database_path == tmp_path / storage.DATABASE_FILENAME
-    assert client.database_path == tmp_path / "stats-v5.sqlite3"
+    assert client.database_path == tmp_path / "stats-v6.sqlite3"
     assert client_module.default_socket_path() == tmp_path / "services" / "statsd.sock"
     assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL == 24
     assert client._transport.registry.spec.code_revision == revision.CURRENT_CODE_REVISION
@@ -113,9 +113,9 @@ def test_all_lifecycle_and_data_rpcs_carry_the_current_service_and_schema_fence(
     assert append_payload["coverage_epochs"][0]["epoch_id"] == "cpu:1"
     assert append_payload["unavailable_spans"][0]["reason"] == "legacy_aggregate_not_reconstructable"
     snapshot_payload = calls[-2][1]
-    assert snapshot_payload == {"range_seconds": 300, "resolution": "AUTO", "client_id": "browser-a", "since_generation": 7, "action": "snapshot", "protocol_version": 24, "schema_generation": 5}
+    assert snapshot_payload == {"range_seconds": 300, "resolution": "AUTO", "client_id": "browser-a", "since_generation": 7, "action": "snapshot", "protocol_version": 24, "schema_generation": 6}
     delta_payload = calls[-1][1]
-    assert delta_payload == {"range_seconds": 300, "resolution_seconds": 1, "client_id": "browser-a", "after_cache_generation": 7, "after_revision": 41, "action": "delta", "protocol_version": 24, "schema_generation": 5}
+    assert delta_payload == {"range_seconds": 300, "resolution_seconds": 1, "client_id": "browser-a", "after_cache_generation": 7, "after_revision": 41, "action": "delta", "protocol_version": 24, "schema_generation": 6}
 
 
 def test_snapshot_revalidates_typed_or_query_requests_before_rpc(tmp_path, monkeypatch):

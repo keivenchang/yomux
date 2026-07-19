@@ -153,8 +153,8 @@ CURRENT_FAMILIES = (
     ),
     FamilySpec(
         "agent_status", "agent_status", 10, 10, FoldKind.STATUS,
-        (_field("states", AGENT_STATES),),
-        ("ask_agents", "run_agents", "transition_agents", "idle_agents"), True,
+        (_field("states", AGENT_STATES), _field("session_states", AGENT_STATES, required=False), _field("snapshot_revision", NUMBER, required=False)),
+        ("ask_agents", "run_agents", "transition_agents", "idle_agents", "ask_sessions", "run_sessions", "transition_sessions", "idle_sessions", "agent_window_snapshot_revision"), True,
     ),
     FamilySpec(
         "gpu", "gpu", 10, 10, FoldKind.GAUGE,

@@ -1436,7 +1436,7 @@
     if (name.startsWith('agent_tokens_per_minute:')) return 'agent-tokens';
     if (name.startsWith('model_tokens_per_minute:output:')) return 'model-output-tokens';
     if (name.startsWith('model_tokens_per_minute:')) return 'model-usage';
-    if (['ask_agents', 'run_agents', 'transition_agents', 'idle_agents'].includes(name)) return 'agent-status';
+    if (['ask_agents', 'run_agents', 'transition_agents', 'idle_agents', 'ask_sessions', 'run_sessions', 'transition_sessions', 'idle_sessions'].includes(name)) return 'agent-status';
     if (name.startsWith('gpu_')) return 'gpu';
     if (name.startsWith('service_') || name.startsWith('system_memory_')) return 'system';
     if (name.startsWith('browser_')) return 'browser';

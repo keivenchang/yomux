@@ -1195,9 +1195,62 @@ async function refreshSettings(options = {}) {
 
 const runtimeIntervals = new Map();
 
+// One catalog names the truth source for every recurring browser callback. An entry is
+// deliberately a reason, not a scheduling policy: callers still own their visibility,
+// demand, and socket-health guards. Keep this in source (rather than a docs-only list) so
+// a future "remove polling" cleanup has to classify a new callback before treating it as
+// redundant discovery work.
+const runtimeTimerClassCatalog = Object.freeze({
+  'poll:no-change': 'A bounded reconciliation that can report no changed state.',
+  sample: 'A request or local observation that creates a new measurement.',
+  lease: 'A bounded liveness or ownership renewal.',
+  'external-reconcile': 'A bounded check against a system without an event source.',
+  repair: 'A bounded recovery action after a detected gap or divergence.',
+  fallback: 'A reduced-cadence recovery path while the primary event source is unavailable.',
+  'local-display': 'A local repaint that does not discover remote state.',
+});
+
+const runtimeIntervalCatalog = Object.freeze({
+  latency: Object.freeze({classes: Object.freeze(['sample']), source: 'A fresh /api/ping round trip is the latency measurement.'}),
+  'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
+  'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
+  'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'The index service owns staleness/rebuild state; a visible Finder/search periodically asks for that external state.'}),
+  'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
+  'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
+  'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
+  'debug-logs': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Debug log retention has no push revision; the visible Logs tab reconciles its bounded server snapshot.'}),
+  'share-geometry-digest': Object.freeze({classes: Object.freeze(['repair']), source: 'Host/viewer geometry comparison detects replay divergence; it is not state discovery.'}),
+  'chat-relative-times': Object.freeze({classes: Object.freeze(['local-display']), source: 'Existing message timestamps are repainted locally; no request is made.'}),
+  'share-status': Object.freeze({classes: Object.freeze(['local-display', 'fallback']), source: 'The share socket pushes status while healthy; the loop repaints local countdowns and repairs status only after socket loss.'}),
+});
+
+function runtimeIntervalCatalogEntry(name) {
+  return runtimeIntervalCatalog[name] || null;
+}
+
 function runtimeIntervalDelay(baseDelay) {
   const base = Math.max(1, Math.round(Number(baseDelay) || 1));
   return base;
+}
+
+function runtimeIntervalDiagnostics(name = '') {
+  const names = name ? [name] : [...runtimeIntervals.keys()].sort();
+  return names.map(intervalName => {
+    const state = runtimeIntervals.get(intervalName);
+    if (!state) return null;
+    const catalog = runtimeIntervalCatalogEntry(intervalName);
+    return {
+      name: intervalName,
+      classes: catalog?.classes || [],
+      source: catalog?.source || '',
+      active: state.active === true,
+      delay: state.delay,
+      lastStartedAtMs: state.lastStartedAtMs,
+      lastUsefulAtMs: state.lastUsefulAtMs,
+      lastResult: state.lastResult,
+    };
+  }).filter(Boolean);
 }
 
 function resetRuntimeInterval(name, callback, delay) {
@@ -1211,15 +1264,28 @@ function resetRuntimeInterval(name, callback, delay) {
     existing.active = false;
     clearTimeout(existing.timer);
   }
-  const state = {active: true, timer: null, delay: normalizedDelay, callback};
+  const state = {
+    active: true,
+    timer: null,
+    delay: normalizedDelay,
+    callback,
+    lastStartedAtMs: 0,
+    lastUsefulAtMs: 0,
+    lastResult: 'never',
+  };
   const scheduleNext = () => {
     if (!state.active) return;
     state.timer = setTimeout(run, runtimeIntervalDelay(state.delay));
   };
   const run = () => {
     if (!state.active) return;
+    state.lastStartedAtMs = Date.now();
     try {
       Promise.resolve(state.callback())
+        .then(result => {
+          state.lastResult = result === null ? 'no-change' : 'useful';
+          if (result !== null) state.lastUsefulAtMs = Date.now();
+        })
         .catch(error => console.warn('runtime interval failed', name, error))
         .finally(scheduleNext);
     } catch (error) {
@@ -1245,25 +1311,28 @@ function runtimeIntervalActive(name) {
   return runtimeIntervals.get(name)?.active === true;
 }
 
-function renewServerWatchRootsFromRuntime() {
-  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') {
-    syncServerWatchRoots({renew: true});
-  }
-}
-
 function installRuntimeIntervals() {
   resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
-  resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
+  // Event-log writes publish `event_log_changed` over the shared SSE stream. Retain this
+  // interval solely as an outage repair path so an EventSource failure cannot leave an open Log
+  // pane permanently stale.
+  resetRuntimeInterval('events-fallback', () => {
+    if (clientEventTransportState.connected === true) return null;
+    return refreshOpenEventLogs();
+  }, eventLogRefreshMs);
+  clearRuntimeInterval('events');
   resetRuntimeInterval('auto-approve', () => {
     if (document.visibilityState === 'hidden') return null;
     if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
-  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
   if (itemInLayout(tabberItemId)) {
-    resetRuntimeInterval('tabber-activity', () => { if (itemInLayout(tabberItemId)) fetchTabberActivity(); }, tabberActivityRefreshMs);
+    resetRuntimeInterval('tabber-activity-fallback', () => {
+      if (clientEventTransportState.connected === true || !tabberActivityVisibleConsumer()) return null;
+      return fetchTabberActivity();
+    }, tabberActivityRefreshMs);
   } else {
-    clearRuntimeInterval('tabber-activity');
+    clearRuntimeInterval('tabber-activity-fallback');
   }
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);

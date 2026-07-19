@@ -990,7 +990,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     browser.set_window_size(1200, 900)
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
     mermaid_uri = fixture_asset_url("static", "vendor", "mermaid.min.js")
-    mermaid_source = (REPO_ROOT / "docs" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
+    mermaid_source = (REPO_ROOT / "tests" / "fixtures" / "preview-samples" / "14-mermaid.mmd").read_text(encoding="utf-8")
     assert "flowchart TD" in mermaid_source
     assert "direction LR" in mermaid_source
     assert "subgraph MarkdownFlow" in mermaid_source
@@ -1039,7 +1039,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             const probeNativeLabelTexts = Array.from(new DOMParser().parseFromString(probeSvgText, 'image/svg+xml').querySelectorAll('text'))
               .map(node => String(node.textContent || '').trim())
               .filter(Boolean);
-            const path = '/home/test/repo/docs/preview-samples/14-mermaid.mmd';
+            const path = '/home/test/repo/tests/fixtures/preview-samples/14-mermaid.mmd';
             const item = fileEditorItemFor(path);
             setFileState(path, {kind: 'text', content: mermaidSource, original: mermaidSource, dirty: false, language: 'mermaid'});
             setFileEditorViewMode(path, 'preview', item);
@@ -3267,6 +3267,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             popupDoc.defaultView.dispatchEvent(new Event('scroll'));
             await frame();
             await frame();
+            await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const afterPopupBottomScrollEditMode = {
               mode: editorViewModeFor(path, item),
               popupTop: popupScroller().scrollTop,
@@ -3274,7 +3275,6 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               editorTop: editorScroller?.scrollTop || 0,
               editorMax: maxScrollTop(editorScroller),
             };
-                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const splitPath = '/home/test/repo/SPLIT_SCROLL.md';
             const splitTail = Array.from({length: 120}, (_, index) => `Split paragraph ${index + 1} smooth scroll text`).join('\\n\\n');
             const splitOriginal = `# Split Scroll\n\n${splitTail}\n`;

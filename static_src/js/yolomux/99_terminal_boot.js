@@ -2543,16 +2543,27 @@ function infoTabGroupStatusRecord(group = {}) {
 }
 
 function infoTabGroupLeadingActivityHtml(group = {}) {
+  const representative = infoGroupRepresentativeRecord(group);
   const status = infoTabGroupStatusRecord(group);
-  if (!status?.record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
-  const record = status.record;
+  const record = representative || status?.record;
+  if (!record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
+  const groupRecords = Array.isArray(group.records) ? group.records : [];
+  const representativeKind = String(record.aiKind || '').trim().toLowerCase();
+  const exactWindowSurface = representativeKind && groupRecords.every(item => String(item?.aiKind || '').trim().toLowerCase() === representativeKind);
+  const exactAgent = exactWindowSurface ? infoRecordCanonicalAgent(record) : null;
+  const exactActivityHtml = exactAgent
+    ? agentWindowActivityIconHtmlForStatus(exactAgent, record.aiKind, session, {statusOnly: true})
+    : '';
+  if (exactActivityHtml) {
+    return `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${exactActivityHtml}</span>`;
+  }
+  const summary = sessionAgentWindowStatusSummary(session, info, payload);
   const agent = summary?.agent || infoRecordDisplayAgent(record);
   const activityHtml = summary?.item
     ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
@@ -4810,6 +4821,7 @@ function activateTab(session, name, options = {}) {
   }
   if (name === 'summary') startSummaryStream(session);
   if (name === 'events') refreshEventLog(session);
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
   if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -5428,11 +5440,12 @@ async function setAutoApprove(session, enabled) {
   }
   try {
     const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    autoApproveStates.set(session, payload);
+    const state = autoApproveStateWithSnapshotRevision(payload);
+    autoApproveStates.set(session, state);
     updateDocumentTitle();
     updateSessionButtonStates();
     renderInfoPanel();
-    renderAutoApproveButton(session, payload);
+    renderAutoApproveButton(session, state);
     scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
     statusEl.innerHTML = payload.enabled
@@ -5442,10 +5455,11 @@ async function setAutoApprove(session, enabled) {
     const payload = error?.payload || {};
     if (error?.status) {
       if (payload?.target || payload?.session) {
-        autoApproveStates.set(session, payload);
+        const state = autoApproveStateWithSnapshotRevision(payload);
+        autoApproveStates.set(session, state);
         updateDocumentTitle();
         updateSessionButtonStates();
-        renderAutoApproveButton(session, payload);
+        renderAutoApproveButton(session, state);
         scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
@@ -5482,7 +5496,7 @@ function loadAutoStatuses(options = {}) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
         const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        autoApproveStates.set(session, payload);
+        autoApproveStates.set(session, autoApproveStateWithSnapshotRevision(payload));
       } catch (_) {}
     }
     result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
@@ -5500,11 +5514,19 @@ loadAutoStatuses.request = null;
 loadAutoStatuses.lastResult = null;
 loadAutoStatuses.updatedAt = 0;
 
+function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnapshotRevision(state)) {
+  if (!state || typeof state !== 'object') return state;
+  const normalizedRevision = Number(revision || 0);
+  if (!Number.isInteger(normalizedRevision) || normalizedRevision <= 0 || agentWindowSnapshotRevision(state) === normalizedRevision) return state;
+  return {...state, agent_window_snapshot_revision: normalizedRevision};
+}
+
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
   try {
     if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
     else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+    if (typeof refreshDebugAgentWindowLiveDetails === 'function') refreshDebugAgentWindowLiveDetails();
     updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
@@ -5530,8 +5552,9 @@ function applyAutoApprovePayload(payload, options = {}) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
   }
+  const snapshotRevision = agentWindowSnapshotRevision(payload);
   for (const session of sessions) {
-    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
+    const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
     autoApproveStates.set(session, state);
     reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
@@ -5967,7 +5990,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   renderPaneTabStrips();
   scheduleFileExplorerActiveTabSync();
-  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (!shareViewMode) scheduleShareUiStatePublish();
   trackSessionStateChanges();
   refreshOpenEventLogs();
@@ -6487,30 +6510,75 @@ function formatEventTime(value) {
   });
 }
 
-async function refreshEventLog(session) {
-  const node = document.getElementById(`events-${session}`);
-  if (!node) return;
-  delete node.dataset.localeTextKey;
-  try {
-    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
-    const events = Array.isArray(payload.events) ? payload.events : [];
-    node.innerHTML = events.length
-      ? events.slice().reverse().map(eventItemHtml).join('')
-      : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
-  } catch (error) {
-    if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
-      return;
-    }
-    node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
+function eventLogRefreshRecord(session) {
+  const key = String(session || '');
+  let record = eventLogRefreshRecords.get(key);
+  if (!record) {
+    record = {request: null, pending: false};
+    eventLogRefreshRecords.set(key, record);
   }
+  return record;
+}
+
+function refreshEventLog(session) {
+  const node = document.getElementById(`events-${session}`);
+  if (!node) return Promise.resolve(false);
+  const record = eventLogRefreshRecord(session);
+  if (record.request) {
+    record.pending = true;
+    return record.request;
+  }
+  delete node.dataset.localeTextKey;
+  const scrollTop = Number(node.scrollTop) || 0;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      node.innerHTML = events.length
+        ? events.slice().reverse().map(eventItemHtml).join('')
+        : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
+      // A push is an invalidation, not a command to move a reader away from
+      // the older page of the bounded tail they are inspecting.
+      node.scrollTop = scrollTop;
+      return true;
+    } catch (error) {
+      if (error?.status) {
+        node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
+        return false;
+      }
+      node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
+      return false;
+    } finally {
+      if (record.request === request) {
+        record.request = null;
+        if (record.pending) {
+          record.pending = false;
+          Promise.resolve().then(() => refreshEventLog(session));
+        }
+      }
+    }
+  })();
+  record.request = request;
+  return request;
 }
 
 function refreshOpenEventLogs() {
+  const refreshes = [];
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
+    if (pane?.classList.contains(CLS.active)) refreshes.push(refreshEventLog(session));
   }
+  return Promise.all(refreshes);
+}
+
+function refreshEventLogsFromPush(payload = {}) {
+  const session = String(payload.session || '');
+  if (session) {
+    const pane = document.getElementById(`events-pane-${session}`);
+    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
+    return;
+  }
+  refreshOpenEventLogs();
 }
 
 function postEvent(session, type, message, details = {}) {
@@ -6568,16 +6636,7 @@ function renderLatency(latestMs) {
 }
 
 async function updateLatency() {
-  if (document.visibilityState === 'hidden') return null;
-  const startedAt = performance.now();
-  try {
-    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
-    const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
-    latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
-    renderLatency(elapsedMs);
-  } catch (_) {
-    renderLatency(null);
-  }
+  return measureClientHealth();
 }
 
 function refreshAll() {
@@ -6742,6 +6801,92 @@ function clientEventPayloadFromEnvelope(envelope) {
   return envelope && typeof envelope === 'object' && envelope.payload && typeof envelope.payload === 'object'
     ? envelope.payload
     : envelope;
+}
+
+function applyClientEventReadyEnvelope(envelope = {}) {
+  const epoch = String(envelope.epoch || '');
+  if (!epoch) return false;
+  if (clientEventTransportState.resourceEpoch !== epoch) {
+    clientEventTransportState.resourceEpoch = epoch;
+    clientEventTransportState.resourceRevisions.clear();
+  }
+  // `ready` is a reconnect fence, not state.  Seeding accepted revisions here
+  // would discard queued frames without proving the corresponding panel read
+  // happened.  Channel-scoped repair below establishes readable state first.
+  return true;
+}
+
+function repairClientEventReadyChannels(channels) {
+  if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+  if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+  if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
+  if (channels.has('transcripts') && typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
+  if (channels.has('activity') && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true}).catch(error => console.warn('client-events ready activity refresh failed', error));
+  if (channels.has('events') && typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs().catch(error => console.warn('client-events ready event-log refresh failed', error));
+  if (channels.has('yoagent') && typeof loadYoagentConversation === 'function') loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: false}).catch(error => console.warn('client-events ready YO!agent refresh failed', error));
+}
+
+function repairReadyEventLogRevisions(resources, envelope) {
+  const eventLogResources = resources.filter(resource => /^event_log_changed/.test(resource));
+  if (!eventLogResources.length || typeof refreshOpenEventLogs !== 'function') return;
+  const epoch = String(envelope.epoch || '');
+  refreshOpenEventLogs().then(() => {
+    if (clientEventTransportState.resourceEpoch !== epoch) return;
+    for (const resource of eventLogResources) {
+      const revision = Number(envelope.resource_revisions?.[resource]);
+      if (Number.isFinite(revision)) clientEventTransportState.resourceRevisions.set(resource, revision);
+    }
+  }).catch(error => console.warn('client-events ready event-log refresh failed', error));
+}
+
+function clientEventRepairChannels(resources = []) {
+  const channels = new Set();
+  for (const rawResource of resources) {
+    const resource = String(rawResource || '');
+    if (/^(?:files_changed|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
+    else if (/^(?:auto_approve_changed|attention_acks_changed|tmux_signals_changed)/.test(resource)) channels.add('status');
+    else if (/^event_log_changed/.test(resource)) channels.add('events');
+    else if (/^(?:transcripts_changed|context_changed|context_items_ready)/.test(resource)) channels.add('transcripts');
+    else if (/^activity_summary_ready|background:tabber-activity/.test(resource)) channels.add('activity');
+    else if (/^yoagent_/.test(resource)) channels.add('yoagent');
+    else if (/^chat_/.test(resource)) channels.add('chat');
+    else channels.add('core');
+  }
+  return channels;
+}
+
+function repairClientEventResources(resources = []) {
+  const channels = clientEventRepairChannels(resources);
+  if (channels.size) repairClientEventReadyChannels(channels);
+}
+
+function clientEventReadyGapResources(envelope = {}) {
+  const revisions = envelope.resource_revisions;
+  if (!revisions || typeof revisions !== 'object') return [];
+  const gaps = [];
+  for (const [resource, rawRevision] of Object.entries(revisions)) {
+    const revision = Number(rawRevision);
+    if (!Number.isSafeInteger(revision) || revision < 1) continue;
+    if (revision > (clientEventTransportState.resourceRevisions.get(resource) || 0)) gaps.push(resource);
+  }
+  return gaps;
+}
+
+function clientEventEnvelopeIsCurrent(envelope = {}) {
+  const epoch = String(envelope.epoch || '');
+  const resource = String(envelope.resource || '');
+  const revision = Number(envelope.resource_revision);
+  // Older servers and direct unit-test calls remain valid until every dev server has re-execed.
+  if (!epoch || !resource || !Number.isSafeInteger(revision) || revision < 1) return true;
+  if (clientEventTransportState.resourceEpoch !== epoch) {
+    clientEventTransportState.resourceEpoch = epoch;
+    clientEventTransportState.resourceRevisions.clear();
+  }
+  const previous = clientEventTransportState.resourceRevisions.get(resource) || 0;
+  if (revision <= previous) return false;
+  clientEventTransportState.resourceRevisions.set(resource, revision);
+  return true;
 }
 
 function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
@@ -6945,6 +7090,18 @@ function clientPushEventSessionKey(payload = {}) {
   return String(payload.session || payload.request?.session || payload.data?.session || payload.data?.target || '');
 }
 
+// Keep EventSource registration and the browser dispatch owner on one typed contract. The server
+// still validates its authoritative set in ClientEventBroker; this prevents a browser-only typo or
+// a newly added handler from silently having no EventSource listener.
+const clientPushEventTypes = Object.freeze([
+  'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
+  'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
+  'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
+  'chat_messages_changed', 'chat_typing_changed',
+]);
+
 function clientPushEventCoalesceKey(type, payload = {}) {
   const key = String(type || 'event');
   const session = clientPushEventSessionKey(payload);
@@ -6952,9 +7109,9 @@ function clientPushEventCoalesceKey(type, payload = {}) {
   return key;
 }
 
-function queueClientPushEvent(type, payload = {}) {
+function queueClientPushEvent(type, payload = {}, envelope = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientEventTransportState.queue.set(key, {type, payload});
+  clientEventTransportState.queue.set(key, {type, payload, envelope});
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
@@ -6975,14 +7132,17 @@ function flushQueuedClientPushEvents() {
   const events = Array.from(clientEventTransportState.queue.values());
   clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
-  for (const event of events) handleClientPushEventNow(event.type, event.payload);
+  for (const event of events) handleClientPushEventNow(event.type, event.payload, event.envelope);
 }
 
-function handleClientPushEvent(type, payload = {}) {
-  queueClientPushEvent(type, payload);
+function handleClientPushEvent(type, payload = {}, envelope = {}) {
+  repairClientEventResources(envelope.repair_resources);
+  if (!clientEventEnvelopeIsCurrent(envelope)) return false;
+  queueClientPushEvent(type, payload, envelope);
+  return true;
 }
 
-function handleClientPushEventNow(type, payload = {}) {
+function handleClientPushEventNowByType(type, payload = {}) {
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
     return;
@@ -6991,6 +7151,10 @@ function handleClientPushEventNow(type, payload = {}) {
     if (payload.data && typeof payload.data === 'object') {
       applySettingsPayload(payload.data, {force: true});
     }
+    return;
+  }
+  if (type === 'pricing_catalog_changed') {
+    if (typeof refreshDebugCostPricingStatus === 'function') refreshDebugCostPricingStatus().catch(error => console.warn('pricing catalog refresh failed', error));
     return;
   }
   if (type === 'stats_sample') {
@@ -7012,13 +7176,25 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    } else if (typeof refreshAllIndexedDirsStatus === 'function') {
+      // A new owner may have rebuilt or invalidated an index while this client was
+      // following the previous owner. Revalidate only surfaces that are currently demanded.
+      refreshAllIndexedDirsStatus();
     }
+    return;
+  }
+  if (type === 'background_refresh_requested') {
+    refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('background refresh request status failed', error));
     return;
   }
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
-      if (payload.root) refreshFileIndexStatus(payload.root);
+      const applied = payload.root && typeof applyFileIndexStatusPayload === 'function'
+        ? applyFileIndexStatusPayload(payload.root, payload)
+        : false;
+      // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
+      // immediately recreates the retired building-index poll and can race a newer generation.
+      if (payload.root && !applied) refreshFileIndexStatus(payload.root);
       if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
         refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }
@@ -7028,6 +7204,9 @@ function handleClientPushEventNow(type, payload = {}) {
       if (!session || session === fileExplorerSessionFilesTargetSession()) {
         fetchSessionFiles({silent: true}).catch(error => console.warn('session-files refresh failed', error));
       }
+    }
+    if (payload.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab(tabberItemId) && document.visibilityState !== 'hidden') {
+      fetchTabberActivity().catch(error => console.warn('Tabber activity refresh failed', error));
     }
     return;
   }
@@ -7053,12 +7232,20 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'context_changed') {
+    if (typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events context refresh failed', error));
+    return;
+  }
   if (type === 'context_items_ready') {
     if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
     return;
   }
   if (type === 'activity_summary_ready') {
     if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'event_log_changed') {
+    refreshEventLogsFromPush(payload);
     return;
   }
   if (type === 'yoagent_conversation_changed') {
@@ -7104,7 +7291,20 @@ function handleClientPushEventNow(type, payload = {}) {
     if (typeof refreshFileExplorerFromPush === 'function') {
       refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
     }
+    return;
   }
+  if (type === 'roots_changed') {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  }
+}
+
+const clientPushEventHandlers = Object.freeze(Object.fromEntries(
+  clientPushEventTypes.map(type => [type, payload => handleClientPushEventNowByType(type, payload)])
+));
+
+function handleClientPushEventNow(type, payload = {}) {
+  const handler = clientPushEventHandlers[type];
+  if (handler) handler(payload);
 }
 
 function clientEventDemandDescriptor() {
@@ -7125,6 +7325,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.some(item => isTmuxSession(item) && panelActiveTabName(item) === 'events')) channels.add('events');
     if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
         && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
@@ -7186,11 +7387,23 @@ function openClientEventStream(descriptor) {
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
-    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
-    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
-    if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
+    const envelope = clientEventEnvelope(event);
+    const readyEpoch = String(envelope.epoch || '');
+    // Older servers did not include an epoch/revision summary. Treat that compatibility frame
+    // as an unknown reconnect and conservatively repair current demand rather than assuming it
+    // is the same generation with zero gaps.
+    const freshEpoch = !readyEpoch || clientEventTransportState.resourceEpoch !== readyEpoch;
+    applyClientEventReadyEnvelope(envelope);
+    recordSseDebugEvent('ready', envelope, event);
+    if (freshEpoch) {
+      repairClientEventReadyChannels(channels);
+    } else {
+      const gapResources = clientEventReadyGapResources(envelope);
+      repairReadyEventLogRevisions(gapResources, envelope);
+      const repairChannels = clientEventRepairChannels(gapResources);
+      repairChannels.delete('events');
+      repairClientEventReadyChannels(new Set([...repairChannels].filter(channel => channels.has(channel))));
+    }
   });
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
@@ -7203,14 +7416,14 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of Object.keys(clientPushEventHandlers)) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
-      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
+      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope), envelope);
     });
   }
   return source;

@@ -2305,17 +2305,21 @@ async function applyShareFinderState(finder = {}) {
   const session = String(finder.session || '').trim();
   const previousRoot = normalizeDirectoryPath(fileExplorerRoot || '');
   const previousExpandedSignature = shareSetSignature(fileExplorerExpanded);
-  // `finder.mode` is a legacy semantic frame field. Layout/tabs now name the independent Finder,
-  // Differ, and Tabber identities, so consuming this old field must never select a surface or
-  // rebuild every file panel. The rest of this state remains shared domain data.
+  // `finder.mode` is a legacy semantic frame field. New hosts send independent Finder and Differ
+  // selections, but old hosts used `mode: diff, session` to name the Differ target. Retain that
+  // narrow compatibility mapping so an old host cannot update a shared root while leaving its
+  // readonly viewer's Differ payload attached to the previous session.
   const legacyMode = 'mode' in finder ? normalizeFileExplorerMode(finder.mode) : '';
   void legacyMode;
   if ('rootMode' in finder) fileExplorerRootMode = finder.rootMode === 'fixed' ? 'fixed' : 'sync';
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   if (isTmuxSession(session)) {
-    fileExplorerChangesSelectedSession = session;
+    fileExplorerFinderSelectedSession = session;
     setExplicitPaneFocusItem(session, {allowInactive: true, renderMenu: false});
   }
+  const differSession = String(finder.differSession || '').trim();
+  if (isTmuxSession(differSession)) fileExplorerChangesSelectedSession = differSession;
+  else if (legacyMode === 'diff' && isTmuxSession(session)) fileExplorerChangesSelectedSession = session;
   applyFileExplorerViewSettingsSeed(finder);
   if ('diffRefFrom' in finder) diffRefFrom = cleanDiffRef(finder.diffRefFrom, diffRefFrom || 'HEAD');
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
@@ -2329,8 +2333,7 @@ async function applyShareFinderState(finder = {}) {
   if ('tabberCollapsed' in finder) shareReplaceSet(fileExplorerTabberCollapsed, finder.tabberCollapsed);
   const expandedChanged = previousExpandedSignature !== shareSetSignature(fileExplorerExpanded);
   renderFileExplorerRootModeControls();
-  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
-  document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
+  syncFileExplorerHiddenButtons();
   syncFileExplorerTreeDateButtons();
   const root = String(finder.root || '').trim();
   const normalizedRoot = root ? normalizeDirectoryPath(expandUserPath(root)) : '';
@@ -2360,8 +2363,8 @@ async function applyShareFinderState(finder = {}) {
   }
   if (itemInLayout(differItemId)) {
     renderFileExplorerChangesPanels({force: true});
-    if (fileExplorerChangesSelectedSession) {
-      fetchSessionFiles({destination: 'finder', session: fileExplorerChangesSelectedSession, silent: true, force: false, background: true});
+    if (fileExplorerSessionFilesTargetSession()) {
+      fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: false, background: true});
     }
   }
   if (itemInLayout(tabberItemId)) {

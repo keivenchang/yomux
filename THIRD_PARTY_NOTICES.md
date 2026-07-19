@@ -6,7 +6,7 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 
 ## Runtime Python Dependency
 
-- PyYAML - YAML parser/emitter dependency declared in `requirements.txt`; package metadata reports MIT license.
+- PyYAML - YAML parser/emitter dependency declared in `pyproject.toml`; package metadata reports MIT license.
 
 ## Vendored Browser Assets
 
@@ -15,9 +15,9 @@ Do not replace third-party notices with the YOLOmux project license. They are no
 
 ## Generated Browser Bundles
 
-- CodeMirror 6 packages and `esbuild` are used to rebuild `static/codemirror.js` from `prototypes/codemirror-entry.js`; `prototypes/codemirror-bundle/package-lock.json` records MIT license metadata for those packages.
+- CodeMirror 6 packages and `esbuild` are used to rebuild `static/codemirror.js` from `tools/codemirror-bundle/codemirror-entry.js`; `tools/codemirror-bundle/package-lock.json` records MIT license metadata for those packages.
 
 ## Development/Test Dependencies
 
-- `pytest-xdist` is declared in `requirements-dev.txt` for local test parallelism.
-- Optional managed-agent SDK packages are declared in `requirements-yoagent-managed.txt`; their upstream licenses remain separate from the YOLOmux project license.
+- `pytest-xdist` is declared in the `dev` extra in `pyproject.toml` for local test parallelism.
+- Optional managed-agent SDK packages are declared in the `yoagent` extra in `pyproject.toml`; their upstream licenses remain separate from the YOLOmux project license.

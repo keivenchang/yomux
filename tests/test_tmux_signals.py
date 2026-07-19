@@ -214,6 +214,41 @@ def test_tmux_control_event_filter_accepts_signal_notifications():
     assert tmux_control_event_relevant("not a control event") is False
 
 
+def test_tmux_control_watcher_reinstalls_subscriptions_after_control_client_exit(monkeypatch):
+    installs = []
+    control_clients = []
+
+    class StopAfterRecovery:
+        stopped = False
+
+        def clear(self):
+            self.stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, _timeout=None):
+            return self.stopped
+
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None)
+    watcher.stop_event = StopAfterRecovery()
+    monkeypatch.setattr(tmux_signals, "install_tmux_signal_monitoring", lambda sessions: installs.append(list(sessions)) or [])
+
+    def exited_control_client(session):
+        control_clients.append(session)
+        if len(control_clients) == 2:
+            watcher.stop_event.set()
+
+    monkeypatch.setattr(watcher, "run_control_client", exited_control_client)
+    watcher.run()
+
+    assert installs == [["alpha"], ["alpha"]]
+    assert control_clients == ["alpha", "alpha"]
+
+
 def test_tmux_pane_exit_hook_never_writes_into_a_terminal():
     assert tmux_signal_hook_command("pane-exited") == "refresh-client"
     assert tmux_signal_hook_command("pane-died") == "refresh-client"

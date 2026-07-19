@@ -1,7 +1,7 @@
 """Persistent, stale-while-revalidate file index for quick-open search.
 
 The live `search_files` walk re-walks a root on every keystroke and is capped
-(MAX_SEARCH_DIRS / MAX_SEARCH_FILES), so a huge root like ~/dynamo is both slow
+(MAX_SEARCH_DIRS / MAX_SEARCH_FILES), so a huge root like ~/GPU is both slow
 and incomplete. This module builds a per-root index of every file once (in a
 background thread, respecting the same skip dirs), keeps it in memory + on disk,
 and serves quick-open queries from it instantly with no per-query walk and no
@@ -118,6 +118,10 @@ class RootIndex:
         self.last_full_build_at = 0.0
         self.ready = False
         self.building = False
+        self.build_generation = 0
+        self.active_generation = 0
+        self.completed_generation = 0
+        self.last_error = ""
         self.truncated = False
         self.too_large = False
         self.build_duration_ms = 0.0
@@ -995,6 +999,7 @@ def _run_build(
     skip_dirs: set[str],
     exclude_path: Callable[[Path], bool] | None = None,
     exclude_signature: str = "",
+    generation: int | None = None,
 ) -> None:
     # C11: take a cross-process lock so a second server process does not duplicate the walk. If another
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
@@ -1003,6 +1008,10 @@ def _run_build(
     effective_exclude_path = _build_exclude_path(exclude_path)
     with ri.lock:
         dirty_paths = _coalesced_paths(set(ri.dirty_paths)) if ri.ready else []
+
+    def current() -> bool:
+        with ri.lock:
+            return generation is None or ri.active_generation == generation
     lock_fd = None
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -1045,11 +1054,14 @@ def _run_build(
             entries.sort(key=lambda entry: (entry[2].lower(), entry[0]))
             scanned_entries = len(entries)
             build_kind = "full"
-        if ri.stop_event.is_set():
+        if ri.stop_event.is_set() or not current():
             with ri.lock:
-                ri.building = False
+                if generation is None or ri.active_generation == generation:
+                    ri.building = False
             return
         with ri.lock:
+            if generation is not None and ri.active_generation != generation:
+                return
             ri.entries = entries
             ri.entry_by_path = {entry[0]: entry for entry in entries}
             ri.truncated = truncated
@@ -1070,10 +1082,15 @@ def _run_build(
             ri.disk_entry_count = len(ri.entries)
             ri.ready = True
             _record_pending_delta(ri, dirty_paths, build_kind)
+        if not current():
+            return
         _persist(ri, skip_dirs, exclude_signature)
         with ri.lock:
+            if generation is not None and ri.active_generation != generation:
+                return
             ri.disk_metadata_ready = ri.persisted
             ri.building = False
+            ri.completed_generation = ri.active_generation
         # C11: a fresh build supersedes any prior unindex, so clear the tombstone.
         _clear_tombstone(ri.root)
         notify_background_owner_done({
@@ -1087,8 +1104,16 @@ def _run_build(
             "scanned_entries": ri.scanned_entries,
             "ignored_entries": ri.ignored_entries,
             "state": "ready",
+            "generation": generation or ri.completed_generation,
             "compute_ms": round(ri.build_duration_ms, 3),
         })
+    except (OSError, RuntimeError, ValueError) as exc:
+        if current():
+            with ri.lock:
+                if generation is None or ri.active_generation == generation:
+                    ri.building = False
+                    ri.last_error = str(exc)
+            notify_background_owner_done({"root": str(ri.root), "state": "error", "generation": generation or ri.active_generation, "error": str(exc)})
     finally:
         if lock_fd is not None:
             try:
@@ -1108,18 +1133,26 @@ def _start_build(
         if ri.building:
             return
         ri.building = True
+        ri.build_generation += 1
+        generation = ri.build_generation
+        ri.active_generation = generation
+        ri.last_error = ""
         ri.stop_event = threading.Event()
         thread = threading.Thread(
             target=_run_build,
-            args=(ri, set(skip_dirs), exclude_path, exclude_signature),
+            args=(ri, set(skip_dirs), exclude_path, exclude_signature, generation),
             name=f"file-index-{ri.root.name}",
             daemon=True,
         )
         ri.thread = thread
+    # A browser that already knows this root is building must not discover the
+    # transition through its 1.5-second repair poll. The completion callback
+    # publishes the matching ready state after the new index is readable.
+    notify_background_owner_done({"root": str(ri.root), "state": "building", "generation": generation})
 
     def rollback() -> None:
         with ri.lock:
-            if ri.thread is thread:
+            if ri.thread is thread and ri.active_generation == generation:
                 ri.thread = None
                 ri.building = False
 
@@ -1323,7 +1356,11 @@ def unindex(root: Path) -> None:
     with _REGISTRY_LOCK:
         ri = _REGISTRY.pop(key, None)
     if ri is not None:
-        ri.stop_event.set()
+        with ri.lock:
+            ri.build_generation += 1
+            ri.active_generation = ri.build_generation
+            ri.building = False
+            ri.stop_event.set()
     _drop_persisted_index(root)
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)

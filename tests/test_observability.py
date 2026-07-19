@@ -34,6 +34,9 @@ def make_app(tmp_path, sessions=("s1",)):
     app.yoagent_session_summary_lock = threading.RLock()
     app.yoagent_session_summaries = {}
     app.refresh_sessions = lambda *args, **kwargs: []
+    # Observability unit tests construct only the event-storage slice; production log writes
+    # additionally publish their durable invalidation through the full app's event broker.
+    app.publish_background_client_event = lambda *_args, **_kwargs: {}
     return app
 
 

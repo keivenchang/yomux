@@ -89,9 +89,11 @@ test('Vertical Side Pane tab menus omit More desc and reuse the shared direction
   assert.doesNotMatch(coreUtils, /vertical-side-pane-edge-move|appendVerticalSidePaneEdgeMoveCommand/);
 });
 
-test('Finder and Differ render the same shared session selector', () => {
+test('Finder and Differ render shared selectors with independent selected-session owners', () => {
   const finderBuilder = panel.slice(panel.indexOf('function createFileExplorerPanel('), panel.indexOf('function refreshFileExplorerPanelTree('));
-  assert.match(finderBuilder, /file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-path-row[\s\S]*view === 'differ'[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)/);
+  assert.match(finderBuilder, /file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*file-explorer-path-row[\s\S]*view === 'differ'[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\), 'differ'\)/);
+  assert.match(panel, /function switchFileExplorerFinderSession\(session\)[\s\S]*fileExplorerFinderSelectedSession = session[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\)/);
+  assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
 });
 
 test('Dockview file surfaces inherit the common outer header controls and never render an inner copy', () => {

@@ -31,8 +31,6 @@ def load_check_module():
 def test_python_imports_are_module_scoped():
     roots = [
         REPO_ROOT / "yolomux.py",
-        REPO_ROOT / "tmux_wall.py",
-        REPO_ROOT / "auto_approve_tmux.py",
         REPO_ROOT / "yolomux_lib",
         REPO_ROOT / "tools",
         REPO_ROOT / "tests",

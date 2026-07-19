@@ -81,6 +81,13 @@ _TRANSCRIPT_SCAN_MESSAGE_ID_MAX = 4096
 _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES = 64 * 1024
 _TRANSCRIPT_SCAN_PERSIST_APPEND_BYTES = 256 * 1024
 _TRANSCRIPT_SCAN_PERSIST_INTERVAL_SECONDS = 30.0
+_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION = 1
+_REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS = 60.0
+_REPOSITORY_SNAPSHOT_CACHE_DIRNAME = "session-files-repository-snapshots"
+_REPOSITORY_SNAPSHOT_CACHE_PRUNE_INTERVAL_SECONDS = 300.0
+_REPOSITORY_SNAPSHOT_CACHE_PRUNE_MAX_AGE_SECONDS = 3600.0
+_repository_snapshot_cache_prune_lock = threading.Lock()
+_repository_snapshot_cache_last_pruned_at = 0.0
 
 
 @dataclass
@@ -182,6 +189,16 @@ logger = logging.getLogger(__name__)
 
 SessionFilesPhaseRecorder = Callable[[str, float, dict[str, Any]], None]
 GitSnapshotProvider = Callable[[Path, str | None, str | None], dict[str, Any]]
+
+# The jobd product carries only these aggregate timings.  Keeping the vocabulary fixed prevents a
+# worker result from becoming an unbounded diagnostics channel or exposing session/repository names.
+SESSION_FILES_VIEW_PHASES = frozenset({
+    "cross-session-attribution",
+    "transcript-attribution",
+    "repository-discovery",
+    "git-snapshot",
+    "session-merge-render",
+})
 
 
 def classify_change(markers: set[str]) -> str:
@@ -2314,9 +2331,35 @@ def git_ahead_behind(repo: Path, from_ref: str | None = None, to_ref: str | None
     return {"behind": behind, "ahead": ahead}
 
 
+def canonical_repository_path(repo: str | Path) -> str:
+    """One stable key for repository snapshots and watcher generations."""
+    return str(Path(repo).expanduser().resolve(strict=False))
+
+
+def canonical_repository_refs(repo_refs: dict[str, dict[str, str]] | None) -> dict[str, dict[str, str]]:
+    """Normalize per-repository ref overrides at the web/worker boundary.
+
+    A pane may report a symlink or worktree spelling while the watcher and
+    cross-process snapshot cache use the resolved repository root.  Keeping
+    this conversion here ensures cache planning and worker execution agree on
+    the same override without making metadata churn part of repository state.
+    """
+    if not repo_refs:
+        return {}
+    normalized: dict[str, dict[str, str]] = {}
+    for repo, refs in repo_refs.items():
+        if not isinstance(refs, dict):
+            continue
+        normalized[canonical_repository_path(repo)] = {
+            "from": str(refs.get("from") or ""),
+            "to": str(refs.get("to") or ""),
+        }
+    return normalized
+
+
 def git_snapshot_identity(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> tuple[Any, ...]:
     """Return every worktree/ref input that can change a shared Git snapshot."""
-    canonical_repo = str(repo.expanduser().resolve(strict=False))
+    canonical_repo = canonical_repository_path(repo)
     git_dir_result = git(["rev-parse", "--absolute-git-dir"], cwd=canonical_repo, timeout=5.0)
     git_dir = git_dir_result.stdout.strip() if git_dir_result.returncode == 0 else ""
     head_result = git(["rev-parse", "--verify", "HEAD"], cwd=canonical_repo, timeout=5.0)
@@ -2366,6 +2409,82 @@ def git_snapshot_identity(repo: Path, from_ref: str | None = None, to_ref: str |
     )
 
 
+def repository_snapshot_cache_path(repo: Path, from_ref: str | None, to_ref: str | None, generation: int) -> Path:
+    """Return the private cross-worker cache path for one watcher-owned Git state."""
+    key = json.dumps([_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION, canonical_repository_path(repo), from_ref or "", to_ref or "", generation], separators=(",", ":"))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return common.STATE_DIR / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME / f"{digest}.json"
+
+
+def prune_repository_snapshot_cache(now: float | None = None) -> int:
+    """Bound stale cross-worker Git snapshots without adding a scan to every view."""
+    global _repository_snapshot_cache_last_pruned_at
+    current = time.time() if now is None else float(now)
+    if current - _repository_snapshot_cache_last_pruned_at < _REPOSITORY_SNAPSHOT_CACHE_PRUNE_INTERVAL_SECONDS:
+        return 0
+    if not _repository_snapshot_cache_prune_lock.acquire(blocking=False):
+        return 0
+    try:
+        if current - _repository_snapshot_cache_last_pruned_at < _REPOSITORY_SNAPSHOT_CACHE_PRUNE_INTERVAL_SECONDS:
+            return 0
+        directory = common.STATE_DIR / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME
+        removed = 0
+        try:
+            for path in directory.glob("*.json"):
+                try:
+                    if current - path.stat().st_mtime > _REPOSITORY_SNAPSHOT_CACHE_PRUNE_MAX_AGE_SECONDS:
+                        path.unlink()
+                        removed += 1
+                except OSError as error:
+                    logger.warning("repository snapshot cache prune failed for %s: %s", path.name, error)
+        except OSError as error:
+            logger.warning("repository snapshot cache prune failed: %s", error)
+        _repository_snapshot_cache_last_pruned_at = current
+        return removed
+    finally:
+        _repository_snapshot_cache_prune_lock.release()
+
+
+def cached_repository_snapshot(
+    repo: Path,
+    from_ref: str | None,
+    to_ref: str | None,
+    generation: int | None,
+    builder: Callable[[Path, str | None, str | None], dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Load or build immutable Git facts; reuse is allowed only for a watcher generation."""
+    snapshot_builder = builder or build_git_snapshot
+    if generation is None:
+        return snapshot_builder(repo, from_ref, to_ref), False
+    prune_repository_snapshot_cache()
+    path = repository_snapshot_cache_path(repo, from_ref, to_ref, generation)
+    try:
+        with file_lock(path, dir_mode=0o700):
+            try:
+                now = time.time()
+                record = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+                logger.warning("repository snapshot cache read failed for %s: %s", repo.name, error)
+                record = {}
+            if (
+                isinstance(record, dict)
+                and record.get("schema_version") == _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION
+                and record.get("generation") == generation
+                and isinstance(record.get("snapshot"), dict)
+                and now - float(record.get("verified_at") or 0.0) <= _REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS
+            ):
+                return copy.deepcopy(record["snapshot"]), True
+            snapshot = snapshot_builder(repo, from_ref, to_ref)
+            try:
+                atomic_write_text(path, json.dumps({"schema_version": _REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION, "generation": generation, "verified_at": now, "snapshot": snapshot}, ensure_ascii=False, separators=(",", ":"), sort_keys=True), mode=0o600)
+            except (OSError, TypeError, ValueError) as error:
+                logger.warning("repository snapshot cache write failed for %s: %s", repo.name, error)
+            return copy.deepcopy(snapshot), False
+    except OSError as error:
+        logger.warning("repository snapshot cache lock unavailable for %s: %s", repo.name, error)
+        return snapshot_builder(repo, from_ref, to_ref), False
+
+
 def build_git_snapshot(repo: Path, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     """Build repository-wide Git facts once; session attribution is merged later."""
     refs_active = refs_requested(from_ref, to_ref)
@@ -2413,13 +2532,32 @@ def record_session_files_phase(
     recorder(phase, max(0.0, (time.perf_counter() - started) * 1000), dict(details or {}))
 
 
+def session_files_view_phase_summary(samples: list[tuple[str, float]]) -> dict[str, dict[str, float | int]]:
+    """Return a bounded, path-free aggregate of worker phase timings."""
+    summary: dict[str, dict[str, float | int]] = {}
+    for phase, elapsed_ms in samples:
+        if phase not in SESSION_FILES_VIEW_PHASES:
+            continue
+        stats = summary.setdefault(phase, {"count": 0, "total_ms": 0.0, "max_ms": 0.0})
+        elapsed = max(0.0, float(elapsed_ms))
+        stats["count"] = int(stats["count"]) + 1
+        stats["total_ms"] = float(stats["total_ms"]) + elapsed
+        stats["max_ms"] = max(float(stats["max_ms"]), elapsed)
+    return {
+        phase: {"count": int(stats["count"]), "total_ms": round(float(stats["total_ms"]), 3), "max_ms": round(float(stats["max_ms"]), 3)}
+        for phase, stats in summary.items()
+    }
+
+
 # Untracked-file line counts keyed by file identity: repeated payload assembly was
 # re-reading every unchanged untracked file (up to 2 MB each) on every refresh, and
 # os.stat/read dominated the web process's hot thread during session-files bursts.
 # One stat still runs per lookup (it IS the identity check); the read is skipped
-# while (dev, inode, size, mtime_ns) is unchanged. Bounded FIFO so a huge repo
+# while (dev, inode, size, mtime_ns, ctime_ns) is unchanged. ``ctime_ns`` catches
+# a same-size rewrite whose caller restores the old mtime, without another file
+# read on ordinary unchanged refreshes. Bounded FIFO so a huge repo
 # cannot grow it without limit.
-_UNTRACKED_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int, int], int | None]] = {}
+_UNTRACKED_LINE_COUNT_CACHE: dict[str, tuple[tuple[int, int, int, int, int], int | None]] = {}
 _UNTRACKED_LINE_COUNT_CACHE_MAX = 4096
 
 # Cumulative session-files work accounting (DOIT.optimize-backends): monotonic
@@ -2446,7 +2584,7 @@ def untracked_added_line_count(path: Path) -> int | None:
         stat = path.stat()
     except OSError:
         return None
-    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     key = str(path)
     cached = _UNTRACKED_LINE_COUNT_CACHE.get(key)
     if cached is not None and cached[0] == identity:
@@ -3158,19 +3296,48 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     from_ref = str(payload.get("from_ref") or "").strip() or None
     to_ref = str(payload.get("to_ref") or "").strip() or None
     raw_repo_refs = payload.get("repo_refs")
-    repo_refs = raw_repo_refs if isinstance(raw_repo_refs, dict) else {}
+    repo_refs = canonical_repository_refs(raw_repo_refs if isinstance(raw_repo_refs, dict) else None)
     include_cross = bool(payload.get("include_cross_session_attribution", not bool(session)))
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    raw_repository_states = payload.get("repository_states")
+    repository_generations: dict[str, int] = {}
+    if isinstance(raw_repository_states, list):
+        for item in raw_repository_states:
+            if not isinstance(item, dict) or not isinstance(item.get("generation"), int):
+                continue
+            path = canonical_repository_path(str(item.get("path") or "")) if item.get("path") else ""
+            if path and int(item["generation"]) >= 0:
+                repository_generations[path] = int(item["generation"])
+    phase_samples: list[tuple[str, float]] = []
+
+    def phase_recorder(phase: str, elapsed_ms: float, _details: dict[str, Any]) -> None:
+        phase_samples.append((phase, elapsed_ms))
 
     snapshot_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+    git_snapshot_builds = 0
+    git_snapshot_cache_hits = 0
 
     def provider(repo: Path, repo_from: str | None, repo_to: str | None) -> dict[str, Any]:
-        key = (str(repo), repo_from or "", repo_to or "")
+        nonlocal git_snapshot_builds, git_snapshot_cache_hits
+        canonical_repo = canonical_repository_path(repo)
+        key = (canonical_repo, repo_from or "", repo_to or "")
         snapshot = snapshot_cache.get(key)
         if snapshot is None:
-            snapshot = build_git_snapshot(repo, repo_from, repo_to)
+            started = time.perf_counter()
+            snapshot, hit = cached_repository_snapshot(
+                repo, repo_from, repo_to, repository_generations.get(canonical_repo), build_git_snapshot,
+            )
+            phase_samples.append(("git-snapshot", max(0.0, (time.perf_counter() - started) * 1000)))
+            if hit:
+                git_snapshot_cache_hits += 1
+            else:
+                git_snapshot_builds += 1
             snapshot_cache[key] = snapshot
         return copy.deepcopy(snapshot)
 
+    attribution_started = time.perf_counter()
+    # session_files_payload owns the actual cross-session attribution calculation; recording it
+    # here makes the worker's expensive top-level pass visible alongside its per-session phases.
     result_payload, status = session_files_payload(
         session,
         infos,
@@ -3180,9 +3347,34 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
         repo_refs=repo_refs,
         include_cross_session_attribution=include_cross,
         git_snapshot_provider=provider,
+        phase_recorder=phase_recorder,
     )
+    if include_cross:
+        phase_samples.append(("cross-session-attribution", max(0.0, (time.perf_counter() - attribution_started) * 1000)))
     truncated = bound_session_files_view_payload(result_payload, max_bytes)
-    return {"payload": result_payload, "status": int(status), "truncated": truncated}
+    profile = {
+        "phases": session_files_view_phase_summary(phase_samples),
+        "work": {
+            "sessions": len(infos),
+            "repositories": len(snapshot_cache),
+            "files": len(result_payload.get("files") or []),
+            # A provider call may read the versioned cross-worker cache. Report real builds
+            # separately from cache hits so System/DOIT CPU evidence never mistakes a cheap read
+            # for another Git subprocess snapshot.
+            "git_snapshots": git_snapshot_builds,
+            "git_snapshot_cache_hits": git_snapshot_cache_hits,
+        },
+        # The web process supplies digests/counts only.  No path, ref, transcript, or agent text
+        # crosses this worker boundary merely for diagnostics.
+        "source": {
+            key: value for key, value in source.items()
+            if key in {"requester", "stable_view", "info_signature", "repo_signature", "repo_dirty_generation_count", "repo_dirty_generation_max"}
+            and isinstance(value, (str, int))
+        },
+    }
+    response = {"payload": result_payload, "status": int(status), "truncated": truncated, "profile": profile}
+    profile["work"]["result_bytes"] = len(json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return response
 
 
 def bound_session_files_view_payload(result_payload: dict[str, Any], max_bytes: int) -> bool:

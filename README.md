@@ -2,7 +2,7 @@
 
 Lightweight, powerful browser workspace for managing AI work.
 
-`yolomux.py` brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. Two companion tools ship alongside it: `auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tmux_wall.py` (a read-only snapshot wall).
+`yolomux.py` brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. Two companion tools ship alongside it: `tools/auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tools/tmux_wall.py` (a read-only snapshot wall).
 
 Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), detailed product behavior lives under [`docs/specs/`](docs/specs/), and peer findings live in [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
@@ -306,7 +306,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. At 900px and wider they live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores Finder/Differ/Tabber to the left while leaving YO!* tabs generic. Finder Sync remembers each session's root, expansion, selection, and every touched path; touched ancestors carry that session's `★`. Switching sessions paints the shared bounded cache immediately, then revalidates visible directories in the background. Filesystem permission failures are reported in Finder instead of terminating the request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
 - Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root, starts one lazy local indexer on demand, and excludes common dependency/build directories. Paths displayed by Finder or Differ are batched at two seconds; hidden paths rely on the long safety refresh. The indexer incrementally replaces only changed subtrees and writes row deltas to SQLite. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same indexed-root list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yolomux/settings.yaml`.
 - Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI language.
-- YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for setup and examples.
+- YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT.md`](docs/YOAGENT.md) for setup, intents, and coordination rules.
 - File -> `YO!chat`, immediately after `YO!stats`, opens one global conversation shared by authenticated admin and readonly users whose servers use the same `YOLOMUX_STATE_DIR`; YO!share guests cannot access it. Human headers preserve the authenticated username's case, show the server-observed IP, use a stable per-person color from the shared theme, and show relative age for the first four hours before switching to an exact local timestamp; the composer border uses the same color as that user's sent messages. A non-persisted YO!agent introduction with one of several localized greetings remains first in the current timeline, named typing presence uses localized list formatting, history search stays absent until Cmd/Ctrl-F and its X hides it again, older messages load in bounded pages as you scroll upward, the composer grows with content only up to half the pane, and the keyboard/touch emoji picker lazy-loads its catalog. New content follows the bottom only while you are already viewing the tail; scrolling into older messages preserves that position and exposes New messages. `/yo <query>` stores the question, shares `YO!agent is typing…` through the normal typing lease without adding a fake history message, delegates to the existing YO!agent task/transcript/recommendation pipeline, renders the stored answer through the shared sanitized Markdown path, and shares it with every client. Searchable state lives in SQLite and exact messages are also journaled under `YOLOMUX_STATE_DIR/yochat-history/YYYY-MM-DD.jsonl` using UTC dates. Both are retained for seven days by default (`Preferences -> YO!chat` supports 1–365 days), the database is capped at 100,000 messages, and first load starts at the current tail.
 - Cross-pane notifications appear in one global toast rail and identify their target tab without changing your current focus. Attention remains until acknowledged; completion, chat, PR, and job notices are coalesced by target. Clicking a notice opens its target and clears it. Uploads and file/editor errors remain in the pane where that direct action occurred. Preferences independently control in-YOLOmux and system notifications.
 - Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOLOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications. Visible spinner/timer history is bounded and resets when it disappears, so a reused tmux pane cannot inherit stale working state.
@@ -445,30 +445,30 @@ python3 yolomux.py --host 127.0.0.1 --port 9998 --dang
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 
-## Companion: `auto_approve_tmux.py`
+## Companion: `tools/auto_approve_tmux.py`
 
 Standalone YOLO auto-approval without the browser UI:
 
 ```bash
-python3 auto_approve_tmux.py --list                       # list tmux sessions
-python3 auto_approve_tmux.py --dry-run --once project1    # preview one visible prompt
-python3 auto_approve_tmux.py project1                     # watch one session
-python3 auto_approve_tmux.py "project*"                   # glob
+python3 tools/auto_approve_tmux.py --list                       # list tmux sessions
+python3 tools/auto_approve_tmux.py --dry-run --once project1    # preview one visible prompt
+python3 tools/auto_approve_tmux.py project1                     # watch one session
+python3 tools/auto_approve_tmux.py "project*"                   # glob
 ```
 
 Background:
 
 ```bash
-setsid nohup env PYTHONUNBUFFERED=1 python3 auto_approve_tmux.py --interval 0.5 "project*" > /tmp/auto_approve.log 2>&1 < /dev/null &
+setsid nohup env PYTHONUNBUFFERED=1 python3 tools/auto_approve_tmux.py --interval 0.5 "project*" > /tmp/auto_approve.log 2>&1 < /dev/null &
 ```
 
-## Companion: `tmux_wall.py`
+## Companion: `tools/tmux_wall.py`
 
 Read-only snapshot wall — passive view of terminal panes with no login layer (refuses non-loopback by default):
 
 ```bash
-python3 tmux_wall.py --port 8765
-python3 tmux_wall.py --targets project1:0.0,project2:0.0 --slots 4
+python3 tools/tmux_wall.py --port 8765
+python3 tools/tmux_wall.py --targets project1:0.0,project2:0.0 --slots 4
 ```
 
 Set `YOLOMUX_CONTAINER_HELPER=/path/to/show_project_containers.py` if the wall should include container metadata from a helper outside `~/utils/container/show_project_containers.py`.

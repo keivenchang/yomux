@@ -26,7 +26,7 @@ from . import identity
 # combination makes the legacy writer's read-only header fence stop before it
 # can reinterpret or mutate this intentionally incompatible schema.
 APPLICATION_ID = 0x594F5354
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 MIN_WRITER_PROTOCOL = 24
 MIN_WRITER_BUILD = 3
 RETENTION_SECONDS = 24 * 60 * 60
@@ -60,6 +60,7 @@ _COLUMNS = {
     ),
     "schema_meta": (
         "singleton", "minimum_writer_protocol", "minimum_writer_build", "source_generation",
+        "last_vacuumed_at",
     ),
     "unavailable_spans": (
         "family", "source_id", "epoch_id", "started_at", "ended_at",
@@ -799,12 +800,13 @@ class Store:
                 "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
                 "minimum_writer_protocol INTEGER NOT NULL CHECK (minimum_writer_protocol >= 0), "
                 "minimum_writer_build INTEGER NOT NULL CHECK (minimum_writer_build >= 0), "
-                "source_generation INTEGER NOT NULL CHECK (source_generation >= 0))"
+                "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+                "last_vacuumed_at REAL NOT NULL DEFAULT 0 CHECK (last_vacuumed_at >= 0))"
             )
             connection.execute(
                 "INSERT INTO schema_meta(singleton, minimum_writer_protocol, minimum_writer_build, "
-                "source_generation) VALUES(?, ?, ?, ?)",
-                (1, MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, 0),
+                "source_generation, last_vacuumed_at) VALUES(?, ?, ?, ?, ?)",
+                (1, MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, 0, 0.0),
             )
             connection.execute(
                 "CREATE TABLE observations ("
@@ -941,6 +943,35 @@ class Store:
         if self._database is None:
             raise StatsCurrentError("stats store is closed")
         return self._database
+
+    def last_vacuumed_at(self) -> float:
+        """Return the persisted completion time for the last successful VACUUM."""
+        row = self._connection().execute(
+            "SELECT last_vacuumed_at FROM schema_meta WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise SchemaMismatchError("current stats vacuum metadata is missing")
+        return float(row[0])
+
+    def vacuum(self, completed_at: float) -> float:
+        """Compact the writer database and persist completion only after success.
+
+        SQLite forbids VACUUM inside a transaction.  A crash or SQLite failure before the following
+        metadata transaction intentionally leaves the prior marker intact so a later idle cycle may
+        retry; callers must serialize this with their sole writer lock.
+        """
+        if self.read_only:
+            raise StatsCurrentError("stats store reader cannot vacuum the database")
+        timestamp = _validate_timestamp(completed_at, "completed_at")
+        connection = self._connection()
+        connection.execute("VACUUM")
+        connection.execute("PRAGMA optimize")
+        with _transaction(connection):
+            connection.execute(
+                "UPDATE schema_meta SET last_vacuumed_at = ? WHERE singleton = 1",
+                (timestamp,),
+            )
+        return timestamp
 
     def append_batch(
         self,
@@ -1176,12 +1207,14 @@ class Store:
         *,
         dirty_intervals: Iterable[tuple[int | float, int | float]] | None = None,
         private_observation_sources: int = 0,
+        include_coverage: bool = True,
     ) -> StoreSnapshot:
         """Read all coverage plus either full or dirty-window original facts."""
 
         with self.pinned_snapshot(
             dirty_intervals=dirty_intervals,
             private_observation_sources=private_observation_sources,
+            include_coverage=include_coverage,
         ) as read:
             return read()
 
@@ -1191,6 +1224,7 @@ class Store:
         *,
         dirty_intervals: Iterable[tuple[int | float, int | float]] | None = None,
         private_observation_sources: int = 0,
+        include_coverage: bool = True,
     ) -> Iterator[Callable[[], StoreSnapshot]]:
         """Pin one WAL generation before yielding its potentially longer row scan."""
 
@@ -1224,7 +1258,7 @@ class Store:
                     + " ORDER BY observed_at, family, source_id",
                     observation_parameters,
                 ).fetchall()
-                coverage_rows = connection.execute(
+                coverage_rows = () if not include_coverage else connection.execute(
                     "SELECT family, source_id, epoch_id, started_at, ended_at, "
                     "native_cadence_seconds, owner_generation FROM coverage_epochs "
                     "ORDER BY started_at, family, source_id, epoch_id"
@@ -1235,7 +1269,7 @@ class Store:
                     + " ORDER BY observed_at, event_id, direction, modality, cache_role, unit",
                     time_parameters,
                 ).fetchall()
-                unavailable_rows = connection.execute(
+                unavailable_rows = () if not include_coverage else connection.execute(
                     "SELECT family, source_id, epoch_id, started_at, ended_at, "
                     "native_cadence_seconds, reason, owner_generation FROM unavailable_spans "
                     "ORDER BY started_at, family, source_id, epoch_id"

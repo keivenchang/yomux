@@ -71,9 +71,11 @@ def agent_status_success(
     *, epoch_id: str, epoch_started_at: float, observed_at: float,
     cadence_seconds: float, owner_generation: int, source_id: str,
     states: Mapping[str, str],
+    session_states: Mapping[str, str] | None = None,
+    snapshot_revision: int = 0,
 ) -> CollectorFacts:
     return _single(
-        "agent_status", source_id, {"states": dict(states)}, epoch_id,
+        "agent_status", source_id, {"states": dict(states), "session_states": dict(session_states or {}), "snapshot_revision": snapshot_revision}, epoch_id,
         epoch_started_at, observed_at, cadence_seconds, owner_generation,
     )
 

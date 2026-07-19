@@ -575,7 +575,7 @@ function startShareStatusRefresh() {
       updateShareViewerBanner();
       renderShareCountdowns();
     }
-    if (shareViewMode && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
+    if (shareViewMode && !shareStatusSocketHealthy() && Date.now() - shareStatusLastRefreshAt >= shareViewerStatusBackupRefreshMs) {
       refreshShareViewerStatus({silent: true});
     } else if (shareHostStatusBackupPollDue()) {
       refreshActiveShare({silent: true});
@@ -586,6 +586,7 @@ function startShareStatusRefresh() {
 function shareHostStatusBackupPollDue(nowMs = Date.now()) {
   return !readOnlyMode
     && shareHasActiveShare()
+    && !shareStatusSocketHealthy()
     && nowMs - shareStatusLastRefreshAt >= shareHostStatusBackupRefreshMs;
 }
 

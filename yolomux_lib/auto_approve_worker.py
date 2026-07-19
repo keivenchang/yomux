@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
-import auto_approve_tmux
+from tools import auto_approve_tmux
 
 from .agent_tui import AgentPaneState
 from .agent_tui import classify_agent_pane
@@ -190,6 +190,15 @@ class AutoApproveWorker:
         self.last_screen_key = ""
         self.last_visible_screen_hash = ""
         self.last_poll_is_quiet = False
+        # Aggregate cycle evidence is deliberately target-free in status output. approvald
+        # sums these counters so System can show the cost of the necessary capture sampler
+        # without leaking session names, prompt text, or screen content.
+        self.recurring_attempts = 0
+        self.recurring_useful = 0
+        self.recurring_no_change = 0
+        self.recurring_failures = 0
+        self.recurring_last_attempt_at = 0.0
+        self.recurring_last_useful_at = 0.0
         self.process_lock = AutoApproveProcessLock(target, owner_extra)
         self.lock_owner: dict[str, Any] | None = None
 
@@ -228,6 +237,16 @@ class AutoApproveWorker:
                 "started_at": self.started_at,
                 "lock_owner": self.lock_owner,
                 "prompt_source": self.prompt_source,
+                "recurring_work": {
+                    "class": "sample",
+                    "cadence_seconds": self.interval,
+                    "attempts": self.recurring_attempts,
+                    "useful": self.recurring_useful,
+                    "no_change": self.recurring_no_change,
+                    "failures": self.recurring_failures,
+                    "last_attempt_at": self.recurring_last_attempt_at,
+                    "last_useful_at": self.recurring_last_useful_at,
+                },
             }
 
     def has_pending_prompt(self) -> bool:
@@ -240,6 +259,20 @@ class AutoApproveWorker:
 
     def update_last_action(self, key: str, fallback: str, **params: Any) -> None:
         self.update(**message_fields("last_action", key, fallback, params))
+
+    def note_recurring_work(self, *, useful: bool, failed: bool = False) -> None:
+        """Record one capture/classify cycle without retaining its target or contents."""
+        now = time.time()
+        with self.lock:
+            self.recurring_attempts += 1
+            self.recurring_last_attempt_at = now
+            if failed:
+                self.recurring_failures += 1
+            elif useful:
+                self.recurring_useful += 1
+                self.recurring_last_useful_at = now
+            else:
+                self.recurring_no_change += 1
 
     def emit_event(
         self,
@@ -271,6 +304,7 @@ class AutoApproveWorker:
             while not self.stop_event.is_set():
                 try:
                     acted = self.process_once(module)
+                    self.note_recurring_work(useful=acted)
                     if acted or not self.last_poll_is_quiet:
                         idle_since = None
                         wait_for = self.interval
@@ -286,6 +320,7 @@ class AutoApproveWorker:
                         )
                     self.stop_event.wait(wait_for)
                 except EXPECTED_AUTO_APPROVE_ERRORS as exc:
+                    self.note_recurring_work(useful=False, failed=True)
                     self.update(error=str(exc))
                     self.update_last_action("yolo.status.autoApproveError", "auto approve error")
                     self.emit_event(

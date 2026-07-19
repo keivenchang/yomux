@@ -53,9 +53,19 @@ from .transcripts import transcript_activity_state_from_text
 # v4: registered the `session_files_view` task; a v3 daemon lacks it, so the fence retires the old one.
 # v5: registered the `tabber_activity_view` task; a v4 daemon lacks it, so the fence retires the old one.
 # v6: registered the `metadata_warm_view` task; a v5 daemon lacks it, so the fence retires the old one.
-JOBD_PROTOCOL_VERSION = 6
+# v7: session_files_view returns bounded worker phase timings, surfaced in System diagnostics.
+# v8: session_files_view's repository snapshot cache has bounded expiry pruning; restart older
+# workers so the active broker does not retain an unbounded on-disk cache behavior.
+# v9: bounded requester counters identify which caller admitted each completed session-files job.
+# v10: metadata warm products include bounded Git/GitHub/Linear work totals.
+# v11: timed-out products are counted and reported as the latest failure.
+JOBD_PROTOCOL_VERSION = 11
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 JOBD_MAX_WORKERS = 2
+JOBD_SESSION_FILES_REQUESTERS = frozenset({
+    "api-session-files", "api-session-files-batch", "background-refresh",
+    "background-info-refresh", "metadata-cache-miss", "metadata-follower-fallback",
+})
 JOBD_MAX_QUEUE = 64
 JOBD_MAX_PAYLOAD_BYTES = 256 * 1024
 JOBD_MAX_RESULT_BYTES = 512 * 1024
@@ -63,10 +73,15 @@ JOBD_MAX_RECORDS = 256
 # The last-known-good product store is keyed by coalesce_key (per file/session), so bound it
 # independently of the job-record ring and evict the oldest completed bytes past this many keys.
 JOBD_MAX_PRODUCTS = 256
+JOBD_MAX_SOURCE_DIAGNOSTICS = 256
 JOBD_MAX_DEADLINE_MS = 120_000
 JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY = 4
 JOBD_SOCKET_NAME = "jobd.sock"
 JOBD_PRIORITIES = ("interactive", "freshness", "maintenance")
+JOBD_REQUEST_ACTIONS = frozenset({
+    "ping", "status", "profile", "submit", "result", "product", "cancel",
+    "lease", "release", "shutdown", "shutdown_if_idle",
+})
 
 
 def default_socket_path() -> Path:
@@ -279,11 +294,19 @@ class PersistentJobBroker:
         # Per-task pure execution duration (excludes queue wait): count/total/max in milliseconds,
         # bounded per task name (not per job) so this dict cannot grow with job volume.
         self.product_runtime_ms: dict[str, dict[str, float]] = {}
+        # Nested only by registered task and a fixed worker-owned phase vocabulary.  The broker
+        # deliberately retains aggregates rather than completed product/profile payloads.
+        self.product_phase_runtime_ms: dict[str, dict[str, dict[str, float]]] = {}
+        self.product_work_totals: dict[str, dict[str, int]] = {}
+        self.source_diagnostics: dict[str, dict[str, str | int]] = {}
+        self.source_change_counters: dict[str, int] = {}
+        self.session_files_requester_counters: dict[str, int] = {}
+        self.request_counters: dict[str, int] = {}
         self.executor: ProcessPoolExecutor | None = None
         self.high_priority_streak = 0
 
     def _bump_counter(self, task: str, name: str) -> None:
-        counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0})
+        counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0, "timed_out": 0})
         counters[name] = counters.get(name, 0) + 1
 
     def _record_runtime_ms(self, task: str, elapsed_ms: float) -> None:
@@ -291,6 +314,81 @@ class PersistentJobBroker:
         stats["count"] += 1
         stats["total_ms"] += elapsed_ms
         stats["max_ms"] = max(stats["max_ms"], elapsed_ms)
+
+    def _record_phase_runtime_ms(self, task: str, result: bytes) -> None:
+        if task not in {"session_files_view", "metadata_warm_view"}:
+            return
+        decoded = json.loads(result.decode("utf-8"))
+        profile = decoded.get("profile") if isinstance(decoded, dict) else None
+        phases = profile.get("phases") if isinstance(profile, dict) else None
+        if task == "session_files_view" and isinstance(phases, dict):
+            task_stats = self.product_phase_runtime_ms.setdefault(task, {})
+            for phase, raw_stats in phases.items():
+                if phase not in session_files.SESSION_FILES_VIEW_PHASES or not isinstance(raw_stats, dict):
+                    continue
+                count = raw_stats.get("count")
+                total_ms = raw_stats.get("total_ms")
+                max_ms = raw_stats.get("max_ms")
+                if not isinstance(count, int) or count < 1 or not isinstance(total_ms, (int, float)) or not isinstance(max_ms, (int, float)):
+                    continue
+                stats = task_stats.setdefault(phase, {"count": 0.0, "total_ms": 0.0, "max_ms": 0.0})
+                stats["count"] += count
+                stats["total_ms"] += max(0.0, float(total_ms))
+                stats["max_ms"] = max(stats["max_ms"], max(0.0, float(max_ms)))
+        work = profile.get("work") if isinstance(profile, dict) else None
+        if isinstance(work, dict):
+            totals = self.product_work_totals.setdefault(task, {})
+            allowed_work = {
+                "session_files_view": ("sessions", "repositories", "files", "git_snapshots", "git_snapshot_cache_hits", "result_bytes"),
+                "metadata_warm_view": ("sessions", "entries", "git_spawns", "github_http_calls", "linear_http_calls", "result_bytes"),
+            }[task]
+            for name in allowed_work:
+                value = work.get(name)
+                if isinstance(value, int) and value >= 0:
+                    totals[name] = totals.get(name, 0) + value
+        if task != "session_files_view":
+            return
+        source = profile.get("source") if isinstance(profile, dict) else None
+        if not isinstance(source, dict):
+            return
+        requester = source.get("requester")
+        requester_key = requester if requester in JOBD_SESSION_FILES_REQUESTERS else "unknown"
+        self.session_files_requester_counters[requester_key] = self.session_files_requester_counters.get(requester_key, 0) + 1
+        stable_view = source.get("stable_view")
+        info_signature = source.get("info_signature")
+        repo_signature = source.get("repo_signature")
+        if not all(isinstance(value, str) and value for value in (stable_view, info_signature, repo_signature)):
+            return
+        prior = self.source_diagnostics.get(stable_view)
+        if prior is None:
+            reason = "initial"
+        elif prior["repo_signature"] != repo_signature and prior["info_signature"] != info_signature:
+            reason = "repository-and-metadata"
+        elif prior["repo_signature"] != repo_signature:
+            reason = "repository-state"
+        elif prior["info_signature"] != info_signature:
+            reason = "agent-or-transcript-metadata"
+        else:
+            reason = "same-source"
+        self.source_change_counters[reason] = self.source_change_counters.get(reason, 0) + 1
+        dirty_count = source.get("repo_dirty_generation_count")
+        dirty_max = source.get("repo_dirty_generation_max")
+        if not isinstance(dirty_count, int) or dirty_count < 0:
+            dirty_count = 0
+        if not isinstance(dirty_max, int) or dirty_max < 0:
+            dirty_max = 0
+        if prior is not None:
+            dirty_changed = prior.get("repo_dirty_generation_count") != dirty_count or prior.get("repo_dirty_generation_max") != dirty_max
+            dirty_key = "dirty-generation-changed" if dirty_changed else "dirty-generation-unchanged"
+            self.source_change_counters[dirty_key] = self.source_change_counters.get(dirty_key, 0) + 1
+        self.source_diagnostics[stable_view] = {
+            "info_signature": info_signature,
+            "repo_signature": repo_signature,
+            "repo_dirty_generation_count": dirty_count,
+            "repo_dirty_generation_max": dirty_max,
+        }
+        while len(self.source_diagnostics) > JOBD_MAX_SOURCE_DIAGNOSTICS:
+            self.source_diagnostics.pop(next(iter(self.source_diagnostics)))
 
     def _store_product(self, record: JobRecord) -> None:
         # Generation guard: a slow older-generation completion must never overwrite a newer
@@ -344,6 +442,7 @@ class PersistentJobBroker:
                 # its future occupying a slot until it exits so a deadline cannot create
                 # unbounded hidden CPU work behind the broker's capacity accounting.
                 self._mark_terminal(record, "timed_out", "deadline exceeded while executing")
+            self._bump_counter(record.task, "timed_out")
 
     def _handle_finished_futures(self) -> None:
         restart_executor = False
@@ -363,6 +462,7 @@ class PersistentJobBroker:
                     self._mark_terminal(record, "completed")
                     self._store_product(record)
                     self._bump_counter(record.task, "completed")
+                    self._record_phase_runtime_ms(record.task, result)
                     if record.running_started_at > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
             except BrokenProcessPool as exc:
@@ -508,6 +608,16 @@ class PersistentJobBroker:
 
     def common_status(self) -> dict[str, Any]:
         self._pump()
+        active_records = [
+            self._record_payload(record)
+            for record in self.records.values()
+            if record.status == "running"
+        ]
+        worker_pids = sorted(
+            int(process.pid)
+            for process in (self.executor._processes.values() if self.executor is not None else [])
+            if process.pid is not None
+        )
         return {
             "ok": True,
             "version": JOBD_PROTOCOL_VERSION,
@@ -518,6 +628,8 @@ class PersistentJobBroker:
             "worker_count": self.worker_count,
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
+            "active_records": active_records,
+            "worker_pids": worker_pids,
             "cache": {
                 "records": len(self.records), "coalesced": len(self.coalesced), "record_limit": JOBD_MAX_RECORDS,
                 "products": len(self.latest_product),
@@ -531,8 +643,19 @@ class PersistentJobBroker:
                 task: {"count": int(stats["count"]), "total_ms": round(stats["total_ms"], 3), "max_ms": round(stats["max_ms"], 3), "avg_ms": round(stats["total_ms"] / stats["count"], 3) if stats["count"] else 0.0}
                 for task, stats in self.product_runtime_ms.items()
             },
+            "product_phase_runtime_ms": {
+                task: {
+                    phase: {"count": int(stats["count"]), "total_ms": round(stats["total_ms"], 3), "max_ms": round(stats["max_ms"], 3), "avg_ms": round(stats["total_ms"] / stats["count"], 3) if stats["count"] else 0.0}
+                    for phase, stats in phases.items()
+                }
+                for task, phases in self.product_phase_runtime_ms.items()
+            },
+            "product_work_totals": {task: dict(totals) for task, totals in self.product_work_totals.items()},
+            "source_change_counters": dict(self.source_change_counters),
+            "session_files_requester_counters": dict(self.session_files_requester_counters),
+            "request_counters": dict(self.request_counters),
             "last_success": max((record.completed_at for record in self.records.values() if record.status == "completed"), default=0.0),
-            "last_failure": next((record.error for record in reversed(list(self.records.values())) if record.status == "failed"), ""),
+            "last_failure": next((record.error for record in reversed(list(self.records.values())) if record.status in {"failed", "timed_out"}), ""),
             "restart_backoff_seconds": 0.0,
             "generation": max(self.latest_generation.values(), default=0),
             "idle_seconds": self.idle_seconds,
@@ -540,6 +663,8 @@ class PersistentJobBroker:
 
     def handle(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
         action = str(request.get("action") or "")
+        action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
+        self.request_counters[action_counter] = self.request_counters.get(action_counter, 0) + 1
         if action == "ping":
             return {"ok": True, "version": JOBD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at}, b""
         if action == "status":
@@ -631,7 +756,17 @@ class JobClient(LocalServiceClient):
     def runtime_status(self) -> dict[str, Any]:
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        return {"service": "jobd", "pid": int(payload.get("pid") or 0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""), "resources": self.registry.resources(int(payload.get("pid") or 0))}
+        pid = int(payload.get("pid") or 0)
+        worker_pids: list[int] = []
+        if isinstance(payload.get("worker_pids"), list):
+            for value in payload["worker_pids"]:
+                try:
+                    worker_pid = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if worker_pid > 0:
+                    worker_pids.append(worker_pid)
+        return {"service": "jobd", "pid": pid, "started_at": float(payload.get("started_at") or 0.0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [], "worker_count": int(payload.get("worker_count") or len(worker_pids)), "worker_pids": worker_pids, "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {}, "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {}, "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {}, "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {}, "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""), "resources": self.registry.resources_for_pids(pid, worker_pids)}
 
 
 def main(argv: list[str] | None = None) -> int:

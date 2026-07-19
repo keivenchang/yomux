@@ -662,9 +662,12 @@ def index_status(raw_root: str) -> dict[str, Any]:
         ignored_entries = int(index.ignored_entries)
         write_bytes = int(index.write_bytes)
         dirty_subtrees = len(index.dirty_paths)
+        build_generation = int(index.active_generation)
+        completed_generation = int(index.completed_generation)
+        last_error = str(index.last_error)
     # C11: report the real state so the Finder badge shows indexing/indexed honestly instead of guessing
     # (which made the badge flicker). `state` is the single field the UI keys on.
-    state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else "missing"))
+    state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else ("error" if last_error else "missing")))
     if not ready and not building and not file_index.background_owner_can_build():
         state = "follower"
     return {
@@ -688,6 +691,9 @@ def index_status(raw_root: str) -> dict[str, Any]:
         "ignored_entries": ignored_entries,
         "write_bytes": write_bytes,
         "dirty_subtrees": dirty_subtrees,
+        "generation": build_generation,
+        "completed_generation": completed_generation,
+        "error": last_error,
         "refresh_seconds": policy["refresh_seconds"],
         "max_files": policy["max_files"],
         "persist_max_files": policy["persist_max_files"],

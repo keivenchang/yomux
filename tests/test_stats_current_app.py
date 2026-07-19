@@ -55,6 +55,98 @@ def test_cpu_adapter_forces_a_native_sample_at_the_scheduler_deadline():
     }
 
 
+def test_agent_status_adapter_carries_the_authoritative_statusd_snapshot_revision():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = SimpleNamespace(agent_activity_lock=threading.RLock(), agent_activity_state={})
+    webapp.status_snapshot_payload = lambda: {
+        "agent_window_snapshot_revision": 17,
+        "sessions": {"1": {"agent_windows": [{"window_index": 0, "pane_target": "%1", "kind": "codex", "state": "working"}]}},
+    }
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_agent_activity_kind_locked = lambda _row, _key, _at, _seconds: "run"
+    webapp.stats_current_process_identity = lambda: ("web-8881", "web", 8881)
+
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
+
+    assert facts.observations[0].payload == {
+        "states": {"1|0|%1|codex": "run"},
+        "session_states": {"1": "run"},
+        "snapshot_revision": 17,
+    }
+
+
+def test_agent_status_adapter_rolls_deduplicated_windows_into_one_session_state():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = SimpleNamespace(agent_activity_lock=threading.RLock(), agent_activity_state={})
+    webapp.status_snapshot_payload = lambda: {
+        "sessions": {
+            "1": {"agent_windows": [
+                {"window_index": 0, "pane_target": "%1", "kind": "codex", "state": "idle"},
+                {"window_index": 1, "pane_target": "%2", "kind": "claude", "state": "working"},
+                {"window_index": 1, "pane_target": "%2", "kind": "claude", "state": "working"},
+            ]},
+            "2": {"agent_windows": [{"window_index": 0, "pane_target": "%3", "kind": "codex", "state": "approval"}]},
+        },
+    }
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_agent_activity_kind_locked = lambda row, _key, _at, _seconds: {"approval": "ask", "working": "run", "idle": "idle"}[row["state"]]
+    webapp.stats_current_process_identity = lambda: ("web-8881", "web", 8881)
+
+    facts = webapp.collect_current_stats_agent_status(attempt("agent_status", 10))
+
+    assert facts.observations[0].payload["states"] == {"1|0|%1|codex": "idle", "1|1|%2|claude": "run", "2|0|%3|codex": "ask"}
+    assert facts.observations[0].payload["session_states"] == {"1": "run", "2": "ask"}
+
+
+def test_agent_status_adapter_counts_six_physical_windows_and_drops_a_removed_pane():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = SimpleNamespace(agent_activity_lock=threading.RLock(), agent_activity_state={})
+    rows = [
+        {"window_index": index, "pane_target": f"%{index}", "kind": "codex", "state": "working"}
+        for index in range(6)
+    ]
+    payload = {"sessions": {"1": {"agent_windows": rows + [dict(rows[0])]}}}
+    webapp.status_snapshot_payload = lambda: payload
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_agent_activity_kind_locked = lambda _row, _key, _at, _seconds: "run"
+    webapp.stats_current_process_identity = lambda: ("web-8881", "web", 8881)
+
+    first = webapp.collect_current_stats_agent_status(attempt("agent_status", 10)).observations[0].payload
+    payload["sessions"]["1"]["agent_windows"] = rows[:-1]
+    second = webapp.collect_current_stats_agent_status(attempt("agent_status", 10)).observations[0].payload
+
+    assert len(first["states"]) == 6
+    assert first["session_states"] == {"1": "run"}
+    assert len(second["states"]) == 5
+    assert "1|5|%5|codex" not in second["states"]
+    assert "1|5|%5|codex" not in webapp.stats_collection_state.agent_activity_state
+
+
+def test_agent_status_adapter_expires_a_finished_window_transition_at_the_configured_glow_deadline():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = SimpleNamespace(agent_activity_lock=threading.RLock(), agent_activity_state={})
+    payload = {"sessions": {"1": {"agent_windows": [
+        {"window_index": 0, "pane_target": "%0", "kind": "codex", "state": "working"},
+    ]}}}
+    webapp.status_snapshot_payload = lambda: payload
+    webapp.notification_transition_seconds = lambda: 30.0
+    webapp.stats_current_process_identity = lambda: ("web-8881", "web", 8881)
+
+    def status_attempt(scheduled_at):
+        value = attempt("agent_status", 10)
+        value.scheduled_at = scheduled_at
+        return value
+
+    running = webapp.collect_current_stats_agent_status(status_attempt(100)).observations[0].payload
+    payload["sessions"]["1"]["agent_windows"][0]["state"] = "idle"
+    during_glow = webapp.collect_current_stats_agent_status(status_attempt(101)).observations[0].payload
+    after_glow = webapp.collect_current_stats_agent_status(status_attempt(131)).observations[0].payload
+
+    assert running["states"] == {"1|0|%0|codex": "run"}
+    assert during_glow["states"] == {"1|0|%0|codex": "transition"}
+    assert after_glow["states"] == {"1|0|%0|codex": "idle"}
+
+
 def test_service_load_adapter_excludes_the_web_process_owned_by_cpu():
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.runtime_local_services = lambda: {"services": [
@@ -619,7 +711,7 @@ def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
 def test_background_owner_starts_only_the_current_stats_runtime():
     calls = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True})
+    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True}, can_run=lambda _role: True)
     webapp.log_event = lambda *args, **kwargs: calls.append("event")
     webapp.job_client = SimpleNamespace(start_for_scheduler=lambda: calls.append("job"))
     webapp.pricing_refresh_coordinator = SimpleNamespace(
@@ -632,11 +724,12 @@ def test_background_owner_starts_only_the_current_stats_runtime():
     webapp.start_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not start")
     webapp.warm_start_session_files_payload_cache = lambda: calls.append("session-files")
     webapp.warm_start_tabber_activity_cache = lambda: calls.append("tabber")
+    webapp.start_tabber_activity_cache_warmer = lambda: calls.append("tabber-worker")
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
 
     webapp.handle_background_owner_acquired({"last_transition": "acquired", "generation": {}})
 
-    assert calls == ["event", "job", "pricing", "current", "session-files", "tabber", "publish"]
+    assert calls == ["event", "job", "pricing", "current", "session-files", "tabber", "tabber-worker", "publish"]
 
 
 def test_background_owner_advertises_current_stats_writer_build(monkeypatch, tmp_path):
@@ -682,7 +775,7 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
     reserved = webapp.session_files_service.reserve_work(("active",), "stable")
     assert reserved is not None
     webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": False})
-    webapp.publish_client_event = lambda *args, **kwargs: calls.append("publish")
+    webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
     monkeypatch.setattr(app_module.file_index, "clear_memory_indexes", lambda: calls.append("indexes"))
 
     webapp.demote_background_owner()

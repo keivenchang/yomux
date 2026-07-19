@@ -455,6 +455,14 @@ restart_port() {
   fi
   stop_port_listener "$port"
 
+  # Fail closed: a wedged previous owner (alive but not listening, so the
+  # listener kill above never reached it) or identity-verified stale children
+  # of a dead owner must be resolved before another launch can stack on top.
+  if ! "$python_bin" -m yolomux_lib.local_services.preflight --port "$port"; then
+    release_port_restart_lock "$port"
+    die "port $port launch preflight refused (wedged owner or stale tracked children; see message above)"
+  fi
+
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   if [[ "$(uname -s)" == "Darwin" ]]; then
     yolomux_submit_macos_server "$repo_root" "$python_bin" "$server_shell" "$PATH" "$port" "$log_path" "$background_owner_primary_port" "${server_args[@]}"

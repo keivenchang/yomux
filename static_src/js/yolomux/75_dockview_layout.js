@@ -1397,17 +1397,34 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   dockviewLayoutToHost(api);
   const signature = layoutSlotsSignature(layoutSlots);
   let activeOnlyChange = false;
+  let layoutReloaded = false;
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
     const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
       dockviewLoadLayout(layoutSlots);
+      layoutReloaded = true;
     } else {
       dockviewLayoutState.lastAppliedLayoutSignature = signature;
       activeOnlyChange = true;
     }
   }
-  dockviewRefreshTabs();
-  dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
+  // dockviewLoadLayout already refreshes these once after fromJSON. Repeating
+  // the same mounted-panel walk on a whole-pane swap made the drop path a
+  // single long task even though Dockview reused every panel instance.
+  if (!layoutReloaded) {
+    const tabsPerf = clientPerfStart('dockviewRefreshTabs');
+    try {
+      dockviewRefreshTabs();
+    } finally {
+      clientPerfEnd(tabsPerf, {nodes: activePaneCount});
+    }
+    const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
+    try {
+      dockviewSyncMountedPanels({renderAttached: !activeOnlyChange});
+    } finally {
+      clientPerfEnd(mountedPerf, {nodes: activePaneCount});
+    }
+  }
   finishPanelLayoutRender(previousActive, options);
   return true;
 }
@@ -1428,10 +1445,26 @@ function dockviewLoadLayout(slots = layoutSlots) {
       dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
       return;
     }
-    api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
+    const loadPerf = clientPerfStart('dockviewFromJson');
+    try {
+      api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
+    } finally {
+      clientPerfEnd(loadPerf, {nodes: items.length});
+    }
     dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
     dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
-    dockviewSyncMountedPanels();
+    const tabsPerf = clientPerfStart('dockviewRefreshTabs');
+    try {
+      dockviewRefreshTabs();
+    } finally {
+      clientPerfEnd(tabsPerf, {nodes: items.length});
+    }
+    const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
+    try {
+      dockviewSyncMountedPanels();
+    } finally {
+      clientPerfEnd(mountedPerf, {nodes: items.length});
+    }
   } finally {
     dockviewLayoutState.applyingFromLayout = false;
   }

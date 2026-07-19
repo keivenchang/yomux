@@ -93,6 +93,7 @@ const jsDebugStatsPollState = {
   pendingForceGraphRefresh: false,
   firstSampleReceived: false,
   lastSampleAtMs: 0,
+  agentWindowSnapshotRevision: 0,
 };
 const jsDebugCurrentStatsClientState = {
   client: null,
@@ -216,9 +217,6 @@ const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
-// A real client-health observation has the same native cadence as the 10-second
-// host gauges. This fills a 10s chart without fabricating values in 1s cells.
-const jsDebugClientHealthPollMs = 10_000;
 // Full-retention background prefetch: one request spans the whole retention window and
 // (via the server's per-span tiers) returns a few hundred coarse buckets covering EVERY
 // range, so every range switch renders from cache. The current short range keeps its own
@@ -327,18 +325,28 @@ const jsDebugGraphClientMetrics = Object.freeze([
 const jsDebugGraphAgentTokenSeriesPrefix = 'agentToken:';
 const jsDebugGraphModelTokenSeriesPrefix = 'modelToken:';
 const jsDebugAgentStatusSeriesKeys = Object.freeze(['askAgents', 'workingAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentSessionSeriesKeys = Object.freeze(['askSessions', 'workingSessions', 'transitionSessions', 'idleSessions']);
 const jsDebugAgentStatusLegendSeriesKeys = Object.freeze(['workingAgents', 'askAgents', 'transitionAgents', 'idleAgents']);
+const jsDebugAgentSessionLegendSeriesKeys = Object.freeze(['workingSessions', 'askSessions', 'transitionSessions', 'idleSessions']);
 const jsDebugAgentStatusSeriesLabelKeys = Object.freeze({
   askAgents: 'debug.graph.status.attention',
   workingAgents: 'state.working',
   transitionAgents: 'debug.graph.status.transition',
   idleAgents: 'state.idle',
+  askSessions: 'debug.graph.status.attention',
+  workingSessions: 'state.working',
+  transitionSessions: 'debug.graph.status.transition',
+  idleSessions: 'state.idle',
 });
 const jsDebugAgentStatusBucketValueGetters = Object.freeze({
   askAgents: bucket => bucket.agentActivitySamples ? bucket.askAgentTotal / bucket.agentActivitySamples : 0,
   workingAgents: bucket => bucket.agentActivitySamples ? bucket.runAgentTotal / bucket.agentActivitySamples : 0,
   transitionAgents: bucket => bucket.agentActivitySamples ? bucket.transitionAgentTotal / bucket.agentActivitySamples : 0,
   idleAgents: bucket => bucket.agentActivitySamples ? bucket.idleAgentTotal / bucket.agentActivitySamples : 0,
+  askSessions: bucket => bucket.agentActivitySamples ? bucket.askSessionTotal / bucket.agentActivitySamples : 0,
+  workingSessions: bucket => bucket.agentActivitySamples ? bucket.runSessionTotal / bucket.agentActivitySamples : 0,
+  transitionSessions: bucket => bucket.agentActivitySamples ? bucket.transitionSessionTotal / bucket.agentActivitySamples : 0,
+  idleSessions: bucket => bucket.agentActivitySamples ? bucket.idleSessionTotal / bucket.agentActivitySamples : 0,
 });
 function debugGraphAgentStatusSeriesDef(key) {
   return {
@@ -396,6 +404,7 @@ const jsDebugGraphHoverChartData = new Map();
 const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
+  ...jsDebugAgentSessionSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
   {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
   {
@@ -419,7 +428,7 @@ const jsDebugGraphSeries = Object.freeze([
 const jsDebugStatsFamilyManifest = Object.freeze({
   cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
   service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
-  agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
+  agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity', 'activitySessions']), series: Object.freeze([...jsDebugAgentStatusSeriesKeys, ...jsDebugAgentSessionSeriesKeys])}),
   agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
   cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
   gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
@@ -433,7 +442,8 @@ const jsDebugGraphChartGroups = Object.freeze([
   {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
   {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Daemons load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent #', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agent windows', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
+  {key: 'activitySessions', label: 'Agent sessions', desc: 'One status per top-level tmux session: ask, run, transition, then idle.', toggleLabelEn: 'Agent sessions', series: jsDebugAgentSessionSeriesKeys, legendSeries: jsDebugAgentSessionLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
   {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
   {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
@@ -1417,6 +1427,10 @@ function debugGraphNewBucket(startMs, durationMs) {
     runAgentTotal: 0,
     transitionAgentTotal: 0,
     idleAgentTotal: 0,
+    askSessionTotal: 0,
+    runSessionTotal: 0,
+    transitionSessionTotal: 0,
+    idleSessionTotal: 0,
     activeAgentTotal: 0,
     inactiveAgentTotal: 0,
     agentActivitySamples: 0,
@@ -1779,6 +1793,10 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
   target.runAgentTotal += (source.runAgentTotal || 0) * scale;
   target.transitionAgentTotal += (source.transitionAgentTotal || 0) * scale;
   target.idleAgentTotal += (source.idleAgentTotal || 0) * scale;
+  target.askSessionTotal += (source.askSessionTotal || 0) * scale;
+  target.runSessionTotal += (source.runSessionTotal || 0) * scale;
+  target.transitionSessionTotal += (source.transitionSessionTotal || 0) * scale;
+  target.idleSessionTotal += (source.idleSessionTotal || 0) * scale;
   target.activeAgentTotal += (source.activeAgentTotal || 0) * scale;
   target.inactiveAgentTotal += (source.inactiveAgentTotal || 0) * scale;
   target.agentActivitySamples += (source.agentActivitySamples || 0) * scale;
@@ -2288,6 +2306,10 @@ function debugGraphAgentStatusSnapshot(record) {
   const runAgentTotal = Number(record?.run_agent_total);
   const transitionAgentTotal = Number(record?.transition_agent_total);
   const idleAgentTotal = Number(record?.idle_agent_total);
+  const askSessionTotal = Number(record?.ask_session_total);
+  const runSessionTotal = Number(record?.run_session_total);
+  const transitionSessionTotal = Number(record?.transition_session_total);
+  const idleSessionTotal = Number(record?.idle_session_total);
   const hasSplitAgentTotals = [askAgentTotal, runAgentTotal, transitionAgentTotal, idleAgentTotal].some(Number.isFinite);
   if (!hasSplitAgentTotals && !Number.isFinite(Number(record?.active_agent_total)) && !Number.isFinite(Number(record?.inactive_agent_total))) return null;
   const ask = hasSplitAgentTotals ? Math.max(0, askAgentTotal || 0) : 0;
@@ -2303,6 +2325,10 @@ function debugGraphAgentStatusSnapshot(record) {
     runAgentTotal: run,
     transitionAgentTotal: transition,
     idleAgentTotal: idle,
+    askSessionTotal: Math.max(0, askSessionTotal || 0),
+    runSessionTotal: Math.max(0, runSessionTotal || 0),
+    transitionSessionTotal: Math.max(0, transitionSessionTotal || 0),
+    idleSessionTotal: Math.max(0, idleSessionTotal || 0),
     activeAgentTotal: ask + run + transition,
     inactiveAgentTotal: idle,
     agentActivitySamples: Math.max(0, Number(record.agent_activity_samples || 0)),
@@ -4715,6 +4741,51 @@ function debugGraphLivePulseHtml(groupSeries, buckets, domain, nowMs = Date.now(
   return `<rect class="js-debug-live-pulse heartbeat-pulse" data-js-debug-live-pulse x="${esc(xStart)}" y="0" width="${esc(width)}" height="${esc(jsDebugGraphGeometry.height)}" pointer-events="none"></rect>`;
 }
 
+function debugGraphLiveAgentWindowRows() {
+  const rows = [];
+  const seen = new Set();
+  const revisions = new Set();
+  for (const [session, payload] of autoApproveStates.entries()) {
+    const revision = agentWindowSnapshotRevision(payload);
+    if (revision > 0) revisions.add(revision);
+    for (const agent of agentWindowPayloadRows(payload?.agent_windows)) {
+      const kind = agentWindowKind(agent?.kind);
+      const physical = agentWindowPhysicalKey(agent);
+      if (!kind || !physical) continue;
+      const key = `${session}\u0000${physical}\u0000${kind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({session, agent, kind});
+    }
+  }
+  rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
+    || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
+    || left.kind.localeCompare(right.kind));
+  return {rows, revisions};
+}
+
+function debugGraphLiveAgentWindowDetailHtml() {
+  const chartRevision = Number(jsDebugStatsPollState.agentWindowSnapshotRevision) || 0;
+  const {rows, revisions} = debugGraphLiveAgentWindowRows();
+  if (!chartRevision || revisions.size !== 1 || !revisions.has(chartRevision)) {
+    return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail data-js-debug-agent-window-detail-state="changed">${esc('Live window details are waiting for the chart snapshot')}</div>`;
+  }
+  const sessions = new Set(rows.map(row => row.session));
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  const details = rows.map(({session, agent, kind}) => {
+    const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
+    const state = String(agent?.state || 'idle') === 'transition' ? 'cooldown' : String(agent?.state || 'idle');
+    return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
+  }).join('');
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail data-js-debug-agent-window-detail-state="current"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+}
+
+function refreshDebugAgentWindowLiveDetails() {
+  for (const detail of document.querySelectorAll('[data-js-debug-agent-window-detail]')) {
+    detail.outerHTML = debugGraphLiveAgentWindowDetailHtml();
+  }
+}
+
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
@@ -4770,13 +4841,14 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       }).join('')}</select></label>`
     : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${tokenAxis ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
-    <div class="js-debug-chart-head">
+      <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
         ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
+      ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml() : ''}
       ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
@@ -6175,6 +6247,11 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     else if (name === 'run_agents') record.run_agent_total = value;
     else if (name === 'transition_agents') record.transition_agent_total = value;
     else if (name === 'idle_agents') record.idle_agent_total = value;
+    else if (name === 'ask_sessions') record.ask_session_total = value;
+    else if (name === 'run_sessions') record.run_session_total = value;
+    else if (name === 'transition_sessions') record.transition_session_total = value;
+    else if (name === 'idle_sessions') record.idle_session_total = value;
+    else if (name === 'agent_window_snapshot_revision') record.agent_window_snapshot_revision = value;
     else if (name === 'system_memory_used_bytes') {
       record.host_metrics.system_memory_used_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
@@ -6242,6 +6319,15 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
   } else if (modelComponents.length) record.cost_summary = {components: modelComponents};
   if (includeRangeCost && rangeCost) record.cost_summary = {...(record.cost_summary || {}), ...jsDebugCurrentCostSummary(rangeCost), components: [...modelComponents, ...jsDebugCurrentCostSummary(rangeCost).components]};
   return record;
+}
+
+function jsDebugCurrentSnapshotAgentWindowRevision(snapshot = {}) {
+  const buckets = Array.isArray(snapshot?.buckets) ? snapshot.buckets : [];
+  for (const bucket of buckets.slice().reverse()) {
+    const revision = jsDebugCurrentSeriesValue(bucket?.series || {}, 'agent_window_snapshot_revision');
+    if (revision !== null && Number.isInteger(revision) && revision > 0) return revision;
+  }
+  return 0;
 }
 
 function jsDebugCurrentBucketHasFamilyData(bucket, family) {
@@ -6322,6 +6408,7 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
   jsDebugHistoryReadiness.loadedEndSeconds = snapshot.window_end;
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
+  jsDebugStatsPollState.agentWindowSnapshotRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
   const firstSample = !jsDebugStatsPollState.firstSampleReceived;
   jsDebugStatsPollState.lastSampleAtMs = Date.now();
   jsDebugStatsPollState.firstSampleReceived = true;
@@ -6425,42 +6512,42 @@ async function clearJsDebugServerHistory() {
 }
 
 function startJsDebugStatsPolling({pollNow = true} = {}) {
-  startJsDebugClientHealthPolling();
   syncJsDebugStatsPolling({pollNow});
 }
 
-const jsDebugClientHealthPollState = {inFlight: false};
+const jsDebugClientHealthMeasurementState = {inFlight: false, lastObservationAtMs: 0};
 
-async function pollJsDebugClientHealth() {
-  if (!jsDebugCollectionEnabled || jsDebugClientHealthPollState.inFlight || typeof apiFetchJsonQuiet !== 'function') return;
-  jsDebugClientHealthPollState.inFlight = true;
-  const url = `/api/ping?client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}`;
+async function measureClientHealth() {
+  if (document.visibilityState === 'hidden' || jsDebugClientHealthMeasurementState.inFlight || typeof apiFetchJson !== 'function') return null;
+  jsDebugClientHealthMeasurementState.inFlight = true;
+  const collect = jsDebugCollectionEnabled === true;
+  const url = collect ? `/api/ping?client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}` : `/api/ping?t=${Date.now()}`;
   const startedAt = performanceNow();
   try {
-    const payload = await apiFetchJsonQuiet(url, {cache: 'no-store'});
-    const latencyMs = Math.max(0, performanceNow() - startedAt);
-    const bandwidthBytes = jsDebugRequestBytes(url) + utf8ByteLength(JSON.stringify(payload || {}));
+    const payload = await apiFetchJson(url, {cache: 'no-store'});
+    const latencyMs = Math.max(1, Math.round(performanceNow() - startedAt));
+    latencySamples = [...latencySamples, latencyMs].slice(-latencySamplesMax);
+    renderLatency(latencyMs);
     const sampleTimeMs = Date.now();
+    if (!collect || sampleTimeMs - jsDebugClientHealthMeasurementState.lastObservationAtMs < jsDebugCurrentObservationBatchDelayMs) return {latencyMs, observed: false};
+    jsDebugClientHealthMeasurementState.lastObservationAtMs = sampleTimeMs;
+    const bandwidthBytes = jsDebugRequestBytes(url) + utf8ByteLength(JSON.stringify(payload || {}));
     if (jsDebugGraphExactResolutionEnabled) {
       recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleTimeMs);
-      return;
+      return {latencyMs, observed: true};
     }
     const bucketRef = debugGraphServerBucketRefForTime(sampleTimeMs, sampleTimeMs);
     const data = {heartbeatCount: 1, latencyMs, bandwidthBytes};
     debugGraphAddBucketData(debugGraphBucketForTime(sampleTimeMs, sampleTimeMs), data);
     debugGraphQueueServerDelta(bucketRef, data);
     compactJsDebugGraphBuckets(sampleTimeMs);
+    return {latencyMs, observed: true};
+  } catch (_) {
+    renderLatency(null);
+    return null;
   } finally {
-    jsDebugClientHealthPollState.inFlight = false;
+    jsDebugClientHealthMeasurementState.inFlight = false;
   }
-}
-
-function startJsDebugClientHealthPolling() {
-  if (!jsDebugCollectionEnabled || runtimeIntervalActive('debug-client-health')) return;
-  // A background health request is best-effort: an offline/browser-suspended page has no
-  // sample to contribute and must not surface an unhandled promise rejection.
-  void pollJsDebugClientHealth().catch(() => {});
-  resetRuntimeInterval('debug-client-health', () => { void pollJsDebugClientHealth().catch(() => {}); }, jsDebugClientHealthPollMs);
 }
 
 function syncJsDebugStatsPolling({pollNow = true, forceGraphRefresh = false} = {}) {
@@ -6480,7 +6567,6 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
 }
 
 async function initializeJsDebugStatsBeforeStreams() {
-  startJsDebugClientHealthPolling();
   await primeJsDebugStatsBeforeLongLivedStreams();
   syncJsDebugStatsPolling({pollNow: false});
   return jsDebugStatsPollState.firstSampleReceived;
@@ -6613,8 +6699,14 @@ function debugSystemProductCountersText(service = {}) {
 
 function debugSystemProductRuntimeText(service = {}) {
   const runtime = service.product_runtime_ms && typeof service.product_runtime_ms === 'object' ? service.product_runtime_ms : {};
-  return Object.entries(runtime)
-    .map(([task, stats]) => `${task}: avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})`)
+  const work = service.product_work_totals && typeof service.product_work_totals === 'object' ? service.product_work_totals : {};
+  return [...new Set([...Object.keys(runtime), ...Object.keys(work)])]
+    .map(task => {
+      const stats = runtime[task];
+      const workText = debugSystemDictSummaryText(work[task]).split('\n').join(', ');
+      const runtimeText = stats ? `avg ${debugGraphTerseTimeText(stats?.avg_ms)}, max ${debugGraphTerseTimeText(stats?.max_ms)} (${debugSystemNumber(stats?.count)})` : '';
+      return `${task}: ${[runtimeText, workText].filter(Boolean).join(' · ')}`;
+    })
     .join('\n');
 }
 
@@ -6802,6 +6894,25 @@ function debugSystemPerformanceTableHtml(rows = [], kind = 'endpoint') {
   </table></div>`;
 }
 
+function debugSystemRecurringWorkHtml(rows = [], nowSeconds = Date.now() / 1000) {
+  if (!Array.isArray(rows) || !rows.length) return `<p class="js-debug-system-empty">${esc(t('common.notAvailable'))}</p>`;
+  return `<div class="js-debug-system-table-wrap"><table class="js-debug-system-table js-debug-system-fixed-table" data-js-debug-recurring-work>
+    <thead><tr><th>Owner</th><th>Class</th><th>Cadence</th><th>Demand</th><th>Attempt / useful / unchanged / failed</th><th>Last useful</th><th>Next due</th></tr></thead>
+    <tbody>${rows.map(row => {
+      const cadence = Math.max(0, Number(row?.cadence_seconds) || 0);
+      const lastUsefulAt = Math.max(0, Number(row?.last_useful_at) || 0);
+      const nextDue = Math.max(0, Number(row?.next_due_in_seconds) || 0);
+      return `<tr data-js-debug-recurring-work-owner="${esc(row?.owner || '')}">
+        <th scope="row">${esc(row?.owner || t('common.notAvailable'))}</th><td>${esc(row?.class || t('common.notAvailable'))}</td>
+        <td>${esc(cadence > 0 ? debugGraphTerseTimeText(cadence * 1000) : '—')}</td><td>${row?.demanded ? 'Yes' : 'No'}</td>
+        <td>${esc(`${debugSystemNumber(row?.attempts)} / ${debugSystemNumber(row?.useful)} / ${debugSystemNumber(row?.no_change)} / ${debugSystemNumber(row?.failures)}`)}</td>
+        <td>${esc(lastUsefulAt > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - lastUsefulAt)) : '—')}</td>
+        <td>${esc(nextDue > 0 ? debugGraphTerseTimeText(nextDue * 1000) : '—')}</td>
+      </tr>`;
+    }).join('')}</tbody>
+  </table></div>`;
+}
+
 function debugSystemSamplerFamilyEntries(value) {
   if (Array.isArray(value)) {
     return value.map((family, index) => [String(family?.family || family?.name || index), family || {}]);
@@ -6940,6 +7051,7 @@ function debugSystemInnerHtml() {
   const caches = payload.caches || {};
   const clientEvents = payload.client_events || {};
   const chat = payload.chat || {};
+  const recurringWork = Array.isArray(refresh.recurring_work) ? refresh.recurring_work : [];
   const totals = payload.local_services?.totals || {};
   const cpuBudget = payload.cpu_budget || {};
   const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
@@ -6975,6 +7087,7 @@ function debugSystemInnerHtml() {
       ['Delivered events', clientEvents.delivered_events],
       ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
     ])),
+    debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(recurringWork), {wide: true}),
     debugSystemStatsSamplerCardHtml(services),
     debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
     debugSystemLocalServicesCardHtml(),

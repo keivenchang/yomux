@@ -10,6 +10,7 @@ Python side so it can run from a normal host checkout.
 from __future__ import annotations
 
 import collections
+import contextvars
 import logging
 import math
 import os
@@ -20,6 +21,7 @@ import socket
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -532,11 +534,38 @@ def next_numbered_session_name(existing_sessions: list[str]) -> str | None:
 # Monotonic so readers can diff without a cross-thread reset race; sampled into
 # session-files performance accounting (DOIT.optimize-backends).
 GIT_COMMAND_COUNTS: dict[str, int] = {}
+_METADATA_WARM_WORK_METRICS: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "metadata_warm_work_metrics", default=None
+)
+
+
+@contextmanager
+def metadata_warm_work_metrics() -> Any:
+    """Count only the Git/network work performed by one metadata-warm jobd task."""
+    metrics = {"git_spawns": 0, "github_http_calls": 0, "linear_http_calls": 0}
+    token = _METADATA_WARM_WORK_METRICS.set(metrics)
+    try:
+        yield metrics
+    finally:
+        _METADATA_WARM_WORK_METRICS.reset(token)
+
+
+def record_metadata_warm_http(url: str) -> None:
+    metrics = _METADATA_WARM_WORK_METRICS.get()
+    if metrics is None:
+        return
+    if url.startswith(GITHUB_API_ROOT):
+        metrics["github_http_calls"] += 1
+    elif url.startswith(LINEAR_API_URL):
+        metrics["linear_http_calls"] += 1
 
 
 def git(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.CompletedProcess[str]:
     verb = args[0] if args else ""
     GIT_COMMAND_COUNTS[verb] = GIT_COMMAND_COUNTS.get(verb, 0) + 1
+    metrics = _METADATA_WARM_WORK_METRICS.get()
+    if metrics is not None:
+        metrics["git_spawns"] += 1
     return run_cmd(["git", "-C", cwd, *args], timeout=timeout)
 
 

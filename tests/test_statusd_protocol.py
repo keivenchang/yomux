@@ -41,10 +41,10 @@ def test_statusd_request_contract_rejects_private_or_malformed_input(payload):
 
 
 @pytest.mark.parametrize("metadata, body", [
-    ({"protocol_version": 2, "generation": 1, "status": 200, "built_at": 1}, b"{}"),
-    ({"protocol_version": 1, "generation": -1, "status": 200, "built_at": 1}, b"{}"),
-    ({"protocol_version": 1, "generation": 1, "status": 200, "built_at": 1}, b"not-json"),
-    ({"protocol_version": 1, "generation": 1, "status": 200, "built_at": 1}, b'{"client_id":"private"}'),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION + 1, "generation": 1, "status": 200, "built_at": 1}, b"{}"),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "generation": -1, "status": 200, "built_at": 1}, b"{}"),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "generation": 1, "status": 200, "built_at": 1}, b"not-json"),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "generation": 1, "status": 200, "built_at": 1}, b'{"client_id":"private"}'),
 ])
 def test_statusd_snapshot_contract_rejects_wrong_version_stale_generation_and_private_body(metadata, body):
     with pytest.raises(StatusProtocolError):
@@ -67,19 +67,19 @@ def test_statusd_inventory_contract_accepts_bounded_identifiers_with_source_sign
 
 @pytest.mark.parametrize("metadata, body", [
     # wrong protocol version
-    ({"protocol_version": 2, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x"}}}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION + 1, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x"}}}).encode()),
     # negative generation
-    ({"protocol_version": 1, "inventory_generation": -1}, json.dumps({"sessions": {"a": {"source_signature": "x"}}}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": -1}, json.dumps({"sessions": {"a": {"source_signature": "x"}}}).encode()),
     # heavy-enrichment field leaked into a session entry
-    ({"protocol_version": 1, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x", "git": {}}}}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x", "git": {}}}}).encode()),
     # transcript enrichment leaked
-    ({"protocol_version": 1, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x", "transcript": "t"}}}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x", "transcript": "t"}}}).encode()),
     # missing per-session source_signature
-    ({"protocol_version": 1, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"windows": 1}}}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"windows": 1}}}).encode()),
     # browser-private field in a session entry
-    ({"protocol_version": 1, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x", "client_id": "p"}}}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": 1}, json.dumps({"sessions": {"a": {"source_signature": "x", "client_id": "p"}}}).encode()),
     # sessions is not an object
-    ({"protocol_version": 1, "inventory_generation": 1}, json.dumps({"sessions": []}).encode()),
+    ({"protocol_version": STATUSD_PROTOCOL_VERSION, "inventory_generation": 1}, json.dumps({"sessions": []}).encode()),
 ])
 def test_statusd_inventory_contract_rejects_wrong_version_heavy_and_unsigned_entries(metadata, body):
     with pytest.raises(StatusProtocolError):

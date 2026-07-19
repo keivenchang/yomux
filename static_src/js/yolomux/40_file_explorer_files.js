@@ -1388,7 +1388,8 @@ function setFileExplorerPathDisplay(path = currentFileExplorerRoot(), options = 
 }
 
 function displayedFileExplorerRoot() {
-  const input = fileExplorerPathInputs()[0];
+  const inputs = fileExplorerPathInputs();
+  const input = inputs.find(node => typeof node.getClientRects !== 'function' || node.getClientRects().length > 0) || inputs[0];
   const value = input ? ('value' in input ? input.value : input.textContent) : '';
   return normalizeDirectoryPath(expandUserPath(value || currentFileExplorerRoot()));
 }
@@ -3595,8 +3596,8 @@ function fileExplorerIndexBadgeText(path) {
   if (fileExplorerPathIsExcluded(path)) return t('finder.index.excluded');
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
-    const status = fileExplorerIndexStatus.get(normalized);
-    return status === 'building' ? '…' : (status === 'too_large' ? '!' : t('finder.index.indexed'));
+  const status = fileExplorerIndexStatus.get(normalized);
+  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed')));
   }
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
@@ -3608,6 +3609,7 @@ function fileExplorerIndexBadgeTitle(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   const status = fileExplorerIndexStatus.get(normalized);
   if (status === 'too_large') return t('finder.index.partial');
+  if (status === 'error') return t('common.errorDetail', {error: ''});
   return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
 }
 
@@ -3617,6 +3619,7 @@ function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
+  if (state === 'error' || payload.error) return 'error';
   if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
   return 'building';
 }
@@ -3650,16 +3653,13 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   return true;
 }
 
-async function refreshFileIndexStatus(root) {
+function applyFileIndexStatusPayload(root, payload) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
-  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  let payload;
-  try {
-    payload = await apiFetchJson(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
-  } catch (error) {
-    return;  // transient error: keep the prior badge, don't flip it
-  }
-  if (!fileExplorerIndexedDirs.has(normalized)) return;  // un-indexed while the request was in flight
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return false;
+  const generation = Number(payload?.generation || payload?.completed_generation || 0);
+  const accepted = Number(fileExplorerIndexGeneration.get(normalized) || 0);
+  if (Number.isSafeInteger(generation) && generation > 0 && generation < accepted) return false;
+  if (Number.isSafeInteger(generation) && generation > 0) fileExplorerIndexGeneration.set(normalized, generation);
   const status = fileIndexStatusFromPayload(payload);
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
@@ -3669,6 +3669,19 @@ async function refreshFileIndexStatus(root) {
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+  return true;
+}
+
+async function refreshFileIndexStatus(root) {
+  const normalized = normalizeStoredFileExplorerIndexedDir(root);
+  if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
+  let payload;
+  try {
+    payload = await apiFetchJson(`/api/fs/index-status?root=${encodeURIComponent(normalized)}`);
+  } catch (error) {
+    return;  // transient error: keep the prior badge, don't flip it
+  }
+  applyFileIndexStatusPayload(normalized, payload);
 }
 
 function refreshBuildingFileIndexStatuses() {
@@ -3683,7 +3696,7 @@ function refreshBuildingFileIndexStatuses() {
 }
 
 function syncFileIndexStatusPollInterval() {
-  if (!fileIndexStatusPollRoots.size) {
+  if (!fileIndexStatusPollRoots.size || clientEventTransportState.connected === true) {
     clearRuntimeInterval('file-index-building');
     return;
   }
@@ -3705,6 +3718,7 @@ function clearFileIndexStatus(root) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized) return;
   fileExplorerIndexStatus.delete(normalized);
+  fileExplorerIndexGeneration.delete(normalized);
   fileIndexStatusPollRoots.delete(normalized);
   fileIndexPartialWarningRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
@@ -4060,7 +4074,9 @@ function tabberWindowDateDisplay(recencyTs, agentStatus = null, nowSeconds = Dat
 }
 
 function tabberActivityVisibleConsumer() {
-  return itemInLayout(tabberItemId) && document.visibilityState !== 'hidden';
+  // Legacy single-surface layouts set `fileExplorerMode`; Dockview owns three
+  // independent surfaces, where the active Tabber tab is the visibility truth.
+  return itemInLayout(tabberItemId) && (fileExplorerMode === 'tabber' || itemIsActivePaneTab(tabberItemId)) && document.visibilityState !== 'hidden';
 }
 
 function tabberActivityPayloadHasUsefulData(payload) {

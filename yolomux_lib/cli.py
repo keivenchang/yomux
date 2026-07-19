@@ -27,6 +27,11 @@ from .common import split_csv
 from .common import unique_session_names
 from .common import warn_unavailable_agent_commands_once
 from .control import send_yolomux_control_request
+from .local_services.registry import bounded_process_table
+from .local_services.registry import set_local_service_launch_context
+from .local_services.registry import tracked_local_service_groups
+from .local_services.registry import tracked_port_process_group
+from .local_services.watchdog import GroupOverloadWatchdog
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
 from .server_logs import emit_server_log
@@ -86,7 +91,7 @@ def start_dev_backend_watcher() -> None:
     """Dev-velocity #1c: re-exec the server when a backend source file changes, so a Python edit takes
     effect without the manual systemd-run restart dance. Daemon thread; only started under --dev."""
     repo_root = Path(__file__).resolve().parents[1]
-    watched = [repo_root / "yolomux.py", repo_root / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
+    watched = [repo_root / "yolomux.py", repo_root / "tools" / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
 
     def snapshot() -> dict[str, int]:
         stamps: dict[str, int] = {}
@@ -323,19 +328,74 @@ def runtime_report_background_status() -> tuple[dict[str, Any], dict[str, Any], 
 
 
 def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) -> int:
-    app = TmuxWebtermApp(sessions, dangerously_yolo=dangerously_yolo)
-    try:
-        owner_debug, owner_control_response, background_status = runtime_report_background_status()
-        payload = app.runtime_report_payload(
-            background_status=background_status,
-            owner_debug=owner_debug,
-            owner_control_response=owner_control_response,
-        )
-        print(json.dumps(payload, sort_keys=True, indent=2))
+    """Print runtime diagnostics via bounded record/socket lookups only.
+
+    The old path constructed a second full TmuxWebtermApp just to render this
+    JSON; on a loaded host that construction (SQLite opens, control-socket
+    thread, forced transcript build) could stall indefinitely and leave stray
+    children behind. A live server now answers over its existing control
+    socket; with no live owner the report degrades to the durable ledger
+    records instead of starting anything.
+    """
+    del sessions, dangerously_yolo  # the bounded report never constructs an app
+    owner_debug = read_background_owner_debug_status()
+    owner = owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None
+    response = send_yolomux_control_request(owner, {"action": "runtime_report"})
+    report = response.get("report") if response.get("ok") else None
+    if isinstance(report, dict):
+        report.setdefault("owner_debug", owner_debug)
+        print(json.dumps(report, sort_keys=True, indent=2))
         return 0
-    finally:
-        app.stop_auto_approve_all()
-        app.control_server.stop()
+    table = bounded_process_table()
+    port_groups = []
+    for lease_path in sorted((STATE_DIR / "server-leases").glob("*.lock")):
+        try:
+            port = int(lease_path.stem)
+        except ValueError:
+            continue
+        group = tracked_port_process_group(port, STATE_DIR, table)
+        if group:
+            port_groups.append(group)
+    payload = {
+        "mode": "bounded-records",
+        "reason": "no live server answered the control socket; report built from ledger records only",
+        "owner_debug": owner_debug,
+        "owner_control_response": response,
+        "port_groups": port_groups,
+        "local_service_groups": tracked_local_service_groups(STATE_DIR / "services", table),
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
+
+
+STARTUP_WATCHDOG_SECONDS_ENV = "YOLOMUX_STARTUP_WATCHDOG_SECONDS"
+STARTUP_WATCHDOG_DEFAULT_SECONDS = 120.0
+
+
+def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
+    """Arm the bounded overload watchdog for the startup window only.
+
+    A failed or wedged launch is when runaway groups have historically formed
+    (2026-07-19 incident: the dev server plus two orphaned workers at ~300%
+    CPU). The watchdog samples only the ledger-tracked group for this port and
+    disarms itself when the window ends; set the env var to 0 to disable.
+    """
+    raw = os.environ.get(STARTUP_WATCHDOG_SECONDS_ENV, "")
+    try:
+        seconds = float(raw) if raw else STARTUP_WATCHDOG_DEFAULT_SECONDS
+    except ValueError:
+        seconds = STARTUP_WATCHDOG_DEFAULT_SECONDS
+    if seconds <= 0:
+        return None
+    watchdog = GroupOverloadWatchdog(port=int(port), state_dir=STATE_DIR, service_dir=STATE_DIR / "services")
+    thread = threading.Thread(
+        target=watchdog.run,
+        args=(seconds,),
+        name=f"startup-overload-watchdog-{port}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def print_auth_setup_error() -> None:
@@ -368,6 +428,11 @@ def main() -> int:
     if lease is None:
         print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
         return 1
+    # Ledger provenance + bounded startup protection: services spawned from
+    # here on are stamped with this port, and a runaway during the launch
+    # window is contained by the tracked-group watchdog.
+    set_local_service_launch_context(args.port)
+    start_startup_overload_watchdog(args.port)
 
     app: TmuxWebtermApp | None = None
     server: TmuxWebtermHTTPServer | None = None

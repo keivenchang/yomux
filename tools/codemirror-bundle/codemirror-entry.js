@@ -3,7 +3,7 @@
 //
 // Source entry for the vendored CodeMirror spike bundle.
 // Rebuild with:
-// cd prototypes/codemirror-bundle
+// cd tools/codemirror-bundle
 // npm ci
 // npm run build
 

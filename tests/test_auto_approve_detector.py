@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 
-import auto_approve_tmux
+from tools import auto_approve_tmux
 from yolomux_lib import app as app_module
 from yolomux_lib import approvals
 from yolomux_lib import prompt_detector

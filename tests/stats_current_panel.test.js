@@ -10,6 +10,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const retiredMount = fs.readFileSync('static_src/js/yolomux/83_stats_panel.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
 let passed = 0;
@@ -92,7 +93,7 @@ test('CPU promotes the newest sampled owner instead of covering it with a duplic
 });
 
 test('all established chart controls and semantic renderers remain present', () => {
-  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agent #', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
+  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agent windows', 'Agent sessions', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
     assert.ok(source.includes(`toggleLabelEn: '${label}'`), label);
   }
   for (const token of ['data-js-debug-range-slider', 'data-js-debug-resolution-override', 'data-js-debug-chart-layout', 'data-js-debug-chart-close']) {
@@ -102,6 +103,23 @@ test('all established chart controls and semantic renderers remain present', () 
   assert.match(css, /\.js-debug-chart/);
   assert.match(css, /\.js-debug-system-grid/);
   assert.match(css, /\.js-debug-logs-view/);
+});
+
+test('Agent windows chart keeps live identities revision-gated against its status sample', () => {
+  assert.match(source, /agent_window_snapshot_revision/);
+  assert.match(source, /function debugGraphLiveAgentWindowDetailHtml\(\)/);
+  assert.match(source, /Live window details are waiting for the chart snapshot/);
+  assert.match(source, /agentWindowPhysicalKey\(agent\)/);
+  assert.match(source, /group\.key === 'activity' \? debugGraphLiveAgentWindowDetailHtml\(\) : ''/);
+  assert.match(css, /\.js-debug-agent-window-detail/);
+});
+
+test('Agent sessions chart is separate and uses server-provided session rollups', () => {
+  assert.match(source, /key: 'activitySessions'/);
+  assert.match(source, /askSessionTotal/);
+  assert.match(source, /runSessionTotal/);
+  assert.match(source, /name === 'ask_sessions'/);
+  assert.match(source, /chartGroups: Object\.freeze\(\['activity', 'activitySessions'\]\)/);
 });
 
 test('YO!stats and YO!cost place shared size before range and resolution', () => {
@@ -154,6 +172,52 @@ test('the System sampler renders stalled usage as an explicit bounded warning', 
   assert.doesNotMatch(context.result, /payload|quantity|token values/);
 });
 
+test('the System sampler reuses the same warning block for sustained collector failure loops', () => {
+  const functionText = sourceFunction('debugSystemStatsSamplerCardHtml', 'debugSystemCpuBudgetCardHtml');
+  const context = {result: null};
+  vm.runInNewContext(`
+    function esc(value) { return String(value); }
+    function debugSystemNumber(value) { return Number.isFinite(Number(value)) ? String(value) : 'N/A'; }
+    function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
+    function debugSystemRowsHtml() { return '<dl></dl>'; }
+    function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
+    function debugSystemCardHtml(_title, body) { return body; }
+    ${functionText}
+    result = debugSystemStatsSamplerCardHtml([{service: 'statsd', usage: {
+      quarantined_conflict_count: 0,
+      health: {
+        state: 'warning',
+        reason: 'sustained sampler failure loop in cpu: 496 failures, last FileNotFoundError: statsd.sock missing',
+        last_accepted_atom_age_seconds: 5,
+        sampler_warning: {family: 'cpu'},
+      },
+    }}], 1000);
+  `, context);
+  assert.match(context.result, /data-js-debug-usage-health="warning"/);
+  assert.match(context.result, /sustained sampler failure loop in cpu/);
+  assert.match(context.result, /FileNotFoundError: statsd\.sock missing/);
+});
+
+test('System renders bounded recurring-work diagnostics without client identity or payload data', () => {
+  const functionText = sourceFunction('debugSystemRecurringWorkHtml', 'debugSystemSamplerFamilyEntries');
+  const context = {result: null};
+  vm.runInNewContext(`
+    function esc(value) { return String(value); }
+    function t(key) { return key; }
+    function debugSystemNumber(value) { return Number.isFinite(Number(value)) ? String(value) : 'N/A'; }
+    function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
+    function relativeTimeFormat(value) { return String(value) + ' ago'; }
+    ${functionText}
+    result = debugSystemRecurringWorkHtml([{owner: 'sse_heartbeat', class: 'lease', cadence_seconds: 15, demanded: true, attempts: 4, useful: 4, no_change: 0, failures: 0, last_useful_at: 90, next_due_in_seconds: 15}], 100);
+  `, context);
+  assert.match(context.result, /data-js-debug-recurring-work/);
+  assert.match(context.result, /sse_heartbeat/);
+  assert.match(context.result, /4 \/ 4 \/ 0 \/ 0/);
+  assert.match(context.result, /10 ago/);
+  assert.doesNotMatch(context.result, /client_id|payload|request/);
+  assert.match(source, /debugSystemCardHtml\('Recurring work', debugSystemRecurringWorkHtml\(recurringWork\), \{wide: true\}\)/);
+});
+
 test('the exact current snapshot feeds the established renderer without legacy APIs', () => {
   assert.match(source, /\/api\/stats-snapshot\?range_seconds=/);
   assert.match(source, /function applyJsDebugCurrentSnapshot\(/);
@@ -161,7 +225,7 @@ test('the exact current snapshot feeds the established renderer without legacy A
   assert.doesNotMatch(source, /fetchJsDebugStatsJson\(jsDebugStatsSampleQuery/);
 });
 
-test('browser observations use the current writer and a calm bounded cadence', () => {
+test('browser observations share the topbar ping and keep a calm bounded cadence', () => {
   assert.match(source, /const jsDebugCurrentObservationBatchDelayMs = 10_000/);
   assert.match(source, /'\/api\/stats-observations'/);
   assert.match(bootstrapSource, /const statsWriterFence = \(\(\) =>/);
@@ -172,8 +236,11 @@ test('browser observations use the current writer and a calm bounded cadence', (
   assert.match(source, /Math\.min\(jsDebugCurrentObservationRetryMaxMs, state\.retryMs \* 2\)/);
   assert.match(source, /recordJsDebugClientHealthObservation\(latencyMs, bandwidthBytes, sampleTimeMs\)/);
   assert.match(source, /type: 'heartbeat'/);
-  assert.match(source, /const jsDebugClientHealthPollMs = 10_000/);
-  assert.match(source, /resetRuntimeInterval\('debug-client-health',[\s\S]*jsDebugClientHealthPollMs\)/);
+  assert.match(source, /async function measureClientHealth\(\)/);
+  assert.match(terminalSource, /async function updateLatency\(\) \{\s*return measureClientHealth\(\);\s*\}/);
+  assert.doesNotMatch(source, /debug-client-health/);
+  assert.match(source, /lastObservationAtMs/);
+  assert.equal((source.match(/apiFetchJson\(url/g) || []).length, 1, 'YO!stats must reuse the topbar health round trip');
 });
 
 testAsync('browser observation uploads acknowledge, back off, stop on 426, and restart with a new page epoch', async () => {

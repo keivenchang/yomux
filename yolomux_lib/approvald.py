@@ -162,6 +162,18 @@ class PersistentApprovalService(LocalRpcServiceState):
             self._status_payload(target, record)
             for target, record in sorted(self.records.items())[:APPROVALD_STATUS_TARGET_LIMIT]
         ]
+        recurring_rows = [item.get("recurring_work") for item in targets if isinstance(item.get("recurring_work"), dict)]
+        recurring_work = {
+            "class": "sample",
+            "cadence_seconds": approval_interval_seconds(),
+            "demanded": bool(self.records),
+            "attempts": sum(int(row.get("attempts") or 0) for row in recurring_rows),
+            "useful": sum(int(row.get("useful") or 0) for row in recurring_rows),
+            "no_change": sum(int(row.get("no_change") or 0) for row in recurring_rows),
+            "failures": sum(int(row.get("failures") or 0) for row in recurring_rows),
+            "last_attempt_at": max((float(row.get("last_attempt_at") or 0.0) for row in recurring_rows), default=0.0),
+            "last_useful_at": max((float(row.get("last_useful_at") or 0.0) for row in recurring_rows), default=0.0),
+        }
         return {
             "ok": True,
             "service": "approvald",
@@ -172,6 +184,7 @@ class PersistentApprovalService(LocalRpcServiceState):
             "clients": len(self.leases),
             "targets": targets,
             "target_count": len(self.records),
+            "recurring_work": recurring_work,
             "queues": {"latency": 0},
             "active_task": "",
             "cache": {},
@@ -347,6 +360,7 @@ class ApprovalClient(LocalServiceClient):
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
             "generation": int(payload.get("generation") or 0),
             "target_count": int(payload.get("target_count") or 0),
+            "recurring_work": payload.get("recurring_work") if isinstance(payload.get("recurring_work"), dict) else {},
             "resources": self.registry.resources(int(payload.get("pid") or 0)),
         }
 

@@ -147,6 +147,93 @@ async function runTabberSuite() {
     assert.deepStrictEqual(canonical(api.fileExplorerSelectionForTest().paths), ['/repo/app.py'], 'auto-focused Finder moves the shared selection');
   });
 
+  test('Finder Copy relative path is Finder-root-relative while Differ remains repo-relative', () => {
+    const api = loadYolomux('', ['1']);
+    assert.equal(api.pathRelativeToDirectory('/repo/project/docs/nested/file.md', '/repo/project/docs'), 'nested/file.md', 'nested Finder roots produce a Finder-relative path');
+    assert.equal(api.pathRelativeToDirectory('/repo/project/docs-two/file.md', '/repo/project/docs'), '/repo/project/docs-two/file.md', 'the shared helper rejects string-prefix siblings');
+    assert.deepStrictEqual(
+      canonical(api.finderRelativeCopyEntryForSelectionForTest('/repo/project/docs/nested/file.md', {realpath: '/real/project/docs/nested/file.md'}, {
+        finderRoot: '/repo/project/docs',
+        finderRootInfo: {realpath: '/real/project/docs'},
+      })),
+      {available: true, text: 'nested/file.md', reason: '', mode: 'finder'},
+      'Finder copies the path relative to the visible Finder root when both display and resolved paths stay inside it',
+    );
+    assert.deepStrictEqual(
+      canonical(api.finderRelativeCopyEntryForSelectionForTest('/repo/project/docs/escape.md', {realpath: '/outside/escape.md'}, {
+        finderRoot: '/repo/project/docs',
+        finderRootInfo: {realpath: '/real/project/docs'},
+      })),
+      {available: false, text: '', reason: 'outside-finder-root', mode: 'finder'},
+      'Finder disables misleading relative copies when a displayed child resolves outside the Finder root',
+    );
+    assert.deepStrictEqual(
+      canonical(api.finderRelativeCopyEntryForSelectionForTest('/repo/project/docs/nested/file.md', {realpath: '/real/project/docs/nested/file.md'}, {
+        finderRoot: '/repo/project/docs',
+      })),
+      {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'},
+      'Finder fails closed when the displayed root has no verified realpath',
+    );
+    assert.deepStrictEqual(
+      canonical(api.finderRelativeCopyEntryForSelectionForTest('/repo/project/docs/nested/file.md', null, {
+        finderRoot: '/repo/project/docs',
+        finderRootInfo: {realpath: '/real/project/docs'},
+      })),
+      {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'},
+      'Finder fails closed when a selected target cannot be resolved',
+    );
+    assert.deepStrictEqual(
+      canonical(api.repoRelativeCopyEntryForSelectionForTest({relative_path: 'docs/nested/file.md'})),
+      {available: true, text: 'docs/nested/file.md', reason: '', mode: 'repo'},
+      'Differ and other Git-backed surfaces keep repository-relative metadata untouched',
+    );
+    assert.equal(api.fileTreeRelativeCopyModeForTest({closest(selector) { return selector === '.file-explorer-changes-panel' ? {} : null; }}, {}), 'repo', 'changed-files rows stay on repo-relative copy semantics');
+    assert.equal(api.fileTreeRelativeCopyModeForTest({closest() { return null; }}, {}), 'finder', 'Finder rows default to Finder-root-relative copy semantics');
+  });
+
+  await testAsync('Finder relative-copy multi-selection fails closed as one clipboard action', async () => {
+    const api = loadYolomux('', ['1']);
+    const root = '/repo/project/docs';
+    const rootInfo = {realpath: '/real/project/docs'};
+    const paths = [`${root}/first.md`, `${root}/nested/second.md`];
+    const entries = await api.fileTreeRelativeCopyEntriesForTest(null, paths, [
+      {realpath: '/real/project/docs/first.md'},
+      {realpath: '/real/project/docs/nested/second.md'},
+    ], {finderRoot: root, finderRootInfo: rootInfo});
+    assert.deepStrictEqual(canonical(entries), [
+      {available: true, text: 'first.md', reason: '', mode: 'finder'},
+      {available: true, text: 'nested/second.md', reason: '', mode: 'finder'},
+    ], 'Finder keeps the selected order and computes every item from the displayed root');
+
+    const mixedEntries = await api.fileTreeRelativeCopyEntriesForTest(null, paths, [
+      {realpath: '/real/project/docs/first.md'},
+      null,
+    ], {finderRoot: root, finderRootInfo: rootInfo});
+    assert.deepStrictEqual(canonical(mixedEntries), [
+      {available: true, text: 'first.md', reason: '', mode: 'finder'},
+      {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'},
+    ], 'one unresolved selected target makes the shared menu owner disable the whole relative-copy action');
+
+    api.setFetchForTest(() => Promise.reject(new Error('fs info unavailable')));
+    const missingRootEntries = await api.fileTreeRelativeCopyEntriesForTest(null, paths, [
+      {realpath: '/real/project/docs/first.md'},
+      {realpath: '/real/project/docs/nested/second.md'},
+    ], {finderRoot: root});
+    assert.deepStrictEqual(canonical(missingRootEntries), [
+      {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'},
+      {available: false, text: '', reason: 'unverified-finder-root', mode: 'finder'},
+    ], 'a failed Finder-root info lookup cannot silently fall back to repository-relative text');
+
+    const repoEntries = await api.fileTreeRelativeCopyEntriesForTest({closest(selector) { return selector === '.file-explorer-changes-panel' ? {} : null; }}, paths, [
+      {relative_path: 'docs/first.md'},
+      {relative_path: 'docs/nested/second.md'},
+    ], {finderRoot: root});
+    assert.deepStrictEqual(canonical(repoEntries), [
+      {available: true, text: 'docs/first.md', reason: '', mode: 'repo'},
+      {available: true, text: 'docs/nested/second.md', reason: '', mode: 'repo'},
+    ], 'Differ does not perform a Finder-root lookup and remains explicitly repository-relative');
+  });
+
   test('Tabber shared tree controller handles keyboard navigation and active-window sync', () => {
     const api = loadYolomux('', ['1', '2']);
     const slots = api.emptyLayoutSlots();
@@ -598,6 +685,13 @@ async function runTabberSuite() {
     const endDragBody = dragSrc.slice(endDragStart, endDragStart + 1200);
     assert.ok(/cancelDragOperationState\(\);[\s\S]*?flushPendingLayoutRender\(\);/.test(endDragBody), '#endSessionDrag clears the shared drag record before flushing through the layout scheduler');
     assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
+  });
+
+  test('whole-pane Dockview reload reconciles mounted panels once', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    assert.match(source, /let layoutReloaded = false;[\s\S]*?dockviewLoadLayout\(layoutSlots\);[\s\S]*?layoutReloaded = true;[\s\S]*?if \(!layoutReloaded\) \{[\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\{renderAttached: !activeOnlyChange\}\);/);
+    const loadBody = source.slice(source.indexOf('function dockviewLoadLayout'), source.indexOf('function dockviewActivateLayoutTabs'));
+    assert.match(loadBody, /clientPerfStart\('dockviewFromJson'\)[\s\S]*?api\.fromJSON\([\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\);/);
   });
 
   test('same-strip tab drops reorder in both directions', () => {
@@ -1516,7 +1610,7 @@ async function runTabberSuite() {
     assert.equal(source.includes("initialSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated bootstrap fallback');
     assert.equal(source.includes("numberSetting('performance.tabber_activity_refresh_ms', 15000)"), false, 'Tabber activity refresh does not keep a duplicated reload fallback');
     assert.ok(/Promise\.resolve\(state\.callback\(\)\)[\s\S]*?\.finally\(scheduleNext\)/.test(source), 'runtime intervals wait for async callbacks to settle before starting the next wait');
-    assert.ok(/file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, proactiveMs\)/.test(source), 'DOIT.61 A5: file-index building poll keeps the odd 1501ms cadence cap');
+    assert.ok(/if \(!fileIndexStatusPollRoots\.size \|\| clientEventTransportState\.connected === true\)[\s\S]*clearRuntimeInterval\('file-index-building'\)[\s\S]*resetRuntimeInterval\('file-index-building', refreshBuildingFileIndexStatuses, Math\.min\(1501, proactiveMs\)\)/.test(source), 'a building index uses the odd 1501ms repair cadence only after SSE disconnects');
     assert.equal(source.includes('tabber-row-detail'), false, 'DOIT.61 A4: Tabber no longer carries a dead visible detail slot');
     assert.equal(source.includes("type === 'path' && row.dataset.tabberOpenFile"), false, 'DOIT.61 A3: Tabber has no unreachable path-row activation branch');
     assert.ok(source.includes('function setRowDataset(row, key, value)'), 'DOIT.61 B1: row dataset set/delete is centralized');

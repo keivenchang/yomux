@@ -10,13 +10,14 @@ import hashlib
 import json
 import math
 import os
+import random
 import sqlite3
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -32,6 +33,12 @@ MAX_ID_BYTES = 512
 MAX_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_IDLE_SECONDS = 60.0
 FULL_RECONCILE_SECONDS = 300.0
+# VACUUM rewrites the SQLite file, so it is intentionally maintenance rather
+# than part of startup, ingest, or request handling. A small per-daemon jitter
+# stops several local statsd instances from choosing the same hourly moment.
+VACUUM_INTERVAL_SECONDS = 60.0 * 60.0
+VACUUM_JITTER_SECONDS = 10.0 * 60.0
+VACUUM_RETRY_SECONDS = 5.0 * 60.0
 PrivateClientKey = str | None
 CacheKey = tuple[int, protocol.RequestedResolution, PrivateClientKey]
 DeltaKey = tuple[int, int, PrivateClientKey]
@@ -363,6 +370,7 @@ class StatsCurrentService:
         encoder: Callable[[protocol.SnapshotWire | protocol.DeltaWire], bytes] = _json_bytes,
         clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        randomizer: Callable[[], float] = random.random,
         price_resolver: materializer.PriceResolver | None = None,
         migration_runner: Callable[..., migration.MigrationReport] = migration.migrate,
     ):
@@ -373,6 +381,7 @@ class StatsCurrentService:
         self.store_opener, self.reader_opener = store_opener, reader_opener
         self.full_builder, self.incremental_builder = full_builder, incremental_builder
         self.encoder, self.clock, self.monotonic = encoder, clock, monotonic
+        self.randomizer = randomizer
         self.price_resolver = price_resolver if price_resolver is not None else pricing.UsagePriceProjector()
         self.migration_runner = migration_runner
         self.stop_event, self.work_event, self.cache_ready_event = threading.Event(), threading.Event(), threading.Event()
@@ -399,6 +408,9 @@ class StatsCurrentService:
         self._view_demand: dict[tuple[int, object], float] = {}
         self._forced_publication_resolutions: set[int] = set()
         self._pending_coverage_refresh = False
+        self._cached_coverage_epochs: tuple[storage.CoverageEpoch, ...] = ()
+        self._cached_unavailable_spans: tuple[storage.UnavailableSpan, ...] = ()
+        self._coverage_cache_ready = False
         self._latest_source_generation = self._next_cache_generation = 0
         self._cache: PublishedCache | None = None
         self._delta_entries: dict[DeltaKey, list[CacheEntry]] = {}
@@ -409,6 +421,12 @@ class StatsCurrentService:
         self._reconciliations = 0
         self._last_reconcile_at = 0.0
         self._last_reconcile_seconds = 0.0
+        self._last_vacuumed_at = 0.0
+        self._last_vacuum_seconds = 0.0
+        self._vacuum_count = 0
+        self._vacuum_failure = ""
+        self._vacuum_jitter_seconds = self._vacuum_jitter()
+        self._next_vacuum_at = self.monotonic() + VACUUM_INTERVAL_SECONDS + self._vacuum_jitter_seconds
         self._building = False
         self._rejected_old = self._append_requests = self._snapshot_requests = 0
         self._usage_attribution_conflicts = 0
@@ -491,10 +509,49 @@ class StatsCurrentService:
             "issues": report.issue_count,
         }
         self._migration_issue_kinds = tuple(sorted({issue.kind for issue in report.issues}))[:16]
+        self._last_vacuumed_at = self.writer.last_vacuumed_at()
+        remaining = (
+            max(
+                0.0,
+                self._last_vacuumed_at + VACUUM_INTERVAL_SECONDS + self._vacuum_jitter_seconds - self.clock(),
+            )
+            if self._last_vacuumed_at > 0.0
+            else VACUUM_INTERVAL_SECONDS + self._vacuum_jitter_seconds
+        )
+        self._next_vacuum_at = self.monotonic() + remaining
         self.worker = threading.Thread(target=self._worker_loop, name="yolomux-stats-materializer", daemon=True)
         self.worker.start()
         self._next_reconcile_at = self.monotonic() + FULL_RECONCILE_SECONDS
         self.work_event.set()
+
+    def _vacuum_jitter(self) -> float:
+        """Return bounded injectable scheduling jitter for periodic maintenance."""
+        return VACUUM_JITTER_SECONDS * min(1.0, max(0.0, float(self.randomizer())))
+
+    def _vacuum_if_due_while_idle(self) -> bool:
+        """Run file-rewriting maintenance only after the service is genuinely idle."""
+        if self.writer is None or self.monotonic() < self._next_vacuum_at:
+            return False
+        with self.work_lock:
+            pending = self._pending_full or bool(self._pending_dirty) or self._pending_coverage_refresh
+            if self._building or pending:
+                self._next_vacuum_at = self.monotonic() + VACUUM_RETRY_SECONDS
+                return False
+            started = self.monotonic()
+            try:
+                completed_at = self.writer.vacuum(completed_at=self.clock())
+            except (OSError, sqlite3.Error, storage.StatsCurrentError) as error:
+                self._vacuum_failure = type(error).__name__[:64]
+                self._next_vacuum_at = self.monotonic() + VACUUM_RETRY_SECONDS
+                self._record_failure("vacuum", error)
+                return False
+            self._last_vacuumed_at = completed_at
+            self._last_vacuum_seconds = max(0.0, self.monotonic() - started)
+            self._vacuum_count += 1
+            self._vacuum_failure = ""
+            self._clear_failure("vacuum")
+            self._next_vacuum_at = self.monotonic() + VACUUM_INTERVAL_SECONDS + self._vacuum_jitter()
+            return True
 
     def _close(self) -> None:
         self.stop_event.set()
@@ -505,7 +562,7 @@ class StatsCurrentService:
             self.writer.close()
             self.writer = None
 
-    def _take_work(self) -> tuple[bool, frozenset[materializer.DirtyCell]] | None:
+    def _take_work(self) -> tuple[bool, frozenset[materializer.DirtyCell], bool] | None:
         with self.work_lock:
             if (
                 not self._pending_full
@@ -513,7 +570,11 @@ class StatsCurrentService:
                 and not self._pending_coverage_refresh
             ):
                 return None
-            work = (self._pending_full, frozenset(self._pending_dirty))
+            work = (
+                self._pending_full,
+                frozenset(self._pending_dirty),
+                self._pending_coverage_refresh,
+            )
             self._pending_full = False
             self._pending_dirty.clear()
             self._pending_coverage_refresh = False
@@ -540,7 +601,7 @@ class StatsCurrentService:
             reader.close()
 
     def _build_once(self, reader: storage.Store, full: bool,
-                    dirty: frozenset[materializer.DirtyCell]) -> None:
+                    dirty: frozenset[materializer.DirtyCell], coverage_refresh: bool = False) -> None:
         started = self.monotonic()
         used_full = full
         self._building = True
@@ -548,6 +609,10 @@ class StatsCurrentService:
             with self.cache_lock:
                 previous = None if self._cache is None else self._cache.generation
             used_full = full or previous is None
+            # `coverage_refresh` means an accepted coverage delta still needs to
+            # materialize no-data spans. It does not mean the complete immutable
+            # history must be read again: `_append()` merges that delta into cache.
+            include_coverage = used_full or not self._coverage_cache_ready
             dirty_intervals = None if used_full else tuple(
                 (cell.start, cell.start + cell.resolution) for cell in dirty
             )
@@ -563,9 +628,20 @@ class StatsCurrentService:
                                 if dirty_intervals is None
                                 else materializer.MAX_PRIVATE_BROWSER_CLIENTS
                             ),
+                            include_coverage=include_coverage,
                         )
                     )
                 snapshot = read_snapshot()
+                if include_coverage:
+                    self._cached_coverage_epochs = snapshot.coverage_epochs
+                    self._cached_unavailable_spans = snapshot.unavailable_spans
+                    self._coverage_cache_ready = True
+                else:
+                    snapshot = replace(
+                        snapshot,
+                        coverage_epochs=self._cached_coverage_epochs,
+                        unavailable_spans=self._cached_unavailable_spans,
+                    )
                 source_generation = snapshot.schema.source_generation
             with self.work_lock:
                 self._latest_source_generation = max(self._latest_source_generation, source_generation)
@@ -992,6 +1068,43 @@ class StatsCurrentService:
                 dirty.add(materializer.DirtyCell(resolution, math.floor(observed_at / resolution) * resolution))
         return dirty
 
+    def _merge_cached_coverage(
+        self,
+        coverage: tuple[storage.CoverageEpoch, ...],
+        unavailable: tuple[storage.UnavailableSpan, ...],
+    ) -> bool:
+        """Apply accepted append facts without rescanning immutable coverage history."""
+
+        if not self._coverage_cache_ready:
+            return False
+        if coverage:
+            epochs = {
+                (item.family, item.source_id, item.epoch_id): item
+                for item in self._cached_coverage_epochs
+            }
+            epochs.update({
+                (item.family, item.source_id, item.epoch_id): item
+                for item in coverage
+            })
+            self._cached_coverage_epochs = tuple(sorted(
+                epochs.values(),
+                key=lambda item: (item.started_at, item.family, item.source_id, item.epoch_id),
+            ))
+        if unavailable:
+            spans = {
+                (item.family, item.source_id, item.epoch_id, item.started_at): item
+                for item in self._cached_unavailable_spans
+            }
+            spans.update({
+                (item.family, item.source_id, item.epoch_id, item.started_at): item
+                for item in unavailable
+            })
+            self._cached_unavailable_spans = tuple(sorted(
+                spans.values(),
+                key=lambda item: (item.started_at, item.family, item.source_id, item.epoch_id),
+            ))
+        return True
+
     def _usage_identity_conflict_response(
         self,
         error: storage.UsageAtomIdentityConflict,
@@ -1087,9 +1200,10 @@ class StatsCurrentService:
                 self._latest_source_generation = max(self._latest_source_generation, result.source_generation)
                 self._last_source_commit_at = self.clock()
                 self._pending_dirty.update(dirty)
-                self._pending_coverage_refresh |= bool(
-                    result.coverage_changed or result.unavailable_spans_accepted
-                )
+                coverage_changed = bool(result.coverage_changed or result.unavailable_spans_accepted)
+                if coverage_changed:
+                    self._merge_cached_coverage(coverage, unavailable)
+                    self._pending_coverage_refresh = True
         if changed:
             self.work_event.set()
         self._append_requests += 1
@@ -1322,6 +1436,7 @@ class StatsCurrentService:
         }
         warm_total = sum(1 + len(stats_resolution.explicit_resolutions(value)) for value in stats_resolution.RANGE_SECONDS)
         next_reconcile_in = max(0.0, self._next_reconcile_at - self.monotonic())
+        next_vacuum_in = max(0.0, self._next_vacuum_at - self.monotonic())
         materializer_depth = int(pending_full) + dirty + int(pending_coverage)
         materializer_state = (
             "failed" if self._last_failure_component == "materializer"
@@ -1482,6 +1597,17 @@ class StatsCurrentService:
                 "next_at": self.clock() + next_reconcile_in,
                 "next_in_seconds": round(next_reconcile_in, 3),
             },
+            "vacuum": {
+                "interval_seconds": VACUUM_INTERVAL_SECONDS,
+                "jitter_seconds": round(self._vacuum_jitter_seconds, 3),
+                "retry_seconds": VACUUM_RETRY_SECONDS,
+                "count": self._vacuum_count,
+                "last_at": self._last_vacuumed_at,
+                "last_seconds": round(self._last_vacuum_seconds, 6),
+                "next_at": self.clock() + next_vacuum_in,
+                "next_in_seconds": round(next_vacuum_in, 3),
+                "failure": self._vacuum_failure,
+            },
             "failure": {
                 "component": self._last_failure_component,
                 "kind": self._last_failure,
@@ -1590,12 +1716,15 @@ class StatsCurrentService:
                 or bool(self._pending_dirty)
                 or self._pending_coverage_refresh
             )
-        return (
+        idle = (
             not self.leases
             and not self._building
             and not pending
             and self.monotonic() - self.last_client_at >= self.idle_seconds
         )
+        if idle:
+            self._vacuum_if_due_while_idle()
+        return idle
 
     def run(self) -> int:
         return run_local_rpc_service(

@@ -574,7 +574,8 @@ function shareFinderSeed() {
   return {
     root,
     rootMode: fileExplorerRootMode === 'fixed' ? 'fixed' : 'sync',
-    session: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
+    session: typeof fileExplorerFinderTargetSession === 'function' ? fileExplorerFinderTargetSession() : '',
+    differSession: typeof fileExplorerSessionFilesTargetSession === 'function' ? fileExplorerSessionFilesTargetSession() : '',
   };
 }
 
@@ -633,6 +634,13 @@ function shareHostConnectionRecord(token, options = {}) {
 
 function shareHostConnectionSockets() {
   return shareSenderRecordEntries('connection').map(([, record]) => record.connection.socket).filter(Boolean);
+}
+
+function shareStatusSocketHealthy() {
+  const tokens = shareViewMode
+    ? [shareToken].filter(Boolean)
+    : activeShares.map(share => String(share?.token || '')).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token => shareHostConnectionRecord(token)?.socket?.readyState === WebSocket.OPEN);
 }
 
 function shareHostQueuedMessageCount(token) {

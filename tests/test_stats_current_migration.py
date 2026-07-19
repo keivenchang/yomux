@@ -137,6 +137,36 @@ def _create_legacy_database(path: Path, *, unsupported_table: bool = False) -> P
     return path
 
 
+def _create_schema5_database(path: Path, *, malformed: bool = False) -> Path:
+    """Frozen v5 fixture: direct SQL keeps this test independent of the current Store schema."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY, minimum_writer_protocol INTEGER NOT NULL, minimum_writer_build INTEGER NOT NULL, source_generation INTEGER NOT NULL);
+        CREATE TABLE observations (event_id TEXT NOT NULL, family TEXT NOT NULL, source_id TEXT NOT NULL, observed_at REAL NOT NULL, epoch_id TEXT NOT NULL, owner_generation INTEGER NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(family, source_id, event_id)) WITHOUT ROWID;
+        CREATE TABLE coverage_epochs (family TEXT NOT NULL, source_id TEXT NOT NULL, epoch_id TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL, native_cadence_seconds REAL NOT NULL, owner_generation INTEGER NOT NULL, PRIMARY KEY(family, source_id, epoch_id)) WITHOUT ROWID;
+        CREATE TABLE unavailable_spans (family TEXT NOT NULL, source_id TEXT NOT NULL, epoch_id TEXT NOT NULL, started_at REAL NOT NULL, ended_at REAL NOT NULL, native_cadence_seconds REAL NOT NULL, reason TEXT NOT NULL, owner_generation INTEGER NOT NULL, PRIMARY KEY(family, source_id, epoch_id, started_at, ended_at)) WITHOUT ROWID;
+        CREATE TABLE usage_atoms (event_id TEXT NOT NULL, direction TEXT NOT NULL, modality TEXT NOT NULL, cache_role TEXT NOT NULL, unit TEXT NOT NULL, observed_at REAL NOT NULL, payload_json TEXT NOT NULL, PRIMARY KEY(event_id, direction, modality, cache_role, unit)) WITHOUT ROWID;
+        CREATE TABLE migration_reconciliation (migration_id TEXT PRIMARY KEY, completed_at REAL NOT NULL, source_digest TEXT NOT NULL, details_json TEXT NOT NULL) WITHOUT ROWID;
+        """
+    )
+    connection.execute(f"PRAGMA application_id = {migration.APPLICATION_ID}")
+    connection.execute("PRAGMA user_version = 5")
+    connection.execute("INSERT INTO schema_meta VALUES(1,24,3,7)")
+    connection.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?)", ("cpu-1", "cpu", "port:8881", 100.0, "cpu-epoch", 2, json.dumps({"process_percent": 3, "system_percent": 20})))
+    connection.execute("INSERT INTO coverage_epochs VALUES(?,?,?,?,?,?,?)", ("cpu", "port:8881", "cpu-epoch", 100.0, None, 1.0, 2))
+    connection.execute("INSERT INTO unavailable_spans VALUES(?,?,?,?,?,?,?,?)", ("gpu", "gpu:0", "gap", 90.0, 100.0, 10.0, "lost", 2))
+    connection.execute("INSERT INTO usage_atoms VALUES(?,?,?,?,?,?,?)", ("usage-1", "input", "text", "none", "tokens", 101.0, json.dumps({"quantity": 7, "provider": "openai", "model": "gpt-test", "agent_id": "agent", "telemetry_complete": True})))
+    details = {"format": 1, "sources": [], "counts": {"observations": 1, "coverage_epochs": 1, "usage_atoms": 1, "unavailable_spans": 1}, "issue_counts": {}, "issues": [], "issues_truncated": 0, "retirement": {"artifacts": 0, "bytes": 0, "shared_history_rewrites": 0}}
+    connection.execute("INSERT INTO migration_reconciliation VALUES(?,?,?,?)", (migration.MIGRATION_ID, 100.0, "0" * 64, json.dumps(details)))
+    if malformed:
+        connection.execute("ALTER TABLE observations ADD COLUMN unexpected TEXT")
+    connection.commit()
+    connection.close()
+    return path
+
+
 def _create_live_schema2_database(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
@@ -195,6 +225,37 @@ def _create_live_schema2_database(path: Path) -> Path:
 
 def _file_state(path: Path) -> tuple[bytes, int]:
     return path.read_bytes(), path.stat().st_mtime_ns
+
+
+def test_schema5_current_database_migrates_original_facts_to_schema6_without_mutating_source(tmp_path):
+    state = tmp_path / "state"
+    source = _create_schema5_database(state / migration.V5_DATABASE_FILENAME)
+    before = _file_state(source)
+
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    assert report.active_database == state / DATABASE_FILENAME
+    assert report.observations == report.coverage_epochs == report.usage_atoms == report.unavailable_spans == 1
+    assert _file_state(source) == before
+    with Store.open(report.active_database) as store:
+        snapshot = store.read_snapshot()
+        assert store.last_vacuumed_at() == 0.0
+    assert [item.event_id for item in snapshot.observations] == ["cpu-1"]
+    assert [item.event_id for item in snapshot.usage_atoms] == ["usage-1"]
+    assert len(snapshot.coverage_epochs) == len(snapshot.unavailable_spans) == len(snapshot.migration_reconciliation) == 1
+    assert json.loads((state / WRITER_FENCE_FILENAME).read_text(encoding="utf-8"))["schema_version"] == 6
+
+
+def test_malformed_schema5_database_never_activates_schema6(tmp_path):
+    state = tmp_path / "state"
+    source = _create_schema5_database(state / migration.V5_DATABASE_FILENAME, malformed=True)
+    before = _file_state(source)
+
+    with pytest.raises(migration.MigrationError, match="unexpected table shape"):
+        migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    assert _file_state(source) == before
+    assert not (state / DATABASE_FILENAME).exists()
 
 
 def test_schema4_database_migrates_exact_facts_and_marks_lost_aggregates(tmp_path):
@@ -790,7 +851,7 @@ def test_final_retirement_failure_restores_every_source_and_deactivates_current_
     assert _file_state(shared) == shared_before
     assert _file_state(old_fence) == fence_before
     assert not (state / DATABASE_FILENAME).exists()
-    assert list(state.glob("stats-v5.failed-*.sqlite3"))
+    assert list(state.glob("stats-v6.failed-*.sqlite3"))
     assert (state / migration.RETIREMENT_ARCHIVE_FILENAME).is_file()
     assert (state / migration.RETIREMENT_JOURNAL_FILENAME).is_file()
 

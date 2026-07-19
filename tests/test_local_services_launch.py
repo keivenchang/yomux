@@ -26,12 +26,12 @@ def test_pyproject_package_discovery_includes_local_service_subpackages():
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
     assert "[tool.setuptools.packages.find]" in pyproject
-    assert 'py-modules = ["auto_approve_tmux", "tmux_wall", "yolomux"]' in pyproject
-    assert 'include = ["yolomux_lib*"]' in pyproject
+    assert 'py-modules = ["yolomux"]' in pyproject
+    assert 'include = ["tools*", "yolomux_lib*"]' in pyproject
     assert 'packages = ["yolomux_lib"]' not in pyproject
     for module_name in (
-        "auto_approve_tmux",
-        "tmux_wall",
+        "tools.auto_approve_tmux",
+        "tools.tmux_wall",
         "yolomux_lib.local_services",
         "yolomux_lib.local_services.rpc",
         "yolomux_lib.stats_current.service",
@@ -76,6 +76,7 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     assert args[args.index("--idle-seconds") + 1] == "12.5"
     assert args[-2:] == ["--workers", "1"]
     assert kwargs["start_new_session"] is True
+    assert kwargs["stdin"] is subprocess.DEVNULL
     assert Path(kwargs["stdout"].name) == registry.stderr_path
     assert kwargs["stdout"].closed is True
     assert kwargs["stderr"] is subprocess.STDOUT
@@ -211,6 +212,37 @@ def test_registry_resources_returns_none_when_ps_reports_no_such_pid(tmp_path, m
     registry = LocalServiceRegistry(tmp_path, LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1))
 
     assert registry.resources(999999) == {"cpu_percent": None, "rss_bytes": None}
+
+
+def test_registry_resources_for_pids_aggregates_verified_workers_and_resets_on_membership_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry_mod.platform, "system", lambda: "Darwin")
+    outputs = iter([
+        "100 1 10 00:01.00\n101 100 20 00:02.00\n102 999 40 00:50.00\n",
+        "100 1 11 00:02.00\n101 100 21 00:04.00\n",
+        "100 1 12 00:03.00\n",
+    ])
+
+    class FakeCompleted:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    monkeypatch.setattr(registry_mod.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted(next(outputs)))
+    clock_values = iter([100.0, 101.0, 102.0])
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", 1),
+        clock=lambda: next(clock_values),
+    )
+
+    first = registry.resources_for_pids(100, [101, 102])
+    second = registry.resources_for_pids(100, [101])
+    third = registry.resources_for_pids(100, [])
+
+    assert first == {"cpu_percent": None, "rss_bytes": 30 * 1024, "process_count": 2}
+    # Parent + direct worker gained three cumulative CPU seconds in one wall second.
+    assert second == {"cpu_percent": 300.0, "rss_bytes": 32 * 1024, "process_count": 2}
+    # The worker exited, so a different membership deliberately starts a fresh CPU baseline.
+    assert third == {"cpu_percent": None, "rss_bytes": 12 * 1024, "process_count": 1}
 
 
 def test_registry_health_request_identifies_expected_service_protocol(tmp_path, monkeypatch):
@@ -425,3 +457,99 @@ def test_service_priority_is_best_effort(monkeypatch):
 
     monkeypatch.setattr(runtime.os, "nice", raise_os_error)
     assert runtime.apply_service_process_priority(7) is False
+
+
+def _table(rows):
+    return {
+        pid: registry_mod.ProcessTableEntry(ppid, pgid, cpu_seconds, command)
+        for pid, ppid, pgid, cpu_seconds, command in rows
+    }
+
+
+def _write_service_record(service_dir, name, pid, socket_path):
+    service_dir.mkdir(parents=True, exist_ok=True)
+    (service_dir / f"{name}.service.json").write_text(
+        registry_mod.json.dumps({"service": name, "pid": pid, "socket": str(socket_path)}),
+        encoding="utf-8",
+    )
+
+
+def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
+    socket_path = tmp_path / "services" / "jobd.sock"
+    record = {"service": "jobd", "pid": 100, "socket": str(socket_path)}
+    with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60")])
+    unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
+    defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
+
+    assert registry_mod.service_record_identity_matches(record, with_marker) is True
+    # PID reuse: the recycled PID belongs to another python process — rejected.
+    assert registry_mod.service_record_identity_matches(record, unrelated_python) is False
+    # A system/security process can never satisfy the socket marker — rejected.
+    assert registry_mod.service_record_identity_matches(record, defender_shaped) is False
+    assert registry_mod.service_record_identity_matches(record, {}) is False
+
+
+def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path):
+    service_dir = tmp_path / "services"
+    jobd_socket = service_dir / "jobd.sock"
+    stale_socket = service_dir / "statsd.sock"
+    _write_service_record(service_dir, "jobd", 200, jobd_socket)
+    _write_service_record(service_dir, "statsd", 300, stale_socket)
+    table = _table(
+        [
+            (200, 1, 200, 10.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60"),
+            (201, 200, 200, 90.0, "python3 -c multiprocessing-spawn-worker"),
+            (202, 200, 200, 80.0, "python3 -c multiprocessing-spawn-worker"),
+            # Same-name stranger in ANOTHER process group: never a member.
+            (250, 1, 250, 999.0, "python3 -c multiprocessing-spawn-worker"),
+            # statsd record's PID was recycled by an unrelated process: no group at all.
+            (300, 1, 300, 5.0, "python3 unrelated.py"),
+        ]
+    )
+
+    groups = registry_mod.tracked_local_service_groups(service_dir, table)
+
+    assert [group["service"] for group in groups] == ["jobd"]
+    assert groups[0]["pid"] == 200
+    assert groups[0]["pgid"] == 200
+    assert groups[0]["member_pids"] == (200, 201, 202)
+
+
+def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
+    lease_dir = tmp_path / "server-leases"
+    lease_dir.mkdir(parents=True)
+    (lease_dir / "8881.lock").write_text(registry_mod.json.dumps({"pid": 400, "port": 8881}), encoding="utf-8")
+    good = _table(
+        [
+            (400, 1, 400, 50.0, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev"),
+            (401, 400, 400, 5.0, "tmux -C attach-session"),
+        ]
+    )
+    prefix_collision = _table([(400, 1, 400, 50.0, "python3 yolomux.py --port 888 --dev")])
+    recycled = _table([(400, 1, 400, 50.0, "python3 unrelated.py")])
+
+    group = registry_mod.tracked_port_process_group(8881, tmp_path, good)
+    assert group == {"port": 8881, "pid": 400, "pgid": 400, "member_pids": (400, 401)}
+    # Another YOLOmux port (or a --port prefix collision) never enters this ledger.
+    assert registry_mod.tracked_port_process_group(8881, tmp_path, prefix_collision) == {}
+    # A recycled lease PID fails the command identity check.
+    assert registry_mod.tracked_port_process_group(8881, tmp_path, recycled) == {}
+    assert registry_mod.tracked_port_process_group(9999, tmp_path, good) == {}
+
+
+def test_service_record_carries_pgid_launcher_and_bounded_worker_pids(tmp_path, monkeypatch):
+    monkeypatch.setattr(registry_mod, "process_group_id", lambda pid: 700 if pid == 700 else 0)
+    registry_mod.set_local_service_launch_context(8881)
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", protocol_version=3),
+    )
+
+    record = registry._record_from_status(
+        {"pid": 700, "version": 3, "worker_pids": [701, 702, 0, -4, "junk"], "started_at": 1.0}
+    )
+
+    assert record["pgid"] == 700
+    assert record["launcher_pid"] == registry_mod.os.getpid()
+    assert record["launcher_port"] == 8881
+    assert record["worker_pids"] == [701, 702]

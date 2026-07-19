@@ -107,6 +107,7 @@ def test_schema_contains_only_original_facts_and_current_metadata(tmp_path):
             ),
             "schema_meta": (
                 "singleton", "minimum_writer_protocol", "minimum_writer_build", "source_generation",
+                "last_vacuumed_at",
             ),
             "usage_atoms": (
                 "event_id", "direction", "modality", "cache_role", "unit", "observed_at", "payload_json",
@@ -122,6 +123,19 @@ def test_schema_contains_only_original_facts_and_current_metadata(tmp_path):
         ).fetchone() == (MIN_WRITER_PROTOCOL, MIN_WRITER_BUILD, 0)
     finally:
         connection.close()
+
+
+def test_vacuum_persists_its_completion_marker_only_after_success(tmp_path):
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        assert store.last_vacuumed_at() == 0.0
+        assert store.vacuum(123.0) == 123.0
+        assert store.last_vacuumed_at() == 123.0
+
+    with Store.open_reader(path) as reader:
+        assert reader.last_vacuumed_at() == 123.0
+        with pytest.raises(StatsCurrentError, match="cannot vacuum"):
+            reader.vacuum(124.0)
 
 
 def test_current_database_uses_a_versioned_path_and_publishes_the_fence_first(tmp_path):

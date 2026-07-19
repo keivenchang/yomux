@@ -2150,6 +2150,11 @@ function syncFileExplorerHiddenButton(button) {
   });
 }
 
+function syncFileExplorerHiddenButtons() {
+  syncFileExplorerHiddenButton(fileExplorerHiddenToggle);
+  document.querySelectorAll('.file-explorer-hidden-toggle-panel').forEach(syncFileExplorerHiddenButton);
+}
+
 function fileExplorerTreeDateModeLabel(mode = fileExplorerTreeDateModeForView('finder')) {
   const normalized = normalizeFileExplorerTreeDateMode(mode);
   return t(`finder.dateMode.${normalized}`);

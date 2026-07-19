@@ -120,6 +120,8 @@ class FakeStore:
         self.last_append = {}
         self.prunes = 0
         self.dirty_reads = []
+        self.coverage_reads = []
+        self.vacuums = []
 
     def append_batch(self, **values):
         self.appends += 1
@@ -151,13 +153,21 @@ class FakeStore:
         )
 
     @contextmanager
-    def pinned_snapshot(self, *, dirty_intervals=None, private_observation_sources=0):
+    def pinned_snapshot(self, *, dirty_intervals=None, private_observation_sources=0, include_coverage=True):
+        self.coverage_reads.append(include_coverage)
         yield lambda: self.read_snapshot(dirty_intervals=dirty_intervals)
 
     def prune(self, *, now):
         self.prunes += 1
         deleted = getattr(self, "prune_observations_deleted", 0)
         return storage.PruneResult(deleted, 0, 0, 0, self.source_generation, 0, 0)
+
+    def last_vacuumed_at(self):
+        return self.vacuums[-1] if self.vacuums else 0.0
+
+    def vacuum(self, *, completed_at):
+        self.vacuums.append(completed_at)
+        return completed_at
 
     def close(self):
         self.closed += 1
@@ -190,10 +200,14 @@ def test_store_open_is_deferred_until_generic_runtime_owns_the_lock(tmp_path, mo
         tmp_path / storage.DATABASE_FILENAME,
         store_opener=open_store,
         migration_runner=migrate_store,
+        clock=lambda: 1_000.0,
+        monotonic=lambda: 10.0,
+        randomizer=lambda: 0.0,
     )
     assert events == []
     assert service.run() == 0
     assert events[0:3] == ["lock", "migrate", "open"]
+    assert service._next_vacuum_at == 3_610.0
 
 
 def test_startup_migrates_before_writer_open_preserves_legacy_and_reports_bounded_counts(
@@ -304,10 +318,10 @@ def test_future_state_fence_stops_service_after_singleton_before_migration_or_da
 @pytest.mark.parametrize(
     "fence",
     [
-        {"protocol_version": 23, "schema_generation": 5},
+        {"protocol_version": 23, "schema_generation": 6},
         {"protocol_version": 24, "schema_generation": 4},
         {"protocol_version": 25, "schema_generation": 6},
-        {"protocol_version": "24", "schema_generation": 5},
+        {"protocol_version": "24", "schema_generation": 6},
     ],
 )
 def test_old_or_mismatched_protocol_is_terminal_before_dispatch_or_mutation(tmp_path, fence):
@@ -324,7 +338,7 @@ def test_old_or_mismatched_protocol_is_terminal_before_dispatch_or_mutation(tmp_
 
     assert response["status"] == "upgrade_required"
     assert response["required_protocol_version"] == 24
-    assert response["required_schema_generation"] == 5
+    assert response["required_schema_generation"] == 6
     assert binary == b""
     assert store.appends == 0
     assert service._status()["requests"]["rejected_old"] == 1
@@ -1291,7 +1305,44 @@ def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cell
         materializer.DirtyCell(resolution, math.floor(cutoff / resolution) * resolution)
         for resolution in stats_resolution.RESOLUTION_CHOICES
     )
-    assert service._take_work() == (False, expected)
+    assert service._take_work() == (False, expected, False)
+
+
+def test_vacuum_runs_only_after_idle_and_persists_its_schedule(tmp_path):
+    monotonic_now = [0.0]
+    wall_now = [1_000.0]
+    store = FakeStore()
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        idle_seconds=1.0,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    service.writer = store
+    service._pending_full = False
+    service._next_reconcile_at = 9_999.0
+    service._next_vacuum_at = 0.0
+
+    # Requests never perform file-rewriting maintenance; the generic runtime
+    # calls _idle only after client handling has stopped.
+    service._on_client()
+    assert store.vacuums == []
+    monotonic_now[0] = 2.0
+    assert service._idle() is True
+    assert store.vacuums == [1_000.0]
+    assert service._status()["vacuum"] == {
+        "interval_seconds": service_module.VACUUM_INTERVAL_SECONDS,
+        "jitter_seconds": 0.0,
+        "retry_seconds": service_module.VACUUM_RETRY_SECONDS,
+        "count": 1,
+        "last_at": 1_000.0,
+        "last_seconds": 0.0,
+        "next_at": 4_600.0,
+        "next_in_seconds": 3_600.0,
+        "failure": "",
+    }
 
 
 def test_active_client_lease_prevents_idle_exit_until_released(tmp_path):
@@ -1645,6 +1696,7 @@ def test_incremental_build_reads_only_the_union_of_dirty_bucket_intervals(tmp_pa
     assert set(store.dirty_reads[1]) == {
         (cell.start, cell.start + cell.resolution) for cell in dirty
     }
+    assert store.coverage_reads == [True, False], 'observation-only incremental builds reuse the last complete coverage model'
     assert service._cache is not None
     assert service._cache.generation.source_generation == 1
 
@@ -1664,7 +1716,7 @@ def test_partial_reader_generation_is_pinned_before_later_append_commits(tmp_pat
             return result
 
         @contextmanager
-        def pinned_snapshot(self, *, dirty_intervals=None, private_observation_sources=0):
+        def pinned_snapshot(self, *, dirty_intervals=None, private_observation_sources=0, include_coverage=True):
             self.reads += 1
             self.dirty_reads.append(dirty_intervals)
             pinned_generation = self.source_generation
@@ -1767,10 +1819,12 @@ def test_coverage_only_append_schedules_empty_dirty_incremental_refresh(tmp_path
 
     assert response.get("ok") is True, response
     assert service._pending_full is False
-    assert work == (False, frozenset())
+    assert work == (False, frozenset(), True)
     now[0] = 100_001.0
     service._build_once(store, *work)
     assert store.dirty_reads[-1] == ()
+    assert store.coverage_reads[-1] is False, 'an accepted coverage append updates the retained model without a history rescan'
+    assert service._cached_coverage_epochs[0].ended_at == 100_001.0
     assert service._full_builds == service._incremental_builds == 1
 
 

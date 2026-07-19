@@ -1714,7 +1714,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 cache_status="computed",
                 owner_role="client",
                 count=len(requests),
-                details={"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)},
+                details=details,
             )
         self.write_json(response_payload)
 
@@ -1852,7 +1852,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.send_auth_cookie_if_needed()
         self.end_headers()
-        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe(
+        subscriber_id, _subscriber_queue = self.server.app.client_events.subscribe(
             channels=channels or None,
             client_id=client_id,
         )
@@ -1861,18 +1861,28 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if hasattr(self.server.app, "wake_client_event_watcher"):
             self.server.app.wake_client_event_watcher()
         try:
-            self.write_sse_json("ready", {"time": time.time()})
+            client_event_snapshot = self.server.app.client_events.ready_snapshot(subscriber_id)
+            self.write_sse_json("ready", {
+                "time": time.time(),
+                "epoch": client_event_snapshot["epoch"],
+                "resource_revisions": client_event_snapshot["resource_revisions"],
+            })
             while True:
                 try:
-                    event = subscriber_queue.get(timeout=15.0)
+                    event = self.server.app.client_events.next_event(subscriber_id, timeout=15.0)
                 except queue.Empty:
+                    if hasattr(self.server.app, "touch_client_watch_descriptor"):
+                        self.server.app.touch_client_watch_descriptor(client_id)
                     self.write_sse_json("ping", {"time": time.time()})
+                    self.server.app.client_events.record_heartbeat()
                     continue
                 self.write_sse_json(str(event.get("type") or "event"), event)
         except OSError:
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "client_event_subscriber_disconnected"):
+                self.server.app.client_event_subscriber_disconnected(client_id)
             if hasattr(self.server.app, "wake_client_event_watcher"):
                 self.server.app.wake_client_event_watcher()
             if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):

@@ -1733,7 +1733,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(networkErrorStatus.message, `${api.t('dialog.unableLoadDisk')}: network down`, 'file-state errors use the shared localized disk-load message');
     assert.equal(networkErrorStatus.message.includes('deleted'), false, 'network/list refresh errors are not reported as deletion');
     assert.equal(
-      api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/docs/preview-samples/03-mixed.md'),
+      api.fileInspectionErrorMessageForTest({payload: {error: 'outside allowed root'}, status: 403}, '/home/test/yolomux.dev3/tests/fixtures/preview-samples/03-mixed.md'),
       'outside allowed root',
       'file inspection resolves the structured backend reason through the shared user-message parent',
     );
@@ -2379,6 +2379,25 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       {kind: 'codex', state: 'working', window_index: 2, window_label: '2:codex'},
     ]});
     assert.deepStrictEqual(canonical(canonicalStatusRows.map(row => ({state: row.state, working_stopped_ts: row.working_stopped_ts}))), [{state: 'idle', working_stopped_ts: 300}], 'the canonical auto-approve row is the one status source for regular Tabs, Tabber, and YO!info; stale Tabber and transcript rows only enrich it');
+    api.applyAutoApprovePayloadForTest({agent_window_snapshot_revision: 8, sessions: {'1': {agent_windows: [
+      {kind: 'codex', state: 'idle', pane_target: '%2', window_index: 2, window_label: '2:codex'},
+    ]}}}, {render: false});
+    assert.equal(api.sessionAgentWindowStatusModelForTest('1').stateRevision, 8, 'the response-level snapshot revision is retained on each stored session state before status consumers compare generations');
+    api.setAutoApproveStateForTest('1', {agent_window_snapshot_revision: 8, agent_windows: [
+      {kind: 'codex', state: 'idle', pane_target: '%2', window_index: 2, window_label: '2:codex'},
+    ]});
+    api.setTabberActivityForTest({agent_window_snapshot_revision: 7, agent_windows: {'1': [
+      {kind: 'codex', state: 'working', pane_target: '%2', window_index: 2, window_label: '2:codex', path: '/stale-tabber-metadata'},
+    ]}});
+    const mismatchedRevisionModel = api.sessionAgentWindowStatusModelForTest('1');
+    assert.equal(mismatchedRevisionModel.stale, true, 'a newer statusd row never merges Tabber metadata from a different snapshot generation');
+    assert.equal(mismatchedRevisionModel.agents[0].path || '', '', 'mismatched Tabber metadata is withheld until the normal refresh reaches the same revision');
+    api.setTabberActivityForTest({agent_window_snapshot_revision: 8, agent_windows: {'1': [
+      {kind: 'codex', state: 'working', pane_target: '%2', window_index: 2, window_label: '2:codex', path: '/same-revision-tabber-metadata'},
+    ]}});
+    const matchedRevisionModel = api.sessionAgentWindowStatusModelForTest('1');
+    assert.equal(matchedRevisionModel.stale, false, 'matching statusd and Tabber generations retain normal metadata enrichment');
+    assert.equal(matchedRevisionModel.agents[0].path, '/same-revision-tabber-metadata');
     const sourceInfo = {panes: [{window: '2', window_name: 'codex', process_label: 'codex', window_active: true, active: true}], agent_windows: [
       {kind: 'codex', state: 'working', window_index: 2, window_label: '2:codex'},
     ]};
@@ -4875,6 +4894,18 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(greenTabSummary), 'YO!info Tab group shows green inside the shared tab token when all child tmux sub-windows are working');
     assert.ok(greenTabSummary.includes('agent-window-status-dot--transition-glow'), 'YO!info inherits the same animated green status marker as the Tab surface');
     assert.equal((greenTabSummary.match(/\bagent-window-status-dot(?=\s|")/g) || []).length, 1, 'YO!info Tab group summaries do not render a duplicate standalone status dot next to the tab token');
+    const exactWindowRecords = [
+      {tabKey: 'exact-window-tab', tabLabel: 'exact-window-tab', tabSession: 'exact-window-tab', aiKey: '0:codex', aiLabel: '0:codex', aiKind: 'codex', aiWindow: '0', aiWindowIndex: '0', aiState: 'idle', aiWorkingStoppedTs: statusNow},
+      {tabKey: 'exact-window-tab', tabLabel: 'exact-window-tab', tabSession: 'exact-window-tab', aiKey: '3:codex', aiLabel: '3:codex', aiKind: 'codex', aiWindow: '3', aiWindowIndex: '3', aiState: 'working'},
+    ];
+    api.setAutoApproveStateForTest('exact-window-tab', {agent_windows: [
+      {kind: 'codex', state: 'idle', window_index: 0, working_stopped_ts: statusNow},
+      {kind: 'codex', state: 'working', window_index: 3},
+    ]});
+    const exactWindowHtml = api.infoTreeHtmlForTest(exactWindowRecords, ['tab'], {key: 'tab', dir: 'asc'});
+    const exactWindowSummary = tabSummaryFor('exact-window-tab');
+    assert.equal(/tmux-pane-tab-token[\s\S]*info-tree-tab-group-status[\s\S]*status-indicator--working/.test(exactWindowSummary), false, 'YO!info Tab group uses the representative tmux sub-window state instead of borrowing a green working glyph from a different child window');
+    assert.ok(/data-info-open-ai-window="3"[\s\S]*status-indicator--working/.test(exactWindowHtml), 'YO!info still renders the real working child tmux sub-window row as green');
     const noOwnerRecord = {
       id: 'orphan',
       tabKey: '__no_tab__',
@@ -5818,7 +5849,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const api = loadYolomux();
     api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
     const lines = [
-      terminalLine('• Documented it in docs/specs/SHARE_TEST_INVENTORY.md:123'),
+      terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123'),
       terminalLine('Open https://example.com/guide here'),
     ];
     const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
@@ -5830,14 +5861,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       line: fileRef?.line,
       range: fileRef?.range,
     }), {
-      text: 'docs/specs/SHARE_TEST_INVENTORY.md:123',
-      path: 'docs/specs/SHARE_TEST_INVENTORY.md',
+      text: 'tests/SHARE_TEST_INVENTORY.md:123',
+      path: 'tests/SHARE_TEST_INVENTORY.md',
       line: 123,
-      range: {start: {x: 20, y: 1}, end: {x: 57, y: 1}},
+      range: {start: {x: 20, y: 1}, end: {x: 52, y: 1}},
     }, 'terminal output detects relative file:line references as context-menu references');
-    assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
+    assert.equal(api.terminalFileReferenceAbsolutePath('1', fileRef), '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', 'relative terminal file refs resolve against the active pane cwd');
     assert.equal(api.terminalWrappedLineLinks(term, 1).some(ref => ref.type === 'file'), true, 'file references are visually marked for right-click open/copy actions');
-    assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'docs/specs/SHARE_TEST_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
+    assert.equal(api.terminalReferenceAtPosition(term, {x: 32, y: 1})?.text, 'tests/SHARE_TEST_INVENTORY.md:123', 'right-click hit-testing finds the file ref under the cursor');
     const urlRef = api.terminalReferenceAtPosition(term, {x: 8, y: 2});
     assert.equal(urlRef.type, 'url', 'right-click hit-testing still finds URLs');
     assert.equal(urlRef.href, 'https://example.com/guide');
@@ -6633,7 +6664,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function reconcileWorkingAgentTransitionNotifications\(session, payload = \{\}\)[\s\S]*sessionAgentWindowStatusPayloads\(session, transcriptMetadataState\.payload\.sessions\?\.\[session\], payload\)[\s\S]*workingAgentFinishedRecently\(agent\)[\s\S]*scheduleWorkingAgentTransitionNotification/.test(notificationSource), 'one payload-level transition classifier uses the shared visible-status source plus fresh server stop timestamps for delayed green-to-red/yellow notifications');
     assert.ok(notificationSource.includes('function reconcileWorkingAgentTransitionNotifications(session, payload = {})') && notificationSource.includes('function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {})'), 'green-to-red has one per-window notification owner instead of also firing a generic session-state alert');
     assert.ok(/renderAutoApproveStatusSurfaces\(result\);[\s\S]*workingAgentTransitionNotifications \+= reconcileWorkingAgentTransitionNotifications\(session, state\)/.test(autoApproveSource), 'auto-approve payload ingestion delivers transition notifications after status rendering preserves the toast container');
-    assert.ok(/function queueClientPushEvent\(type, payload = \{\}\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*flushQueuedClientPushEvents\(\)[\s\S]*requestAnimationFrame/.test(autoApproveSource), 'hidden-tab SSE delivery bypasses requestAnimationFrame because Chrome pauses it in the background');
+    assert.ok(/function queueClientPushEvent\(type, payload = \{\}, envelope = \{\}\)[\s\S]*document\.visibilityState === 'hidden'[\s\S]*flushQueuedClientPushEvents\(\)[\s\S]*requestAnimationFrame/.test(autoApproveSource), 'hidden-tab SSE delivery bypasses requestAnimationFrame because Chrome pauses it in the background');
     assert.equal(activitySource.includes('maybeNotifyWorkingAgentTransition('), false, 'status renderers do not own notification delivery');
   });
 
@@ -6699,7 +6730,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(source.includes('refreshTranscriptsFromRuntime'), false, 'metadata fallback poll wrapper is removed');
     assert.equal(source.includes('refreshWatchedFilesystemFromRuntime'), false, 'filesystem fallback poll wrapper is removed');
     assert.equal(source.includes('refreshSettingsFromRuntime'), false, 'settings fallback poll wrapper is removed');
-    assert.ok(source.includes('syncServerWatchRoots({renew: true})'), 'connected push mode renews watched roots without polling the filesystem');
+    assert.ok(source.includes('syncServerWatchRoots({immediate: true, force: true})'), 'SSE ready/reconnect restores watched roots without a browser renewal interval');
     assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side SSE polling');
     assert.ok(source.includes('function clientServerWatchRoots()'), 'client derives watched directory roots from Finder/session-file state');
     assert.ok(/function visibleFileEditorWatchFiles\(\)[\s\S]*?activePaneItems\(\)/.test(source), 'client reports active visible editor files separately from directory roots');
@@ -6708,20 +6739,21 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(source.includes('background_files: backgroundFileEditorWatchFiles()'), 'watch state includes background editor file paths for the slower files_changed stream');
     assert.ok(/function transcriptPreviewPaneIsActive\(session\)[\s\S]*pane\?\.classList\?\.contains\(CLS\.active\)[\s\S]*preview\?\.isConnected/.test(source), 'transcript context previews only subscribe when their transcript pane is active');
     assert.ok(/function transcriptContextWatchRequests\(\)[\s\S]*activeSessions[\s\S]*filter\(transcriptPreviewPaneIsActive\)[\s\S]*messages: transcriptPreviewMessages/.test(source), 'watch state derives context-item requests from visible transcript previews');
-    assert.ok(source.includes("['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']"), 'client listens for the expected push event types');
+    assert.ok(source.includes("const clientPushEventHandlers = Object.freeze(") && source.includes("for (const type of Object.keys(clientPushEventHandlers))"), 'one browser dispatch table drives every EventSource listener');
     assert.ok(/if \(type === 'attention_acks_changed'\)[\s\S]{0,120}applyAttentionAcknowledgementResponse\(payload\)/.test(source), 'attention acknowledgement pushes apply scoped key patches without refetching every session status');
-    assert.ok(/addEventListener\('ready',[\s\S]{0,520}refreshAutoStatuses\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches auto status so stale YO markers are backfilled after reconnect');
-    assert.ok(/addEventListener\('ready',[\s\S]{0,700}refreshBackgroundOwnerStatus\(\{preferFresh: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status after reconnect');
+    assert.ok(/function repairClientEventReadyChannels\(channels\)[\s\S]*refreshAutoStatuses\(\{force: true\}\)\.catch/.test(source), 'client-events ready re-fetches auto status through its scoped repair owner');
+    assert.ok(/function repairClientEventReadyChannels\(channels\)[\s\S]*refreshBackgroundOwnerStatus\(\{preferFresh: true\}\)\.catch/.test(source), 'client-events ready re-fetches background owner status through its scoped repair owner');
     assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
     assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
     const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
     assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (document.visibilityState === 'hidden') return null;\n    if (clientEventTransportState.connected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll runs only on visible pages while client-events is disconnected');
     assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
     assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
-    assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,180}applyBackgroundOwnerStatusPayload\(payload\)/.test(source), 'background_owner_changed applies direct owner status');
-    assert.ok(/if \(type === 'background_refresh_done'\)[\s\S]{0,180}payload\.role === 'search-index'[\s\S]{0,160}refreshBackgroundOwnerStatus\(\{force: true\}\)/.test(source), 'search-index refresh completion refreshes owner status');
-    assert.ok(/payload\.role === 'search-index'[\s\S]{0,420}commandPaletteEffectiveMode\(\) === 'files'[\s\S]{0,180}refreshFileQuickOpenCandidates\(commandPaletteState.query\)/.test(source), 'search-index refresh completion reruns an open file search against the rebuilt index');
+    assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,280}applyBackgroundOwnerStatusPayload\(payload\)[\s\S]{0,240}else if \(typeof refreshAllIndexedDirsStatus === 'function'\)[\s\S]{0,360}refreshAllIndexedDirsStatus\(\)/.test(source), 'background_owner_changed applies direct owner status and revalidates only demanded index roots');
+    assert.ok(/if \(type === 'background_refresh_done'\)[\s\S]{0,240}payload\.role === 'search-index'[\s\S]{0,260}applyFileIndexStatusPayload\(payload\.root, payload\)[\s\S]{0,260}if \(payload\.root && !applied\) refreshFileIndexStatus\(payload\.root\)/.test(source), 'search-index completion applies its lifecycle payload and only falls back to a root read when it cannot apply it');
+    assert.ok(/payload\.role === 'search-index'[\s\S]{0,700}commandPaletteEffectiveMode\(\) === 'files'[\s\S]{0,180}refreshFileQuickOpenCandidates\(commandPaletteState.query\)/.test(source), 'search-index refresh completion reruns an open file search against the rebuilt index');
     assert.ok(/if \(payload\.role === 'session-files'\)[\s\S]{0,260}fetchSessionFiles\(\{silent: true\}\)/.test(source), 'session-files refresh completion refetches the visible Differ payload from the follower cache');
+    assert.ok(/if \(payload\.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab\(tabberItemId\) && document\.visibilityState !== 'hidden'\)[\s\S]{0,180}fetchTabberActivity\(\)/.test(source), 'Tabber refresh completion refetches only an active visible Tabber from its readable shared cache');
     assert.ok(/if \(type === 'tmux_signals_changed'\)[\s\S]{0,120}applyTmuxSignalsPayload\(payload\)/.test(source), 'tmux_signals_changed applies direct payloads');
     assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
     assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,220}applyTranscriptsPayload\(payload\.data, \{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/.test(source), 'transcripts_changed applies direct metadata payloads');
@@ -6809,6 +6841,10 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a host without shares never performs the recurring backup request');
     api.setActiveSharesForTest([{active: true, token: 'active-token'}]);
     assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'an active share retains expiry and viewer-status backup polling');
+    api.setShareHostSocketForTest('active-token', {readyState: 1});
+    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), false, 'a healthy share socket suppresses the host backup request');
+    api.setShareHostSocketForTest('active-token', {readyState: 3});
+    assert.equal(api.shareHostStatusBackupPollDueForTest(Number.MAX_SAFE_INTEGER), true, 'a closed share socket re-enables the bounded host repair request');
   });
 
   await testAsync('background owner context menu claims follower leadership', async () => {

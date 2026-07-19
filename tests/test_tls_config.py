@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from yolomux_lib import cli
+from yolomux_lib.local_services import registry as cli_registry
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.server import https_redirect_response
 
@@ -192,43 +193,52 @@ def test_parse_args_supports_runtime_report(monkeypatch):
     assert args.sessions == ["8002"]
 
 
-def test_print_runtime_report_outputs_json(monkeypatch, capsys):
-    captured = {}
+def _forbid_app_construction(monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise AssertionError("print_runtime_report must never construct a TmuxWebtermApp")
 
-    class FakeControl:
-        def stop(self):
-            captured["control_stopped"] = True
+    monkeypatch.setattr(cli, "TmuxWebtermApp", explode)
 
-    class FakeApp:
-        def __init__(self, sessions, dangerously_yolo=False):
-            captured["sessions"] = sessions
-            captured["dangerously_yolo"] = dangerously_yolo
-            self.control_server = FakeControl()
 
-        def runtime_report_payload(self, **kwargs):
-            captured["runtime_kwargs"] = kwargs
-            return {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}
+def test_print_runtime_report_uses_live_owner_control_socket_without_an_app(monkeypatch, capsys):
+    _forbid_app_construction(monkeypatch)
+    requests = []
+    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": {"port": 8002}})
 
-        def stop_auto_approve_all(self):
-            captured["stopped"] = True
+    def fake_control(owner, request):
+        requests.append((owner, request))
+        return {"ok": True, "report": {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}}
 
-    monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
-    monkeypatch.setattr(
-        cli,
-        "runtime_report_background_status",
-        lambda: ({"current_owner": {"port": 8002}}, {"ok": True}, {"status": "owner"}),
-    )
+    monkeypatch.setattr(cli, "send_yolomux_control_request", fake_control)
 
     assert cli.print_runtime_report(["8002"], dangerously_yolo=True) == 0
 
-    assert json.loads(capsys.readouterr().out) == {"ok": True, "top_endpoints": [{"surface": "GET /api/session-files"}]}
-    assert captured["sessions"] == ["8002"]
-    assert captured["dangerously_yolo"] is True
-    assert captured["runtime_kwargs"]["background_status"] == {"status": "owner"}
-    assert captured["runtime_kwargs"]["owner_debug"] == {"current_owner": {"port": 8002}}
-    assert captured["runtime_kwargs"]["owner_control_response"] == {"ok": True}
-    assert captured["stopped"] is True
-    assert captured["control_stopped"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["top_endpoints"] == [{"surface": "GET /api/session-files"}]
+    assert payload["owner_debug"] == {"current_owner": {"port": 8002}}
+    assert requests == [({"port": 8002}, {"action": "runtime_report"})]
+
+
+def test_print_runtime_report_degrades_to_bounded_ledger_records(monkeypatch, capsys, tmp_path):
+    _forbid_app_construction(monkeypatch)
+    monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": None})
+    monkeypatch.setattr(cli, "send_yolomux_control_request", lambda owner, request: {"ok": False, "error": "no owner"})
+    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    lease_dir = tmp_path / "server-leases"
+    lease_dir.mkdir(parents=True)
+    (lease_dir / "8881.lock").write_text(json.dumps({"pid": 400, "port": 8881}), encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "bounded_process_table",
+        lambda: {400: cli_registry.ProcessTableEntry(1, 400, 5.0, "python3 -u yolomux.py 8880 /tmp/log --port 8881 --dang")},
+    )
+
+    assert cli.print_runtime_report([], dangerously_yolo=False) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "bounded-records"
+    assert payload["port_groups"] == [{"port": 8881, "pid": 400, "pgid": 400, "member_pids": [400]}]
+    assert payload["local_service_groups"] == []
 
 
 def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):

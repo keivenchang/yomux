@@ -1,4 +1,5 @@
 import errno
+import fcntl
 import inspect
 import io
 import json
@@ -1252,9 +1253,10 @@ def test_tmux_signal_event_watcher_is_owned_by_client_event_lifecycle():
     assert "self.start_tmux_signal_event_watcher()" in app_start_body
     assert "self.tmux_signal_cache.clear()" in app_event_body
     assert "TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS" in app_event_body
-    assert "record.next_tmux_signal_poll_at = 0.0" in app_event_body
+    assert "record.tmux_signal_refresh_at" in app_event_body
     assert "record.wake_event.set()" in app_event_body
     assert "self.server.app.start_client_event_watcher()" in stream_body
+    assert "self.server.app.client_events.ready_snapshot(subscriber_id)" in stream_body
     assert "self.server.app.stop_client_event_watcher_if_idle()" in stream_body
     assert "self.app.start_client_event_watcher()" not in server_init_body
     assert "self.app.stop_client_event_watcher()" in server_close_body
@@ -2954,8 +2956,14 @@ def test_share_terminal_upstream_refreshes_existing_viewer_attach():
 
 
 def test_share_terminal_upstream_start_closes_openpty_fds_on_setup_error(monkeypatch):
-    master_fd = os.open(os.devnull, os.O_RDONLY)
-    slave_fd = os.open(os.devnull, os.O_RDONLY)
+    # Avoid the busy low descriptor range used by concurrent server fixtures: an unrelated
+    # background socket can otherwise reuse a just-closed descriptor before this assertion.
+    raw_master_fd = os.open(os.devnull, os.O_RDONLY)
+    raw_slave_fd = os.open(os.devnull, os.O_RDONLY)
+    master_fd = fcntl.fcntl(raw_master_fd, fcntl.F_DUPFD, 128)
+    slave_fd = fcntl.fcntl(raw_slave_fd, fcntl.F_DUPFD, 129)
+    os.close(raw_master_fd)
+    os.close(raw_slave_fd)
     upstream = server_module.ShareTerminalUpstream(
         SimpleNamespace(host_pty_dimensions_for_session=lambda _session: (24, 80)),
         "token",

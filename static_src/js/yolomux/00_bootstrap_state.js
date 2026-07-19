@@ -687,6 +687,9 @@ const tabberActivityState = {
   loaded: false,
   request: null,
 };
+// One per-session owner for event-log HTTP repairs. SSE invalidations may arrive
+// in bursts; retain at most one follow-up fetch after the readable log changes.
+const eventLogRefreshRecords = new Map();
 // per-repo collapse state for the Modified-files panel repo headers (keyed by repo path).
 let changesRepoCollapsed = readStoredSet(changesRepoCollapsedStorageKey);
 const fileExplorerSessionFilesState = {
@@ -702,6 +705,9 @@ const explicitPaneFocusState = {
   item: shareBootstrapFinderSession(),
   tmuxSession: shareBootstrapFinderSession(),
 };
+// Finder's root synchronization and Differ's changed-files query are independent surfaces. Keep
+// their explicit selections separate so choosing a Finder root never silently changes the Differ.
+let fileExplorerFinderSelectedSession = shareBootstrapFinderSession();
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerSyncTargetRecords = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
@@ -716,7 +722,8 @@ let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead"
 let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large'
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large' | 'error'
+const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
@@ -1654,6 +1661,8 @@ const clientEventTransportState = {
   demandSignature: '',
   demandTimer: null,
   queue: new Map(),
+  resourceEpoch: '',
+  resourceRevisions: new Map(),
   frame: 0,
   resyncTimer: null,
 };

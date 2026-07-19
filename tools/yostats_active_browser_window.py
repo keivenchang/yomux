@@ -192,6 +192,23 @@ def capture_measurement_metrics() -> dict[str, object]:
     return performance
 
 
+def install_measurement_fetch_header(driver: webdriver.Chrome, marker: str) -> None:
+    """Tag in-page fetches after navigation without retaining the marker in app state."""
+    driver.execute_script(
+        """
+        const marker = arguments[0];
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = (resource, init) => {
+          const request = resource instanceof Request ? resource : new Request(resource, init);
+          const headers = new Headers(request.headers);
+          headers.set('X-YOLOmux-Measurement', marker);
+          return originalFetch(new Request(request, {headers}));
+        };
+        """,
+        marker,
+    )
+
+
 def authenticate_and_open(driver: webdriver.Chrome, base_url: str, port: int, username: str | None, timeout: int) -> list[str]:
     wait = WebDriverWait(driver, timeout)
     install_local_auth_cookie(driver, base_url, port, capture_auth_user(username))
@@ -433,7 +450,8 @@ def main() -> int:
     options.add_argument("--window-size=1600,1000")
     options.set_capability("acceptInsecureCerts", True)
     driver = webdriver.Chrome(options=options)
-    driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"X-YOLOmux-Measurement": f"capture-{uuid.uuid4().hex}"}})
+    measurement_marker = f"capture-{uuid.uuid4().hex}"
+    driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"X-YOLOmux-Measurement": measurement_marker}})
     # Client-side Selenium timeouts: a wedged server or chromedriver must
     # surface as an exception that reaches cleanup, never an infinite block.
     driver.set_page_load_timeout(60)
@@ -465,6 +483,7 @@ def main() -> int:
     watchdog_thread.start()
     try:
         tmux_sessions = authenticate_and_open(driver, base_url, args.port, args.username, timeout=20)
+        install_measurement_fetch_header(driver, measurement_marker)
         driver.execute_script("clearClientPerfCounters(); performance.clearResourceTimings()")
         measurement_before = capture_measurement_metrics()
         benchmark_output = args.output.with_name(f"{args.output.stem}-contention.json")

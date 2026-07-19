@@ -11,6 +11,7 @@ from .local_services.client import LocalServiceClient
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
 from .statusd_protocol import STATUSD_SERVICE_NAME
+from .statusd_protocol import STATUSD_CODE_REVISION
 from .statusd_protocol import stamped_request
 
 
@@ -26,7 +27,7 @@ class StatusClient(LocalServiceClient):
     """Typed byte-forwarding client for the shared status owner."""
 
     def __init__(self, socket_path: Path | None = None):
-        super().__init__(STATUSD_SERVICE_NAME, "yolomux_lib.statusd", socket_path or default_socket_path(), LOCAL_RPC_VERSION, idle_seconds=STATUSD_DEFAULT_IDLE_SECONDS, service_dir=Path(socket_path).parent if socket_path is not None else common.STATE_DIR / "services")
+        super().__init__(STATUSD_SERVICE_NAME, "yolomux_lib.statusd", socket_path or default_socket_path(), LOCAL_RPC_VERSION, idle_seconds=STATUSD_DEFAULT_IDLE_SECONDS, code_revision=STATUSD_CODE_REVISION, build_revision=1, service_dir=Path(socket_path).parent if socket_path is not None else common.STATE_DIR / "services")
 
     def snapshot(self, sessions: list[str], session: str | None = None, timeout: float = 1.0) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
@@ -47,6 +48,13 @@ class StatusClient(LocalServiceClient):
 
     def wait_generation(self, after_generation: int, timeout: float) -> dict[str, Any]:
         return self.request(stamped_request("wait_generation", after_generation=after_generation, timeout_seconds=timeout), timeout=timeout + 0.1)
+
+    def acquire_generation_lease(self) -> dict[str, Any]:
+        """Keep statusd's demand-scoped generation refresher alive for one web process."""
+        return self.registry.acquire_lease()
+
+    def release_generation_lease(self, lease_id: str) -> dict[str, Any]:
+        return self.registry.release_lease(lease_id)
 
     def invalidate(self, reason: str) -> dict[str, Any]:
         return self.request(stamped_request("invalidate", reason=str(reason)[:80]), timeout=0.25)

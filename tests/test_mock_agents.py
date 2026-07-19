@@ -2588,7 +2588,7 @@ def test_tmux_claude_shell_launch_scrolls_history_instead_of_clobbering(visual_t
     visual_tmux.send_keys(session, "printf 'history-one\\nhistory-two\\nhistory-three\\nhistory-four\\n'", "Enter")
     printed, pane = visual_tmux.wait_until(session, lambda text: "history-four" in text)
     assert printed, pane
-    visual_tmux.send_keys(session, "python3 ./utils/claude.py --mock", "Enter")
+    visual_tmux.send_keys(session, "python3 tools/claude.py --mock", "Enter")
     booted, pane = visual_tmux.wait_until(
         session,
         lambda text: "Claude Code v2.1.185" in text and '❯ Try "fix typecheck errors"' in text,

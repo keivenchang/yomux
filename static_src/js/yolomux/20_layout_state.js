@@ -1121,8 +1121,11 @@ function applyLayoutUrlFinderSeed(finder = {}) {
     if (root) fileExplorerRoot = normalizeDirectoryPath(expandUserPath(root));
   }
   if ('session' in finder && isTmuxSession(String(finder.session || '').trim())) {
-    fileExplorerChangesSelectedSession = String(finder.session || '').trim();
-    setExplicitPaneFocusItem(fileExplorerChangesSelectedSession, {allowInactive: true, renderMenu: false});
+    fileExplorerFinderSelectedSession = String(finder.session || '').trim();
+    setExplicitPaneFocusItem(fileExplorerFinderSelectedSession, {allowInactive: true, renderMenu: false});
+  }
+  if ('differSession' in finder && isTmuxSession(String(finder.differSession || '').trim())) {
+    fileExplorerChangesSelectedSession = String(finder.differSession || '').trim();
   }
   if ('showHidden' in finder) fileExplorerShowHidden = finder.showHidden === true;
   applyFileExplorerViewSettingsSeed(finder);

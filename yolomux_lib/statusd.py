@@ -21,9 +21,11 @@ from .local_services.rpc import safe_socket_path
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
 from .local_services.runtime import LocalRpcServiceState
+from .local_services.runtime import reap_dead_client_leases
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
+from .statusd_protocol import STATUSD_CODE_REVISION
 from .statusd_protocol import STATUSD_SERVICE_NAME
 from .statusd_protocol import StatusProtocolError
 from .statusd_protocol import StatusSnapshotMetadata
@@ -35,6 +37,7 @@ from .statusd_client import default_socket_path
 
 
 STATUSD_MAX_SESSIONS = 256
+STATUSD_CONCURRENT_HANDLER_LIMIT = 8
 
 # Working/idle classification changes on every agent turn transition, and nothing about that
 # transition (no approval prompt, no attention-ack) triggers an explicit invalidate() call. Without
@@ -63,6 +66,7 @@ class PersistentStatusService(LocalRpcServiceState):
         self.inventory: tuple[dict[str, object], bytes] | None = None
         self.inventory_generation = 0
         self.inventory_signature: str | None = None
+        self.refresh_worker: threading.Thread | None = None
 
     def _sessions(self, request: dict[str, Any]) -> tuple[str, ...]:
         raw = request.get("sessions", [])
@@ -89,9 +93,16 @@ class PersistentStatusService(LocalRpcServiceState):
         if not isinstance(payload, dict):
             raise StatusProtocolError("invalid status payload")
         payload["timings"] = timings
+        # Reserve the generation before encoding so the immutable body forwarded to every
+        # consumer identifies the exact statusd snapshot it represents. Do not advance the
+        # public counter until this body is committed: waiters must never observe a generation
+        # for a snapshot that cannot yet be read.
+        with self.lock:
+            generation = self.generation + 1
+        payload["agent_window_snapshot_revision"] = generation
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         with self.lock:
-            self.generation += 1
+            self.generation = generation
             self.build_count += 1
             self.encode_count += 1
             metadata = StatusSnapshotMetadata(
@@ -189,7 +200,12 @@ class PersistentStatusService(LocalRpcServiceState):
                 payload = self.snapshot_payload
             if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), dict) or session not in payload["sessions"]:
                 return {"ok": False, "status": int(HTTPStatus.NOT_FOUND), "error": "unknown session"}, b""
-            body = json.dumps(payload["sessions"][session], sort_keys=True, separators=(",", ":")).encode("utf-8")
+            session_payload = payload["sessions"][session]
+            if not isinstance(session_payload, dict):
+                return {"ok": False, "status": int(HTTPStatus.NOT_FOUND), "error": "unknown session"}, b""
+            # Session-scoped reads are still statusd snapshots; retain the source revision so
+            # a client cannot merge this state with Tabber data from a different generation.
+            body = json.dumps({**session_payload, "agent_window_snapshot_revision": metadata.generation}, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return {"ok": True, **metadata.to_dict()}, body
 
     def _wait_generation(self, request: dict[str, Any]) -> tuple[dict[str, object], bytes]:
@@ -197,7 +213,7 @@ class PersistentStatusService(LocalRpcServiceState):
         timeout = float(request.get("timeout_seconds") or 0.0)
         deadline = time.monotonic() + timeout
         with self.lock:
-            while self.generation <= after and timeout > 0:
+            while self.generation <= after and timeout > 0 and not self.stop_event.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -205,11 +221,53 @@ class PersistentStatusService(LocalRpcServiceState):
             metadata = self.snapshot[0] if self.snapshot else None
         return {"ok": True, "protocol_version": STATUSD_PROTOCOL_VERSION, "generation": metadata.generation if metadata else 0, "changed": bool(metadata and metadata.generation > after)}, b""
 
+    def refresh_loop(self) -> None:
+        """Rebuild only while a web process holds a status generation lease.
+
+        A worker-to-idle transition has no reliable immediate producer today.
+        This daemon-owned cadence is therefore a correctness reconciliation, not
+        a per-web polling substitute; each web process long-waits its generation.
+        """
+        while not self.stop_event.is_set():
+            with self.lock:
+                while not self.stop_event.is_set() and (not self.leases or self.snapshot is None):
+                    self.lock.wait(0.1)
+                if self.stop_event.is_set():
+                    return
+                metadata, _body = self.snapshot
+                invalidated = bool(self.invalidation_reason)
+                remaining = 0.0 if invalidated else max(0.0, STATUSD_SNAPSHOT_MAX_AGE_SECONDS - (time.time() - metadata.built_at))
+                if remaining > 0:
+                    self.lock.wait(remaining)
+                    continue
+                sessions = list(self.session_names)
+            try:
+                self._snapshot({"sessions": sessions})
+            except (OSError, RuntimeError, StatusProtocolError) as error:
+                with self.lock:
+                    self.last_error = str(error)[:256]
+
+    def start_refresh_worker(self) -> None:
+        with self.lock:
+            worker = self.refresh_worker
+            if worker is not None and worker.is_alive():
+                return
+            worker = threading.Thread(target=self.refresh_loop, name="statusd-refresh", daemon=True)
+            self.refresh_worker = worker
+        worker.start()
+
+    def idle_due(self) -> bool:
+        with self.lock:
+            # A test worker or a crashed web process cannot release its lease. Reap before
+            # deciding idleness so its abandoned lease cannot pin a private daemon forever.
+            reap_dead_client_leases(self.leases)
+            return not self.leases and time.monotonic() - self.last_client_at >= self.idle_seconds
+
     def status(self) -> dict[str, object]:
         with self.lock:
             snapshot = self.snapshot[0] if self.snapshot else None
             return {
-                "ok": True, "service": STATUSD_SERVICE_NAME, "pid": os.getpid(), "version": STATUSD_PROTOCOL_VERSION,
+                "ok": True, "service": STATUSD_SERVICE_NAME, "pid": os.getpid(), "version": STATUSD_PROTOCOL_VERSION, "code_revision": STATUSD_CODE_REVISION, "build_revision": 1,
                 "socket": str(self.socket_path), "started_at": self.started_at, "clients": len(self.leases),
                 "generation": self.generation, "build_count": self.build_count, "encode_count": self.encode_count,
                 "inventory_generation": self.inventory_generation,
@@ -225,7 +283,7 @@ class PersistentStatusService(LocalRpcServiceState):
             return {"ok": False, "error": str(error), "required_protocol_version": STATUSD_PROTOCOL_VERSION}, b""
         action = str(request["action"])
         if action == "ping":
-            return {"ok": True, "service": STATUSD_SERVICE_NAME, "pid": os.getpid(), "version": STATUSD_PROTOCOL_VERSION}, b""
+            return {"ok": True, "service": STATUSD_SERVICE_NAME, "pid": os.getpid(), "version": STATUSD_PROTOCOL_VERSION, "code_revision": STATUSD_CODE_REVISION, "build_revision": 1}, b""
         if action in {"status", "profile"}:
             return self.status(), b""
         if action == "snapshot":
@@ -246,25 +304,39 @@ class PersistentStatusService(LocalRpcServiceState):
                 self.lock.notify_all()
             return {"ok": True, "generation": self.generation}, b""
         if action == "lease":
-            return {**acquire_client_lease(self.leases, request.get("client_pid")), "version": STATUSD_PROTOCOL_VERSION}, b""
+            with self.lock:
+                response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("lease_id"))
+                self.lock.notify_all()
+            return {**response, "version": STATUSD_PROTOCOL_VERSION}, b""
         if action == "release":
-            return release_client_lease(self.leases, request.get("lease_id")), b""
+            with self.lock:
+                response = release_client_lease(self.leases, request.get("lease_id"))
+                self.lock.notify_all()
+            return response, b""
         if action == "shutdown":
             self.stop_event.set()
+            with self.lock:
+                self.lock.notify_all()
             return {"ok": True, "shutdown": True}, b""
         if action == "shutdown_if_idle":
-            if self.leases:
+            with self.lock:
+                leased = bool(self.leases)
+            if leased:
                 return {"ok": True, "shutdown": False, "leases": len(self.leases)}, b""
             self.stop_event.set()
+            with self.lock:
+                self.lock.notify_all()
             return {"ok": True, "shutdown": True}, b""
         return {"ok": False, "error": "unknown status action"}, b""
 
     def run(self) -> int:
+        self.start_refresh_worker()
         return run_local_rpc_service(
             socket_path=self.socket_path, lock_path=self.lock_path, service_name=STATUSD_SERVICE_NAME,
             stop_event=self.stop_event, handle=self.handle,
-            on_idle=lambda: not self.leases and time.monotonic() - self.last_client_at >= self.idle_seconds,
+            on_idle=self.idle_due,
             on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            concurrent_handlers=STATUSD_CONCURRENT_HANDLER_LIMIT,
         )
 
 

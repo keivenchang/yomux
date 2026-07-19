@@ -28,7 +28,7 @@ from .rpc import safe_socket_path
 from .runtime import redact_local_service_text
 
 
-LOCAL_SERVICE_REGISTRY_VERSION = 1
+LOCAL_SERVICE_REGISTRY_VERSION = 2
 LOCAL_SERVICE_IDLE_SECONDS = 60.0
 # A cold daemon can be delayed by concurrent browser/E2E workers on a
 # developer machine. Startup remains bounded, but it must outlast that normal
@@ -40,6 +40,164 @@ LOCAL_SERVICE_HEALTH_CACHE_SECONDS = 1.0
 LOCAL_SERVICE_IDLE_SECONDS_ENV = "YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS"
 LOCAL_SERVICE_START_EXIT_LIMIT = 3
 LOCAL_SERVICE_STDERR_TAIL_BYTES = 4096
+
+
+_LAUNCH_CONTEXT: dict[str, int] = {}
+
+
+def set_local_service_launch_context(port: int) -> None:
+    """Record which web port owns subsequently written service records.
+
+    The ledger (`tracked_local_service_groups`) needs launch provenance so a
+    watchdog can tell "spawned for this port" from "shared daemon another port
+    still leases". One process serves one port, so module state is the owner.
+    """
+    _LAUNCH_CONTEXT["port"] = int(port)
+
+
+def local_service_launch_port() -> int:
+    return int(_LAUNCH_CONTEXT.get("port") or 0)
+
+
+def process_group_id(pid: int) -> int:
+    try:
+        return os.getpgid(int(pid))
+    except (OSError, ValueError):
+        return 0
+
+
+@dataclass(frozen=True)
+class ProcessTableEntry:
+    ppid: int
+    pgid: int
+    cpu_seconds: float
+    command: str
+
+
+def bounded_process_table() -> dict[int, ProcessTableEntry]:
+    """One bounded read of pid -> (ppid, pgid, cpu seconds, command).
+
+    This is the single identity source for the ledger and the overload
+    watchdog. Ledger membership decisions never use bare command-name
+    matching; the table supplies exact parent/group identity plus the command
+    line so a record's PID is only trusted when its command still names the
+    record's exact socket, and cumulative CPU time rides along so overload
+    sampling does not need a second process sweep.
+    """
+    try:
+        completed = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,pgid=,time=,command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    table: dict[int, ProcessTableEntry] = {}
+    for line in str(getattr(completed, "stdout", "") or "").splitlines():
+        fields = line.split(None, 4)
+        if len(fields) < 4:
+            continue
+        try:
+            pid, ppid, pgid = int(fields[0]), int(fields[1]), int(fields[2])
+        except ValueError:
+            continue
+        cpu_seconds = parse_ps_cpu_seconds(fields[3])
+        if cpu_seconds is None:
+            continue
+        table[pid] = ProcessTableEntry(ppid, pgid, cpu_seconds, fields[4] if len(fields) > 4 else "")
+    return table
+
+
+def service_record_identity_matches(record: dict[str, Any], table: dict[int, ProcessTableEntry]) -> bool:
+    """A record's PID counts only when the live command names its exact socket."""
+    pid = int(record.get("pid") or 0)
+    socket_path = str(record.get("socket") or "")
+    if pid <= 0 or not socket_path or pid not in table:
+        return False
+    return f"--socket {socket_path}" in table[pid].command
+
+
+def tracked_local_service_groups(
+    service_dir: Path,
+    table: dict[int, tuple[int, int, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Enumerate the identity-verified process groups this registry dir owns.
+
+    Every entry is anchored to a persisted service record whose PID passed the
+    exact-socket identity check; members are the PIDs sharing the service's
+    process group (each service is spawned with start_new_session, so its
+    spawn/pool workers inherit that fresh group and nothing else can join it).
+    Unverifiable records yield no entry — the caller must never act on a PID
+    that is not in a returned group.
+    """
+    if table is None:
+        table = bounded_process_table()
+    groups: list[dict[str, Any]] = []
+    try:
+        record_paths = sorted(Path(service_dir).glob("*.service.json"))
+    except OSError:
+        return groups
+    for record_path in record_paths:
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, dict) or not service_record_identity_matches(record, table):
+            continue
+        pid = int(record.get("pid") or 0)
+        pgid = table[pid].pgid
+        members = tuple(sorted(member for member, entry in table.items() if entry.pgid == pgid))
+        groups.append(
+            {
+                "service": str(record.get("service") or ""),
+                "pid": pid,
+                "pgid": pgid,
+                "socket": str(record.get("socket") or ""),
+                "launcher_pid": int(record.get("launcher_pid") or 0),
+                "launcher_port": int(record.get("launcher_port") or 0),
+                "member_pids": members,
+                "record_path": str(record_path),
+            }
+        )
+    return groups
+
+
+def read_server_port_lease_record(port: int, state_dir: Path) -> dict[str, Any]:
+    """Read the existing per-port ownership record written by acquire_server_port_lease."""
+    lease_path = Path(state_dir) / "server-leases" / f"{int(port)}.lock"
+    try:
+        record = json.loads(lease_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def tracked_port_process_group(
+    port: int,
+    state_dir: Path,
+    table: dict[int, ProcessTableEntry] | None = None,
+) -> dict[str, Any]:
+    """Resolve the web-server process group for one port from its lease record.
+
+    Identity is the lease PID (written by the server itself under its flock)
+    cross-checked against the live command naming this exact port; a recycled
+    or unrelated PID fails that check and yields an empty result. Members are
+    the PIDs sharing the web server's process group — local-service daemons are
+    session leaders of their own groups, so they never appear here.
+    """
+    if table is None:
+        table = bounded_process_table()
+    record = read_server_port_lease_record(port, state_dir)
+    pid = int(record.get("pid") or 0)
+    if pid <= 0 or int(record.get("port") or 0) != int(port) or pid not in table:
+        return {}
+    if f"--port {int(port)} " not in table[pid].command + " ":
+        return {}
+    pgid = table[pid].pgid
+    members = tuple(sorted(member for member, entry in table.items() if entry.pgid == pgid))
+    return {"port": int(port), "pid": pid, "pgid": pgid, "member_pids": members}
 
 
 def parse_ps_cpu_seconds(text: str) -> float | None:
@@ -110,6 +268,7 @@ class LocalServiceRegistry:
         self.next_start_at = 0.0
         self._healthy_until = 0.0
         self._last_resource_sample: tuple[float, float] | None = None
+        self._last_resource_group_sample: tuple[tuple[int, ...], float, float] | None = None
         self._upgrade_required: dict[str, Any] | None = None
         self._start_exit_count = 0
         self._last_exit_code: int | None = None
@@ -268,11 +427,21 @@ class LocalServiceRegistry:
         return self.clock() < self._healthy_until
 
     def _record_from_status(self, status: dict[str, Any]) -> dict[str, Any]:
+        pid = int(status.get("pid") or 0)
+        worker_pids = status.get("worker_pids")
         return {
             "version": LOCAL_SERVICE_REGISTRY_VERSION,
             "service": self.spec.name,
             "module": self.spec.module,
-            "pid": int(status.get("pid") or 0),
+            "pid": pid,
+            # Ledger provenance: the process group anchors watchdog/cleanup
+            # membership, and the launcher identifies which web port asked for
+            # this daemon (shared daemons keep the first launcher's stamp; live
+            # lease/client state, not this record, decides sharedness).
+            "pgid": process_group_id(pid),
+            "launcher_pid": os.getpid(),
+            "launcher_port": local_service_launch_port(),
+            "worker_pids": [int(worker) for worker in worker_pids if isinstance(worker, int) and worker > 0] if isinstance(worker_pids, list) else [],
             "protocol_version": int(status.get("version") or 0),
             "socket": str(self.socket_path),
             "started_at": float(status.get("started_at") or wall_clock()),
@@ -358,6 +527,10 @@ class LocalServiceRegistry:
                     args,
                     close_fds=True,
                     start_new_session=True,
+                    # A daemon launched from nohup/launchd can inherit a closed fd 0. Its own
+                    # RPC loop starts, but a macOS spawn worker then aborts while initializing
+                    # Python's standard streams. Give every local service a valid inert stdin.
+                    stdin=subprocess.DEVNULL,
                     stdout=output,
                     stderr=subprocess.STDOUT,
                 )
@@ -491,6 +664,71 @@ class LocalServiceRegistry:
         if previous is not None and now > previous[0] and cpu_seconds >= previous[1]:
             cpu_percent = round(max(0.0, (cpu_seconds - previous[1]) / (now - previous[0]) * 100.0), 3)
         return {"cpu_percent": cpu_percent, "rss_bytes": rss_bytes}
+
+    def resources_for_pids(self, parent_pid: int, child_pids: list[int] | tuple[int, ...]) -> dict[str, float | int | None]:
+        """Return one CPU/RSS reading for a service broker and its verified direct workers.
+
+        A process-pool worker does the costly work while its broker stays mostly idle.  Sampling
+        only the broker made the System view materially underreport jobd.  Membership is part of
+        the CPU baseline: a spawn/exit yields an honest unknown CPU for one sample rather than a
+        false spike from mixing cumulative process times.
+        """
+        candidates = tuple(sorted({int(pid) for pid in (parent_pid, *child_pids) if int(pid) > 0}))
+        if parent_pid <= 0 or not candidates:
+            return {"cpu_percent": None, "rss_bytes": None, "process_count": 0}
+        readings = self._read_process_group_cpu_seconds_and_rss(parent_pid, candidates)
+        if not readings:
+            return {"cpu_percent": None, "rss_bytes": None, "process_count": 0}
+        members = tuple(sorted(readings))
+        cpu_seconds = sum(reading[0] for reading in readings.values())
+        rss_bytes = sum(reading[1] for reading in readings.values())
+        now = self.clock()
+        previous = self._last_resource_group_sample
+        self._last_resource_group_sample = (members, now, cpu_seconds)
+        cpu_percent: float | None = None
+        if previous is not None and previous[0] == members and now > previous[1] and cpu_seconds >= previous[2]:
+            cpu_percent = round(max(0.0, (cpu_seconds - previous[2]) / (now - previous[1]) * 100.0), 3)
+        return {"cpu_percent": cpu_percent, "rss_bytes": rss_bytes, "process_count": len(members)}
+
+    def _read_process_group_cpu_seconds_and_rss(self, parent_pid: int, pids: tuple[int, ...]) -> dict[int, tuple[float, int]]:
+        """Read a parent and its direct children in one bounded platform-specific operation."""
+        if platform.system() == "Linux":
+            readings: dict[int, tuple[float, int]] = {}
+            for pid in pids:
+                try:
+                    stat_fields = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8").split()
+                    statm_fields = (Path("/proc") / str(pid) / "statm").read_text(encoding="utf-8").split()
+                    if pid != parent_pid and int(stat_fields[3]) != parent_pid:
+                        continue
+                    cpu_seconds = (float(stat_fields[13]) + float(stat_fields[14])) / float(os.sysconf("SC_CLK_TCK"))
+                    readings[pid] = (cpu_seconds, int(statm_fields[1]) * int(os.sysconf("SC_PAGE_SIZE")))
+                except (IndexError, OSError, ValueError):
+                    continue
+            return readings if parent_pid in readings else {}
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "pid=,ppid=,rss=,time=", "-p", ",".join(str(pid) for pid in pids)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return {}
+        readings = {}
+        for line in str(getattr(completed, "stdout", "") or "").splitlines():
+            fields = line.split()
+            if len(fields) != 4:
+                continue
+            try:
+                pid, ppid, rss_kib = (int(fields[0]), int(fields[1]), int(fields[2]))
+            except ValueError:
+                continue
+            cpu_seconds = parse_ps_cpu_seconds(fields[3])
+            if pid not in pids or cpu_seconds is None or (pid != parent_pid and ppid != parent_pid):
+                continue
+            readings[pid] = (cpu_seconds, rss_kib * 1024)
+        return readings if parent_pid in readings else {}
 
     def _read_process_cpu_seconds_and_rss(self, pid: int) -> tuple[float, int] | None:
         """Return (cumulative CPU seconds, RSS bytes) for an existing pid."""

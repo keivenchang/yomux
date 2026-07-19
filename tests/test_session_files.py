@@ -2514,6 +2514,31 @@ def test_untracked_line_counts_cache_by_identity_and_invalidate_on_change(tmp_pa
     assert len(reads) == 2
 
 
+def test_untracked_line_counts_invalidate_same_size_rewrite_with_restored_mtime(tmp_path, monkeypatch):
+    """A caller can preserve mtime while replacing content; ctime keeps the count correct."""
+    target = tmp_path / "notes.txt"
+    target.write_text("one\ntwo\n", encoding="utf-8")
+    session_files._UNTRACKED_LINE_COUNT_CACHE.clear()
+    original_mtime_ns = target.stat().st_mtime_ns
+    reads = []
+    real_read_bytes = Path.read_bytes
+
+    def counting_read_bytes(self):
+        reads.append(str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    assert session_files.untracked_added_line_count(target) == 2
+
+    # Preserve both byte length and mtime. The filesystem still changes ctime on
+    # the replacement, so the cache must not reuse the old two-line result.
+    target.write_text("one two\n", encoding="utf-8")
+    os.utime(target, ns=(original_mtime_ns, original_mtime_ns))
+    assert target.stat().st_mtime_ns == original_mtime_ns
+    assert session_files.untracked_added_line_count(target) == 1
+    assert len(reads) == 2
+
+
 def test_concurrent_views_share_one_git_identity_run(tmp_path, monkeypatch):
     """Six concurrent session-files views of one repo must pay the expensive
     `git status --untracked-files=all` signature ONCE (in-flight single-flight),
@@ -2684,6 +2709,7 @@ def test_git_metadata_event_filter_admits_identity_inputs_only(tmp_path):
     assert webapp.git_metadata_event_allowed(git_dir / "HEAD", record) is True
     assert webapp.git_metadata_event_allowed(git_dir / "index", record) is True
     assert webapp.git_metadata_event_allowed(git_dir / "packed-refs", record) is True
+    assert webapp.git_metadata_event_allowed(git_dir / "config", record) is True
     assert webapp.git_metadata_event_allowed(git_dir / "MERGE_HEAD", record) is True
     assert webapp.git_metadata_event_allowed(git_dir / "refs" / "heads" / "main", record) is True
     assert webapp.git_metadata_event_allowed(git_dir / "objects" / "ab" / "cdef", record) is False
@@ -2728,12 +2754,14 @@ def test_session_files_cache_key_uses_watcher_generation_and_skips_git_identity(
         record.filesystem_roots = (str(tmp_path.resolve()),)
         record.filesystem_watch_paths = (str(tmp_path.resolve()),)
 
-        spawns_before = dict(common_module.GIT_COMMAND_COUNTS)
+        original_shared_git_identity = webapp.shared_git_identity
+        monkeypatch.setattr(
+            webapp,
+            "shared_git_identity",
+            lambda *_args: pytest.fail("healthy watcher cache key must not request a Git identity"),
+        )
         key_one = webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, None)
-        # The identity commands (git status / for-each-ref) are NOT spawned on the watcher path.
-        healthy_verbs = _new_git_verbs(spawns_before)
-        assert "status" not in healthy_verbs
-        assert "for-each-ref" not in healthy_verbs
+        monkeypatch.setattr(webapp, "shared_git_identity", original_shared_git_identity)
 
         repo_signatures = dict(key_one[-1])
         assert len(repo_signatures) == 1
@@ -2758,6 +2786,34 @@ def test_session_files_cache_key_uses_watcher_generation_and_skips_git_identity(
         assert "status" in _new_git_verbs(spawns_unhealthy)
         (_repo_text, unhealthy_signature), = dict(key_unhealthy[-1]).items()
         assert isinstance(unhealthy_signature, tuple)
+    finally:
+        webapp.control_server.stop()
+
+
+def test_session_files_cache_key_canonicalizes_ref_override_paths(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    alias = tmp_path / "repo-alias"
+    alias.symlink_to(repo, target_is_directory=True)
+    monkeypatch.setattr(TmuxWebtermApp, "discover_and_start", lambda self: None, raising=False)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = TmuxWebtermApp(["1"])
+    try:
+        pane = PaneInfo(
+            session="1", window="0", pane="0", pane_id="%1", target="1:0.0",
+            current_path=str(repo), command="zsh", active=True, window_active=True, title="", pid=11,
+        )
+        infos = {"1": SessionInfo(session="1", panes=[pane], selected_pane=pane, agents=[])}
+        record = webapp.client_watch_service.event_watcher_record
+        record.filesystem_healthy = True
+        record.filesystem_roots = (str(tmp_path.resolve()),)
+        record.filesystem_watch_paths = (str(tmp_path.resolve()),)
+        canonical_refs = {str(repo): {"from": "HEAD~1", "to": "HEAD"}}
+        alias_refs = {str(alias): {"from": "HEAD~1", "to": "HEAD"}}
+        assert webapp.session_files_cache_key("payload", infos, "1", 24.0, None, None, canonical_refs) == webapp.session_files_cache_key(
+            "payload", infos, "1", 24.0, None, None, alias_refs,
+        )
     finally:
         webapp.control_server.stop()
 

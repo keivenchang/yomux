@@ -800,8 +800,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 12,
-        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agent #", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
+        "toggles": 13,
+        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agent windows", "Agent sessions", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -3017,7 +3017,7 @@ def test_agent_attention_and_cooldown_status_balls_sit_beside_static_ai_icon(bro
 
 def test_pane_info_bar_scrolls_metadata_without_shrinking_window_buttons(browser, tmp_path):
     page = tmp_path / "pane-info-bar-scroll.html"
-    long_text = "#76 DRAFT · keivenchang/DIS-2239__parity-commit-link-frontend-crates · ~/dynamo/frontend-crates3 · 5 dirty · DIS-2239 In Review · fix(performance): repair v1 PARITY commit + case-doc links after"
+    long_text = "#76 DRAFT · keivenchang/DIS-2239__parity-commit-link-frontend-crates · ~/GPU/frontend-crates3 · 5 dirty · DIS-2239 In Review · fix(performance): repair v1 PARITY commit + case-doc links after"
     body = """
       <article class="panel active-pane" style="width: 520px;">
         <div id="info-bar" class="pane-info-bar panel-detail-row">

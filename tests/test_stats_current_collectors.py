@@ -178,7 +178,7 @@ def test_absent_devices_services_and_agents_never_gain_placeholder_values():
     )
     assert gpu == collectors.CollectorFacts()
     assert services == collectors.CollectorFacts()
-    assert dict(agents.observations[0].payload) == {"states": {}}
+    assert dict(agents.observations[0].payload) == {"states": {}, "session_states": {}, "snapshot_revision": 0}
 
 
 def test_successful_empty_usage_scan_is_coverage_not_fabricated_usage():

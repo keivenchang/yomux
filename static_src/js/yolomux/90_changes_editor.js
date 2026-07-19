@@ -793,24 +793,35 @@ function syncDiffRefControlValues(container) {
   if (resetBtn) resetBtn.hidden = refs.from === 'HEAD' && refs.to === 'current';
 }
 
+function fileExplorerSelectedSessionForView(view) {
+  const surface = normalizeFileExplorerView(view);
+  const selected = surface === 'finder' ? fileExplorerFinderSelectedSession : fileExplorerChangesSelectedSession;
+  if (selected && sessions.includes(selected)) return selected;
+  const explicitSession = fileExplorerExplicitSyncSessionTarget();
+  if (explicitSession) return explicitSession;
+  return '';
+}
+
+function fileExplorerFinderTargetSession() {
+  if (shareViewMode && !shareWriteMode) return fileExplorerSelectedSessionForView('finder');
+  const selected = fileExplorerSelectedSessionForView('finder');
+  if (selected) {
+    fileExplorerFinderSelectedSession = selected;
+    return selected;
+  }
+  const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
+  if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
+  return sessions[0] || '';
+}
+
 function fileExplorerSessionFilesTargetSession() {
   if (shareViewMode && !shareWriteMode) {
-    if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
-      return fileExplorerChangesSelectedSession;
-    }
-    const explicitSession = fileExplorerExplicitSyncSessionTarget();
-    if (explicitSession) {
-      return explicitSession;
-    }
-    return '';
+    return fileExplorerSelectedSessionForView('differ');
   }
-  if (fileExplorerChangesSelectedSession && sessions.includes(fileExplorerChangesSelectedSession)) {
-    return fileExplorerChangesSelectedSession;
-  }
-  const explicitSession = fileExplorerExplicitSyncSessionTarget();
-  if (explicitSession) {
-    fileExplorerChangesSelectedSession = explicitSession;
-    return explicitSession;
+  const selected = fileExplorerSelectedSessionForView('differ');
+  if (selected) {
+    fileExplorerChangesSelectedSession = selected;
+    return selected;
   }
   const payloadSession = String(fileExplorerSessionFilesState.payload?.session || '');
   if (payloadSession && sessions.includes(payloadSession)) return payloadSession;
@@ -914,8 +925,23 @@ function switchFileExplorerChangesSession(session) {
   }
   setSessionFilesLoadingForDestination('finder', !cachedPayloadIsLoaded);
   renderFileExplorerChangesPanel(panelNodes.get(differItemId));
-  fetchSessionFiles({destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded});
+  // A cached session switch already has visible last-known-good rows. Let the server decide
+  // whether its entry is stale and coalesce one background refresh; forcing here used to bypass
+  // that parent and submit a full session-files job for every tab switch.
+  fetchSessionFiles({destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded});
   scheduleShareTopologySnapshot('finder-session');
+}
+
+function switchFileExplorerFinderSession(session) {
+  if (!isTmuxSession(session) || !sessions.includes(session)) return false;
+  if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
+  if (fileExplorerFinderSelectedSession === session) return false;
+  fileExplorerFinderSelectedSession = session;
+  rememberFileExplorerExplicitSyncSession(session);
+  scheduleFileExplorerActiveTabSync(session, {explicit: true});
+  sharePublish('finder-mode', {mode: 'files', session});
+  scheduleShareTopologySnapshot('finder-session');
+  return true;
 }
 
 function noteFileExplorerChangesSessionInteraction(session) {
@@ -1752,13 +1778,15 @@ function sessionFilesSessionSelectHtml(target, options = {}) {
   return `<select${classes} data-session-files-session>${selectOptions}</select>`;
 }
 
-function fileExplorerDiffSessionControlHtml(session) {
-  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control">${esc(t('common.sessionLabel'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
+function fileExplorerDiffSessionControlHtml(session, view = 'differ') {
+  const surface = normalizeFileExplorerView(view);
+  return `<label class="file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control" data-file-explorer-session-surface="${esc(surface)}">${esc(t('common.sessionLabel'))}: ${sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'})}</label>`;
 }
 
 function syncFileExplorerDiffSessionControls() {
-  const session = fileExplorerSessionFilesTargetSession();
   for (const select of document.querySelectorAll('.file-explorer-diff-session-control [data-session-files-session]')) {
+    const surface = select.closest('[data-file-explorer-session-surface]')?.dataset.fileExplorerSessionSurface || 'differ';
+    const session = surface === 'finder' ? fileExplorerFinderTargetSession() : fileExplorerSessionFilesTargetSession();
     const options = Array.from(select.options || []);
     if (options.length !== sessions.length || !options.some(option => option.value === session)) {
       select.outerHTML = sessionFilesSessionSelectHtml(session, {className: 'file-explorer-diff-session-select'});
@@ -2037,9 +2065,9 @@ function bindChangesPanel(panel) {
     if (handleFileExplorerTreeToolbarChange(panel, event)) return;
     const sessionSelect = event.target.closest('[data-session-files-session]');
     if (sessionSelect && panel.contains(sessionSelect)) {
-      fileExplorerChangesSelectedSession = sessionSelect.value;
-      rememberFileExplorerExplicitSyncSession(fileExplorerChangesSelectedSession);
-      switchFileExplorerChangesSession(fileExplorerChangesSelectedSession);
+      const view = fileExplorerViewForItem(panel.dataset.panelItem) || 'finder';
+      if (view === 'finder') switchFileExplorerFinderSession(sessionSelect.value);
+      else switchFileExplorerChangesSession(sessionSelect.value);
       return;
     }
     const diffRefInput = event.target.closest('[data-diff-ref-from], [data-diff-ref-to]');
@@ -2609,7 +2637,7 @@ function createFileExplorerPanel(item = finderItemId) {
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
   const finderToolbarHtml = view === 'finder' ? `<div class="file-explorer-toolbar">
           <div class="file-explorer-toolbar-row file-explorer-primary-row">
-            ${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}
+            ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
             <span class="file-explorer-toolbar-spacer"></span>
             ${reloadButtonHtml}
           </div>
@@ -2629,7 +2657,7 @@ function createFileExplorerPanel(item = finderItemId) {
               ${fileTreeExpandCollapseAllButtonsHtml('changes-date-toggle')}
             </span>
           </div>
-        </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession())}</div></div>` : '';
+        </div>` : view === 'differ' ? `<div class="file-explorer-toolbar"><div class="file-explorer-toolbar-row file-explorer-primary-row">${fileExplorerDiffSessionControlHtml(fileExplorerSessionFilesTargetSession(), 'differ')}</div></div>` : '';
   panel.innerHTML = panelFrameHtml({
     item,
     headClass: 'file-explorer-head',

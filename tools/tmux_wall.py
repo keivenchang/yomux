@@ -29,9 +29,13 @@ from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from yolomux_lib.agent_tui import capture_agent_pane
 from yolomux_lib.agent_tui import classify_agent_pane
 from yolomux_lib.common import split_csv
+from yolomux_lib.common import path_mtime_or_zero
 from yolomux_lib.locales import message_fields
 from yolomux_lib.locales import resolve_locale_preference
 from yolomux_lib.locales import user_message_payload
@@ -50,7 +54,7 @@ DEFAULT_SLOTS = 6
 DEFAULT_LINES = 90
 DEFAULT_CONTAINER_HELPER = Path.home() / "utils" / "container" / "show_project_containers.py"
 AGENT_COMMANDS = {"claude", "codex"}
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 STATIC_CONTENT_TYPES = {
     "tmux-wall.css": "text/css; charset=utf-8",
     "tmux-wall.js": "application/javascript; charset=utf-8",
@@ -187,16 +191,6 @@ def static_asset_path(asset: str) -> Path | None:
         return None
     path = STATIC_DIR / asset
     return path if path.is_file() else None
-
-
-def static_asset_version(asset: str) -> int:
-    path = static_asset_path(asset)
-    if path is None:
-        return 0
-    try:
-        return int(path.stat().st_mtime)
-    except OSError:
-        return 0
 
 
 def container_helper_path() -> Path:
@@ -541,8 +535,8 @@ class TmuxWallApp:
 
 
 def html_page(locale: str = "en") -> str:
-    css_version = static_asset_version("tmux-wall.css")
-    js_version = static_asset_version("tmux-wall.js")
+    css_version = int(path_mtime_or_zero(static_asset_path("tmux-wall.css")))
+    js_version = int(path_mtime_or_zero(static_asset_path("tmux-wall.js")))
     bootstrap_json = tmux_wall_bootstrap_json(locale)
     return f"""<!doctype html>
 <html {html_lang_dir_attrs(locale)}>

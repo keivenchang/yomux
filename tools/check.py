@@ -91,8 +91,10 @@ class StepResult:
 def py_compile_files() -> list[str]:
     return [
         "yolomux.py",
-        "tmux_wall.py",
-        "auto_approve_tmux.py",
+        "tools/tmux_wall.py",
+        "tools/auto_approve_tmux.py",
+        "tools/yostats_contention_benchmark.py",
+        "tools/yostats_active_browser_window.py",
         *sorted(str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "yolomux_lib").rglob("*.py")),
     ]
 
@@ -459,7 +461,9 @@ def performance_report_path(value: str) -> Path:
     tmp_root = Path("/tmp").resolve()
     if not resolved.is_relative_to(tmp_root):
         raise ValueError("--performance-report must be under /tmp")
-    return resolved
+    # Keep the caller-visible `/tmp/...` spelling on macOS, where resolving the path turns it
+    # into `/private/tmp/...`; the resolved value above remains the security check.
+    return path
 
 
 def write_performance_report(path: Path, payload: dict[str, object]) -> None:

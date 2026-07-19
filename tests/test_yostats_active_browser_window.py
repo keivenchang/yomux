@@ -49,6 +49,8 @@ def test_active_browser_window_requires_normal_login_and_tmp_output():
     assert "runtime_service_pids" in source
     assert "X-YOLOmux-Measurement" in source
     assert "capture_measurement_metrics" in source
+    assert "install_measurement_fetch_header" in source
+    assert "window.fetch =" in source
 
 
 def test_active_browser_window_uses_configured_admin_without_plaintext_credentials(monkeypatch):

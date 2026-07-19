@@ -100,7 +100,7 @@ def test_one_fold_handles_average_gauge_rate_status_tokens_and_cost():
             "kind": "api", "latency_ms": 15, "bytes": 200,
         }),
         Observation("status-12", "agent_status", "host", 12, "epoch", 1, {
-            "states": {"a": "ask", "b": "run", "c": "run", "d": "idle"},
+            "states": {"a": "ask", "b": "run", "c": "run", "d": "idle"}, "session_states": {"one": "ask", "two": "run"}, "snapshot_revision": 17,
         }),
     )
     atom = UsageAtom("event", "output", "text", "none", "tokens", 12, {
@@ -118,10 +118,13 @@ def test_one_fold_handles_average_gauge_rate_status_tokens_and_cost():
     )
     values = _series(bucket)
     assert values["cpu_percent:host"].value == 3
+    assert values["agent_window_snapshot_revision"].value == 17
     assert values["gpu_util_percent:host"].value == 40
     assert values["browser_api_per_second"].value == 0.1
     assert values["browser_latency_ms"].value == 15
     assert values["run_agents"].value == 2
+    assert values["ask_sessions"].value == 1
+    assert values["run_sessions"].value == 1
     assert values["agent_tokens_per_minute:sol"].value == 600
     assert values["model_tokens_per_minute:output:gpt"].value == 600
     assert values["model_tokens_per_minute:all:gpt"].value == 600

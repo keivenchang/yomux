@@ -145,12 +145,14 @@ def test_settings_payload_reuses_cached_yaml_until_file_changes(monkeypatch, tmp
     path = tmp_path / "settings.yaml"
     write_settings_file({"appearance": {"theme": "light"}}, path)
     calls = []
+    owner_thread = threading.get_ident()
     real_safe_load = settings_module.yaml.safe_load
 
     def counting_safe_load(text):
         # yaml.safe_load is process-global. Background work in the same xdist worker may parse
-        # another YAML file while this test temporarily spies on it; count only this unique path.
-        if text == path.read_text(encoding="utf-8"):
+        # another YAML file with identical generated text while this test temporarily spies on it.
+        # Count only the request thread that calls this test's settings_payload() path.
+        if threading.get_ident() == owner_thread and text == path.read_text(encoding="utf-8"):
             calls.append(text)
         return real_safe_load(text)
 

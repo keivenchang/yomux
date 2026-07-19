@@ -94,7 +94,12 @@ def test_boot_restart_requires_old_listener_to_stop_before_launch():
 
     assert "wait_for_port_free()" in source
     assert "listener still alive after SIGTERM; sending SIGKILL" in source
-    assert "stop_port_listener \"$port\"\n\n  printf" in source
+    # Fail-closed ordering: listener teardown, then the ledger preflight
+    # (refuse a wedged live owner / reap a dead owner's verified orphans),
+    # then and only then the launch.
+    assert source.index('stop_port_listener "$port"') < source.index("yolomux_lib.local_services.preflight --port") < source.index("boot.sh launching port")
+    assert 'if ! "$python_bin" -m yolomux_lib.local_services.preflight --port "$port"; then' in source
+    assert "launch preflight refused" in source
     assert "boot.sh launching port" in source
     assert " >> %q 2>&1 < /dev/null" in source
     assert 'env.pop("TMUX", None)' in source

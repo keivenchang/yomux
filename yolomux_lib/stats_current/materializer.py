@@ -677,10 +677,20 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
         states = payload["states"]
         if not isinstance(states, Mapping):
             raise MaterializationError("agent_status.states must be an object")
-        return tuple(
+        samples = [
             _Sample(f"{name}_agents", "status", float(sum(value == name for value in states.values())), at, source)
             for name in ("ask", "run", "transition", "idle")
+        ]
+        session_states = payload.get("session_states", {})
+        if not isinstance(session_states, Mapping):
+            raise MaterializationError("agent_status.session_states must be an object")
+        samples.extend(
+            _Sample(f"{name}_sessions", "status", float(sum(value == name for value in session_states.values())), at, source)
+            for name in ("ask", "run", "transition", "idle")
         )
+        if "snapshot_revision" in payload:
+            samples.append(_Sample("agent_window_snapshot_revision", "gauge", _number(payload, "snapshot_revision"), at, source))
+        return tuple(samples)
     if observation.family == "browser":
         samples = []
         kind = payload["kind"]
