@@ -251,6 +251,26 @@ def test_record_http_response_bytes_includes_route_compute_details():
     assert kwargs["details"]["bootstrap_bytes"] == 17
 
 
+def test_record_http_response_bytes_keeps_capture_marker_out_of_metrics():
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/ping"
+    handler.headers = {"X-YOLOmux-Measurement": "capture-0123456789abcdef0123456789abcdef"}
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = None
+    handler._http_request_dispatch_started_at = None
+
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 17, "application/json")
+
+    assert records[0][1]["details"]["measurement_scope"] == "capture"
+    assert "capture-" not in repr(records[0][1])
+    handler.headers = {"X-YOLOmux-Measurement": "capture-not-a-random-marker"}
+    assert Handler.measurement_scope(handler) == ""
+
+
 def test_keepalive_request_profile_is_reset_before_each_dispatch(monkeypatch):
     handler = object.__new__(Handler)
     handler._http_response_compute_ms = 37.0

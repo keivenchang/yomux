@@ -150,6 +150,7 @@ from .chat_store import CHAT_TYPING_LEASE_SECONDS
 from .metadata import MetadataCache
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
+from .metadata import invalidate_git_metadata_paths
 from .metadata import indexed_repo_summaries
 from .metadata import INDEXED_REPO_ROOTS_CACHE_SECONDS
 from .metadata import metadata_build_cache
@@ -4757,7 +4758,42 @@ class TmuxWebtermApp:
             record.filesystem_stop_event.set()
             record.wake_event.set()
 
-    GIT_METADATA_EVENT_NAMES = frozenset({"HEAD", "index", "packed-refs", "MERGE_HEAD"})
+    def handle_native_filesystem_watch_loss(
+        self,
+        record: ClientEventWatcherRecord,
+        *,
+        reason: str,
+        diagnostic: str = "",
+    ) -> bool:
+        """Fail over one watcher generation to the bounded reconciliation owner.
+
+        watchfiles exposes create/modify/delete but no portable overflow event. A
+        backend exception or an unexpected iterator end therefore has the same
+        correctness meaning as an overflow: native events may have been lost.
+        Mark that state before waking the existing one-shot directory reconciler;
+        its single-worker guard coalesces repeated backend failures.
+        """
+        now = time.monotonic()
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return False
+            record.filesystem_healthy = False
+            record.next_filesystem_retry_at = now + NATIVE_FILESYSTEM_RETRY_SECONDS
+            record.next_file_poll_at = min(record.next_file_poll_at, now) if record.next_file_poll_at else now
+            record.next_background_file_poll_at = min(record.next_background_file_poll_at, now) if record.next_background_file_poll_at else now
+            record.next_signature_poll_at = min(record.next_signature_poll_at, now) if record.next_signature_poll_at else now
+        self.log_event(
+            None,
+            "native_filesystem_watch_loss",
+            f"native filesystem watch lost ({reason}); reconciling watched state",
+            {"reason": reason, "diagnostic": diagnostic},
+            message_key="events.message.clientEvent.directoryWatchFailed",
+        )
+        self.start_client_directory_poll(record)
+        record.wake_event.set()
+        return True
+
+    GIT_METADATA_EVENT_NAMES = frozenset({"HEAD", "index", "packed-refs", "MERGE_HEAD", "config"})
 
     def git_metadata_event_allowed(self, path: Path, record: ClientEventWatcherRecord) -> bool:
         """Admit exactly the .git paths that change `git_snapshot_identity`.
@@ -4826,6 +4862,21 @@ class TmuxWebtermApp:
         # delivered, and the periodic reconciliation remains the backstop.
         return not any(path == Path(root) for root in roots)
 
+    @staticmethod
+    def native_filesystem_path_requires_metadata_invalidation(change: Any, path: Path, roots: tuple[str, ...] = ()) -> bool:
+        """Ignore only synthetic modified watch-root notifications for Git metadata.
+
+        macOS reports a modified watch root alongside real child events.  That
+        root can contain every indexed repository, so treating it as a source
+        change invalidates the complete Git cache on each watcher batch. Root
+        add/delete events remain invalidating because they can replace a repo.
+        """
+        try:
+            change_code = int(change)
+        except (TypeError, ValueError):
+            change_code = 0
+        return change_code != 2 or not any(path == Path(root) for root in roots)
+
     def publish_native_files_changed(self, changed_paths: list[Path]) -> list[str]:
         watched_files = [*self.files_for_watch(), *self.background_files_for_watch()]
         changed: list[dict[str, Any]] = []
@@ -4868,6 +4919,12 @@ class TmuxWebtermApp:
         # Every change (worktree or .git metadata) dirties intersecting repo
         # records; .git paths take part in NOTHING else below.
         self.mark_repo_state_dirty(all_changed)
+        invalidate_git_metadata_paths([
+            path
+            for change, path in native_changes
+            if self.native_filesystem_path_requires_metadata_invalidation(change, path, roots)
+        ])
+        self.mark_indexed_repo_discovery_dirty(all_changed)
         changed_paths = [path for path in all_changed if ".git" not in path.parts]
         if not changed_paths:
             return []
@@ -8199,12 +8256,18 @@ class TmuxWebtermApp:
             self.performance_records.append(item)
         return item
 
-    def performance_metrics_payload(self, window_seconds: float = PERFORMANCE_SUMMARY_WINDOW_SECONDS) -> dict[str, Any]:
+    def performance_metrics_payload(self, window_seconds: float = PERFORMANCE_SUMMARY_WINDOW_SECONDS, measurement_scope: str = "") -> dict[str, Any]:
         now = time.time()
         cutoff = now - max(1.0, float(window_seconds or PERFORMANCE_SUMMARY_WINDOW_SECONDS))
+        requested_scope = str(measurement_scope or "").strip()
         with self.performance_record_lock:
             records = [dict(item) for item in self.performance_records]
         window_records = [item for item in records if self.float_value(item.get("time"), 0.0) >= cutoff]
+        if requested_scope:
+            window_records = [
+                item for item in window_records
+                if isinstance(item.get("details"), dict) and item["details"].get("measurement_scope") == requested_scope
+            ]
         summaries: dict[tuple[str, str], dict[str, Any]] = {}
         for item in window_records:
             key = (str(item.get("role") or ""), str(item.get("surface") or ""))
@@ -10046,6 +10109,11 @@ class TmuxWebtermApp:
                 "ok": True,
                 "profile": self.runtime_python_profile(request.get("duration_seconds"), request.get("interval_seconds")),
             }
+        if action == "runtime_measurement_metrics":
+            scope = str(request.get("scope") or "")
+            if scope != "capture":
+                return {"ok": False, "error": "unsupported measurement scope"}
+            return {"ok": True, "performance": self.performance_metrics_payload(measurement_scope=scope)}
         if action == "background_ping":
             return {"ok": True, "status": self.background_owner.status_payload()}
         if action == "background_client_event":

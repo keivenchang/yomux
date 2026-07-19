@@ -985,6 +985,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
         return f"{method} {path}"[:120]
 
+    def measurement_scope(self) -> str:
+        """Return a generic in-memory scope without retaining a browser marker."""
+        headers = getattr(self, "headers", {})
+        marker = str(headers.get("X-YOLOmux-Measurement") or "") if hasattr(headers, "get") else ""
+        if marker.startswith("capture-") and len(marker) == 40 and all(char in "0123456789abcdef" for char in marker[8:]):
+            return "capture"
+        return ""
+
     def record_http_response_bytes(
         self,
         status: HTTPStatus | int,
@@ -1004,6 +1012,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
             "content_type": content_type_base(content_type),
         }
+        measurement_scope = self.measurement_scope()
+        if measurement_scope:
+            details["measurement_scope"] = measurement_scope
         request_started = getattr(self, "_http_request_started_at", None)
         dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
         response_started = time.perf_counter()
@@ -1689,6 +1700,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         response_payload = {"responses": responses}
         recorder = getattr(getattr(getattr(self, "server", None), "app", None), "record_performance_sample", None)
         if callable(recorder):
+            measurement_scope = self.measurement_scope()
+            details = {"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)}
+            if measurement_scope:
+                details["measurement_scope"] = measurement_scope
             recorder(
                 "fs-batch",
                 "api",

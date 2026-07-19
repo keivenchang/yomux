@@ -164,7 +164,7 @@ def test_indexed_repo_root_discovery_is_shared_across_metadata_requests(tmp_path
     assert calls == [indexed.resolve()]
 
 
-def test_unchanged_git_metadata_coalesces_real_subprocess_demand_and_refreshes_dirty_state(tmp_path, monkeypatch):
+def test_git_metadata_cache_reuses_unchanged_state_and_invalidates_dirty_paths(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     _init_repo(repo)
     root = str(repo.resolve())
@@ -181,6 +181,7 @@ def test_unchanged_git_metadata_coalesces_real_subprocess_demand_and_refreshes_d
     with metadata._GIT_METADATA_CACHE_LOCK:
         metadata._GIT_METADATA_CACHE.clear()
         metadata._GIT_METADATA_INFLIGHT.clear()
+        metadata._GIT_METADATA_GENERATIONS.clear()
 
     cold = metadata.git_metadata_base(root)
     cold_count = len(calls)
@@ -196,16 +197,58 @@ def test_unchanged_git_metadata_coalesces_real_subprocess_demand_and_refreshes_d
     assert len(warm_results) == 8
     assert warm_results == [cold] * 8
     assert cold_count >= 8
-    assert warm_count <= 2, f"unchanged concurrent readers launched {warm_count} Git subprocesses"
+    assert warm_count == 0, f"unchanged readers launched {warm_count} Git subprocesses"
 
     (repo / "f.txt").write_text("changed\n", encoding="utf-8")
-    with metadata._GIT_METADATA_CACHE_LOCK:
-        signature, value, _verified_at = metadata._GIT_METADATA_CACHE[(root, metadata.OTHER_BRANCH_LIMIT)]
-        metadata._GIT_METADATA_CACHE[(root, metadata.OTHER_BRANCH_LIMIT)] = (signature, value, 0.0)
+    assert metadata.invalidate_git_metadata_paths([repo / "f.txt"]) == {root}
     calls.clear()
     changed = metadata.git_metadata_base(root)
     assert changed and changed["status_lines"] == [" M f.txt"]
-    assert len(calls) >= 2, "a changed source signature must rebuild the Git snapshot"
+    assert len(calls) >= 2, "a native dirty path must rebuild the Git snapshot"
+
+
+def test_git_metadata_invalidation_does_not_restore_an_inflight_snapshot(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    root = str(repo.resolve())
+    real_git = metadata.git
+    status_started = threading.Event()
+    release_status = threading.Event()
+    block_status = False
+    status_calls = 0
+
+    def delayed_git(args, cwd, timeout=3.0):
+        nonlocal status_calls
+        if tuple(args[:2]) == ("status", "--short"):
+            status_calls += 1
+            if block_status and status_calls == 2:
+                status_started.set()
+                assert release_status.wait(timeout=5)
+        return real_git(args, cwd, timeout=timeout)
+
+    monkeypatch.setattr(metadata, "git", delayed_git)
+    with metadata._GIT_METADATA_CACHE_LOCK:
+        metadata._GIT_METADATA_CACHE.clear()
+        metadata._GIT_METADATA_INFLIGHT.clear()
+        metadata._GIT_METADATA_GENERATIONS.clear()
+    assert metadata.git_metadata_base(root)
+    (repo / "f.txt").write_text("changed\n", encoding="utf-8")
+    block_status = True
+    result: list[dict | None] = []
+    worker = threading.Thread(target=lambda: result.append(metadata.git_metadata_base(root)))
+    metadata.invalidate_git_metadata_paths([repo / "f.txt"])
+    worker.start()
+    assert status_started.wait(timeout=5)
+    metadata.invalidate_git_metadata_paths([repo / ".git" / "HEAD"])
+    release_status.set()
+    worker.join(timeout=10)
+
+    assert len(result) == 1
+    assert result[0] and result[0]["status_lines"] == [" M f.txt"]
+    assert status_calls >= 3, "an invalidated in-flight owner must recompute instead of publishing stale metadata"
+    with metadata._GIT_METADATA_CACHE_LOCK:
+        _value, _stored_at, generation = metadata._GIT_METADATA_CACHE[(root, metadata.OTHER_BRANCH_LIMIT)]
+        assert generation == metadata._GIT_METADATA_GENERATIONS[root]
 
 
 def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):
@@ -611,7 +654,9 @@ def test_git_inventory_uses_github_upstream_when_origin_is_local(monkeypatch, tm
         "url": "https://github.com/ai-dynamo/frontend-crates",
     }
     assert pr["number"] == 79
-    assert queries == [(git_data["github_repo"], branch, True)]
+    # Other app-owned background work can query the same module concurrently
+    # under xdist. This fixture owns only its upstream/branch lookup.
+    assert (git_data["github_repo"], branch, True) in queries
 
 
 def test_metadata_public_helpers_remain_available_after_client_split():
@@ -1368,6 +1413,7 @@ def test_session_work_graph_retains_worktree_branch_history_after_switch(tmp_pat
     info = SessionInfo(session="s-history", panes=[pane], selected_pane=pane, agents=[])
     first = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
     _git(repo, "checkout", "-b", "feature/second")
+    metadata.invalidate_git_metadata_paths([repo / ".git" / "HEAD"])
     second = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
 
     worktree = next(iter(second["git_worktrees"].values()))
@@ -1397,6 +1443,7 @@ def test_session_work_graph_preserves_deleted_branch_activity_snapshot_and_sha(t
 
     _git(repo, "checkout", "master")
     _git(repo, "branch", "-D", "feature/renamed-away")
+    metadata.invalidate_git_metadata_paths([repo / ".git" / "HEAD", repo / ".git" / "refs"])
     graph = metadata.session_work_graph(info, MetadataCache(), allow_network=False)
 
     worktree = next(iter(graph["git_worktrees"].values()))

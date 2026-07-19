@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from .common import AgentInfo
 from .common import MAIN_BRANCHES
 from .common import METADATA_CACHE_TTL_SECONDS
+from .common import metadata_warm_work_metrics
 from .common import OTHER_BRANCH_LIMIT
 from .common import TmuxPaneInfo
 from .common import SessionInfo
@@ -56,9 +57,13 @@ _INDEXED_REPO_ROOTS_CACHE: dict[tuple[str, ...], tuple[float, list[str]]] = {}
 # one process-wide, source-keyed owner so unrelated API/background readers do not
 # rebuild the same unchanged repository independently.
 _GIT_METADATA_CACHE_LOCK = threading.Lock()
-GIT_METADATA_BURST_COALESCE_SECONDS = 0.25
-_GIT_METADATA_CACHE: dict[tuple[str, int | None], tuple[tuple[Any, ...], dict[str, Any] | None, float]] = {}
+# Git metadata is requested from several transcript and browser-refresh paths.
+# Native filesystem events invalidate an affected repository immediately; this
+# TTL is only the bounded correctness backstop when a watcher misses an event.
+GIT_METADATA_CACHE_SECONDS = 15.0
+_GIT_METADATA_CACHE: dict[tuple[str, int | None], tuple[dict[str, Any] | None, float, int]] = {}
 _GIT_METADATA_INFLIGHT: dict[tuple[str, int | None], threading.Event] = {}
+_GIT_METADATA_GENERATIONS: dict[str, int] = {}
 # Worktree branch history is deliberately small, process-local metadata. Git describes the current
 # checkout, while this preserves a branch a visible worktree used earlier in the same server lifetime
 # (including a branch later deleted or renamed) without inventing a second branch inventory owner.
@@ -237,19 +242,16 @@ def git_metadata_base(
     root_text: str,
     branch_limit: int | None = OTHER_BRANCH_LIMIT,
 ) -> dict[str, Any] | None:
+    root_text = resolved_path_text(root_text)
     cache_key = (root_text, branch_limit)
     with _GIT_METADATA_CACHE_LOCK:
         cached = _GIT_METADATA_CACHE.get(cache_key)
-        # Burst reuse must still observe a checkout/ref/index change. Those
-        # signatures are filesystem-only and cheap; returning solely by age
-        # made an immediate branch switch look like the previous branch.
-        control_signature = git_control_files_signature(root_text) if cached is not None else ()
         if (
             cached is not None
-            and time.monotonic() - cached[2] <= GIT_METADATA_BURST_COALESCE_SECONDS
-            and cached[0][1] == control_signature
+            and cached[2] == _GIT_METADATA_GENERATIONS.get(root_text, 0)
+            and time.monotonic() - cached[1] <= GIT_METADATA_CACHE_SECONDS
         ):
-            return copy.deepcopy(cached[1])
+            return copy.deepcopy(cached[0])
         inflight = _GIT_METADATA_INFLIGHT.get(cache_key)
         if inflight is None:
             inflight = threading.Event()
@@ -261,7 +263,7 @@ def git_metadata_base(
         inflight.wait()
         with _GIT_METADATA_CACHE_LOCK:
             cached = _GIT_METADATA_CACHE.get(cache_key)
-        return copy.deepcopy(cached[1]) if cached is not None else None
+        return copy.deepcopy(cached[0]) if cached is not None else None
 
     def compute(status: Any) -> dict[str, Any] | None:
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], root_text)
@@ -301,28 +303,61 @@ def git_metadata_base(
             "local_repository": local_repository,
         }
 
+    with _GIT_METADATA_CACHE_LOCK:
+        generation = _GIT_METADATA_GENERATIONS.get(root_text, 0)
     try:
         status = git(["status", "--short", "--untracked-files=all"], root_text, timeout=10.0)
-        status_text = status.stdout if status.returncode == 0 else f"error:{status.returncode}:{status.stderr}"
-        source_signature = (
-            hashlib.sha256(status_text.encode("utf-8", errors="replace")).hexdigest(),
-            git_control_files_signature(root_text),
-        )
+        value = compute(status)
         with _GIT_METADATA_CACHE_LOCK:
-            cached = _GIT_METADATA_CACHE.get(cache_key)
-        if cached is not None and cached[0] == source_signature:
-            value = cached[1]
-        else:
-            value = compute(status)
-        with _GIT_METADATA_CACHE_LOCK:
-            _GIT_METADATA_CACHE[cache_key] = (source_signature, copy.deepcopy(value), time.monotonic())
+            current_generation = _GIT_METADATA_GENERATIONS.get(root_text, 0)
+            if current_generation != generation:
+                value = None
+            else:
+                _GIT_METADATA_CACHE[cache_key] = (copy.deepcopy(value), time.monotonic(), generation)
             if len(_GIT_METADATA_CACHE) > 256:
                 _GIT_METADATA_CACHE.pop(next(iter(_GIT_METADATA_CACHE)))
-        return copy.deepcopy(value)
+        if value is not None:
+            return copy.deepcopy(value)
     finally:
         with _GIT_METADATA_CACHE_LOCK:
             _GIT_METADATA_INFLIGHT.pop(cache_key, None)
             inflight.set()
+    # A filesystem event arrived while this owner was computing. Do not expose
+    # or cache that stale snapshot; the next owner reads the new generation.
+    return git_metadata_base(root_text, branch_limit=branch_limit)
+
+
+def invalidate_git_metadata_paths(paths: list[Path] | tuple[Path, ...]) -> set[str]:
+    """Invalidate cached repositories intersecting native filesystem changes.
+
+    This is deliberately metadata-owned rather than tied to a watcher class so
+    every source of a native batch uses one cache invalidation contract. A
+    generation fence prevents an already-running Git command from restoring a
+    snapshot that predates the event.
+    """
+    changed_paths = [Path(path).expanduser().resolve(strict=False) for path in paths]
+    if not changed_paths:
+        return set()
+
+    def intersects(root: Path, changed: Path) -> bool:
+        try:
+            return root == changed or root.is_relative_to(changed) or changed.is_relative_to(root)
+        except ValueError:
+            return False
+
+    with _GIT_METADATA_CACHE_LOCK:
+        roots = {key[0] for key in _GIT_METADATA_CACHE}
+        roots.update(key[0] for key in _GIT_METADATA_INFLIGHT)
+        invalidated = {
+            root_text
+            for root_text in roots
+            if any(intersects(Path(root_text), changed) for changed in changed_paths)
+        }
+        for root_text in invalidated:
+            _GIT_METADATA_GENERATIONS[root_text] = _GIT_METADATA_GENERATIONS.get(root_text, 0) + 1
+            for key in [key for key in _GIT_METADATA_CACHE if key[0] == root_text]:
+                _GIT_METADATA_CACHE.pop(key, None)
+    return invalidated
 
 
 def git_control_files_signature(root_text: str) -> tuple[Any, ...]:
@@ -1427,17 +1462,20 @@ def metadata_warm_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     if len(raw_sessions) > METADATA_WARM_VIEW_MAX_SESSIONS:
         raise ValueError("metadata_warm_view sessions exceed the bounded session limit")
     cache = MetadataCache()
-    for info_data in raw_sessions.values():
-        if not isinstance(info_data, dict):
-            continue
-        info = session_info_from_json(info_data)
-        session_work_graph(info, cache, allow_network=True)
+    warmed_sessions = 0
+    with metadata_warm_work_metrics() as work:
+        for info_data in raw_sessions.values():
+            if not isinstance(info_data, dict):
+                continue
+            info = session_info_from_json(info_data)
+            session_work_graph(info, cache, allow_network=True)
+            warmed_sessions += 1
     now = time.time()
     entries = {
         key: {"value": value, "ttl_remaining": max(0.0, expires_at - now)}
         for key, (expires_at, value) in cache.values.items()
     }
-    result = {"entries": entries, "truncated": False}
+    result = {"entries": entries, "truncated": False, "profile": {"work": {"sessions": warmed_sessions, **work}}}
     # A pathological fan-out of branches/PRs/Linear issues is bounded by evicting the
     # lowest-remaining-TTL entries first -- those are the ones a caller can most safely defer
     # re-fetching, since they were already closest to a natural cache expiry.
@@ -1445,6 +1483,8 @@ def metadata_warm_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
         oldest_key = min(entries, key=lambda key: entries[key].get("ttl_remaining", 0.0))
         entries.pop(oldest_key, None)
         result["truncated"] = True
+    result["profile"]["work"]["entries"] = len(entries)
+    result["profile"]["work"]["result_bytes"] = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     return result
 
 

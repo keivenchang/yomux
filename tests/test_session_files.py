@@ -1783,13 +1783,13 @@ def test_session_files_payload_marks_statless_touched_path_missing(tmp_path):
     git(repo, "add", "README.md")
     git(repo, "commit", "-m", "base")
     transcript = tmp_path / "rollout.jsonl"
-    transcript.write_text('{"msg":"*** Begin Patch\\n*** Update File: docs/GUI_SPECS.md\\n"}\n', encoding="utf-8")
+    transcript.write_text('{"msg":"*** Begin Patch\\n*** Update File: docs/specs/GUI.md\\n"}\n', encoding="utf-8")
     os.utime(transcript, (2000, 2000))
     info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("codex", transcript, repo)])
 
     payload = session_files.session_files_payload_for_info(info, hours=24, now=2500)
 
-    item = next(file for file in payload["files"] if file["path"] == "docs/GUI_SPECS.md")
+    item = next(file for file in payload["files"] if file["path"] == "docs/specs/GUI.md")
     assert item["missing"] is True
     assert item["source"] == "transcript"
 

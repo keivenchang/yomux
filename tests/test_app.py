@@ -6035,6 +6035,17 @@ def test_native_filesystem_changes_do_not_reindex_modified_directory_metadata(mo
     }
 
 
+def test_native_filesystem_metadata_invalidation_ignores_only_modified_watch_roots(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root, (str(root),)) is False
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root / "src", (str(root),)) is True
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(1, root, (str(root),)) is True
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(3, root, (str(root),)) is True
+
+
 def test_native_filesystem_changes_ignore_synthetic_watched_root_added_event(monkeypatch, tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
