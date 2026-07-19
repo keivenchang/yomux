@@ -671,15 +671,15 @@ const finderTreeInteractionController = createSharedTreeInteractionController({
   getLeadId: () => fileExplorerSelectionLead,
   setLeadId: id => { fileExplorerSelectionLead = id; },
   selectRow(row, id) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     selectFileTreePath(id || row?.dataset?.path || '');
   },
   selectRange(row, id) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     selectFileTreeRange(row, id || row?.dataset?.path || '', {clear: true});
   },
   afterSelectAll(rows) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     fileExplorerSelectionAnchor = rows[0]?.dataset?.path || null;
   },
   isExpanded: row => row?.dataset?.kind === 'dir' && fileTreeDirectoryExpanded(row.dataset.path || '', {row}),

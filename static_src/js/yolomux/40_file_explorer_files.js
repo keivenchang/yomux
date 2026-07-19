@@ -25,12 +25,12 @@ async function openFileExplorerAt(path, options = {}) {
   const openStillCurrent = () => openGeneration === fileExplorerOpenGeneration;
   const showPendingRoot = options.manualSelection === true || options.showPending === true;
   if (showPendingRoot) {
-    fileExplorerManualSelectionActive = options.manualSelection === true;
+    setFileExplorerSelectionPin(options.manualSelection === true);
     setFileExplorerPathDisplay(root);
     renderFileExplorerRootModeControls();
     renderFileExplorerTreeSearching(root);
   } else if (options.syncSelection === true) {
-    fileExplorerManualSelectionActive = false;
+    setFileExplorerSelectionPin(false);
   }
   const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
   if (!openStillCurrent()) return false;
@@ -42,9 +42,10 @@ async function openFileExplorerAt(path, options = {}) {
   }
   const previousExpanded = options.preserveExpanded ? Array.from(fileExplorerExpanded) : [];
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
+  const rootChanged = root !== currentFileExplorerRoot();
   fileExplorerRoot = root;
-  pruneFileExplorerSelectionForRoot(fileExplorerRoot);
-  fileExplorerManualSelectionActive = options.manualSelection === true;
+  if (rootChanged) pruneFileExplorerSelectionForRoot(fileExplorerRoot);
+  if (options.manualSelection === true) setFileExplorerSelectionPin(true);
   if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});
   setFileExplorerPathDisplay(fileExplorerRoot);
   renderFileExplorerRootModeControls();
@@ -682,6 +683,13 @@ function cacheFileExplorerRepoInfoEntries(parentPath, entries) {
 
 function currentFileExplorerRoot() {
   return normalizeDirectoryPath(fileExplorerRoot || homePath || '/');
+}
+
+// Finder sync is allowed to follow only an explicit user intent. Keep that
+// decision in one place because tree mouse, keyboard, and refresh paths share
+// the same selection state.
+function setFileExplorerSelectionPin(pinned) {
+  fileExplorerManualSelectionActive = pinned === true;
 }
 
 function pruneFileExplorerSelectionForRoot(root) {
@@ -1647,7 +1655,7 @@ function scheduleFileExplorerActiveTabSync(preferredItem = null, options = {}) {
   if (shareReadOnlyFinderStateIsHostOwned()) return;
   const explicit = options.explicit === true;
   if (fileExplorerManualSelectionActive && !explicit) return;
-  if (explicit) fileExplorerManualSelectionActive = false;
+  if (explicit) setFileExplorerSelectionPin(false);
   if (options.explicit === true && isTmuxSession(preferredItem)) rememberFileExplorerExplicitSyncSession(preferredItem);
   const explicitSession = fileExplorerExplicitSyncSessionTarget();
   const fileSyncPath = explicit && isFileEditorItem(preferredItem) ? fileItemPath(preferredItem) : '';
@@ -1740,16 +1748,20 @@ function cachedFileExplorerSyncListings(directories = []) {
   return entriesByDir;
 }
 
-function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir) {
+function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, options = {}) {
   const root = normalizeDirectoryPath(plan?.root || '');
   const rootEntries = entriesByDir?.get(root);
   if (!root || !Array.isArray(rootEntries)) return false;
+  const rootChanged = root !== currentFileExplorerRoot();
+  const preserveState = options.preserveState === true && !rootChanged;
+  const previousExpanded = preserveState ? Array.from(fileExplorerExpanded) : [];
+  const scrollPositions = preserveState ? captureFileExplorerScrollPositions() : null;
   fileExplorerRoot = root;
-  pruneFileExplorerSelectionForRoot(root);
-  fileExplorerManualSelectionActive = false;
+  if (rootChanged) pruneFileExplorerSelectionForRoot(root);
   setFileExplorerPathDisplay(root);
   renderFileExplorerRootModeControls();
-  fileExplorerExpanded.clear();
+  if (!preserveState) fileExplorerExpanded.clear();
+  for (const path of previousExpanded) fileExplorerExpanded.add(path);
   for (const path of renderPaths) fileExplorerExpanded.add(path);
   if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
   for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
@@ -1757,6 +1769,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir) {
     if (tree) renderTreeChildren(tree, root, rootEntries, 0, {view: 'finder', entriesByDir});
   }
   updateFileExplorerCurrentFileHighlight();
+  if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
   scheduleShareTopologySnapshot('finder-root');
   return true;
 }
@@ -1793,7 +1806,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
       );
       const currentDirectories = fileExplorerSyncListingDirectories(plan, currentRenderPaths);
       const completeEntriesByDir = cachedFileExplorerSyncListings(currentDirectories) || entriesByDir;
-      renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir);
+      renderCachedFileExplorerSyncPlan(plan, currentRenderPaths, completeEntriesByDir, {preserveState: true});
       restoreFileExplorerSyncCursorState(plan.session, plan.root);
       updateFileExplorerSessionHighlightRows(plan.session);
     }).catch(error => console.warn('Finder sync background revalidation failed', error));
@@ -1824,7 +1837,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const listingDirectories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const cachedListings = cachedFileExplorerSyncListings(listingDirectories);
     if (cachedListings) {
-      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings) || changed;
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, cachedListings, {preserveState: !targetChanged}) || changed;
       restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
@@ -1836,7 +1849,7 @@ async function syncFileExplorerRootToPlan(plan, preferredItem = null, options = 
     const fetchedListings = await fetchFileExplorerSyncListings(listingDirectories, {force: true, user: options.force === true});
     if (!fileExplorerSyncPlanTargetStillCurrent(plan, options)) return false;
     if (fetchedListings.has(normalizeDirectoryPath(plan.root))) {
-      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings) || changed;
+      changed = renderCachedFileExplorerSyncPlan(plan, renderPaths, fetchedListings, {preserveState: !targetChanged}) || changed;
       restoreFileExplorerSyncCursorState(plan.session, plan.root);
       setFileExplorerVisibleSyncTarget(plan.session, plan.root);
       rememberFileExplorerSyncExpandedState(plan.session, plan.root);
@@ -3205,16 +3218,18 @@ function selectFileTreeRange(row, fullPath, options = {}) {
 function updateFileTreeSelectionFromClick(row, fullPath, event) {
   const toggleModifier = appModifier(event);
   if (event.shiftKey) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     selectFileTreeRange(row, fullPath, {clear: !toggleModifier});
     return true;
   }
   if (toggleModifier) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     selectFileTreePath(fullPath, {clear: false, toggle: true});
     return true;
   }
-  fileExplorerManualSelectionActive = false;
+  // A normal Finder file open is just as explicit as a modifier selection.
+  // Directory clicks only expand/collapse and must not change its sync target.
+  setFileExplorerSelectionPin(row?.dataset?.kind === 'file' && Boolean(row?.closest?.('.file-explorer-panel')));
   selectFileTreePath(fullPath);
   return false;
 }

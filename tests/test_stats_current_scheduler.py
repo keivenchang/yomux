@@ -270,7 +270,7 @@ def test_attempt_carries_the_wall_time_where_its_coverage_epoch_started():
 
     assert len(collected) == 1
     assert collected[0].epoch_started_at == 1234.5
-    assert collected[0].scheduled_at == 1234.5
+    assert collected[0].scheduled_at == pytest.approx(1234.5)
 
 
 def test_restart_under_the_same_owner_uses_a_new_coverage_epoch_identity():

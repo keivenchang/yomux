@@ -2240,11 +2240,11 @@ const differTreeInteractionController = createSharedTreeInteractionController({
   getLeadId: () => fileExplorerSelectionLead,
   setLeadId: id => { fileExplorerSelectionLead = id; },
   selectRow(row, id) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     selectFileTreePath(id || differTreeRowPath(row));
   },
   selectRange(row, id) {
-    fileExplorerManualSelectionActive = true;
+    setFileExplorerSelectionPin(true);
     selectFileTreeRange(row, id || differTreeRowPath(row), {clear: true});
   },
   selectFromClick(row, id, event) {

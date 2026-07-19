@@ -1594,17 +1594,38 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
     assert expanded_before_switch["expanded"] == "true", expanded_before_switch
     assert expanded_before_switch["childVisible"] is True, expanded_before_switch
     assert "/home/test/yolomux.dev/other" in expanded_before_switch["expandedSet"], expanded_before_switch
+    click_visible_selector(browser, '.file-explorer-panel .file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]')
+    pinned_before_refresh = WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
+            const row = tree?.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other/touched.js"]');
+            return fileExplorerManualSelectionActive && row?.getAttribute('aria-selected') === 'true' ? {
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              expanded: Array.from(fileExplorerExpanded),
+              selected: Array.from(fileExplorerSelectedPaths),
+            } : false;
+            """
+        )
+    )
+    assert pinned_before_refresh["root"] == "~", pinned_before_refresh
     move_to_visible_panel(browser, "panel-6")
     hover_metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         setFocusedTerminal('6');
-        scheduleFileExplorerActiveTabSync();
-        requestAnimationFrame(() => requestAnimationFrame(() => {
+        applySessionMetadataPayload(transcriptMetadataState.payload, {
+          refreshAuto: false,
+          refreshActivity: false,
+          refreshContext: false,
+        }).then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
           const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
           const plan = fileExplorerSyncPlan();
           done({
             root: document.querySelector('.file-explorer-path-inline')?.value || '',
+            manual: fileExplorerManualSelectionActive,
+            selected: Array.from(fileExplorerSelectedPaths),
+            expanded: Array.from(fileExplorerExpanded),
             activeTmux: activeTmuxDirectoryPath(),
             planSession: plan.session,
             planRoot: plan.root,
@@ -1612,10 +1633,13 @@ def test_sync_mode_does_not_follow_hovered_tmux_session(browser, tmp_path):
             otherRepoVisible: tree.querySelector('.file-tree-row[data-path="/home/test/other.dev"]') !== null,
             otherExpanded: tree.querySelector('.file-tree-row[data-path="/home/test/yolomux.dev/other"]')?.getAttribute('aria-expanded') || '',
           });
-        }));
+        }))).catch(error => done({error: String(error)}));
         """
     )
     assert hover_metrics["root"] == "~", hover_metrics
+    assert hover_metrics["manual"] is True, hover_metrics
+    assert hover_metrics["selected"] == ["/home/test/yolomux.dev/other/touched.js"], hover_metrics
+    assert hover_metrics["expanded"] == pinned_before_refresh["expanded"], hover_metrics
     assert hover_metrics["activeTmux"] == "/home/test/yolomux.dev/src", hover_metrics
     assert hover_metrics["planSession"] == "5", hover_metrics
     assert hover_metrics["planRoot"] == "/home/test", hover_metrics

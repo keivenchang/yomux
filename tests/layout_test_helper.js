@@ -2436,7 +2436,7 @@ globalThis.__layoutTestApi = {
     fileExplorerSelectedPaths.clear();
     for (const path of paths || []) fileExplorerSelectedPaths.add(path);
     fileExplorerSelectionAnchor = anchor;
-    fileExplorerManualSelectionActive = false;
+    setFileExplorerSelectionPin(false);
   },
   activeFileForTest() { return activeFile; },
   setFileExplorerExpandedForTest(paths) {
