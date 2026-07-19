@@ -22,6 +22,7 @@ def test_boot_print_command_uses_any_configured_primary_port():
         "YOLOMUX_LOG_DIR": "/tmp",
         "YOLOMUX_PORT": "48123",
     }
+    env.pop("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", None)
     result = subprocess.run(
         [str(ROOT / "boot.sh"), "--print-command"],
         cwd=ROOT,
