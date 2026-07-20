@@ -41,7 +41,11 @@ async function fetchFilePathInfo(path, options = {}) {
     normalized,
     options,
     () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
-    {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
+    {
+      skipRequest: () => suppressBackgroundFilesystemFetch(options),
+      skipValue: null,
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('info', normalized, options),
+    },
   );
 }
 

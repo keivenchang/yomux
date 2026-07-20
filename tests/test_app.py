@@ -971,13 +971,18 @@ def test_runtime_control_report_returns_only_safe_in_memory_filesystem_batch_att
                 "paths": "/private/credential.txt",
             },
         )
-        monkeypatch.setattr(webapp, "runtime_report_payload", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("control report must not build the full report")))
+        monkeypatch.setattr(webapp, "runtime_cache_dir_stats", lambda *_args: (_ for _ in ()).throw(AssertionError("control report must not scan cache trees")))
+        monkeypatch.setattr(webapp, "runtime_local_services", lambda: (_ for _ in ()).throw(AssertionError("control report must not probe local services")))
+        monkeypatch.setattr(webapp, "transcripts_payload", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("control report must not scan transcripts")))
         response = webapp.handle_control_request({"action": "runtime_report"})
     finally:
         webapp.control_server.stop()
 
     assert response["ok"] is True
     report = response["report"]
+    assert {"state_dir", "owner", "refresh", "caches", "search_index", "local_services", "top_endpoints", "top_background_work", "top_event_types", "client_events", "chat", "login_throttle", "largest_active_transcripts", "transcripts_cache", "filesystem_batch"} <= report.keys()
+    assert report["refresh"]["bounded"] is True
+    assert report["caches"]["session_files"]["truncated"] is True
     assert len(report["filesystem_batch"]) == 1
     row = report["filesystem_batch"][0]
     assert row["time"] > 0

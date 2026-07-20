@@ -1701,6 +1701,18 @@ def test_handle_fs_batch_sets_one_privacy_safe_endpoint_record(monkeypatch):
     assert "credential.txt" not in json.dumps(records[0][1], sort_keys=True)
 
 
+def test_handle_fs_batch_preserves_bounded_coalesced_trigger_counts(monkeypatch):
+    monkeypatch.setattr(server_module.filesystem, "list_directory", lambda path: {"path": path, "entries": []})
+    handler, writes = batch_handler({
+        "requests": [{"id": "root", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 2, "watch-diff-fallback": 3}}],
+    })
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes[0][1]["responses"][0]["ok"] is True
+    assert handler._http_response_performance_details["fs_batch_triggers"] == '{"tree-render": 2, "watch-diff-fallback": 3}'
+
+
 def test_handle_fs_batch_rejects_arbitrary_trigger_without_recording_it(monkeypatch):
     monkeypatch.setattr(server_module.filesystem, "list_directory", lambda path: {"path": path, "entries": []})
     handler, writes = batch_handler({

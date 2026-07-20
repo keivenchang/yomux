@@ -86,6 +86,7 @@ const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
+const fileExplorerFsBatchTriggerCountLimit = 64;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
@@ -222,7 +223,10 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
     lifecycle.onReuse?.(record.value);
     return Promise.resolve(record.value);
   }
-  if (canReuse && record.request) return record.request;
+  if (canReuse && record.request) {
+    lifecycle.onCoalesce?.();
+    return record.request;
+  }
   if (lifecycle.skipRequest?.() === true) {
     lifecycle.onSkip?.();
     return Promise.resolve(lifecycle.skipValue);
@@ -277,6 +281,16 @@ function fileExplorerFsBatchTrigger(options = {}) {
   return options.fresh === true ? 'fresh-repair' : 'tree-render';
 }
 
+function recordFileExplorerFsBatchTrigger(item, trigger) {
+  const count = Number(item.triggerCounts[trigger]) || 0;
+  item.triggerCounts[trigger] = Math.min(fileExplorerFsBatchTriggerCountLimit, count + 1);
+}
+
+function recordPendingFileExplorerFsBatchTrigger(type, path, options = {}) {
+  const pending = fileExplorerFsBatchPending.get(fileExplorerFsBatchKey(type, normalizeDirectoryPath(path)));
+  if (pending?.item && pending.item.sent !== true) recordFileExplorerFsBatchTrigger(pending.item, fileExplorerFsBatchTrigger(options));
+}
+
 function fileExplorerFsBatchClientMetadata() {
   const revision = String((typeof bootstrap === 'object' && bootstrap?.clientRevision) || '');
   return {
@@ -290,7 +304,10 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
   const key = fileExplorerFsBatchKey(type, normalized);
   if (options.dedupe !== false) {
     const existing = fileExplorerFsBatchPending.get(key);
-    if (existing) return existing.promise;
+    if (existing) {
+      if (existing.item.sent !== true) recordFileExplorerFsBatchTrigger(existing.item, fileExplorerFsBatchTrigger(options));
+      return existing.promise;
+    }
   }
   let resolve;
   let reject;
@@ -298,7 +315,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     resolve = ok;
     reject = fail;
   });
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, trigger: fileExplorerFsBatchTrigger(options), key, resolve, reject};
+  const trigger = fileExplorerFsBatchTrigger(options);
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, resolve, reject, sent: false};
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
@@ -335,7 +353,10 @@ async function flushFileExplorerFsBatch() {
   fileExplorerFsBatchTimer = null;
   const items = fileExplorerFsBatchQueue.splice(0);
   if (!items.length) return;
-  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path, trigger: item.trigger}));
+  const requests = items.map(item => {
+    item.sent = true;
+    return {id: item.id, type: item.type, path: item.path, trigger_counts: item.triggerCounts};
+  });
   try {
     const payload = await apiFetchJson('/api/fs/batch', {
       method: 'POST',
@@ -362,6 +383,7 @@ async function fetchDirectory(path, options = {}) {
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('list', root, options),
       skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
       onSkip: () => clearFileExplorerListError(root),
       skipValue: null,

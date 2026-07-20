@@ -235,6 +235,7 @@ FS_BATCH_CLIENT_SCOPE_LEGACY = "legacy"
 FS_BATCH_ALLOWED_CLIENT_SCOPES = frozenset({"browser", "share"})
 FS_BATCH_PATH_FINGERPRINT_LIMIT = 8
 FS_BATCH_CLIENT_REVISION_MAX_LENGTH = 80
+FS_BATCH_TRIGGER_COUNT_LIMIT = MAX_FS_BATCH_REQUESTS
 TOKEN_LOG_RE = re.compile(r"([?&](?:token|client_id)=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
@@ -1702,9 +1703,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             raw_path = str(item.get("path", "") or "")
             safe_op = op if op in {"list", "info"} else "invalid"
             op_counts[safe_op] = op_counts.get(safe_op, 0) + 1
-            raw_trigger = item.get("trigger", FS_BATCH_TRIGGER_LEGACY)
-            trigger = str(raw_trigger or FS_BATCH_TRIGGER_LEGACY)
-            if trigger not in FS_BATCH_ALLOWED_TRIGGERS:
+            raw_trigger_counts = item.get("trigger_counts")
+            if raw_trigger_counts is None:
+                raw_trigger_counts = {str(item.get("trigger", FS_BATCH_TRIGGER_LEGACY) or FS_BATCH_TRIGGER_LEGACY): 1}
+            if not isinstance(raw_trigger_counts, dict) or not raw_trigger_counts:
                 trigger_counts["invalid"] = trigger_counts.get("invalid", 0) + 1
                 responses.append(error_payload(
                     "invalid fs batch trigger",
@@ -1716,7 +1718,35 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     path=raw_path,
                 ))
                 continue
-            trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
+            item_trigger_counts: dict[str, int] = {}
+            for raw_trigger, raw_count in raw_trigger_counts.items():
+                trigger = str(raw_trigger or "")
+                if trigger not in FS_BATCH_ALLOWED_TRIGGERS or isinstance(raw_count, bool):
+                    item_trigger_counts = {}
+                    break
+                try:
+                    count = int(raw_count)
+                except (TypeError, ValueError):
+                    item_trigger_counts = {}
+                    break
+                if count < 1 or count > FS_BATCH_TRIGGER_COUNT_LIMIT:
+                    item_trigger_counts = {}
+                    break
+                item_trigger_counts[trigger] = count
+            if not item_trigger_counts:
+                trigger_counts["invalid"] = trigger_counts.get("invalid", 0) + 1
+                responses.append(error_payload(
+                    "invalid fs batch trigger",
+                    message_key="request.error.unsupportedFsBatchOperation",
+                    message_params={"operation": "trigger"},
+                    id=request_id,
+                    ok=False,
+                    status=HTTPStatus.BAD_REQUEST,
+                    path=raw_path,
+                ))
+                continue
+            for trigger, count in item_trigger_counts.items():
+                trigger_counts[trigger] = trigger_counts.get(trigger, 0) + count
             if raw_path and len(path_fingerprints) < FS_BATCH_PATH_FINGERPRINT_LIMIT:
                 try:
                     normalized_path = str(Path(raw_path).expanduser().resolve(strict=False))

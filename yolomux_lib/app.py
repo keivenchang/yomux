@@ -9392,15 +9392,44 @@ class TmuxWebtermApp:
         status = self.background_owner.status_payload()
         diagnostics = self.performance_diagnostics_payload()
         metrics = diagnostics.get("perf") if isinstance(diagnostics.get("perf"), dict) else {}
+        client_events = self.client_events.snapshot()
+        chat_events = {
+            event_type: {
+                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
+                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
+            }
+            for event_type in ("chat_messages_changed", "chat_typing_changed")
+        }
+        # Keep the documented report shape without cache walks, service probes, event-log reads,
+        # or transcript scans on the single control-server thread.
+        bounded_cache = lambda path: {"path": str(path), "exists": Path(path).exists(), "files": 0, "dirs": 0, "bytes": 0, "errors": 0, "truncated": True}
         return {
             "ok": True,
+            "state_dir": str(common.STATE_DIR),
             "owner": {
                 "current_owner": status.get("current_owner"),
                 "status": status.get("status"),
                 "owner": bool(status.get("owner")),
+                "search_index": status.get("search_index"),
+                "debug": {},
                 "control": {"ok": True, "source": "live-owner-control"},
             },
+            "refresh": {"bounded": True, "roles": status.get("roles", {}), "counters": status.get("counters", {}), "coalescing": status.get("coalescing", {}), "local_refreshing": {}, "dependency_invalidations": {}, "recurring_work": []},
+            "caches": {
+                "session_files": bounded_cache(SESSION_FILES_CACHE_DIR),
+                "activity": bounded_cache(TABBER_ACTIVITY_CACHE_DIR),
+                "search_index": bounded_cache(file_index.INDEX_DIR),
+            },
+            "search_index": {},
+            "local_services": {"services": [], "totals": {}, "ledger": {}, "bounded": True},
             "top_endpoints": self.runtime_top_endpoints(diagnostics),
+            "top_background_work": self.runtime_top_background_work(diagnostics),
+            "top_event_types": [],
+            "client_events": client_events,
+            "chat": {**self.chat_service.diagnostics(), "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)), "events": chat_events},
+            "login_throttle": {**self.login_rate_limiter.diagnostics(), "edge": self.login_edge_controller.diagnostics()},
+            "largest_active_transcripts": [],
+            "transcripts_cache": {},
             "filesystem_batch": self.runtime_filesystem_batch_rows(metrics),
         }
 
