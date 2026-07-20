@@ -3109,10 +3109,10 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
         requests: [
-          {id: 1, path: '/repo', type: 'list'},
-          {id: 2, path: '/repo/src', type: 'list'},
-          {id: 3, path: '/repo/src/js', type: 'list'},
-          {id: 4, path: '/repo/tests', type: 'list'},
+          {id: 1, path: '/repo', trigger_counts: {'tree-render': 1}, type: 'list'},
+          {id: 2, path: '/repo/src', trigger_counts: {'tree-render': 1}, type: 'list'},
+          {id: 3, path: '/repo/src/js', trigger_counts: {'tree-render': 1}, type: 'list'},
+          {id: 4, path: '/repo/tests', trigger_counts: {'tree-render': 1}, type: 'list'},
         ],
         url: '/api/fs/batch',
       }], 'watched Finder/Differ directories prefetch in one fs batch instead of one POST per expanded directory');
@@ -3165,7 +3165,7 @@ async function runLayoutAsyncSuite() {
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test', type: 'info'}],
+        requests: [{id: 1, path: '/home/test', trigger_counts: {'tree-render': 2}, type: 'info'}],
         url: '/api/fs/batch',
       }], 'concurrent identical path-info lookups share one batched backend request');
       const [firstInfo, secondInfo] = await Promise.all([first, second]);
@@ -3251,7 +3251,7 @@ async function runLayoutAsyncSuite() {
       const target = await targetPromise;
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', type: 'info'}],
+        requests: [{id: 1, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', trigger_counts: {'explicit-user': 1}, type: 'info'}],
         url: '/api/fs/batch',
       }], 'terminal file refs confirm existence through the shared fs info batch path');
       assert.deepStrictEqual(canonical(target), {
@@ -3284,7 +3284,7 @@ async function runLayoutAsyncSuite() {
       const links = await providerPromise;
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test/dynamo4/lib/llm/src/protocols/openai/chat_completions/qwen3_coder_v2.rs', type: 'info'}],
+        requests: [{id: 1, path: '/home/test/dynamo4/lib/llm/src/protocols/openai/chat_completions/qwen3_coder_v2.rs', trigger_counts: {'explicit-user': 1}, type: 'info'}],
         url: '/api/fs/batch',
       }], 'terminal qwen-style file refs confirm existence against the active pane cwd');
       assert.equal(links.length, 1, 'confirmed terminal file refs are exposed to xterm as visual decorations');

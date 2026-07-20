@@ -3211,6 +3211,9 @@ async function runSuites(suites) {
   try {
     for (const runSuite of suites) await runSuite();
   } catch (error) {
+    // Some historical suites use direct assertions in a trailing async block rather than testAsync.
+    // Count that failure too, so the printed summary cannot claim a false all-green result.
+    __testFail++;
     console.error(error);
     process.exitCode = 1;
   } finally {
