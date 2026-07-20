@@ -52,6 +52,27 @@ def _series(bucket):
     return {item.name: item for item in bucket.series}
 
 
+def test_system_memory_projection_keeps_mac_details_as_exact_server_series():
+    observation = Observation("memory-1", "system_memory", "host", 10, "epoch", 1, {
+        "used_bytes": 900,
+        "capacity_bytes": 1000,
+        "mac_physical_memory_bytes": 1000,
+        "mac_memory_used_bytes": 600,
+        "mac_cached_files_bytes": 400,
+        "mac_swap_used_bytes": 25,
+        "mac_app_memory_bytes": 300,
+        "mac_wired_memory_bytes": 100,
+        "mac_compressed_memory_bytes": 200,
+        "mac_pressure_percent": 20,
+    })
+
+    samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
+
+    assert samples["mac_pressure_percent"] == 20
+    assert samples["mac_compressed_memory_bytes"] == 200
+    assert samples["system_memory_used_bytes"] == 900
+
+
 def _projection(micro_usd):
     if micro_usd is None:
         return current_pricing.UsagePriceProjection(None, None, None)

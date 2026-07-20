@@ -81,11 +81,21 @@ def test_independent_families_keep_their_native_timestamps_and_cadences():
     )
     memory = collectors.system_memory_success(
         **BASE, observed_at=160, cadence_seconds=60, source_id="host",
-        used_bytes=6, capacity_bytes=7,
+        used_bytes=6, capacity_bytes=7, macos_details={"physical_memory_bytes": 7, "pressure_percent": 20},
     )
     assert [batch.observations[0].observed_at for batch in (cpu, gpu, memory)] == [101, 109, 160]
     assert [batch.coverage_epochs[0].native_cadence_seconds for batch in (cpu, gpu, memory)] == [1, 10, 60]
+    assert memory.observations[0].payload["mac_pressure_percent"] == 20
     assert [batch.coverage_epochs[0].ended_at for batch in (cpu, gpu, memory)] == [102, 119, 220]
+
+
+def test_system_memory_without_macos_details_keeps_the_linux_payload_exactly_legacy_shaped():
+    memory = collectors.system_memory_success(
+        **BASE, observed_at=160, cadence_seconds=60, source_id="host",
+        used_bytes=6, capacity_bytes=7,
+    )
+
+    assert dict(memory.observations[0].payload) == {"used_bytes": 6, "capacity_bytes": 7}
 
 
 @pytest.mark.parametrize(

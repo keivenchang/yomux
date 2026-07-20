@@ -1103,6 +1103,43 @@ def test_current_stats_graph_toolbar_uses_one_wide_row_and_two_narrow_rows(brows
     assert menu_state == {"opened": True, "closed": True}, menu_state
 
 
+def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts_together(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    WebDriverWait(browser, 8).until(lambda driver: driver.execute_script("return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"))
+    result = browser.execute_script(
+        """
+            const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+            if (!graph || typeof debugGraphApplyServerRecord !== 'function') return {ready: false};
+            setDebugGraphChartVisible('memory', true);
+            clearJsDebugGraphData();
+            const now = Date.now();
+            for (let index = 5; index >= 0; index -= 1) {
+              debugGraphApplyServerRecord({start: Math.floor((now - index * 60000) / 1000), duration: 60, host_metrics: {
+                mac_memory_count: 1, mac_physical_memory_total_bytes: 48 * 1024 ** 3, mac_memory_used_total_bytes: 39.6 * 1024 ** 3,
+                mac_cached_files_total_bytes: 8.3 * 1024 ** 3, mac_swap_used_total_bytes: 6.6 * 1024 ** 3, mac_app_memory_total_bytes: 15.9 * 1024 ** 3,
+                mac_wired_memory_total_bytes: 5.1 * 1024 ** 3, mac_compressed_memory_total_bytes: 17.4 * 1024 ** 3, mac_pressure_total_percent: 20 + index,
+              }});
+            }
+            refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+            graph.style.width = '280px';
+            refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+            const card = graph.querySelector('[data-js-debug-chart="memory"]');
+            const details = card?.querySelector('[data-js-debug-mac-memory-details]');
+            if (!card || !details) return {ready: true, card: Boolean(card), details: Boolean(details)};
+            const cardRect = card.getBoundingClientRect();
+            const rows = [...card.querySelectorAll('[data-js-debug-mac-memory-details] > div')].map(row => row.getBoundingClientRect());
+            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
+        """
+    )
+    assert result.get("ready", True) and "cards" in result, result
+    assert result["cards"] == 1, result
+    assert result["title"] == "Memory pressure", result
+    assert result["unit"] == "percent" and result["axisMax"] == 100, result
+    assert result["facts"] == ["Physical Memory", "Memory Used", "Cached Files", "Swap Used", "App Memory", "Wired Memory", "Compressed"], result
+    assert len(result["values"]) == 7 and all(result["values"]), result
+    assert result["bounds"] and result["pageOverflow"], result
+
+
 def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     result = WebDriverWait(browser, 8).until(

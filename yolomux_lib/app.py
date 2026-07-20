@@ -720,8 +720,34 @@ def current_system_memory_bytes() -> tuple[int, int] | None:
     return current_darwin_system_memory_bytes()
 
 
+@dataclass(frozen=True, slots=True)
+class DarwinSystemMemoryDetails:
+    """Activity Monitor-style macOS memory facts from one VM snapshot."""
+
+    physical_memory_bytes: int
+    memory_used_bytes: int
+    cached_files_bytes: int
+    app_memory_bytes: int
+    wired_memory_bytes: int
+    compressed_memory_bytes: int
+    swap_used_bytes: int | None
+    pressure_percent: float | None
+
+
+class DarwinSwapUsage(ctypes.Structure):
+    """macOS xsw_usage from sysctl vm.swapusage."""
+
+    _fields_ = [
+        ("total_bytes", ctypes.c_uint64),
+        ("available_bytes", ctypes.c_uint64),
+        ("used_bytes", ctypes.c_uint64),
+        ("page_size", ctypes.c_uint32),
+        ("encrypted", ctypes.c_int),
+    ]
+
+
 class DarwinVmStatistics64(ctypes.Structure):
-    """Prefix of macOS vm_statistics64_t needed for available-memory accounting."""
+    """macOS vm_statistics64_t fields used by the Memory card."""
 
     _fields_ = [
         ("free_count", ctypes.c_uint32),
@@ -736,12 +762,33 @@ class DarwinVmStatistics64(ctypes.Structure):
         ("throttled_count", ctypes.c_uint32),
         ("external_page_count", ctypes.c_uint32),
         ("internal_page_count", ctypes.c_uint32),
-        ("_revision2_and_3_counters", ctypes.c_uint64 * 13),
+        ("total_uncompressed_pages_in_compressor", ctypes.c_uint64),
+        ("swapped_count", ctypes.c_uint64),
     ]
 
 
-def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
-    """Read macOS VM counters through Mach APIs, with no fork/exec on the sampler path."""
+def darwin_sysctl_structure(name: str, value_type: type[ctypes.Structure]) -> ctypes.Structure | None:
+    """Read one macOS struct sysctl without forking the sampler process."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        sysctlbyname = libc.sysctlbyname
+        sysctlbyname.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t]
+        sysctlbyname.restype = ctypes.c_int
+        value = value_type()
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if sysctlbyname(name.encode("utf-8"), ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+            return None
+        if size.value < ctypes.sizeof(value):
+            return None
+        return value
+    except (AttributeError, OSError):
+        return None
+
+
+def current_darwin_vm_statistics() -> tuple[int, int, DarwinVmStatistics64] | None:
+    """Read the physical capacity, page size, and VM statistics in one Mach call."""
     if sys.platform != "darwin":
         return None
     total = darwin_sysctl_value("hw.memsize", ctypes.c_uint64)
@@ -762,11 +809,56 @@ def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
         count = ctypes.c_uint32(ctypes.sizeof(counters) // ctypes.sizeof(ctypes.c_int))
         if libsystem.host_statistics64(host, 4, ctypes.cast(ctypes.byref(counters), ctypes.POINTER(ctypes.c_int)), ctypes.byref(count)) != 0:
             return None
-        # Darwin's speculative pages are already included in free_count.
-        available = int(counters.free_count) * int(page_size.value)
-        return total, max(0, total - min(total, available))
+        return total, int(page_size.value), counters
     except (AttributeError, OSError):
         return None
+
+
+def current_darwin_system_memory_snapshot() -> tuple[tuple[int, int], DarwinSystemMemoryDetails] | None:
+    """Return legacy allocation and Activity Monitor facts from one native snapshot."""
+    snapshot = current_darwin_vm_statistics()
+    if snapshot is None:
+        return None
+    total, page_size, counters = snapshot
+
+    def page_bytes(count: int) -> int:
+        return max(0, min(total, int(count) * page_size))
+
+    app_memory = page_bytes(counters.internal_page_count)
+    wired_memory = page_bytes(counters.wire_count)
+    compressed_memory = page_bytes(counters.compressor_page_count)
+    cached_files = page_bytes(counters.external_page_count)
+    memory_used = min(total, app_memory + wired_memory + compressed_memory)
+    swap = darwin_sysctl_structure("vm.swapusage", DarwinSwapUsage)
+    swap_used = int(swap.used_bytes) if swap is not None else None
+    available_percent = darwin_sysctl_value("kern.memorystatus_level", ctypes.c_int)
+    pressure_percent = None if available_percent is None else float(100 - max(0, min(100, available_percent)))
+    details = DarwinSystemMemoryDetails(
+        physical_memory_bytes=total,
+        memory_used_bytes=memory_used,
+        cached_files_bytes=cached_files,
+        app_memory_bytes=app_memory,
+        wired_memory_bytes=wired_memory,
+        compressed_memory_bytes=compressed_memory,
+        swap_used_bytes=swap_used,
+        pressure_percent=pressure_percent,
+    )
+    # The existing cross-platform series intentionally means physical allocation on
+    # Darwin. Keep that legacy semantic separate from the pressure display.
+    available = int(counters.free_count) * page_size
+    return (total, max(0, total - min(total, available))), details
+
+
+def current_darwin_system_memory_details() -> DarwinSystemMemoryDetails | None:
+    """Return the Mac-only facts displayed together with the pressure graph."""
+    snapshot = current_darwin_system_memory_snapshot()
+    return None if snapshot is None else snapshot[1]
+
+
+def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
+    """Read macOS physical allocation through Mach APIs for legacy consumers."""
+    snapshot = current_darwin_system_memory_snapshot()
+    return None if snapshot is None else snapshot[0]
 
 
 def stats_GPU_gpu_metrics() -> dict[str, Any]:
@@ -2455,9 +2547,11 @@ class TmuxWebtermApp:
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        memory = current_system_memory_bytes()
+        macos_snapshot = current_darwin_system_memory_snapshot()
+        memory = macos_snapshot[0] if macos_snapshot is not None else current_system_memory_bytes()
         if memory is None:
             raise RuntimeError("system memory metrics unavailable")
+        macos_details = None if macos_snapshot is None else macos_snapshot[1]
         return stats_current_collectors.system_memory_success(
             epoch_id=attempt.epoch_id,
             epoch_started_at=attempt.epoch_started_at,
@@ -2467,6 +2561,7 @@ class TmuxWebtermApp:
             source_id="host",
             used_bytes=float(memory[1]),
             capacity_bytes=float(memory[0]),
+            macos_details=None if macos_details is None else asdict(macos_details),
         )
 
     def collect_current_stats_agent_tokens(

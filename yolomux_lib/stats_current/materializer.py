@@ -715,13 +715,21 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
         "system_memory": {
             "system_memory_used_bytes": "used_bytes",
             "system_memory_capacity_bytes": "capacity_bytes",
+            "mac_physical_memory_bytes": "mac_physical_memory_bytes",
+            "mac_memory_used_bytes": "mac_memory_used_bytes",
+            "mac_cached_files_bytes": "mac_cached_files_bytes",
+            "mac_swap_used_bytes": "mac_swap_used_bytes",
+            "mac_app_memory_bytes": "mac_app_memory_bytes",
+            "mac_wired_memory_bytes": "mac_wired_memory_bytes",
+            "mac_compressed_memory_bytes": "mac_compressed_memory_bytes",
+            "mac_pressure_percent": "mac_pressure_percent",
         },
     }.get(observation.family)
     if fields is not None:
         return tuple(
             _Sample(series, spec.fold_kind.value, _number(payload, field), at, source)
             for series, field in fields.items()
-            if payload[field] is not None
+            if field in payload and payload[field] is not None
         )
     # Agent/model token and cost projections have one owner: usage atoms.
     return ()

@@ -404,6 +404,13 @@ const jsDebugGraphSeries = Object.freeze([
     sampleCount: bucket => Number(bucket?.hostMetrics?.systemMemoryCount || 0),
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
+  {
+    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', color: 'var(--good)',
+    value: bucket => bucket.hostMetrics?.macMemoryDetailCount ? bucket.hostMetrics.macMemoryPressureTotalPercent / bucket.hostMetrics.macMemoryDetailCount : 0,
+    hasData: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0) > 0 && Number.isFinite(Number(bucket?.hostMetrics?.macMemoryPressureTotalPercent)),
+    sampleCount: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0),
+    displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
+  },
 ]);
 // Mirror of yolomux_lib/stats_families.py — the ONE YO!stats family manifest.
 // Per family: the canonical name (identical to the server's
@@ -422,7 +429,7 @@ const jsDebugStatsFamilyManifest = Object.freeze({
   agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
   cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
   gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
-  system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory'])}),
+  system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory', 'macMemoryPressure'])}),
 });
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
@@ -1425,6 +1432,15 @@ function debugGraphNewHostMetrics() {
     systemMemoryUsedTotalBytes: 0,
     systemMemoryCapacityTotalBytes: 0,
     systemMemoryCount: 0,
+    macMemoryDetailCount: 0,
+    macPhysicalMemoryTotalBytes: 0,
+    macMemoryUsedTotalBytes: 0,
+    macCachedFilesTotalBytes: 0,
+    macSwapUsedTotalBytes: 0,
+    macAppMemoryTotalBytes: 0,
+    macWiredMemoryTotalBytes: 0,
+    macCompressedMemoryTotalBytes: 0,
+    macMemoryPressureTotalPercent: NaN,
     cpuLabel: '',
     systemMemoryLabel: '',
     cpuProcesses: new Map(),
@@ -1765,6 +1781,9 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     targetHost.systemMemoryUsedTotalBytes += Number(sourceHost.systemMemoryUsedTotalBytes || 0) * scale;
     targetHost.systemMemoryCapacityTotalBytes += Number(sourceHost.systemMemoryCapacityTotalBytes || 0) * scale;
     targetHost.systemMemoryCount += Number(sourceHost.systemMemoryCount || 0) * scale;
+    targetHost.macMemoryDetailCount += Number(sourceHost.macMemoryDetailCount || 0) * scale;
+    for (const key of ['macPhysicalMemoryTotalBytes', 'macMemoryUsedTotalBytes', 'macCachedFilesTotalBytes', 'macSwapUsedTotalBytes', 'macAppMemoryTotalBytes', 'macWiredMemoryTotalBytes', 'macCompressedMemoryTotalBytes']) targetHost[key] += Number(sourceHost[key] || 0) * scale;
+    if (Number.isFinite(Number(sourceHost.macMemoryPressureTotalPercent))) targetHost.macMemoryPressureTotalPercent = Number(sourceHost.macMemoryPressureTotalPercent);
     if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
     if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
@@ -2214,6 +2233,20 @@ function debugGraphApplyHostMetrics(bucket, source) {
   target.systemMemoryUsedTotalBytes = Math.max(target.systemMemoryUsedTotalBytes, Number(source.system_memory_used_total_bytes || 0));
   target.systemMemoryCapacityTotalBytes = Math.max(target.systemMemoryCapacityTotalBytes, Number(source.system_memory_capacity_total_bytes || 0));
   target.systemMemoryCount = Math.max(target.systemMemoryCount, Number(source.system_memory_count || 0));
+  const macMemoryFields = {
+    macPhysicalMemoryTotalBytes: 'mac_physical_memory_total_bytes', macMemoryUsedTotalBytes: 'mac_memory_used_total_bytes',
+    macCachedFilesTotalBytes: 'mac_cached_files_total_bytes', macSwapUsedTotalBytes: 'mac_swap_used_total_bytes',
+    macAppMemoryTotalBytes: 'mac_app_memory_total_bytes', macWiredMemoryTotalBytes: 'mac_wired_memory_total_bytes',
+    macCompressedMemoryTotalBytes: 'mac_compressed_memory_total_bytes', macMemoryPressureTotalPercent: 'mac_pressure_total_percent',
+  };
+  let macMemoryDetailSeen = false;
+  for (const [targetKey, sourceKey] of Object.entries(macMemoryFields)) {
+    const value = Number(source[sourceKey]);
+    if (!Number.isFinite(value)) continue;
+    target[targetKey] = Number.isFinite(Number(target[targetKey])) ? Math.max(target[targetKey], value) : value;
+    macMemoryDetailSeen = true;
+  }
+  if (macMemoryDetailSeen) target.macMemoryDetailCount = Math.max(target.macMemoryDetailCount, Number(source.mac_memory_count || 1));
   if (source.cpu_label) target.cpuLabel = String(source.cpu_label);
   if (source.system_memory_label) target.systemMemoryLabel = String(source.system_memory_label);
   debugGraphApplyHostMetricProcesses(target.cpuProcesses, source.cpu_processes);
@@ -4503,6 +4536,45 @@ function debugGraphGroupSeriesItems(group, seriesItems) {
   return seriesItems.filter(series => seriesKeys.has(series.chartMetricKey || (series.clientMetric === true ? series.metricKey : series.key)));
 }
 
+function debugGraphMacMemoryCardAvailable(buckets) {
+  return (buckets || []).some(bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0) > 0);
+}
+
+function debugGraphResolvedChartGroup(group, buckets) {
+  if (group?.key !== 'memory' || !debugGraphMacMemoryCardAvailable(buckets)) return group;
+  return {
+    ...group,
+    label: 'Memory pressure',
+    labelKey: '',
+    desc: 'macOS memory pressure with Activity Monitor-style memory facts. Physical allocation and cached files do not by themselves mean the Mac is out of memory.',
+    descKey: '',
+    series: ['macMemoryPressure'],
+    unit: 'percent',
+    fixedMax: 100,
+    kind: 'area',
+    stacked: false,
+    capacityMetric: '',
+    hostMetric: '',
+    macMemoryCard: true,
+  };
+}
+
+function debugGraphMacMemoryDetailsHtml(buckets) {
+  const bucket = [...(buckets || [])].reverse().find(item => Number(item?.hostMetrics?.macMemoryDetailCount || 0) > 0);
+  const host = bucket?.hostMetrics;
+  if (!host) return '';
+  const count = Math.max(1, Number(host.macMemoryDetailCount || 0));
+  const facts = [
+    ['Physical Memory', 'macPhysicalMemoryTotalBytes'], ['Memory Used', 'macMemoryUsedTotalBytes'], ['Cached Files', 'macCachedFilesTotalBytes'],
+    ['Swap Used', 'macSwapUsedTotalBytes'], ['App Memory', 'macAppMemoryTotalBytes'], ['Wired Memory', 'macWiredMemoryTotalBytes'], ['Compressed', 'macCompressedMemoryTotalBytes'],
+  ];
+  return `<dl class="js-debug-mac-memory-details" data-js-debug-mac-memory-details>${facts.map(([label, key]) => {
+    const value = Number(host[key]);
+    const text = Number.isFinite(value) ? debugGraphValueText(value / count, 'bytes') : '—';
+    return `<div><dt>${esc(label)}</dt><dd>${esc(text)}</dd></div>`;
+  }).join('')}</dl>`;
+}
+
 function debugGraphLegendSeriesItems(group, groupSeries) {
   const legendKeys = Array.isArray(group?.legendSeries) ? group.legendSeries : null;
   if (!legendKeys) return groupSeries;
@@ -4746,6 +4818,7 @@ function refreshDebugAgentWindowLiveDetails() {
 }
 
 function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBuckets = buckets, disconnectedRanges = null, options = {}) {
+  group = debugGraphResolvedChartGroup(group, buckets);
   const groupLabel = debugGraphChartLabel(group, buckets);
   const groupTitleAttrs = debugGraphExplainAttrs(groupLabel, group.descKey, {attribute: 'data-js-debug-chart-desc'});
   const groupSeries = debugGraphGroupSeriesItems(group, seriesItems);
@@ -4771,6 +4844,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
   const axisMax = max > 0 ? max : 0;
   const chartClasses = ['js-debug-chart'];
   if (group.dynamicAgentTokens === true || group.dynamicTokenDimension) chartClasses.push('js-debug-chart--token-agents');
+  if (group.macMemoryCard === true) chartClasses.push('js-debug-chart--mac-memory');
   const bucketSeconds = Number(group.bucketSeconds);
   const bucketAttr = Number.isFinite(bucketSeconds) && bucketSeconds > 0 ? ` data-js-debug-chart-bucket-seconds="${esc(bucketSeconds)}"` : '';
   const displayedSummary = debugGraphDisplayedSummary(group, buckets);
@@ -4811,6 +4885,7 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
       ${chartUnavailable ? '' : debugGraphLegendHtml(legendSeries)}
+      ${group.macMemoryCard === true ? debugGraphMacMemoryDetailsHtml(buckets) : ''}
     </div>
     ${chartUnavailable ? `<div class="js-debug-chart-unavailable"${gpuUnavailable ? ` data-js-debug-gpu-unavailable="${esc(group.key)}"` : ' data-js-debug-agent-billable-unavailable'}>${esc(chartUnavailableText)}</div>` : `<div class="js-debug-chart-body">
       ${debugGraphAxisHtml({...group, scale: plotScale}, axisMax)}
@@ -6246,6 +6321,18 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name === 'system_memory_capacity_bytes') {
       record.host_metrics.system_memory_capacity_total_bytes = value;
       record.host_metrics.system_memory_count = 1;
+    } else if (name.startsWith('mac_')) {
+      const macMemorySeries = {
+        mac_physical_memory_bytes: 'mac_physical_memory_total_bytes', mac_memory_used_bytes: 'mac_memory_used_total_bytes',
+        mac_cached_files_bytes: 'mac_cached_files_total_bytes', mac_swap_used_bytes: 'mac_swap_used_total_bytes',
+        mac_app_memory_bytes: 'mac_app_memory_total_bytes', mac_wired_memory_bytes: 'mac_wired_memory_total_bytes',
+        mac_compressed_memory_bytes: 'mac_compressed_memory_total_bytes', mac_pressure_percent: 'mac_pressure_total_percent',
+      };
+      const target = macMemorySeries[name];
+      if (target) {
+        record.host_metrics[target] = value;
+        record.host_metrics.mac_memory_count = 1;
+      }
     } else if (name.startsWith('gpu_util_percent:')) {
       const source = name.slice('gpu_util_percent:'.length);
       const device = record.host_metrics.gpu_devices[source] || {label: source, util_total_percent: 0, memory_used_total_bytes: 0, memory_capacity_total_bytes: 0, samples: 1};
@@ -6328,7 +6415,7 @@ function jsDebugCurrentBucketHasFamilyData(bucket, family) {
     return prefixed('agent_tokens_per_minute:') || prefixed('model_tokens_per_minute:') || names.includes('cost_micro_usd') || names.includes('api_list_cost_micro_usd') || names.includes('usage_tokens');
   }
   if (family === 'gpu') return prefixed('gpu_util_percent:') || prefixed('gpu_memory_bytes:');
-  if (family === 'system_memory') return names.includes('system_memory_used_bytes') || names.includes('system_memory_capacity_bytes');
+  if (family === 'system_memory') return names.includes('system_memory_used_bytes') || names.includes('system_memory_capacity_bytes') || names.some(name => name.startsWith('mac_'));
   if (family === 'browser') return names.some(name => name.startsWith('browser_'));
   return false;
 }

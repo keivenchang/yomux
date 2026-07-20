@@ -5194,6 +5194,43 @@ body :is(
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
   grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
 }
+.js-debug-mac-memory-details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, max-content));
+  gap: var(--space-3) var(--space-10);
+  margin: 0;
+  min-width: 0;
+}
+.js-debug-mac-memory-details > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-5);
+  min-width: 0;
+  border-block-end: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+}
+.js-debug-mac-memory-details dt,
+.js-debug-mac-memory-details dd {
+  margin: 0;
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+}
+.js-debug-mac-memory-details dt {
+  color: var(--muted);
+}
+.js-debug-mac-memory-details dd {
+  color: var(--text);
+  text-align: end;
+  white-space: nowrap;
+}
+@container (max-width: 32rem) {
+  .js-debug-mac-memory-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container (max-width: 20rem) {
+  .js-debug-mac-memory-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .js-debug-cost-summary {
   display: grid;
   grid-template-rows: auto auto auto;

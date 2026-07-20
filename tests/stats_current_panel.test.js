@@ -104,6 +104,19 @@ test('all established chart controls and semantic renderers remain present', () 
   assert.match(css, /\.js-debug-logs-view/);
 });
 
+test('macOS keeps Activity Monitor memory facts and pressure in one card', () => {
+  const resolver = sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml');
+  const details = sourceFunction('debugGraphMacMemoryDetailsHtml', 'debugGraphLegendSeriesItems');
+  const chart = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
+  assert.match(resolver, /key !== 'memory'/);
+  assert.match(resolver, /series: \['macMemoryPressure'\]/);
+  assert.match(resolver, /fixedMax: 100/);
+  for (const label of ['Physical Memory', 'Memory Used', 'Cached Files', 'Swap Used', 'App Memory', 'Wired Memory', 'Compressed']) assert.match(details, new RegExp(label));
+  assert.match(chart, /debugGraphMacMemoryDetailsHtml\(buckets\)/);
+  assert.match(css, /\.js-debug-mac-memory-details/);
+  assert.match(css, /@container \(max-width: 20rem\)/);
+});
+
 test('Agents keeps revision-gated live state and semantic paint', () => {
   assert.match(source, /agent_window_snapshot_revision/);
   assert.match(source, /function debugGraphLiveAgentWindowDetailHtml\(groupKey = 'activity'\)/);

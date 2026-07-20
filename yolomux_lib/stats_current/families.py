@@ -174,8 +174,22 @@ CURRENT_FAMILIES = (
     ),
     FamilySpec(
         "system_memory", "system_memory", 60, 60, FoldKind.GAUGE,
-        (_field("used_bytes", NUMBER), _field("capacity_bytes", NUMBER)),
-        ("system_memory_used_bytes", "system_memory_capacity_bytes"), True,
+        (
+            _field("used_bytes", NUMBER), _field("capacity_bytes", NUMBER),
+            _field("mac_physical_memory_bytes", NUMBER, required=False), _field("mac_memory_used_bytes", NUMBER, required=False),
+            _field("mac_cached_files_bytes", NUMBER, required=False), _field("mac_swap_used_bytes", NUMBER, required=False),
+            _field("mac_app_memory_bytes", NUMBER, required=False), _field("mac_wired_memory_bytes", NUMBER, required=False),
+            _field("mac_compressed_memory_bytes", NUMBER, required=False), _field("mac_pressure_percent", NUMBER, required=False),
+            # A reverted pre-v6 Mac experiment persisted this key. Keep it
+            # readable so one retired observation cannot block statsd startup;
+            # the materializer deliberately does not publish it.
+            _field("pressure_percent", NUMBER, required=False),
+        ),
+        (
+            "system_memory_used_bytes", "system_memory_capacity_bytes", "mac_physical_memory_bytes", "mac_memory_used_bytes",
+            "mac_cached_files_bytes", "mac_swap_used_bytes", "mac_app_memory_bytes", "mac_wired_memory_bytes",
+            "mac_compressed_memory_bytes", "mac_pressure_percent",
+        ), True,
     ),
     FamilySpec(
         "agent_tokens", "agent_tokens", 10, 60, FoldKind.RATE,

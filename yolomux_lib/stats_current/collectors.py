@@ -124,10 +124,14 @@ def service_load_success(
 def system_memory_success(
     *, epoch_id: str, epoch_started_at: float, observed_at: float,
     cadence_seconds: float, owner_generation: int, source_id: str,
-    used_bytes: float, capacity_bytes: float,
+    used_bytes: float, capacity_bytes: float, macos_details: Mapping[str, object] | None = None,
 ) -> CollectorFacts:
+    payload: dict[str, object] = {"used_bytes": used_bytes, "capacity_bytes": capacity_bytes}
+    for key, value in (macos_details or {}).items():
+        if value is not None:
+            payload[f"mac_{key}"] = value
     return _single(
-        "system_memory", source_id, {"used_bytes": used_bytes, "capacity_bytes": capacity_bytes},
+        "system_memory", source_id, payload,
         epoch_id, epoch_started_at, observed_at, cadence_seconds, owner_generation,
     )
 
