@@ -2255,6 +2255,71 @@ def test_sync_mode_user_select_session_8002_opens_transcript_root(browser, tmp_p
     }, metrics
 
 
+def test_fixed_finder_session_dropdown_change_does_not_move_root(browser, tmp_path):
+    # Requirement 3: with Sync OFF (fixed mode), changing the Finder Session dropdown must NOT move
+    # the Finder path/root. The tree's root change happens ONLY via the dropdown when Sync is ON;
+    # the companion test_sync_mode_user_select_session_8002_opens_transcript_root covers the Sync-ON
+    # case. The guard lives in scheduleFileExplorerActiveTabSync (mode !== 'sync' early-returns).
+    fs_entries = {
+        "/home/test": [{"name": "yolomux.dev1", "kind": "dir"}, {"name": "yolomux.dev2", "kind": "dir"}],
+        "/home/test/yolomux.dev1": [{"name": "src", "kind": "dir"}],
+        "/home/test/yolomux.dev2": [{"name": "src", "kind": "dir"}],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,5,8002&layout=row@35(slot1,row@50(left,slot2))&tabs=slot1:files;left:5;slot2:8002",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        sessions=["5", "8002"],
+        transcript_sessions={
+            "5": {"current_path": "/home/test/yolomux.dev1/src", "git_root": "/home/test/yolomux.dev1"},
+            "8002": {"current_path": "/home/test/yolomux.dev2/src", "git_root": "/home/test/yolomux.dev2"},
+        },
+        session_files_payloads={
+            "5": {"session": "5", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev1"}], "files": []},
+            "8002": {"session": "8002", "loaded": True, "errors": [], "repos": [{"repo": "/home/test/yolomux.dev2"}], "files": []},
+        },
+        fs_entries=fs_entries,
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return !!Array.from(document.querySelectorAll('#panel-__finder__ [data-session-files-session]'))"
+            ".find(s => s.getClientRects().length > 0) && document.querySelector('.file-explorer-path-inline') !== null;"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const before = {
+          root: document.querySelector('.file-explorer-path-inline')?.value || '',
+          mode: fileExplorerRootModeValue(),
+        };
+        const sel = Array.from(document.querySelectorAll('#panel-__finder__ [data-session-files-session]'))
+          .find(s => s.getClientRects().length > 0);
+        sel.value = '8002';
+        sel.dispatchEvent(new Event('change', {bubbles: true, cancelable: true}));
+        // Let any (incorrectly) scheduled sync settle before asserting the root did not move.
+        setTimeout(() => {
+          done({
+            before,
+            after: {
+              root: document.querySelector('.file-explorer-path-inline')?.value || '',
+              mode: fileExplorerRootModeValue(),
+            },
+            errors: window.__bootErrors,
+            rejections: window.__bootRejections,
+          });
+        }, 600);
+        """
+    )
+    assert result["errors"] == [], result
+    assert result["rejections"] == [], result
+    assert result["before"]["mode"] == "fixed", result
+    assert result["after"]["mode"] == "fixed", result
+    # Sync OFF: the Session-dropdown change must leave the path/root exactly where it was.
+    assert result["after"]["root"] == result["before"]["root"], result
+
+
 def test_sync_mode_typed_manual_path_does_not_snap_back_until_explicit_input(browser, tmp_path):
     session_files_payload = {
         "session": "5",
@@ -3115,3 +3180,72 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
     assert metrics["root"] == "~", metrics
     assert "/home/test/stale" in {row["path"] for row in metrics["rows"]}, metrics
     assert not any(row["hasRepo"] or row["hasTouched"] for row in metrics["rows"]), metrics
+
+
+def test_finder_panel_paints_initial_path_under_push_without_sync(browser, tmp_path):
+    # Regression for the reported bug: a Finder PANEL whose tree has not yet painted must list the
+    # current path (~ -> home) on a no-entries refresh under the live client-push transport,
+    # regardless of Sync. createFileExplorerPanel ends with `refreshFileExplorerPanelTree(panel)`
+    # (no entries); before the fix that call early-returned under clientPushCanSupplyData() before
+    # the first paint (deferring to a filesystem push that only covers registered watch roots), so
+    # the tree stayed empty until Sync was pressed. This test drives that exact gated path: it
+    # empties the tree, then calls the no-entries panel refresh with push active and Sync OFF, and
+    # asserts the rows render. It fails against the old early-return and passes with the first-paint fix.
+    fs_entries = {
+        "/home/test": [{"name": "alpha", "kind": "dir"}, {"name": "readme.txt", "kind": "file"}],
+        "/home/test/alpha": [{"name": "inner.js", "kind": "file"}],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?layout=left&tabs=left:files",
+        settings={"file_explorer": {"root_mode": "fixed"}},
+        transcript_current_path="",
+        fs_entries=fs_entries,
+    )
+    # Wait for the panel to exist, then reproduce an un-painted panel-refresh under push.
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return !!document.querySelector('.file-explorer-finder .file-explorer-tree-panel');"
+        )
+    )
+    setup = browser.execute_script(
+        """
+        const panel = document.querySelector('.file-explorer-finder');
+        const tree = panel.querySelector('.file-explorer-tree-panel');
+        tree.innerHTML = '';  // simulate a freshly-created, not-yet-painted panel tree
+        const pushActive = typeof clientPushCanSupplyData === 'function' && clientPushCanSupplyData() === true;
+        // Drive the exact gated call from createFileExplorerPanel (no entries, no force).
+        refreshFileExplorerPanelTree(panel);
+        return {
+          pushActive,
+          rootMode: typeof fileExplorerRootMode !== 'undefined' ? fileExplorerRootMode : null,
+          emptiedTo: tree.childElementCount,
+        };
+        """
+    )
+    assert setup["pushActive"] is True, setup
+    assert setup["rootMode"] == "fixed", setup
+    assert setup["emptiedTo"] == 0, setup
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return Array.from(document.querySelectorAll('.file-explorer-finder .file-tree-row')).some("
+            "row => row.dataset.path === '/home/test/alpha' || row.dataset.path === '/home/test/readme.txt');"
+        )
+    )
+    metrics = browser.execute_script(
+        """
+        return {
+          errors: window.__bootErrors,
+          rejections: window.__bootRejections,
+          root: document.querySelector('.file-explorer-finder .file-explorer-path-inline')?.value || '',
+          rows: Array.from(document.querySelectorAll('.file-explorer-finder .file-tree-row')).map(row => row.dataset.path),
+        };
+        """
+    )
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+    assert metrics["root"] == "~", metrics
+    row_paths = set(metrics["rows"])
+    assert "/home/test/alpha" in row_paths, metrics
+    assert "/home/test/readme.txt" in row_paths, metrics

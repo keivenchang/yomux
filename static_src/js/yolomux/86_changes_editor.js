@@ -2628,15 +2628,14 @@ function createFileExplorerPanel(item = finderItemId) {
   const label = fileExplorerItemLabel(item);
   const reloadButtonHtml = `<button type="button" class="changes-refresh file-explorer-refresh-cluster" data-file-explorer-refresh title="${esc(t('common.refresh'))}" aria-label="${esc(t('common.refresh'))}">${esc(t('common.reload'))}</button>`;
   const finderToolbarHtml = view === 'finder' ? `<div class="file-explorer-toolbar">
-          <div class="file-explorer-toolbar-row file-explorer-primary-row">
-            ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
-            <span class="file-explorer-toolbar-spacer"></span>
-            ${reloadButtonHtml}
-          </div>
           <div class="file-explorer-toolbar-row file-explorer-path-row">
-            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
             <input class="file-explorer-path-inline" type="text" value="${esc(initialPath)}" spellcheck="false" aria-label="${esc(t('finder.toolbar.rootPath', {name: label}))}">
             <button type="button" class="path-copy-button file-explorer-path-copy-panel" title="${esc(t('finder.toolbar.copyPath'))}" aria-label="${esc(t('finder.toolbar.copyPath'))}"></button>
+            ${reloadButtonHtml}
+          </div>
+          <div class="file-explorer-toolbar-row file-explorer-primary-row">
+            <button type="button" class="file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel" title="${esc(t('finder.toolbar.syncTitle'))}" aria-label="${esc(t('finder.toolbar.syncTitle'))}" aria-pressed="true">${esc(t('finder.toolbar.syncLabel'))}</button>
+            ${fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')}
           </div>
           <div class="file-explorer-toolbar-row file-explorer-actions-row">
             <button type="button" class="file-explorer-header-action" data-file-explorer-new-file title="${esc(t('finder.toolbar.newFile'))}" aria-label="${esc(t('finder.toolbar.newFile'))}">+</button>
@@ -2726,7 +2725,16 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   syncFileExplorerHiddenButton(hiddenBtn);
   syncFileExplorerTreeDateButton(dateBtn);
   if (sortSelect && sortSelect.value !== fileExplorerTreeSortModeForView(view)) sortSelect.value = fileExplorerTreeSortModeForView(view);
-  if (clientPushCanSupplyData() && !options.entries && options.force !== true) {
+  const pushCanSupply = clientPushCanSupplyData();
+  // Under the live push transport an ALREADY-PAINTED tree is kept current by incremental
+  // filesystem-push deltas (which preserve scroll and expansion), so we must not re-fetch and
+  // re-render the whole tree here — that is the reset-to-top full rebuild. But the FIRST paint
+  // must list the current root's directory directly, regardless of Sync or of whether any push
+  // has arrived yet, so the Finder is never empty on open. `root` is the current path
+  // (`fileExplorerRoot || homePath`), never a session-derived root, so this does not follow a
+  // session when Sync is off.
+  const treeAlreadyPainted = treeEl.childElementCount > 0;
+  if (pushCanSupply && !options.entries && options.force !== true && treeAlreadyPainted) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
   }
@@ -2736,6 +2744,7 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
   if (!entries) return;
   renderTreeChildren(treeEl, root, entries, 0, {entriesByDir: options.entriesByDir});
   updateFileExplorerCurrentFileHighlight();
+  if (pushCanSupply && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
 function renderFileExplorerChangesPanel(panel, options = {}) {

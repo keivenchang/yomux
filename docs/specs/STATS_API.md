@@ -181,7 +181,7 @@ A Range/Resolution selection, reconnect, missed generation, server identity chan
 | No complete materialization yet | `503` | Structured `pending` response with bounded `retry_after_seconds`; no synchronous build. |
 | Current statsd unavailable | `503` | Structured `unavailable` response; no in-process database reader or older transport retry. |
 | Stale page writer protocol or schema | `426` | Structured `upgrade_required`; the page stops mutation and automatic retry. |
-| Read-side RPC fence | `426` | Structured `upgrade_required` with required protocol/schema/build; client retries its own version-scoped service once and shows an updating/retrying state. |
+| Read-side RPC fence | `426` | Structured `upgrade_required` with required protocol/schema/build; when the running daemon is proven by the service ledger to belong to a dead prior web launcher, the owner reclaims that exact daemon and starts the current version, and the browser retries through `/api/stats-retry`. A fence without that sole-owner/dead-launcher proof remains terminal. |
 
 Current clients reject a response whose echoed key, concrete resolution, bucket duration, generation, or protocol does not match the active request. Stale success, failure, and cleanup handlers cannot replace or clear a newer request.
 

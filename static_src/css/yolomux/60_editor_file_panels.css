@@ -1444,7 +1444,7 @@ body.resizing-file-explorer-changes {
   border-color: var(--active-control-border);
 }
 .file-explorer-changes-panel .changes-refresh,
-.file-explorer-primary-row .changes-refresh {
+.file-explorer-refresh-cluster {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1457,7 +1457,7 @@ body.resizing-file-explorer-changes {
   font-size: var(--ui-font-size-2xs);
 }
 .file-explorer-changes-panel .changes-refresh::before,
-.file-explorer-primary-row .changes-refresh::before {
+.file-explorer-refresh-cluster::before {
   content: "↻";
   display: block;
   flex: 0 0 auto;
@@ -1467,8 +1467,8 @@ body.resizing-file-explorer-changes {
 }
 .file-explorer-changes-panel .changes-refresh:hover,
 .file-explorer-changes-panel .changes-refresh:focus-visible,
-.file-explorer-primary-row .changes-refresh:hover,
-.file-explorer-primary-row .changes-refresh:focus-visible {
+.file-explorer-refresh-cluster:hover,
+.file-explorer-refresh-cluster:focus-visible {
   background: var(--file-explorer-refresh-hover-surface);
 }
 body :is(
@@ -1477,7 +1477,7 @@ body :is(
   .file-explorer-root-mode-toggle,
   .file-explorer-header-action,
   .file-explorer-changes-panel .changes-refresh,
-  .file-explorer-primary-row .changes-refresh
+  .file-explorer-refresh-cluster
 ):is(:hover, :focus-visible) {
   color: var(--text);
   border-color: var(--text);

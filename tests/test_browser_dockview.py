@@ -7456,7 +7456,7 @@ def test_dockview_file_surface_header_uses_common_one_line_controls_and_finder_r
             const primary = group?.querySelector('.file-explorer-finder .file-explorer-primary-row');
             const path = group?.querySelector('.file-explorer-finder .file-explorer-path-row');
             const actions = group?.querySelector('.file-explorer-finder .file-explorer-actions-row');
-            const reload = primary?.querySelector('[data-file-explorer-refresh]');
+            const reload = group?.querySelector('.file-explorer-finder [data-file-explorer-refresh]');
             const fileTabs = Array.from(group?.querySelectorAll('.dockview-pane-tab') || [])
               .filter(node => ['__finder__', '__differ__', '__tabber__'].includes(node.dataset.paneTab));
             const visible = node => {
@@ -7483,8 +7483,10 @@ def test_dockview_file_surface_header_uses_common_one_line_controls_and_finder_r
               primaryRight: primaryRect.right,
               reloadRight: reloadRect.right,
               reloadInPrimary: reload?.parentElement === primary,
+              reloadInPath: reload?.parentElement === path,
               reloadInActions: Boolean(actions.querySelector('[data-file-explorer-refresh]')),
               pathTop: pathRect.top,
+              pathRight: pathRect.right,
               actionsTop: actionsRect.top,
               errors: window.__bootErrors || [],
             };
@@ -7498,11 +7500,12 @@ def test_dockview_file_surface_header_uses_common_one_line_controls_and_finder_r
     assert metrics["innerPresent"] is False, metrics
     assert max(tab["top"] for tab in metrics["fileTabs"]) - min(tab["top"] for tab in metrics["fileTabs"]) <= 1, metrics
     assert max(tab["right"] for tab in metrics["fileTabs"]) <= metrics["minimize"]["left"] + 1, metrics
-    assert metrics["sessionText"].startswith("Session:"), metrics
-    assert metrics["primaryTop"] - metrics["headerBottom"] <= 8, metrics
-    assert metrics["reloadInPrimary"] is True and metrics["reloadInActions"] is False, metrics
-    assert metrics["primaryRight"] - metrics["reloadRight"] <= 2, metrics
-    assert metrics["primaryTop"] < metrics["pathTop"] < metrics["actionsTop"], metrics
+    assert "Session:" in metrics["sessionText"], metrics
+    # New header order: path row first (just below the header), then Sync+Session, then actions.
+    assert metrics["pathTop"] - metrics["headerBottom"] <= 8, metrics
+    assert metrics["reloadInPath"] is True and metrics["reloadInPrimary"] is False and metrics["reloadInActions"] is False, metrics
+    assert metrics["pathRight"] - metrics["reloadRight"] <= 2, metrics
+    assert metrics["pathTop"] < metrics["primaryTop"] < metrics["actionsTop"], metrics
     assert metrics["errors"] == [], metrics
 
 

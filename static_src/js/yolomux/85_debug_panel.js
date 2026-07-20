@@ -5981,7 +5981,7 @@ function ensureJsDebugCurrentStatsClient() {
     onState(state, error) {
       if (state !== 'error') return;
       const liveSelection = jsDebugCurrentStatsSelection();
-      const versionFence = error?.versionFence === true;
+      const recoverableReadFence = error?.recoverableReadFence === true;
       const requiredProtocol = Number(error?.requiredProtocolVersion) || 0;
       const requiredSchema = Number(error?.requiredSchemaGeneration) || 0;
       const fenceDetail = requiredProtocol && requiredSchema
@@ -5989,7 +5989,7 @@ function ensureJsDebugCurrentStatsClient() {
         : '';
       setJsDebugHistoryReadiness('error', {
         requestedRangeSeconds: liveSelection.rangeSeconds,
-        error: versionFence
+        error: recoverableReadFence
           ? `YO!stats service is updating${fenceDetail}; retrying automatically.`
           : String(error?.reason || error?.message || 'Current stats stream unavailable'),
         nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,

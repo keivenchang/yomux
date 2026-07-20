@@ -1063,7 +1063,7 @@ async function runShareThemeSuite() {
     assert.ok(changedFilesCss.includes('--30-preferences-changes-file-explorer-changes-panel-changes-indent-line-30: var(--tree-indent-line);'), 'light theme explicitly restyles Finder modified-files through shared tokens');
     assert.ok(changedFilesCss.includes('.file-tree-row.kind-file .file-tree-name'), 'Finder filenames resolve to row text colors instead of inherited stale colors');
     assert.ok(/\.file-explorer-changes-panel \.changes-refresh::before[\s\S]*?\{\s*content:\s*"↻"/.test(changedFilesCss), 'Finder embedded Differ refresh paints a visible refresh icon');
-    assert.ok(/\.file-explorer-primary-row \.changes-refresh::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder primary-row Reload control paints the same visible refresh icon');
+    assert.ok(/\.file-explorer-refresh-cluster::before\s*\{[\s\S]*content:\s*"↻"/.test(changedFilesCss), 'Finder Reload control paints the same visible refresh icon (scoped to its own class after the header row swap)');
     assert.ok(changedFilesCss.includes('--file-hover-bg: #fff2a8'), 'light-mode Finder/Differ row hover uses a yellow highlighter fill');
     assert.ok(/\.file-tree-row:not\(\.selected\):hover\s*\{[\s\S]*background:\s*var\(--file-hover-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-hover-border\)/.test(changedFilesCss), 'Finder/Differ hover rows use the shared yellow highlighter tokens without overriding selected rows');
     assert.ok(/\.file-tree-row\.current-file:not\(\.selected\)\s*\{[\s\S]*color:\s*var\(--file-selection-text\)[\s\S]*background:\s*var\(--file-selection-bg\)[\s\S]*box-shadow:\s*inset 4px 0 0 var\(--file-selection-border\)/.test(changedFilesCss), 'Finder Sync current file reuses the selected-row color tokens');
@@ -1981,13 +1981,15 @@ async function runShareThemeSuite() {
       finderPanelStart,
       finderPanelBundle.indexOf('function bindFileExplorerPanel', finderPanelStart),
     );
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row/.test(finderPanelSource), 'Finder panel toolbar renders primary, path, and action rows in order');
+    assert.ok(/file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-toolbar-row file-explorer-actions-row/.test(finderPanelSource), 'Finder panel toolbar renders path, Sync+Session (primary), and action rows in order');
     assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
     assert.equal(finderPanelSource.includes('file-explorer-panel-title'), false, 'Finder panel no longer prints redundant Finder/Differ title text');
     assert.equal(finderPanelSource.includes('fileExplorerModeSwitcherHtml()'), false, 'Finder panel uses the shared pane tabs instead of a second in-panel mode switcher');
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*reloadButtonHtml/.test(finderPanelSource), 'Finder panel primary row renders its own Session, spacer, and Reload');
+    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*file-explorer-root-mode-toggle-panel[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)/.test(finderPanelSource), 'Finder panel primary row renders Sync then its own Session');
+    assert.ok(/file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-path-inline[\s\S]*file-explorer-path-copy-panel[\s\S]*reloadButtonHtml/.test(finderPanelSource), 'Finder panel path row renders the path input, copy, and Reload');
     assert.equal(finderPanelSource.includes('fileExplorerChangesCollapseToggleHtml()'), false, 'Finder panel primary row no longer renders a redundant Differ collapse/expand button next to close');
-    assert.ok(/file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
+    const finderPathRowBlock = finderPanelSource.slice(finderPanelSource.indexOf('file-explorer-path-row'), finderPanelSource.indexOf('file-explorer-primary-row'));
+    assert.equal(finderPathRowBlock.includes('file-explorer-root-mode-toggle-panel'), false, 'Sync toggle moved out of the path row into the Sync+Session (primary) row');
     assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*common\.sessionLabel[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
     assert.equal(finderPanelSource.includes('file-explorer-scope-row'), false, 'Finder no longer renders a separate scope row');
     assert.equal(finderPanelSource.includes('file-explorer-quick-access-panel'), false, 'Finder pane chrome no longer renders visible quick-root buttons');

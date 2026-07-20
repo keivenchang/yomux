@@ -91,7 +91,7 @@ test('Vertical Side Pane tab menus omit More desc and reuse the shared direction
 
 test('Finder and Differ render shared selectors with independent selected-session owners', () => {
   const finderBuilder = panel.slice(panel.indexOf('function createFileExplorerPanel('), panel.indexOf('function refreshFileExplorerPanelTree('));
-  assert.match(finderBuilder, /file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*file-explorer-path-row[\s\S]*view === 'differ'[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\), 'differ'\)/);
+  assert.match(finderBuilder, /file-explorer-path-row[\s\S]*file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*view === 'differ'[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\), 'differ'\)/);
   assert.match(panel, /function switchFileExplorerFinderSession\(session\)[\s\S]*fileExplorerFinderSelectedSession = session[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\)/);
   assert.match(panel, /function switchFileExplorerChangesSession\(session\)[\s\S]*fileExplorerChangesSelectedSession = session/);
 });
@@ -107,6 +107,30 @@ test('Finder rows require their own pointer-down before pointer-up can activate 
   const finderSource = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
   assert.match(finderSource, /row\.onpointerup = event => \{[\s\S]*const start = row\.__fileTreePointerDown;[\s\S]*if \(!start\)[\s\S]*row\.__fileTreeSuppressClick = true/);
   assert.match(finderSource, /row\.onclick = event => \{[\s\S]*if \(row\.__fileTreeSuppressClick\)[\s\S]*return;/);
+});
+
+test('Finder header puts the path row (path input + copy + Reload) first and the Sync + Session row second', () => {
+  const pathRow = panel.indexOf('file-explorer-toolbar-row file-explorer-path-row');
+  const primaryRow = panel.indexOf('file-explorer-toolbar-row file-explorer-primary-row');
+  const actionsRow = panel.indexOf('file-explorer-toolbar-row file-explorer-actions-row');
+  assert.ok(pathRow > 0 && primaryRow > 0 && actionsRow > 0, 'finder toolbar rows present');
+  // Row order: path row FIRST, then Sync+Session (primary) row, then the actions row.
+  assert.ok(pathRow < primaryRow, 'path row renders before the Sync/Session row');
+  assert.ok(primaryRow < actionsRow, 'Sync/Session row renders before the actions row');
+  // The path row owns the path input, the copy button, and the Reload button (moved off the old primary row).
+  const pathRowBlock = panel.slice(pathRow, primaryRow);
+  assert.match(pathRowBlock, /input class="file-explorer-path-inline"/, 'path input in the path row');
+  assert.match(pathRowBlock, /file-explorer-path-copy-panel/, 'copy button in the path row');
+  assert.match(pathRowBlock, /\$\{reloadButtonHtml\}/, 'Reload button in the path row');
+  // The primary row owns the Sync toggle then the Finder session control.
+  const primaryRowBlock = panel.slice(primaryRow, actionsRow);
+  const syncIdx = primaryRowBlock.indexOf('file-explorer-root-mode-toggle-panel');
+  const sessionIdx = primaryRowBlock.indexOf("fileExplorerDiffSessionControlHtml(fileExplorerFinderTargetSession(), 'finder')");
+  assert.ok(syncIdx > 0 && sessionIdx > 0, 'Sync toggle and Session control in the primary row');
+  assert.ok(syncIdx < sessionIdx, 'Sync button precedes the Session dropdown');
+  // The reload button styling is scoped to its own class (it moved rows), not to the primary row.
+  assert.match(filePanelCss, /\.file-explorer-refresh-cluster \{/, 'reload styling scoped to its own class');
+  assert.doesNotMatch(filePanelCss, /\.file-explorer-primary-row \.changes-refresh/, 'no stale primary-row reload selector');
 });
 
 console.log(`\nfile-surface menu suite: ${passed} passed, ${failed} failed`);

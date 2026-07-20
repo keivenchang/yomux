@@ -614,7 +614,7 @@
     let readFenceRecovery = null;
 
     async function recoverReadFence(error) {
-      if (error?.versionFence !== true) return;
+      if (error?.recoverableReadFence !== true) return;
       if (!readFenceRecovery) {
         readFenceRecovery = fetchJson(fetchImpl, '/api/stats-retry', false, {method: 'POST'})
           .catch(recoveryError => {
@@ -648,7 +648,7 @@
           ['since_generation', request.since_generation],
         ]), true);
       } catch (error) {
-        if (error?.versionFence === true) await recoverReadFence(error);
+        if (error?.recoverableReadFence === true) await recoverReadFence(error);
         onState(error.pending === true ? 'pending' : 'error', error);
         throw error;
       }
@@ -1652,6 +1652,10 @@
       error.terminal = failurePayload?.terminal === true;
       error.versionFence = response?.status === 426
         && failurePayload?.status === 'upgrade_required';
+      // Read-side upgrade fences can be reclaimed by the stats lifecycle retry. A writer
+      // fence is deliberately terminal for the page that sent stale observations, so never
+      // use its terminal marker to trigger that read recovery path.
+      error.recoverableReadFence = error.versionFence && !error.terminal;
       error.requiredProtocolVersion = Number(failurePayload?.required_protocol_version) || 0;
       error.requiredSchemaGeneration = Number(failurePayload?.required_schema_generation) || 0;
       error.requiredBuild = String(failurePayload?.required_build || '');

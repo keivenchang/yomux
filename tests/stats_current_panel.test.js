@@ -340,7 +340,7 @@ test('browser observations share the topbar ping and keep a calm bounded cadence
   assert.equal((source.match(/apiFetchJson\(url/g) || []).length, 1, 'YO!stats must reuse the topbar health round trip');
 });
 
-testAsync('browser observation uploads acknowledge, back off, stop on 426, and restart with a new page epoch', async () => {
+testAsync('browser observation writer fences acknowledge, back off, stop terminal 426, and restart with a new page epoch', async () => {
   const uploaderSource = source.slice(
     source.indexOf('function queueJsDebugCurrentObservation('),
     source.indexOf('\nfunction recordApiDebugResponseBytesForGraph('),
