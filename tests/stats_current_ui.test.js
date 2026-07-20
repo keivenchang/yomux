@@ -1392,7 +1392,7 @@ test('terminal 503 reason reaches state and explicit retry restarts snapshot and
   client.stop();
 });
 
-test('read-side 426 identifies the version fence, posts one automatic recovery, and repairs without a click', async () => {
+test('recoverable stale-daemon read 426 posts one automatic recovery and repairs without a click', async () => {
   FakeEventSource.instances = [];
   const clock = new FakeClock();
   const states = [];
@@ -1407,7 +1407,7 @@ test('read-side 426 identifies the version fence, posts one automatic recovery, 
         return response(200, {ok: true, status: 'ready'});
       }
       if (!recovered) return response(426, {
-        status: 'upgrade_required', reason: 'client or writer is too old',
+        status: 'upgrade_required', reason: 'stale statsd daemon handshake requires a lifecycle retry',
         required_protocol_version: 24, required_schema_generation: 6, required_build: '3',
       });
       return response(200, snapshot({range: 7200, requested: 300, resolution: 300}));
@@ -1428,6 +1428,8 @@ test('read-side 426 identifies the version fence, posts one automatic recovery, 
   await flushPromises();
   assert.equal(states.at(-1).state, 'error');
   assert.equal(states.at(-1).error.versionFence, true);
+  assert.equal(states.at(-1).error.recoverableReadFence, true);
+  assert.equal(states.at(-1).error.terminal, false);
   assert.equal(states.at(-1).error.requiredProtocolVersion, 24);
   assert.equal(fetches.filter(item => item.url === '/api/stats-retry').length, 1);
   assert.equal(clock.nextDelay(), 200);
@@ -1436,6 +1438,40 @@ test('read-side 426 identifies the version fence, posts one automatic recovery, 
   await flushPromises();
   assert.equal(states.at(-1).state, 'ready');
   assert.equal(FakeEventSource.instances.length, 1);
+  client.stop();
+});
+
+test('terminal writer-style 426 is not eligible for the read retry endpoint', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const fetches = [];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async (url, options) => {
+      fetches.push({url, options});
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      return response(426, {
+        status: 'upgrade_required', terminal: true, reason: 'browser observation writer protocol is retired',
+        required_protocol_version: 24, required_schema_generation: 6, required_build: '3',
+      });
+    },
+    EventSource: FakeEventSource,
+    clientId: 'terminal-writer-fence',
+    savedRange: 7200,
+    savedResolution: 300,
+    onState: (state, error) => states.push({state, error}),
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 250},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  await flushPromises();
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'error');
+  assert.equal(states.at(-1).error.versionFence, true);
+  assert.equal(states.at(-1).error.recoverableReadFence, false);
+  assert.equal(states.at(-1).error.terminal, true);
+  assert.equal(fetches.filter(item => item.url === '/api/stats-retry').length, 0);
   client.stop();
 });
 

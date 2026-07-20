@@ -313,6 +313,52 @@ def test_registry_does_not_retire_or_replace_a_newer_service(tmp_path, monkeypat
     assert actions == ["ping"]
 
 
+def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, monkeypatch):
+    spawned = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 21),
+        popen=lambda *args, **kwargs: spawned.append((args, kwargs)) or FakeProcess(),
+    )
+    stale_pid, dead_launcher = 4242, 1111
+    registry._write_record({
+        "service": "statsd", "pid": stale_pid, "pgid": stale_pid,
+        "socket": str(registry.socket_path), "launcher_pid": dead_launcher,
+    })
+    alive = {stale_pid: True, dead_launcher: False}
+    actions = []
+
+    def fake_request(method, payload=None, timeout=0.2):
+        actions.append(method)
+        if method == "shutdown":
+            alive[stale_pid] = False
+            return {"ok": True}
+        if spawned:
+            return {"ok": True, "version": 21, "pid": 5252, "started_at": 1}
+        return {"ok": False, "error_code": "upgrade_required", "version": 22, "pid": stale_pid}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(
+        registry_mod,
+        "tracked_local_service_groups",
+        lambda _service_dir: [{
+            "service": "statsd", "pid": stale_pid, "pgid": stale_pid,
+            "socket": str(registry.socket_path),
+        }],
+    )
+
+    assert registry.ensure_started() is True
+    assert "shutdown" in actions
+    assert len(spawned) == 1
+    assert registry._upgrade_required is None
+
+
 def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_path, monkeypatch):
     registry = LocalServiceRegistry(
         tmp_path,

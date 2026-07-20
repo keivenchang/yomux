@@ -314,6 +314,30 @@ class LocalServiceRegistry:
         except FileNotFoundError:
             pass
 
+    def _can_reclaim_newer_service(self, service_pid: int) -> bool:
+        """Whether a newer daemon is provably left behind by a dead web owner.
+
+        A version fence normally means another live web server may still own the
+        shared daemon, so it remains terminal.  A guarded web restart is the
+        narrow exception: the persisted record still identifies this exact
+        socket/process group, while its launcher has exited.  Only that ledger
+        proof permits retiring the daemon and starting the current one.
+        """
+        if service_pid <= 0:
+            return False
+        record = self._read_record()
+        launcher_pid = int(record.get("launcher_pid") or 0)
+        if int(record.get("pid") or 0) != service_pid or launcher_pid <= 0:
+            return False
+        if launcher_pid == os.getpid() or pid_is_alive(launcher_pid):
+            return False
+        return any(
+            group["service"] == self.spec.name
+            and group["pid"] == service_pid
+            and group["socket"] == str(self.socket_path)
+            for group in tracked_local_service_groups(self.service_dir)
+        )
+
     def _retire_incompatible_service(self) -> None:
         """Stop the service currently bound to our socket after a protocol bump or
         code-revision drift. Same-protocol drift matters: without it the stale daemon
@@ -321,7 +345,11 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_pid = int(response.get("pid") or 0)
         service_version = int(response.get("version") or 0)
-        if service_version > self.spec.protocol_version:
+        newer_reclaimable = (
+            service_version > self.spec.protocol_version
+            and self._can_reclaim_newer_service(service_pid)
+        )
+        if service_version > self.spec.protocol_version and not newer_reclaimable:
             self._upgrade_required = {
                 "required_protocol_version": service_version,
                 "current_protocol_version": self.spec.protocol_version,
@@ -342,7 +370,7 @@ class LocalServiceRegistry:
                 or response.get("status") == "upgrade_required"
             )
         )
-        if (not response.get("ok") and not older_upgrade) or not service_pid or compatible:
+        if (not response.get("ok") and not older_upgrade and not newer_reclaimable) or not service_pid or compatible:
             return
         record = self._read_record()
         record_pid = int(record.get("pid") or 0)
@@ -382,6 +410,13 @@ class LocalServiceRegistry:
         response = self._request("ping", timeout=0.15)
         service_version = int(response.get("version") or response.get("required_protocol_version") or 0)
         if service_version > self.spec.protocol_version:
+            if self._can_reclaim_newer_service(int(response.get("pid") or 0)):
+                # _CurrentRegistry observes the wire fence before this health
+                # check.  Clear that provisional fence so ensure_started can
+                # execute the ledger-proven stale-owner recovery below.
+                self._upgrade_required = None
+                self.note_rpc_failure()
+                return False
             self._upgrade_required = {
                 **response,
                 "required_protocol_version": service_version,
