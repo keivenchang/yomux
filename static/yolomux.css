@@ -137,6 +137,13 @@
   --drop-outline-strong: rgba(255, 255, 255, 0.95);
   --drop-outline-shadow: rgba(245, 197, 66, 0.82);
   --drop-outline-surface: rgba(17, 23, 34, 0.84);
+  --diff-add-line-bg: #2b5d16;
+  --diff-remove-line-bg: #540c06;
+  --diff-search-match-bg: #ffd54a;
+  --diff-search-match-fg: #0b1020;
+  --diff-search-match-ring: var(--file-hover-bg);
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: #fff7c2;
   --auto-text: #071000;
   --auto-surface: #182512;
   --auto-surface-active: #25400f;
@@ -318,8 +325,8 @@
   --space-10: 10px;
   --space-11: 11px;
   --space-12: 12px;
-  --popover-show-delay: 1000ms;
-  --popover-hide-delay: 300ms;
+  --popover-show-delay: 1300ms;
+  --popover-hide-delay: 120ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
   --context-menu-direction-count: 4;
@@ -350,6 +357,13 @@
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 300px;
   --min-split-pane-height: 220px;
+  --touch-row-height: 36px;
+  --session-label-dir-max-inline-size: clamp(5rem, 12vw, 6.5rem);
+  --session-label-detail-max-inline-size: clamp(3.5rem, 8vw, 4rem);
+  --tmux-window-tab-max-inline-size: clamp(4.5rem, 12vw, 6rem);
+  --terminal-tab-max-inline-size: clamp(3.5rem, 9vw, 4.5rem);
+  --topbar-status-max-inline-size: clamp(5rem, 14vw, 7rem);
+  --topbar-account-max-inline-size: clamp(7rem, 18vw, 8.75rem);
   --z-layer-background: 0;
   --z-layer-raised: 1;
   --z-layer-control: 2;
@@ -379,7 +393,8 @@
   --z-file-tree-drag: 60;
   --z-terminal-badge: 150;
   --z-terminal-popover: 240;
-  --z-full-screen-overlay: 200;
+  /* Full-screen overlays cover drop suggestions when both are mounted. */
+  --z-full-screen-overlay: 210;
   --z-resizer: 20;
   --z-pane-overlay: 12;
   --z-drop-preview: 38;
@@ -682,11 +697,9 @@
   --20-sessions-popovers-popover-row-border-top-31: var(--line);
   --20-sessions-popovers-popover-subtitle-fg-32: var(--text);
   --20-sessions-popovers-popover-label-fg-33: var(--text);
-  --20-sessions-popovers-popover-desc-body-fg-34: var(--text);
   --20-sessions-popovers-state-legend-item-fg-35: var(--text);
   --20-sessions-popovers-session-popover-fg-36: var(--text);
   --20-sessions-popovers-session-popover-fg-37: var(--text);
-  --20-sessions-popovers-popover-desc-fg-38: var(--text);
   --20-sessions-popovers-session-popover-fg-39: var(--text);
   --20-sessions-popovers-branch-link-fg-40: var(--text);
   --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #596273;
@@ -1115,11 +1128,18 @@ body.theme-light {
   --git-transcript: var(--muted);
   --git-transcript-badge: #64748b;
   --drop-outline: var(--drop-outline-light);
-  --drop-outline-text: #071327;
+  --drop-outline-text: #0f2d69;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
-  --drop-outline-strong: rgba(29, 78, 216, 0.92);
-  --drop-outline-shadow: rgba(29, 78, 216, 0.42);
-  --drop-outline-surface: rgba(255, 255, 255, 0.90);
+  --drop-outline-strong: rgba(29, 78, 216, 0.98);
+  --drop-outline-shadow: rgba(29, 78, 216, 0.58);
+  --drop-outline-surface: rgba(239, 246, 255, 0.88);
+  --diff-add-line-bg: #bfeac8;
+  --diff-remove-line-bg: #f3b7b7;
+  --diff-search-match-bg: #ffcc00;
+  --diff-search-match-fg: var(--lt-text);
+  --diff-search-match-ring: #7c2d12;
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: var(--diff-search-match-ring);
   --auto-surface: #e9f7dd;
   --auto-surface-active: #d5efbf;
   --auto-muted-text: #2d4f0b;
@@ -1204,11 +1224,9 @@ body.theme-light {
   --20-sessions-popovers-popover-row-border-top-31: var(--paint-overlay-slate-10);
   --20-sessions-popovers-popover-subtitle-fg-32: var(--lt-muted);
   --20-sessions-popovers-popover-label-fg-33: var(--lt-muted);
-  --20-sessions-popovers-popover-desc-body-fg-34: var(--lt-muted);
   --20-sessions-popovers-state-legend-item-fg-35: var(--lt-muted);
   --20-sessions-popovers-session-popover-fg-36: var(--lt-muted);
   --20-sessions-popovers-session-popover-fg-37: #9aa3b2;
-  --20-sessions-popovers-popover-desc-fg-38: var(--pc-control-fg);
   --20-sessions-popovers-session-popover-fg-39: var(--accent);
   --20-sessions-popovers-branch-link-fg-40: var(--accent);
   --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: var(--editor-line-number);
@@ -1430,6 +1448,16 @@ body.theme-light {
   --50-terminal-file-tree-file-tree-row-shadow-113: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 0 6px rgba(122, 160, 0, 0.55);
   --50-terminal-file-tree-file-tree-children-border-left-114: rgba(100, 116, 139, 0.28);
 }
+
+body.editor-theme-light {
+  --diff-add-line-bg: #bfeac8;
+  --diff-remove-line-bg: #f3b7b7;
+  --diff-search-match-bg: #ffcc00;
+  --diff-search-match-fg: var(--lt-text);
+  --diff-search-match-ring: #7c2d12;
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: var(--diff-search-match-ring);
+}
 * { box-sizing: border-box; }
 .a11y-only {
   position: absolute !important;
@@ -1486,6 +1514,17 @@ body.theme-light {
   background: transparent;
   cursor: pointer;
   font: inherit;
+}
+
+/* Compact status/count badges and interactive chips share their inline layout. Their local rules retain size, paint, and radius. */
+.badge-base,
+.chip-base {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+.badge-base {
+  justify-content: center;
 }
 .share-view-fit-toggle,
 .pane-drag-image-tabs span,
@@ -1592,6 +1631,7 @@ body.theme-light {
 .popover-value:has(.popover-copy-value),
 .js-debug-toolbar,
 .js-debug-graph-controls,
+.js-debug-range-resolution-controls,
 .preferences-setting-advisory,
 .preferences-search-row,
 .panel-popover-zone,
@@ -1660,23 +1700,24 @@ body.theme-light {
   align-items: center;
   gap: var(--space-5);
 }
-.js-debug-toolbar,
 .js-debug-summary,
 .js-debug-actions,
-.js-debug-graph-controls,
+.yoagent-job-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+}
+.js-debug-toolbar,
 .preferences-setting-advisory,
 .info-tree-primary-controls,
 .info-tree-presets,
 .info-tree-group-selects,
 .info-tree-sort-controls,
-.yoagent-job-controls,
 .yoagent-chat-error,
 .js-debug-logs-toolbar,
 .js-debug-log-levels,
 .js-debug-log-meta {
-  display: flex;
   flex-wrap: wrap;
-  gap: var(--space-6);
 }
 .pane-info-bar-popover-zone .pane-info-bar-meta,
 .file-editor-toolbar-right {
@@ -1871,23 +1912,6 @@ body {
 }
 .brand {
   min-width: 92px;
-}
-.brand-update-badge {
-  margin-inline-start: var(--space-8);
-  padding: var(--space-1) var(--space-7);
-  border: 1px solid var(--active-control-border, var(--line));
-  border-radius: var(--radius-pill);
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-  cursor: pointer;
-  vertical-align: middle;
-}
-.brand-update-badge:hover {
-  filter: brightness(1.08);
-}
-.brand-update-badge[hidden] {
-  display: none;
 }
 .transport-warning {
   position: relative;
@@ -2217,7 +2241,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   }
 }
 #status {
-  max-width: 112px;
+  max-width: var(--topbar-status-max-inline-size);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -2244,10 +2268,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   color: var(--danger-panel-text);
   border-color: var(--danger-panel-border) !important;
   background: color-mix(in srgb, var(--danger-muted-bg) 86%, var(--panel2));
-}
-body.theme-light #status.layout-status-danger {
-  color: var(--danger-light-text);
-  background: var(--danger-panel-light-bg);
 }
 #status.layout-status-advisory {
   color: var(--warning-border-strong);
@@ -2417,7 +2437,7 @@ button.topbar-status-surface:focus-visible {
   align-items: center;
   justify-content: center;
   height: var(--compact-control-height);
-  max-width: 140px;
+  max-width: var(--topbar-account-max-inline-size);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--topbar-control-surface);
@@ -2668,9 +2688,6 @@ body.topbar-pack-icon-search .topbar-search-hint {
 .app-menu-button-badge {
   min-width: max(16px, calc(var(--ui-font-size) + 3px));
   height: max(16px, calc(var(--ui-font-size) + 3px));
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   padding: 0 var(--space-4);
   color: var(--active-control-text);
   background: var(--active-control-bg);
@@ -3254,19 +3271,6 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .app-menu-tab-command .session-button-dir {
   color: var(--menu-tab-rich-text);
 }
-.app-menu-yolo-session-command {
-  min-inline-size: min(42ch, var(--app-menu-max-inline-size));
-}
-body.app-vw-lte-720 .app-menu-yolo-session-command .pane-tab-core {
-  height: auto;
-  flex-wrap: wrap;
-}
-body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
-  flex: 1 0 100%;
-  height: auto;
-  min-height: 14px;
-  white-space: normal;
-}
 .app-menu-submenu-arrow {
   color: var(--pr-status-closed);
   font-weight: 700;
@@ -3297,11 +3301,6 @@ body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
   gap: 0;
   overflow: visible;
   white-space: nowrap;
-}
-.session-label-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
 }
 .session-button-text {
   flex: 1 1 auto;
@@ -3802,19 +3801,15 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   transform-origin: center;
 }
 .ci-indicator {
-  flex: 0 0 auto;
   max-width: none;
   min-width: 17px;
   height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   padding: 0 var(--space-2);
   border-radius: 0;
   border: 1px solid var(--divider);
+  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
   color: var(--pr-status-closed);
   background: var(--neutral-status-bg);
-  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
 }
 body.tab-meta-hidden .pane-tab .tab-symbol,
 body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
@@ -3935,9 +3930,9 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   box-shadow: var(--20-sessions-popovers-session-popover-shadow-27);
   transform: translateY(-2px);
   transition:
-    opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
-    transform var(--motion-interaction-fast) ease var(--popover-hide-delay),
-    visibility 0s linear calc(var(--popover-hide-delay) + var(--motion-interaction-fast));
+    opacity var(--motion-interaction-fast) ease 0s,
+    transform var(--motion-interaction-fast) ease 0s,
+    visibility 0s linear var(--motion-interaction-fast);
 
 
   border-color: var(--20-sessions-popovers-session-popover-border-26);
@@ -4247,23 +4242,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 
 
   color: var(--20-sessions-popovers-state-legend-item-fg-35);
-}
-.popover-desc {
-  line-height: 1.35;
-
-
-  color: var(--20-sessions-popovers-popover-desc-fg-38);
-}
-.popover-desc-title {
-  font-weight: 700;
-}
-.popover-desc-body {
-  margin-top: var(--space-4);
-
-  color: var(--20-sessions-popovers-popover-desc-body-fg-34);
-}
-.popover-desc-line + .popover-desc-line {
-  margin-top: var(--space-4);
 }
 .popover-value a,
 .branch-link,
@@ -4823,18 +4801,16 @@ body :is(
   gap: var(--space-8);
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
 }
 .js-debug-graph--empty {
   min-height: 180px;
 }
 .js-debug-graph-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
+  flex-wrap: nowrap;
   gap: var(--space-6);
   justify-self: stretch;
   min-width: 0;
-  container-type: inline-size;
 }
 .js-debug-resolution-label {
   min-width: 0;
@@ -4870,30 +4846,22 @@ body :is(
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .js-debug-chart-layout-control {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: start;
+  flex: 0 0 auto;
 }
 .js-debug-range-resolution-controls {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-row: 2;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
+  flex: 1 1 12rem;
   gap: var(--space-6);
   min-width: 0;
 }
 .js-debug-range-resolution-controls > .js-debug-resolution-label {
-  grid-column: 2;
-  grid-row: 1;
+  flex: 0 0 auto;
 }
 .js-debug-range-resolution-controls > .js-debug-range-slider-control {
-  grid-column: 1;
-  grid-row: 1;
+  flex: 1 1 auto;
+  min-inline-size: 12rem;
 }
 .js-debug-chart-toggle-control {
-  grid-column: 1;
-  grid-row: 1;
+  flex: 0 0 auto;
   position: relative;
 }
 .js-debug-chart-layout-control button,
@@ -4937,33 +4905,29 @@ body :is(
 .js-debug-chart-toggle-menu input {
   accent-color: var(--active-accent-bright);
 }
-@container (max-width: 20rem) {
+/* 34rem is the measured intrinsic width of Charts + Size + a usable range slider + Resolution. */
+@container (max-width: 34rem) {
   .js-debug-graph-controls {
-    grid-template-columns: minmax(0, 1fr);
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-rows: auto auto;
   }
   .js-debug-range-resolution-controls {
-    grid-template-columns: minmax(0, 1fr);
-    grid-row: 4;
-    justify-self: start;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
   }
   .js-debug-chart-layout-control,
   .js-debug-chart-toggle-control {
-    grid-column: 1;
+    white-space: nowrap;
   }
   .js-debug-chart-layout-control {
+    grid-column: 2;
     grid-row: 1;
-  }
-  .js-debug-range-resolution-controls > .js-debug-range-slider-control {
-    grid-column: 1;
-    grid-row: 1;
-  }
-  .js-debug-range-resolution-controls > .js-debug-resolution-label {
-    grid-column: 1;
-    grid-row: 2;
   }
   .js-debug-chart-toggle-control {
+    grid-column: 1;
     grid-row: 1;
-    justify-self: start;
   }
 }
 .js-debug-subtab:not(.active):hover,
@@ -4972,6 +4936,9 @@ body :is(
   background: var(--pane-inactive-tab-bg-hover);
 }
 .js-debug-range-slider-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   min-width: 0;
 }
 .js-debug-chart-close {
@@ -4990,8 +4957,8 @@ body :is(
 }
 .js-debug-range-slider {
   flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
+  inline-size: auto;
+  min-inline-size: 8rem;
   accent-color: var(--active-accent-bright);
 }
 .js-debug-range-slider-control datalist {
@@ -5011,6 +4978,16 @@ body :is(
   min-width: 2.5rem;
   color: var(--text);
   text-align: center;
+}
+.js-debug-range-slider-control--zoomed .js-debug-range-slider {
+  display: none;
+}
+.js-debug-range-label--zoomed {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
 }
 .js-debug-zoom-reset {
   flex: 0 0 auto;
@@ -5854,9 +5831,6 @@ body :is(
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
-body.theme-light .js-debug-live-pulse.heartbeat-pulse {
-  fill: rgb(var(--active-accent-rgb) / 0.1);
-}
 .js-debug-hover-line {
   opacity: 0;
   stroke: color-mix(in srgb, var(--text) 46%, transparent);
@@ -6454,27 +6428,13 @@ body.theme-light .js-debug-live-pulse.heartbeat-pulse {
   padding: 0;
   vertical-align: 0;
 }
-.changes-meta-separator {
-  color: rgba(174, 184, 199, 0.62);
-}
 .changes-diff-add {
   color: var(--30-preferences-changes-changes-diff-add-fg-43);
-  font-weight: 800;
-}
-.changes-diff-add-neutral {
-  color: var(--muted);
   font-weight: 800;
 }
 .changes-diff-remove {
   color: var(--30-preferences-changes-changes-diff-remove-fg-44);
   font-weight: 800;
-}
-.changes-diff-file-label {
-  color: var(--muted);
-  font-weight: 700;
-}
-.changes-count-badge {
-  margin-inline-start: var(--space-5);
 }
 .preferences-path-row {
   display: grid;
@@ -8298,9 +8258,9 @@ body.layout-resizing {
   pointer-events: auto;
   transform: translateY(0);
   transition:
-    opacity var(--motion-interaction-fast) ease var(--popover-show-delay),
-    transform var(--motion-interaction-fast) ease var(--popover-show-delay),
-    visibility 0s linear var(--popover-show-delay);
+    opacity var(--motion-interaction-fast) ease 0s,
+    transform var(--motion-interaction-fast) ease 0s,
+    visibility 0s linear 0s;
 }
 .panel-popover-zone > .session-popover::before {
   left: 94px;
@@ -8411,10 +8371,10 @@ body.layout-resizing {
   max-width: none;
 }
 .panel-session-label .session-button-dir {
-  max-width: 104px;
+  max-width: var(--session-label-dir-max-inline-size);
 }
 .panel-session-label .session-button-detail {
-  max-width: 58px;
+  max-width: var(--session-label-detail-max-inline-size);
 }
 .panel-session-label.needs-attention .session-state-badge {
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
@@ -8459,8 +8419,7 @@ body.layout-resizing {
 .pane-info-bar:has(> .tmux-window-bar) > .pane-info-bar-controls {
   margin-inline-end: 0;
 }
-.pane-info-bar-controls,
-.pane-info-bar-fixed-sep {
+.pane-info-bar-controls {
   flex: 0 0 auto;
 }
 .pane-info-bar > .pane-info-bar-controls {
@@ -9110,7 +9069,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-button {
   flex: 0 1 auto;
   min-width: 18px;
-  max-width: 96px;
+  max-width: var(--tmux-window-tab-max-inline-size);
   padding-inline: var(--space-2);
   /* DOIT.57: window buttons read in the normal UI font, not the condensed/bold .tab control font. */
   font-family: var(--ui-font);
@@ -9317,7 +9276,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .terminal-tab {
   flex: 0 1 auto;
-  max-width: 72px;
+  max-width: var(--terminal-tab-max-inline-size);
   min-width: 0;
   padding-inline: var(--space-3);
 }
@@ -9619,8 +9578,8 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .mobile-terminal-key-content {
   grid-row: 2;
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
-  grid-template-rows: repeat(4, 36px);
+  grid-template-columns: var(--touch-row-height) minmax(0, 1fr);
+  grid-template-rows: repeat(4, var(--touch-row-height));
   gap: var(--space-1);
   min-width: 0;
   min-height: 0;
@@ -9635,8 +9594,8 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .mobile-terminal-key-content > .mobile-terminal-key--escape {
   grid-column: 1;
   grid-row: 1;
-  width: 36px;
-  min-width: 36px;
+  width: var(--touch-row-height);
+  min-width: var(--touch-row-height);
   padding: 0;
   align-self: start;
   justify-self: start;
@@ -9645,12 +9604,12 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   grid-column: 1;
   grid-row: 2 / 5;
   display: grid;
-  grid-template-rows: repeat(3, 36px);
+  grid-template-rows: repeat(3, var(--touch-row-height));
   gap: var(--space-1);
 }
 .mobile-terminal-key-side .mobile-terminal-key {
-  width: 36px;
-  min-width: 36px;
+  width: var(--touch-row-height);
+  min-width: var(--touch-row-height);
   padding: 0;
 }
 .mobile-terminal-key-side .mobile-terminal-key--tab { grid-row: 1; }
@@ -9687,9 +9646,9 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   z-index: var(--z-layer-raised);
   inset-inline-end: 1px;
   inset-block-start: 21px;
-  width: 36px;
-  min-width: 36px;
-  min-height: 36px;
+  width: var(--touch-row-height);
+  min-width: var(--touch-row-height);
+  min-height: var(--touch-row-height);
   padding-inline: 0;
 }
 .mobile-terminal-key--close {
@@ -9708,7 +9667,7 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 }
 .mobile-terminal-key-content--more {
   grid-template-columns: repeat(3, minmax(0, 1fr)) 48px 35px;
-  grid-template-rows: repeat(3, minmax(36px, 1fr));
+  grid-template-rows: repeat(3, minmax(var(--touch-row-height), 1fr));
   gap: var(--space-1);
 }
 .mobile-terminal-key-content--more .mobile-terminal-key {
@@ -9738,14 +9697,14 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
   grid-column: 2;
   grid-row: 2 / 5;
   display: grid;
-  grid-template-columns: 36px 1em 32px 36px 40px 1em minmax(36px, 1fr);
-  grid-template-rows: repeat(3, 36px);
+  grid-template-columns: var(--touch-row-height) 1em 32px var(--touch-row-height) 40px 1em minmax(var(--touch-row-height), 1fr);
+  grid-template-rows: repeat(3, var(--touch-row-height));
   gap: var(--space-1);
 }
 .mobile-terminal-key {
   flex: 0 0 auto;
-  min-width: 36px;
-  min-height: 36px;
+  min-width: var(--touch-row-height);
+  min-height: var(--touch-row-height);
   padding: 0 var(--space-7);
   border: 1px solid var(--pane-ctl-border, var(--pane-tab-control-border));
   border-radius: var(--radius-control);
@@ -9758,11 +9717,11 @@ so in light mode force it dark on the light row. (meta/dir/detail already resolv
 .mobile-terminal-key-dpad .mobile-terminal-key--copy { grid-column: 1; grid-row: 1; }
 .mobile-terminal-key-dpad .mobile-terminal-key--command-v { grid-column: 1; grid-row: 2; }
 .mobile-terminal-key-dpad .mobile-terminal-key--alt { grid-column: 1; grid-row: 3; }
-.mobile-terminal-key-dpad .mobile-terminal-key--cmd { grid-column: 2 / 4; grid-row: 3; width: 36px; justify-self: start; }
+.mobile-terminal-key-dpad .mobile-terminal-key--cmd { grid-column: 2 / 4; grid-row: 3; width: var(--touch-row-height); justify-self: start; }
 .mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-up { grid-column: 5; grid-row: 1; }
 .mobile-terminal-key-dpad .mobile-terminal-key--tmux-scroll-down { grid-column: 5; grid-row: 3; }
 .mobile-terminal-key-dpad .mobile-terminal-key--interrupt { grid-column: 7; grid-row: 3; justify-self: start; }
-.mobile-terminal-key--enter { grid-column: 7; grid-row: 1 / 3; width: 36px; justify-self: start; }
+.mobile-terminal-key--enter { grid-column: 7; grid-row: 1 / 3; width: var(--touch-row-height); justify-self: start; }
 .mobile-terminal-key--arrow-up,
 .mobile-terminal-key--arrow-down,
 .mobile-terminal-key--arrow-left,
@@ -12028,14 +11987,14 @@ body :is(.yoagent-compact-action, .yoagent-job-confirm, .yoagent-job-cancel):is(
 }
 .chat-emoji-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(36px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(var(--touch-row-height), 1fr));
   gap: var(--space-3);
   max-height: 310px;
   overflow: auto;
 }
 .chat-emoji-grid button {
-  min-width: 36px;
-  min-height: 36px;
+  min-width: var(--touch-row-height);
+  min-height: var(--touch-row-height);
   padding: var(--space-2);
   background: transparent;
   border: 1px solid transparent;
@@ -12457,10 +12416,6 @@ button.info-tree-tab-token.active:focus-visible {
   --agent-window-activity-block-size: var(--agent-window-icon-size);
   flex: 0 0 auto;
 }
-.info-tree-ai-status-label {
-  flex: 0 0 auto;
-  font-size: var(--ui-font-size-2xs);
-}
 .info-tree-field-tab {
   --info-tree-field-color: var(--info-tree-tab-color);
   --info-tree-field-hover: var(--info-tree-tab-color-hover);
@@ -12532,17 +12487,6 @@ button.info-tree-tab-token.active:focus-visible {
 }
 .info-tree-chip-ai {
   border-color: color-mix(in srgb, var(--link-soft) 55%, var(--line));
-}
-.info-tree-status-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-inline-start: var(--space-4);
-  font: 800 var(--ui-font-size-2xs)/1.2 var(--mono-font);
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-.info-tree-status-badge.pr-status-open {
-  color: var(--text-muted-strong);
 }
 .info-tree-field-pr a,
 .info-tree-field-linear a,
@@ -15718,13 +15662,6 @@ body :is(
 }
 .file-editor-diff-codemirror {
   position: relative;
-  --diff-add-line-bg: #2b5d16;
-  --diff-remove-line-bg: #540c06;
-  --diff-search-match-bg: #ffd54a;
-  --diff-search-match-fg: #0b1020;
-  --diff-search-match-ring: var(--file-hover-bg);
-  --diff-search-selected-bg: #ff9f1c;
-  --diff-search-selected-ring: #fff7c2;
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -15851,14 +15788,6 @@ body :is(
   border-radius: 2px;
   background: rgba(226, 238, 248, 0.045);
   pointer-events: none;
-}
-body.editor-theme-light .file-editor-diff-codemirror {
-  --diff-add-line-bg: #bfeac8;
-  --diff-remove-line-bg: #f3b7b7;
-  --diff-search-match-bg: #ffcc00;
-  --diff-search-match-fg: var(--lt-text);
-  --diff-search-match-ring: #7c2d12;
-  --diff-search-selected-ring: var(--diff-search-match-ring);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk,
@@ -16242,17 +16171,6 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-link: var(--lt-markdown-link);
   --markdown-strong: var(--lt-markdown-strong);
   --markdown-emphasis: var(--lt-markdown-emphasis);
-}
-body.editor-theme-light {
-  /* One light-editor owner feeds both merge and inline diff surfaces; local remaps previously drifted. */
-  --code-diff-add: #00a152;
-  --code-diff-remove: #d81f32;
-  --drop-outline: var(--drop-outline-light);
-  --drop-outline-text: #0f2d69;
-  --drop-outline-bg: rgba(29, 78, 216, 0.14);
-  --drop-outline-strong: rgba(29, 78, 216, 0.98);
-  --drop-outline-shadow: rgba(29, 78, 216, 0.58);
-  --drop-outline-surface: rgba(239, 246, 255, 0.88);
 }
 body.editor-theme-light .file-editor-content .markdown-body h1,
 body.editor-theme-light .file-editor-content .markdown-body h2 {
@@ -17130,10 +17048,6 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   display: block;
   max-width: min(100%, 960px);
   color: var(--text);
-}
-.file-editor-native-video {
-  max-height: min(72vh, 720px);
-  background: var(--markdown-preview-bg);
 }
 .file-editor-image-panel {
   z-index: var(--z-file-editor-preview-layer);

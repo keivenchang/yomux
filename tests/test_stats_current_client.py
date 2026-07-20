@@ -11,6 +11,7 @@ import pytest
 from yolomux_lib import common
 from yolomux_lib.stats_current import client as client_module
 from yolomux_lib.stats_current import protocol, revision, storage
+from yolomux_lib.local_services.rpc import safe_socket_path
 
 
 def observation(index: int = 1) -> storage.Observation:
@@ -45,13 +46,18 @@ def unavailable() -> storage.UnavailableSpan:
     )
 
 
-def test_default_paths_are_schema_versioned_and_never_use_the_legacy_filename(tmp_path, monkeypatch):
+def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "STATE_DIR", tmp_path)
     client = client_module.StatsCurrentClient()
 
     assert client.database_path == tmp_path / storage.DATABASE_FILENAME
     assert client.database_path == tmp_path / "stats-v6.sqlite3"
-    assert client_module.default_socket_path() == tmp_path / "services" / "statsd.sock"
+    assert client_module.default_socket_path() == tmp_path / "services" / "statsd.p24s6.sock"
+    assert client_module.default_socket_path().name == storage.SOCKET_FILENAME
+    assert client._transport.socket_path == safe_socket_path(
+        client_module.default_socket_path(), prefix="yolomux-statsd",
+    )
+    assert client._transport.registry.spec.socket_name == client._transport.socket_path.name
     assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL == 24
     assert client._transport.registry.spec.code_revision == revision.CURRENT_CODE_REVISION
     assert client._transport.registry.spec.extra_args == ("--database", str(client.database_path))
@@ -60,6 +66,18 @@ def test_default_paths_are_schema_versioned_and_never_use_the_legacy_filename(tm
     assert "services/services" not in str(client._transport.registry.lock_path)
     source = Path(client_module.__file__).read_text(encoding="utf-8")
     assert "stats-history.sqlite3" not in source
+
+
+def test_mixed_protocol_schema_service_identities_cannot_share_a_socket_or_database(tmp_path):
+    current_socket = tmp_path / "services" / storage.socket_filename(24, 6)
+    older_socket = tmp_path / "services" / storage.socket_filename(23, 5)
+
+    assert storage.DATABASE_FILENAME == "stats-v6.sqlite3"
+    assert storage.socket_filename(23, 5) == "statsd.p23s5.sock"
+    assert current_socket != older_socket
+    assert safe_socket_path(current_socket, prefix="yolomux-statsd") != safe_socket_path(
+        older_socket, prefix="yolomux-statsd",
+    )
 
 
 def test_all_lifecycle_and_data_rpcs_carry_the_current_service_and_schema_fence(tmp_path, monkeypatch):
@@ -301,6 +319,27 @@ def test_registry_does_not_misclassify_an_older_daemon_as_a_terminal_upgrade(tmp
     assert response == older
     assert client._transport.registry._upgrade_required is None
     assert len(calls) == 1
+
+
+def test_retry_clears_a_cached_read_fence_and_restarts_only_its_version_scoped_service(tmp_path, monkeypatch):
+    socket_path = tmp_path / "services" / storage.SOCKET_FILENAME
+    client = client_module.StatsCurrentClient(socket_path, tmp_path / storage.DATABASE_FILENAME)
+    client._upgrade_required = {
+        "ok": False,
+        "status": "upgrade_required",
+        "required_protocol_version": storage.MIN_WRITER_PROTOCOL,
+        "required_schema_generation": storage.SCHEMA_VERSION,
+    }
+    calls = []
+    monkeypatch.setattr(client._transport.registry, "retry", lambda: calls.append("retry"))
+    monkeypatch.setattr(client._transport.registry, "recently_healthy", lambda: True)
+
+    assert client.retry() is True
+    assert client._upgrade_required is None
+    assert calls == ["retry"]
+    assert client._transport.socket_path == safe_socket_path(
+        socket_path, prefix="yolomux-statsd",
+    )
 
 
 def test_current_registry_rejects_same_protocol_stale_daemon(tmp_path, monkeypatch):

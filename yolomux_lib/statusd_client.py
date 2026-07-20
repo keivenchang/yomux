@@ -6,7 +6,7 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-from . import common
+from .infra import common
 from .local_services.client import LocalServiceClient
 from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path

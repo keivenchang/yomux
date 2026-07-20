@@ -16,16 +16,16 @@ from pathlib import Path
 from typing import Any
 
 from .app import TmuxWebtermApp
-from .background_owner import background_owner_priority
-from .background_owner import read_background_owner_debug_status
-from .common import AUTH_CONFIG_DISPLAY_PATH
-from .common import SERVER_HOSTNAME
-from .common import STATE_DIR
-from .common import auth_setup_required
-from .common import default_session_names
-from .common import split_csv
-from .common import unique_session_names
-from .common import warn_unavailable_agent_commands_once
+from .infra.background_owner import background_owner_priority
+from .infra.background_owner import read_background_owner_debug_status
+from .infra.common import AUTH_CONFIG_DISPLAY_PATH
+from .infra.common import SERVER_HOSTNAME
+from .infra.common import STATE_DIR
+from .infra.common import auth_setup_required
+from .infra.common import default_session_names
+from .infra.common import split_csv
+from .infra.common import unique_session_names
+from .infra.common import warn_unavailable_agent_commands_once
 from .control import send_yolomux_control_request
 from .local_services.registry import bounded_process_table
 from .local_services.registry import set_local_service_launch_context
@@ -36,6 +36,7 @@ from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
 from .server_logs import emit_server_log
 from .server_logs import install_server_log_handler
+from .tmux.tmux_utils import cmd_error
 
 
 def parse_args() -> argparse.Namespace:
@@ -243,7 +244,7 @@ def ensure_self_signed_cert() -> tuple[Path, Path]:
     try:
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or str(error)).strip()
+        detail = cmd_error(error, str(error))
         raise RuntimeError(f"failed to generate self-signed certificate: {detail}") from error
 
     cert_path.chmod(0o600)

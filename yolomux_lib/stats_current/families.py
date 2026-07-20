@@ -152,12 +152,12 @@ CURRENT_FAMILIES = (
         ("system_cpu_percent", "process_cpu_percent"), True,
     ),
     FamilySpec(
-        "agent_status", "agent_status", 10, 10, FoldKind.STATUS,
+        "agent_status", "agent_status", 10, 60, FoldKind.STATUS,
         (_field("states", AGENT_STATES), _field("session_states", AGENT_STATES, required=False), _field("snapshot_revision", NUMBER, required=False)),
         ("ask_agents", "run_agents", "transition_agents", "idle_agents", "ask_sessions", "run_sessions", "transition_sessions", "idle_sessions", "agent_window_snapshot_revision"), True,
     ),
     FamilySpec(
-        "gpu", "gpu", 10, 10, FoldKind.GAUGE,
+        "gpu", "gpu", 10, 60, FoldKind.GAUGE,
         (
             _field("util_percent", NUMBER), _field("memory_used_bytes", NUMBER),
             _field("memory_capacity_bytes", NUMBER), _field("label", STRING),
@@ -165,7 +165,7 @@ CURRENT_FAMILIES = (
         ("gpu_util_percent", "gpu_memory_bytes"), True,
     ),
     FamilySpec(
-        "service_load", "service_load", 10, 10, FoldKind.AVERAGE,
+        "service_load", "service_load", 10, 60, FoldKind.AVERAGE,
         (
             _field("running", BOOLEAN), _field("cpu_percent", NUMBER),
             _field("rss_bytes", NULLABLE_NUMBER),

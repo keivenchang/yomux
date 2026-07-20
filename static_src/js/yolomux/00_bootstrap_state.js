@@ -569,11 +569,7 @@ const HIGHLIGHTABLE_EXTENSIONS = {
   '.drawio': 'xml', '.dio': 'xml',
   '.sql': 'sql', '.rb': 'ruby', '.lua': 'lua', '.pl': 'perl',
 };
-const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame state
-const openFiles = fileState;  // compatibility alias during the file-state migration
-const fileIdentityByPath = new Map();  // display path -> backend physical-file identity
-const openFilePathByIdentity = new Map();  // backend physical-file identity -> primary open display path
-const fileOpenPromisesByPath = new Map();  // display path -> in-flight text-editor open promise
+const fileState = new Map();  // path -> open-file content plus editor tab/owner/mode/blame/identity/open-promise state
 const fileExplorerDirectoryRecords = new Map();  // normalized directory -> {signature, knownEntryNames}
 const fileExplorerNewEntryUntil = new Map();
 const fileExplorerRepoInfoCache = new Map();
@@ -823,9 +819,8 @@ const infoSubTabStorageKey = 'yolomux.infoPanel.activeSubTab.v1';
 const infoLookbackHoursStorageKey = 'yolomux.infoPanel.lookbackHours.v1';
 const transcriptPreviewMessages = 200;
 let remoteResizeDelayMs = initialSetting('performance.remote_resize_delay_ms');
-// The latest watched-PR payload + last-seen status per PR ref (for notify-on-transition diffing) live here.
+// The latest watched-PR payload lives here; transition status and notification throttles share one PR-keyed record owner.
 let watchedPrsData = {watched_prs: [], truncated: 0, invalid: []};
-const watchedPrLastStatus = new Map();
 let latencyRefreshMs = initialSetting('performance.latency_refresh_ms');
 let eventLogRefreshMs = initialSetting('performance.event_log_refresh_ms');
 let tmuxSignalState = null;
@@ -838,13 +833,7 @@ const toastMaxLines = 3;
 const toastMaxLineChars = 180;
 let pinnedTabItems = readStoredPinnedTabs();
 let popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms');
-let hoverCloseDelayMs = initialSetting('performance.popover_hide_delay_ms');
-let popoverHideDelayMs = hoverCloseDelayMs;
-let menuHoverOpenDelayMs = initialSetting('performance.menu_hover_open_delay_ms');
-let menuHoverCloseDelayMs = hoverCloseDelayMs;
-let tabPopoverShowDelayMs = initialSetting('performance.tab_popover_show_delay_ms');
-let tabPopoverFollowDelayMs = initialSetting('performance.tab_popover_follow_delay_ms');
-const fileImagePreviewMinShowDelayMs = 800;
+let popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms');
 const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
@@ -1099,7 +1088,6 @@ function narrowTouchSingleColumnViewport(viewport = nativeViewport()) {
 function narrowSingleColumnMode(viewport = nativeViewport()) {
   return narrowTouchSingleColumnViewport(viewport);
 }
-const jsDebugCollectionEnabled = true;
 const debugModeExplicitUrlEnabled = urlFlagEnabled('debug');
 let debugModeEnabled = debugModeExplicitUrlEnabled;
 const jsDebugEventLimit = 200;
@@ -1252,7 +1240,7 @@ function filePanelTabType({key, prefix, prefixes = null, shortLabel, terminalTit
     relocalize: (item, panel) => relocalizeFileEditorPanel(panel, item),
     canPopout: item => {
       const path = fileItemPath(item);
-      return Boolean(path && editorPreviewModeAvailable(path, openFiles.get(path)));
+      return Boolean(path && editorPreviewModeAvailable(path, fileState.get(path)));
     },
     popoutDisabledReason: item => t(fileItemPath(item)
       ? 'pane.popout.filePreviewRequired'
@@ -1516,7 +1504,6 @@ function tabTypeForParam(value) {
 }
 function tabTypeParam(type, item) { return typeof type?.param === 'function' ? type.param(item) : type?.param; }
 function isYoagentItem(item) { return tabTypeForItem(item)?.key === 'yoagent'; }
-function isChatItem(item) { return tabTypeForItem(item)?.key === 'chat'; }
 function isChatMediaItem(item) { return tabTypeForItem(item)?.key === 'chat-media'; }
 function isPreferencesItem(item) { return tabTypeForItem(item)?.key === 'preferences'; }
 function isDebugItem(item) { return tabTypeForItem(item)?.key === 'debug'; }
@@ -1737,7 +1724,7 @@ const notificationDeliveryStorageKey = 'yolomux.notificationDelivery.v1';
 const notificationDeliveryDefaults = Object.freeze({inApp: true, system: false});
 let notificationDelivery = {...notificationDeliveryDefaults};
 const sessionStatusRecords = new Map();
-const watchedPrNotificationLastSent = new Map();
+const watchedPrRecords = new Map();
 const toastRecords = new Map();
 const browserNotificationsByTarget = new Map();
 const browserNotificationLifecycleKeys = new WeakMap();
@@ -1752,6 +1739,17 @@ function setLimitedMapEntry(map, key, value, limit) {
     if (oldest === undefined) break;
     map.delete(oldest);
   }
+}
+
+function watchedPrRecord(ref, create = false) {
+  const key = String(ref || '').trim();
+  if (!key) return null;
+  let record = watchedPrRecords.get(key) || null;
+  if (!record && create) {
+    record = {lastStatus: null, notificationLastSent: new Map()};
+    setLimitedMapEntry(watchedPrRecords, key, record, notificationLastSentLimit);
+  }
+  return record;
 }
 
 function sessionStatusRecord(session, create = false) {
@@ -1808,6 +1806,7 @@ let pendingPreferencesRender = false;
 // panel renders deferred during tab drag keep the cheap/full render decision that was made
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
+let pendingLayoutRenderFrame = 0;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 // one global editor navigation history (Popular IDE-style back/forward through visited files).

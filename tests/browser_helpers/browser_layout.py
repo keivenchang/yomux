@@ -485,9 +485,9 @@ def ui_pins() -> Mapping[str, object]:
     """Read the shared cross-layer UI pin registry once and expose it as read-only fixture data."""
     global _UI_PINS_CACHE
     if _UI_PINS_CACHE is None:
-        pins = json.loads((REPO_ROOT / "tests" / "ui_pins.json").read_text(encoding="utf-8"))
+        pins = json.loads((REPO_ROOT / "tests" / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))
         if not isinstance(pins, dict):
-            raise TypeError("tests/ui_pins.json must contain one JSON object")
+            raise TypeError("tests/fixtures/ui_pins.json must contain one JSON object")
         _UI_PINS_CACHE = MappingProxyType(pins)
     return _UI_PINS_CACHE
 
@@ -752,9 +752,9 @@ def count_rect_region_pixels(image, dpr, rect, region, predicate, *, step=2):
 
 
 def _browser_fixture_scope(*, fixture_name, config):
-    """Keep the production fixture behavior unless the worker-reuse experiment is explicit."""
+    """Reuse one Chrome lease per pytest worker; the autouse reset owns isolation."""
     del fixture_name, config
-    return "session" if os.environ.get(SESSION_SCOPED_BROWSER_REUSE_ENV) == "1" else "module"
+    return "session"
 
 
 class _BrowserDriverLease:
@@ -848,8 +848,8 @@ def _invalid_browser_session(error):
 
 @pytest.fixture(scope=_browser_fixture_scope)
 def browser():
-    # Default module scope is the established baseline. The opt-in session scope creates exactly
-    # one lease per pytest-xdist worker, while the autouse teardown removes cross-test state.
+    # Session scope creates exactly one lease per pytest-xdist worker, while the autouse teardown
+    # removes cross-test state after every test.
     lease = _BrowserDriverLease(new_chrome_driver())
     try:
         yield lease

@@ -65,7 +65,7 @@ def test_statusd_reuses_one_encoded_snapshot_and_retains_stale_bytes(monkeypatch
     assert service.status()["build_count"] == 1
 
 
-def test_statusd_rebuilds_after_max_age_even_without_explicit_invalidate(monkeypatch, tmp_path):
+def test_statusd_rebuilds_after_max_age_without_bumping_an_unchanged_snapshot(monkeypatch, tmp_path):
     # Regression: a plain working->idle pane transition never calls invalidate() (no approval
     # prompt, no attention-ack), so without a bounded max age the snapshot built while an agent
     # was busy would be served forever and tab status dots would stay stuck on "running".
@@ -87,7 +87,8 @@ def test_statusd_rebuilds_after_max_age_even_without_explicit_invalidate(monkeyp
 
     second, _ = service.handle(request)
     assert FakeStatusApp.builds == 2
-    assert second["generation"] == first["generation"] + 1
+    assert second["generation"] == first["generation"]
+    assert service.status()["build_count"] == 1
 
 
 def _find_claude_case(case_name):
@@ -113,7 +114,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
         tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "78", "-y", "35",
-        f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+        f"cd {REPO_ROOT} && exec python3 tools/agent_clients/claude.py --mock",
     )
     assert created.returncode == 0, created.stderr or created.stdout
     try:
@@ -134,7 +135,7 @@ def test_statusd_dot_reflects_real_idle_pane_after_ttl_without_explicit_invalida
         # than typing into a composer that isn't accepting input.
         respawned = tmux_cmd(
             tmux_binary, socket_path, "respawn-pane", "-k", "-t", f"{session}:",
-            f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+            f"cd {REPO_ROOT} && exec python3 tools/agent_clients/claude.py --mock",
         )
         assert respawned.returncode == 0, respawned.stderr or respawned.stdout
         rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, 'Try "fix typecheck errors"')
@@ -175,7 +176,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
     monkeypatch.setenv(YOLOMUX_TMUX_SOCKET_ENV, str(socket_path))
     created = tmux_cmd(
         tmux_binary, socket_path, "new-session", "-d", "-s", session, "-x", "78", "-y", "35",
-        f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+        f"cd {REPO_ROOT} && exec python3 tools/agent_clients/claude.py --mock",
     )
     assert created.returncode == 0, created.stderr or created.stdout
     service = statusd.PersistentStatusService(status_socket, idle_seconds=60.0)
@@ -236,7 +237,7 @@ def test_real_tmux_agent_window_status_tabber_and_stats_share_lifecycle_identity
 
         respawned = tmux_cmd(
             tmux_binary, socket_path, "respawn-pane", "-k", "-t", f"{session}:",
-            f"cd {REPO_ROOT} && exec python3 tools/claude.py --mock",
+            f"cd {REPO_ROOT} && exec python3 tools/agent_clients/claude.py --mock",
         )
         assert respawned.returncode == 0, respawned.stderr or respawned.stdout
         rendered, pane = wait_for_mockcase_render(tmux_binary, socket_path, session, 'Try "fix typecheck errors"')

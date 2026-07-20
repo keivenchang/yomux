@@ -49,14 +49,28 @@ function sortMenuCommandsByLabel(commands) {
   return [...commands].sort((left, right) => compareLocalizedMenuLabels(left?.label, right?.label));
 }
 
-function layoutMenuCommand(mode) {
+function layoutMenuCommand(mode, options = {}) {
   const normalized = normalizeLayoutMode(mode);
-  const detail = normalized === 'single'
+  const defaultDetail = normalized === 'single'
     ? t('menu.view.layout.single.detail', {name: fileExplorerLabel()})
     : normalized === 'split'
       ? t('menu.view.layout.split.detail', {name: fileExplorerLabel()})
       : '';
-  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {detail, keepOpen: true});
+  return menuCommand(t(`menu.view.layout.${normalized}`), () => applyLayoutMode(normalized), {
+    detail: options.detail ?? defaultDetail,
+    disabled: options.disabled === true,
+    keepOpen: true,
+  });
+}
+
+function layoutMenuCommands() {
+  const unavailable = narrowSingleColumnMode();
+  const options = unavailable
+    ? {disabled: true, detail: t('menu.view.layout.narrow.detail')}
+    : {};
+  // Keep normal modes visible when the measured viewport must use one column. The disabled rows
+  // share the active command owner, so a resize cannot leave an enabled split command behind.
+  return layoutModeValues.map(mode => layoutMenuCommand(mode, options));
 }
 
 const aboutLinkedInUrl = 'https://www.linkedin.com/in/keiven/';
@@ -68,10 +82,6 @@ function aboutDateTimeText() {
   return localizedDateTimeFormat(Date.now() / 1000, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
   });
-}
-
-function openAboutLinkedIn() {
-  window.open(aboutLinkedInUrl, '_blank', 'noopener,noreferrer');
 }
 
 function aboutCommitShaText() {
@@ -886,7 +896,7 @@ function appMenuTree() {
           menuCommand(t('common.theme.dark'), () => setGlobalThemeMode('dark'), {checked: normalizeGlobalThemeMode() === 'dark', keepOpen: true}),
           menuCommand(t('common.theme.light'), () => setGlobalThemeMode('light'), {checked: normalizeGlobalThemeMode() === 'light', keepOpen: true}),
         ]),
-        ...(narrowSingleColumnMode() ? [] : [menuSubmenu(t('menu.view.layout'), availableLayoutModes().map(layoutMenuCommand))]),
+        menuSubmenu(t('menu.view.layout'), layoutMenuCommands()),
       ],
     },
     {
@@ -1520,7 +1530,7 @@ function createAppMenu(menu) {
   const button = makeButton({
     className: 'app-menu-button',
     role: 'menuitem',
-    html: `${esc(menu.label)}${menu.badgeText ? `<span class="app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
+    html: `${esc(menu.label)}${menu.badgeText ? `<span class="badge-base app-menu-button-badge" title="${esc(menu.badgeTitle || '')}">${esc(menu.badgeText)}</span>` : ''}`,
     attributes: {'aria-haspopup': 'true', 'aria-expanded': openAppMenuId === menu.id ? 'true' : 'false'},
     onClick: event => {
       if (button.dataset.pointerActionHandled === '1') {
@@ -1937,8 +1947,8 @@ function bindAppMenuHover(wrapper) {
     popover: () => wrapper.querySelector(':scope > .app-menu-popover'),
     stateClass: '',
     canOpen: event => autoFocusCanFollowCursor(event) || appMenuIsOpen(),
-    showDelay: () => (appMenuIsOpen() ? 0 : menuHoverOpenDelayMs),
-    hideDelay: () => menuHoverCloseDelayMs,
+    showDelay: () => (appMenuIsOpen() ? popoverHideDelayMs : popoverShowDelayMs),
+    hideDelay: () => popoverHideDelayMs,
     stillActive: () => wrapper.matches?.(':hover'),
     onOpen: () => {
       const menuId = wrapper.dataset.appMenu || '';
@@ -1947,7 +1957,7 @@ function bindAppMenuHover(wrapper) {
     },
     onClose: () => {
       const menuId = wrapper.dataset.appMenu || '';
-      if (!wrapper.matches?.(':hover') && openAppMenuId === menuId) closeAppMenus();
+      if (!wrapper.matches?.(':hover') && openAppMenuId === menuId && !document.querySelector('.app-menu:hover')) closeAppMenus();
     },
   });
 }

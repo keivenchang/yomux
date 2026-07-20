@@ -213,14 +213,14 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
               const modeWhilePayloadUnresolved = panel._cmMode || '';
               const textWhilePayloadUnresolved = panel._cmView?.state?.doc?.toString?.() || '';
               window.__resolveReadmeDiffFetch();
-              const diffLoadedWait = await waitFor(() => openFiles.get(path)?.diffLoaded === true);
+              const diffLoadedWait = await waitFor(() => fileState.get(path)?.diffLoaded === true);
               const modeBeforeDiffBuildRelease = panel._cmMode || '';
               const finalWait = await waitFor(
                 () => panel._cmMode === 'diff' && panel._cmView?.state?.doc?.toString?.().includes('Deterministic test-only README diff line.'),
                 {{timeoutMs: 15000, description: 'README diff CodeMirror payload build'}}
               );
               const finalText = panel._cmView?.state?.doc?.toString?.() || '';
-              const state = openFiles.get(path) || {{}};
+              const state = fileState.get(path) || {{}};
               return {{
                 modeWhilePayloadUnresolved,
                 textWhilePayloadUnresolved,
@@ -371,7 +371,7 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
                 const button = panel.querySelector('.file-editor-diff-panel');
                 const refs = panel.querySelector('.file-editor-diff-ref-panel');
                 const refInputs = Array.from(refs?.querySelectorAll('.diff-ref-input') || []).map(input => input.value || '');
-                const state = openFiles.get(path) || {{}};
+                const state = fileState.get(path) || {{}};
                 return {{
                   viewMode: editorViewModeFor(path, item),
                   cmMode: panel._cmMode || '',
@@ -392,12 +392,12 @@ def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser,
               await waitFor(() => panel._cmMode === 'edit' && panel.querySelector('.file-editor-diff-panel')?.hidden === false);
               const beforeClick = snapshot();
               panel.querySelector('.file-editor-diff-panel').click();
-              await waitFor(() => window.__resolveCleanDiffFetch && openFiles.get(path)?.diffLoading === true);
+              await waitFor(() => window.__resolveCleanDiffFetch && fileState.get(path)?.diffLoading === true);
               await frame();
               await frame();
               const whileUnresolved = snapshot();
               window.__resolveCleanDiffFetch();
-              await waitFor(() => openFiles.get(path)?.diffLoaded === true && openFiles.get(path)?.diffLoading === false && editorViewModeFor(path, item) === 'diff');
+              await waitFor(() => fileState.get(path)?.diffLoaded === true && fileState.get(path)?.diffLoading === false && editorViewModeFor(path, item) === 'diff');
               await frame();
               await frame();
               const afterCleanDiff = snapshot();
@@ -2631,19 +2631,19 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
             const ready = await waitFor(() => panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox').length === 2 && panel._cmView?.state?.doc?.toString?.().includes('first task'));
             const before = {
               ready,
-              content: openFiles.get(path)?.content || '',
+              content: fileState.get(path)?.content || '',
               checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
               disabled: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.disabled),
               cmText: panel._cmView?.state?.doc?.toString?.() || '',
             };
             const first = panel.querySelector('.file-editor-preview-pane-panel input.markdown-task-checkbox');
             first.click();
-            await waitFor(() => (openFiles.get(path)?.content || '').startsWith('- [x] first task'));
+            await waitFor(() => (fileState.get(path)?.content || '').startsWith('- [x] first task'));
             await frame();
             await frame();
             const after = {
-              content: openFiles.get(path)?.content || '',
-              dirty: openFiles.get(path)?.dirty === true,
+              content: fileState.get(path)?.content || '',
+              dirty: fileState.get(path)?.dirty === true,
               checked: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.checked),
               sourceLines: Array.from(panel.querySelectorAll('.file-editor-preview-pane-panel input.markdown-task-checkbox')).map(input => input.dataset.sourceLine || ''),
               cmText: panel._cmView?.state?.doc?.toString?.() || '',

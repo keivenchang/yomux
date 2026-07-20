@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time
@@ -24,20 +23,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yolomux_lib.jobd import JobClient
-
-
-def positive_float(value: str) -> float:
-    parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
-
-
-def positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
-    return parsed
+from tools.yostats_capture_common import positive_float, positive_int, process_cpu_seconds
 
 
 def process_cpu_percent(pid: int) -> float | None:
@@ -63,50 +49,11 @@ def process_cpu_percent(pid: int) -> float | None:
         return None
 
 
-def process_cpu_time_seconds(pid: int) -> float | None:
-    if pid <= 0:
-        return None
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "time="],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=1.0,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    value = result.stdout.strip()
-    if not value:
-        return None
-    days = 0
-    if "-" in value:
-        day_text, value = value.split("-", 1)
-        try:
-            days = int(day_text)
-        except ValueError:
-            return None
-    fields = value.split(":")
-    try:
-        if len(fields) == 2:
-            minutes, seconds = int(fields[0]), float(fields[1])
-            hours = 0
-        elif len(fields) == 3:
-            hours, minutes, seconds = int(fields[0]), int(fields[1]), float(fields[2])
-        else:
-            return None
-    except ValueError:
-        return None
-    return float((((days * 24) + hours) * 60 + minutes) * 60 + seconds)
-
-
 def process_snapshot(pids: dict[str, int]) -> dict[str, dict[str, float | None]]:
     return {
         name: {
             "ps_cpu_percent": process_cpu_percent(pid),
-            "cpu_time_seconds": process_cpu_time_seconds(pid),
+            "cpu_time_seconds": process_cpu_seconds(pid),
         }
         for name, pid in sorted(pids.items())
     }
@@ -138,6 +85,7 @@ def bounded_jobd_status() -> dict[str, Any]:
         "product_runtime_ms": status.get("product_runtime_ms") if isinstance(status.get("product_runtime_ms"), dict) else {},
         "product_phase_runtime_ms": status.get("product_phase_runtime_ms") if isinstance(status.get("product_phase_runtime_ms"), dict) else {},
         "product_work_totals": status.get("product_work_totals") if isinstance(status.get("product_work_totals"), dict) else {},
+        "session_files_accepted_requester_counters": status.get("session_files_accepted_requester_counters") if isinstance(status.get("session_files_accepted_requester_counters"), dict) else {},
         "session_files_requester_counters": status.get("session_files_requester_counters") if isinstance(status.get("session_files_requester_counters"), dict) else {},
         "request_counters": status.get("request_counters") if isinstance(status.get("request_counters"), dict) else {},
         "source_change_counters": status.get("source_change_counters") if isinstance(status.get("source_change_counters"), dict) else {},

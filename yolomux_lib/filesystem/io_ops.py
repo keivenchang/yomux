@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import stat
 import tempfile
@@ -93,6 +94,19 @@ IMAGE_EXTENSIONS = {
 
 MAX_RAW_BYTES = 100 * 1024 * 1024  # Fallback raw file download cap when no app transfer cap is supplied.
 FS_ZIP_MAX_BYTES = 100 * 1024 * 1024  # Fallback folder zip cap when no app transfer cap is supplied.
+
+
+def read_json_file(
+    path: Path,
+    default: Any,
+    *,
+    exceptions: tuple[type[Exception], ...] = (OSError, json.JSONDecodeError),
+) -> Any:
+    """Read JSON from *path*, returning *default* for the caller's recoverable errors."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except exceptions:
+        return default
 
 
 def _sniff_raw_mime(data: bytes) -> str:

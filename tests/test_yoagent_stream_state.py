@@ -164,6 +164,36 @@ def test_yoagent_stream_callback_preserves_interleaved_order():
     assert fields["stream_items"] == last_payload["stream_items"]
 
 
+@pytest.mark.parametrize(
+    "transition",
+    [
+        {"kind": "assistant_delta", "text": "Visible answer"},
+        {"kind": "tool_call_started", "tool_name": "command", "command": "pwd"},
+        {"kind": "approval_requested", "text": "approve command", "command": "pwd"},
+        {"kind": "hidden_work_done"},
+        {"kind": "turn_done"},
+    ],
+)
+def test_yoagent_stream_callback_resets_hidden_work_before_new_thinking(transition):
+    webapp = app_module.TmuxWebtermApp(["5"])
+    last_payload = {}
+    webapp.publish_client_event = (
+        lambda event_type, payload=None, **_kwargs: last_payload.update(payload or {})
+        if event_type == "yoagent_stream_delta"
+        else None
+    )
+    try:
+        callback = webapp.yoagent_stream_callback("stream-hidden-reset", "claude")
+        callback({"kind": "hidden_work_delta", "text": "first thought"})
+        callback(transition)
+        callback({"kind": "hidden_work_delta", "text": "second thought"})
+    finally:
+        webapp.control_server.stop()
+
+    thinking = [item["text"] for item in last_payload["stream_items"] if item["kind"] == "thinking"]
+    assert thinking[-1] == "second thought"
+
+
 def test_yoagent_stream_callback_preserves_approval_request_descriptor():
     webapp = app_module.TmuxWebtermApp(["5"])
     last_payload = {}

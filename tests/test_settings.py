@@ -514,7 +514,7 @@ def test_summary_settings_reject_invalid_backend_defaults():
 
 
 def test_preferences_source_paths_are_in_backend_catalog():
-    source = (REPO_ROOT / "static_src/js/yolomux/82_preferences_panel.js").read_text(encoding="utf-8")
+    source = (REPO_ROOT / "static_src/js/yolomux/83_preferences_panel.js").read_text(encoding="utf-8")
     paths = set(re.findall(r"preferenceSettingItem\(['\"]([^'\"]+)['\"]", source))
 
     catalog = settings_catalog(default_settings())

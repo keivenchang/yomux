@@ -63,4 +63,4 @@ These are hard requirements when landing changes, learned by hitting them:
 - **`tools/check.py` runs py_compile, `static_build --check`, node syntax, the node layout suite (`tests/layout_url.test.js`), pytest, and a whitespace check.** Run it parallel (`-n auto` style) — it is the single gate before landing.
 - **No `clean-commit.sh` here.** That is a dynamo-only tool; yolomux commits do not run it.
 
-The commit/land workflow itself (LOCAL vs ORIGIN cps) is an operator workflow kept outside the repo. In short: LOCAL `cps` = rebase + fast-forward to local `main`, no version bump, no push; ORIGIN `cps` = rebase onto `origin/main`, bump `YOLOMUX_VERSION` in `yolomux_lib/common.py`, then push. The version bump belongs only to the ORIGIN/publish path, never to local integration.
+The commit/land workflow itself (LOCAL vs ORIGIN cps) is an operator workflow kept outside the repo. In short: LOCAL `cps` = rebase + fast-forward to local `main`, no version bump, no push; ORIGIN `cps` = rebase onto `origin/main`, bump `YOLOMUX_VERSION` in `yolomux_lib/infra/common.py`, then push. The version bump belongs only to the ORIGIN/publish path, never to local integration.

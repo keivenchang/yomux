@@ -629,7 +629,7 @@ def test_finder_context_open_new_tab_uses_the_selected_file(browser, tmp_path):
           if (!button) return done({error: 'open action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
           button.click();
           const waitForOpen = () => {
-            if (openFiles.has('/home/test/note.txt')) return done({opened: true, errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (fileState.has('/home/test/note.txt')) return done({opened: true, errors: window.__bootErrors, rejections: window.__bootRejections});
             if (performance.now() >= deadline) return done({error: 'selected file did not open', errors: window.__bootErrors, rejections: window.__bootRejections});
             requestAnimationFrame(waitForOpen);
           };
@@ -995,7 +995,7 @@ def test_differ_directory_context_expands_the_target_in_finder(browser, tmp_path
         row.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: 32, clientY: 32}));
         const deadline = performance.now() + 2000;
         const inspect = () => {
-          const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /expand.*finder/i.test(node.textContent));
+              const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /expand/i.test(node.textContent));
           if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
           if (!button) return done({error: 'expand-in-Finder action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
           button.click();

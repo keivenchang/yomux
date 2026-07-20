@@ -14,17 +14,16 @@ from urllib.parse import parse_qs
 from urllib.parse import unquote
 from urllib.parse import urlparse
 
-from .common import ACTIVITY_MAX_HOURS
-from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
-from .common import MAX_EVENT_TAIL_LINES
-from .common import MAX_TRANSCRIPT_TAIL_LINES
-from .common import SUMMARY_LOOKBACK_SECONDS
-from .common import auth_setup_required
-from .common import error_payload
-from .common import parse_bool
-from .chat_service import ChatServiceError
-from .chat_store import ChatStoreValidationError
-from .locales import resolve_locale_preference
+from .infra.common import ACTIVITY_MAX_HOURS
+from .infra.common import MAX_COMPACT_TRANSCRIPT_ITEMS
+from .infra.common import MAX_EVENT_TAIL_LINES
+from .infra.common import MAX_TRANSCRIPT_TAIL_LINES
+from .infra.common import auth_setup_required
+from .infra.common import error_payload
+from .infra.common import parse_bool
+from .chat.chat_service import ChatServiceError
+from .chat.chat_store import ChatStoreValidationError
+from .workspace.locales import resolve_locale_preference
 from .web import html_page
 from .web import server_string
 from .web import static_content_type
@@ -103,6 +102,41 @@ def query_list(qs: dict[str, list[str]], name: str) -> list[str]:
 def query_bool(qs: dict[str, list[str]], name: str, default: bool = False) -> bool:
     raw_default = "1" if default else "0"
     return parse_bool(str(query_one(qs, name, raw_default) or ""))
+
+
+def session_param(qs: dict[str, list[str]], default: str | None = "") -> str | None:
+    """Return the optional session query once with the route's explicit missing-value contract."""
+    value = query_one(qs, "session", default)
+    return None if value is None else str(value or "")
+
+
+def client_ip(request: Any) -> str:
+    """Return a client address when the request transport supplied one."""
+    address = request.client_address
+    return str(address[0]) if isinstance(address, tuple) and address else ""
+
+
+def check_share_session_scope(
+    request: Any,
+    sessions: list[str],
+    *,
+    default_to_shared_sessions: bool = False,
+) -> tuple[list[str], tuple[dict[str, Any], HTTPStatus] | None]:
+    """Apply the one share-token session fence used by single and batched file requests."""
+    share_sessions = request.share_sessions()
+    if not share_sessions:
+        return sessions, None
+    scoped_sessions = sessions or (share_sessions if default_to_shared_sessions else [])
+    if scoped_sessions and all(session in share_sessions for session in scoped_sessions):
+        return scoped_sessions, None
+    return [], (
+        error_payload(
+            "share token is scoped to a different session",
+            message_key="share.error.sessionScope",
+            status=HTTPStatus.FORBIDDEN,
+        ),
+        HTTPStatus.FORBIDDEN,
+    )
 
 
 def parse_query_int(
@@ -272,7 +306,7 @@ def _write_not_found_after_default_auth(request: Any, method: str) -> None:
     )
 
 
-def _json_body(request: Any, route: Route, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
+def require_json_body(request: Any, route: Route, *, allow_empty: bool = False, allow_missing: bool = False) -> dict[str, Any] | None:
     if route.body_limit is None:
         raise RuntimeError(f"route {route.method} {route.path} has no body_limit")
     if not allow_empty and not allow_missing:
@@ -374,7 +408,7 @@ def post_pricing_catalog_refresh(request: Any, parsed: Any, route: Route) -> Non
 
 def post_stats_observations(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.record_current_browser_observations(
@@ -452,8 +486,8 @@ def get_pane_popout(request: Any, parsed: Any, route: Route) -> None:
 def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    payload_fn = getattr(request.server.app, "session_metadata_payload", None) or request.server.app.transcripts_payload
-    scoped_fn = getattr(request, "share_scoped_session_metadata_payload", None) or request.share_scoped_transcripts_payload
+    payload_fn = request.server.app.session_metadata_payload
+    scoped_fn = request.share_scoped_session_metadata_payload
     request.write_json(scoped_fn(payload_fn(force=query_bool(qs, "force"))))
 
 
@@ -464,7 +498,7 @@ def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
 def get_tmux_session_exists(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     request.write_app_result(request.server.app.tmux_session_exists_payload(session))
 
 
@@ -543,19 +577,19 @@ def get_tmux(request: Any, parsed: Any, route: Route) -> None:
         "lines",
         90,
         MAX_TRANSCRIPT_TAIL_LINES,
-        lambda qs, lines: request.server.app.tmux_snapshot(str(query_one(qs, "session", "") or ""), lines),
+        lambda qs, lines: request.server.app.tmux_snapshot(session_param(qs), lines),
     )
 
 
 def get_tmux_signals(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(qs, "force"), session=str(query_one(qs, "session", "") or "")))
+    request.write_app_result(request.server.app.tmux_signals_payload(force=query_bool(qs, "force"), session=session_param(qs)))
 
 def get_tmux_status(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    request.write_app_result(request.server.app.tmux_status_mode(str(query_one(qs, "session", "") or "")))
+    request.write_app_result(request.server.app.tmux_status_mode(session_param(qs)))
 
 
 def get_transcript(request: Any, parsed: Any, route: Route) -> None:
@@ -565,7 +599,7 @@ def get_transcript(request: Any, parsed: Any, route: Route) -> None:
         "lines",
         120,
         MAX_TRANSCRIPT_TAIL_LINES,
-        lambda qs, lines: request.server.app.transcript_tail(str(query_one(qs, "session", "") or ""), lines),
+        lambda qs, lines: request.server.app.transcript_tail(session_param(qs), lines),
     )
 
 
@@ -576,7 +610,7 @@ def get_context(request: Any, parsed: Any, route: Route) -> None:
         "messages",
         40,
         MAX_COMPACT_TRANSCRIPT_ITEMS,
-        lambda qs, messages: request.server.app.context_tail(str(query_one(qs, "session", "") or ""), messages),
+        lambda qs, messages: request.server.app.context_tail(session_param(qs), messages),
     )
 
 
@@ -587,7 +621,7 @@ def get_context_items(request: Any, parsed: Any, route: Route) -> None:
         "messages",
         40,
         MAX_COMPACT_TRANSCRIPT_ITEMS,
-        lambda qs, messages: request.server.app.context_items(str(query_one(qs, "session", "") or ""), messages),
+        lambda qs, messages: request.server.app.context_items(session_param(qs), messages),
     )
 
 
@@ -604,7 +638,7 @@ def get_summary_stream(request: Any, parsed: Any, route: Route) -> None:
 def get_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = query_one(qs, "session", None)
+    session = session_param(qs, None)
     body, status = request.server.app.auto_approve_status_bytes(session)
     request.write_json_bytes(body, status=status)
 
@@ -644,7 +678,7 @@ def get_events(request: Any, parsed: Any, route: Route) -> None:
         "limit",
         100,
         MAX_EVENT_TAIL_LINES,
-        lambda qs, limit: request.server.app.events_payload(query_one(qs, "session", None), limit),
+        lambda qs, limit: request.server.app.events_payload(session_param(qs, None), limit),
     )
 
 
@@ -655,14 +689,14 @@ def get_search(request: Any, parsed: Any, route: Route) -> None:
         "limit",
         100,
         MAX_EVENT_TAIL_LINES,
-        lambda qs, limit: request.server.app.search_payload(str(query_one(qs, "q", "") or ""), query_one(qs, "session", None), limit),
+        lambda qs, limit: request.server.app.search_payload(str(query_one(qs, "q", "") or ""), session_param(qs, None), limit),
     )
 
 
 def get_run_history(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = query_one(qs, "session", None)
+    session = session_param(qs, None)
     request.write_app_result(request.server.app.run_history_payload(session))
 
 
@@ -686,21 +720,16 @@ def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
     force = query_bool(qs, "force")
-    share_sessions = request.share_sessions()
     repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
 
     def make_result(hours: float) -> tuple[Any, HTTPStatus]:
-        scoped_sessions = requested_sessions
-        if share_sessions:
-            if not scoped_sessions:
-                scoped_sessions = share_sessions
-            blocked = [session for session in scoped_sessions if session not in share_sessions]
-            if blocked:
-                return error_payload(
-                    "share token is scoped to a different session",
-                    message_key="share.error.sessionScope",
-                    status=HTTPStatus.FORBIDDEN,
-                ), HTTPStatus.FORBIDDEN
+        scoped_sessions, blocked = check_share_session_scope(
+            request,
+            requested_sessions,
+            default_to_shared_sessions=True,
+        )
+        if blocked is not None:
+            return blocked
         return request.server.app.session_files_batch_payload(scoped_sessions or None, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(qs, "hours", 24.0, ACTIVITY_MAX_HOURS, make_result)
@@ -709,21 +738,18 @@ def get_session_files_batch(request: Any, parsed: Any, route: Route) -> None:
 def get_session_files(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = query_one(qs, "session", None)
+    session = session_param(qs, None)
     from_ref = query_one(qs, "from", None)
     to_ref = query_one(qs, "to", None)
     force = query_bool(qs, "force")
-    share_sessions = request.share_sessions()
     repo_refs = parse_repo_refs_param(query_one(qs, "refs", None))
 
     def make_result(hours: float) -> tuple[Any, HTTPStatus]:
-        if share_sessions and session not in share_sessions:
-            return error_payload(
-                "share token is scoped to a different session",
-                message_key="share.error.sessionScope",
-                status=HTTPStatus.FORBIDDEN,
-            ), HTTPStatus.FORBIDDEN
-        return request.server.app.session_files_payload(session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
+        scoped_sessions, blocked = check_share_session_scope(request, [session] if session else [])
+        if blocked is not None:
+            return blocked
+        scoped_session = scoped_sessions[0] if scoped_sessions else None
+        return request.server.app.session_files_payload(scoped_session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(
         qs,
@@ -737,7 +763,7 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
 def get_summary(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     request.write_app_result(request.server.app.summary(session))
 
 
@@ -766,14 +792,14 @@ def get_chat_bootstrap(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
     identity = request.auth_identity()
-    client_ip = str(request.client_address[0]) if isinstance(request.client_address, tuple) and request.client_address else ""
+    request_ip = client_ip(request)
 
     def bootstrap_payload() -> dict[str, Any]:
         payload = request.server.app.chat_bootstrap(
             identity.username,
             str(query_one(qs, "browser_instance_id", "") or ""),
         )
-        payload["client_ip"] = client_ip
+        payload["client_ip"] = request_ip
         return payload
 
     _chat_write_result(
@@ -838,7 +864,7 @@ def get_chat_search(request: Any, parsed: Any, route: Route) -> None:
 
 def post_chat_send(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     identity = request.auth_identity()
@@ -848,7 +874,7 @@ def post_chat_send(request: Any, parsed: Any, route: Route) -> None:
             identity.username,
             payload,
             request.request_locale_pref(),
-            sender_ip=str(request.client_address[0]),
+            sender_ip=client_ip(request),
         ),
         created=True,
     )
@@ -856,7 +882,7 @@ def post_chat_send(request: Any, parsed: Any, route: Route) -> None:
 
 def post_chat_yoagent(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     identity = request.auth_identity()
@@ -874,7 +900,7 @@ def post_chat_yoagent(request: Any, parsed: Any, route: Route) -> None:
 
 def post_chat_typing(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     _chat_write_result(
@@ -889,7 +915,7 @@ def post_chat_typing(request: Any, parsed: Any, route: Route) -> None:
 
 def post_chat_read(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     _chat_write_result(
@@ -1001,7 +1027,7 @@ def post_self_update(request: Any, parsed: Any, route: Route) -> None:
 def post_ensure_session(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     request.write_app_result(request.server.app.ensure_session(session))
 
 
@@ -1017,7 +1043,7 @@ def post_create_session(request: Any, parsed: Any, route: Route) -> None:
 def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     new_name = str(query_one(qs, "new_name", "") or "")
     request.write_app_result(request.server.app.rename_session(session, new_name))
 
@@ -1025,14 +1051,14 @@ def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
 def post_kill_session(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     request.write_app_result(request.server.app.kill_session(session))
 
 
 def post_upload(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     editor_path = str(query_one(qs, "editor_path", "") or "")
     base_dir = str(query_one(qs, "base_dir", "") or "")
     request.write_app_result(request.handle_upload(session, editor_path=editor_path, base_dir=base_dir))
@@ -1041,14 +1067,14 @@ def post_upload(request: Any, parsed: Any, route: Route) -> None:
 def post_auto_approve(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     enabled = query_bool(qs, "enabled")
     request.write_app_result(request.server.app.set_auto_approve(session, enabled))
 
 
 def post_attention_ack(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     request.write_app_result(request.server.app.acknowledge_attention(payload))
@@ -1063,7 +1089,7 @@ def post_notify(request: Any, parsed: Any, route: Route) -> None:
 
 def post_settings(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     request.write_json(request.server.app.save_settings(payload.get("settings", payload)))
@@ -1071,7 +1097,7 @@ def post_settings(request: Any, parsed: Any, route: Route) -> None:
 
 def post_share_create(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     request.write_app_result(request.handle_share_create(payload))
@@ -1081,7 +1107,7 @@ def post_share_stop(request: Any, parsed: Any, route: Route) -> None:
     qs = request_query(request, parsed)
     token_or_short_id = str(query_one(qs, "token", "") or query_one(qs, "id", "") or "")
     if not token_or_short_id:
-        payload = _json_body(request, route, allow_empty=True, allow_missing=True)
+        payload = require_json_body(request, route, allow_empty=True, allow_missing=True)
         if payload is None:
             return
         token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
@@ -1092,7 +1118,7 @@ def post_share_stop(request: Any, parsed: Any, route: Route) -> None:
 
 def post_share_extend(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     token_or_short_id = str(payload.get("token") or payload.get("short_id") or payload.get("id") or "")
@@ -1106,7 +1132,7 @@ def post_share_extend(request: Any, parsed: Any, route: Route) -> None:
 
 def post_share_debug_profile(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     token = request.share_token()
@@ -1120,18 +1146,18 @@ def post_share_debug_profile(request: Any, parsed: Any, route: Route) -> None:
             status=HTTPStatus.UNAUTHORIZED,
         )
         return
-    client_ip = request.client_address[0] if isinstance(request.client_address, tuple) and request.client_address else ""
+    request_ip = client_ip(request)
     request.write_app_result(request.server.app.record_share_debug_profile(
         token,
         payload,
-        ip=client_ip,
+        ip=request_ip,
         user_agent=request.headers.get("User-Agent", ""),
     ))
 
 
 def post_watch_roots(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     request.write_json(request.server.app.update_client_watch_roots(payload))
@@ -1139,7 +1165,7 @@ def post_watch_roots(request: Any, parsed: Any, route: Route) -> None:
 
 def post_drop_action(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     request.write_app_result(request.server.app.run_file_drop_action(payload))
@@ -1147,7 +1173,7 @@ def post_drop_action(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_chat(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.yoagent_chat(payload, access_role=request.auth_identity().role)
@@ -1155,7 +1181,7 @@ def post_yoagent_chat(request: Any, parsed: Any, route: Route) -> None:
 
 
 def post_yoagent_chat_cancel(request: Any, parsed: Any, route: Route) -> None:
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     request_id = unquote(parsed.path[len("/api/yoagent/chat/"):-len("/cancel")]).strip("/")
@@ -1165,7 +1191,7 @@ def post_yoagent_chat_cancel(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_preview_send(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.preview_yoagent_send_action(payload)
@@ -1174,7 +1200,7 @@ def post_yoagent_preview_send(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_execute_send(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.execute_yoagent_send_action(payload)
@@ -1183,7 +1209,7 @@ def post_yoagent_execute_send(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_intent(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.yoagent_intent(payload)
@@ -1192,7 +1218,7 @@ def post_yoagent_intent(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.create_yoagent_job(payload)
@@ -1200,7 +1226,7 @@ def post_yoagent_jobs(request: Any, parsed: Any, route: Route) -> None:
 
 
 def post_yoagent_job_confirm(request: Any, parsed: Any, route: Route) -> None:
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/confirm")]).strip("/")
@@ -1209,7 +1235,7 @@ def post_yoagent_job_confirm(request: Any, parsed: Any, route: Route) -> None:
 
 
 def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     job_id = unquote(parsed.path[len("/api/yoagent/jobs/"):-len("/cancel")]).strip("/")
@@ -1219,7 +1245,7 @@ def post_yoagent_job_cancel(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_jobs_cancel_session(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.cancel_yoagent_jobs_for_session(str(payload.get("session") or ""))
@@ -1227,7 +1253,7 @@ def post_yoagent_jobs_cancel_session(request: Any, parsed: Any, route: Route) ->
 
 
 def post_yoagent_wait_clear(request: Any, parsed: Any, route: Route) -> None:
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     wait_id = unquote(parsed.path[len("/api/yoagent/waits/"):-len("/clear")]).strip("/")
@@ -1237,7 +1263,7 @@ def post_yoagent_wait_clear(request: Any, parsed: Any, route: Route) -> None:
 
 def post_yoagent_skill_file_upsert(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.upsert_yoagent_skill_file(payload)
@@ -1246,7 +1272,7 @@ def post_yoagent_skill_file_upsert(request: Any, parsed: Any, route: Route) -> N
 
 def post_yoagent_skill_file_delete(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.delete_yoagent_skill_file(payload)
@@ -1255,7 +1281,7 @@ def post_yoagent_skill_file_delete(request: Any, parsed: Any, route: Route) -> N
 
 def post_yoagent_prewarm(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = _json_body(request, route)
+    payload = require_json_body(request, route)
     if payload is None:
         return
     response, status = request.server.app.yoagent_controller.yoagent_prewarm(payload)
@@ -1280,19 +1306,19 @@ def post_yolo_rules_open(request: Any, parsed: Any, route: Route) -> None:
 def post_tmux_next(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = qs.get("session", [""])[0]
+    session = session_param(qs)
     request.write_app_result(request.server.app.tmux_next_window(session))
 
 def post_tmux_status(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    request.write_app_result(request.server.app.cycle_tmux_status_mode(str(query_one(qs, "session", "") or "")))
+    request.write_app_result(request.server.app.cycle_tmux_status_mode(session_param(qs)))
 
 
 def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = qs.get("session", [""])[0]
+    session = session_param(qs)
     window = qs.get("window", [""])[0]
     payload, status = request.server.app.tmux_select_window(session, window)
     request.write_json(payload, status=status)
@@ -1301,7 +1327,7 @@ def post_tmux_window(request: Any, parsed: Any, route: Route) -> None:
 def post_tmux_copy_selection(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    session = str(query_one(qs, "session", "") or "")
+    session = session_param(qs)
     request.write_app_result(request.server.app.tmux_copy_selection(session))
 
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Protocol
 
-from ..pricing_catalog import PricingCatalog, PricingCatalogError, ResolvedRate
+from ..observability.pricing_catalog import PricingCatalog, PricingCatalogError, ResolvedRate
 from .protocol import MAX_SAFE_INTEGER
 from .storage import UsageAtom
 from .usage import normalize_usage_atom

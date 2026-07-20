@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Drive the canonical authenticated YO!stats browser workload and CPU capture.
+"""Drive authenticated YO!stats browser workloads and capture bounded CPU evidence.
 
 This is an operator-only measurement tool. It creates a local authenticated
 browser session from the configured account's existing server-side cookie
@@ -20,7 +20,6 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -41,16 +40,11 @@ from yolomux_lib.auth import read_auth_users
 from yolomux_lib.common import STATE_DIR
 from yolomux_lib.background_owner import read_background_owner_debug_status
 from yolomux_lib.control import send_yolomux_control_request
+from yolomux_lib.filesystem.io_ops import read_json_file
 from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import tracked_local_service_groups
 from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
-
-
-def positive_seconds(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return parsed
+from tools.yostats_capture_common import positive_int, process_cpu_seconds
 
 
 def find_chrome() -> str:
@@ -90,9 +84,8 @@ def runtime_service_pids() -> dict[str, int]:
     """Read bounded local-service records without constructing a second app instance."""
     pids: dict[str, int] = {}
     for record_path in (STATE_DIR / "services").glob("*.service.json"):
-        try:
-            record = json.loads(record_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        record = read_json_file(record_path, None, exceptions=(OSError, json.JSONDecodeError))
+        if record is None:
             continue
         service = str(record.get("service") or "")
         if not service:
@@ -141,7 +134,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8881)
     parser.add_argument("--username", help="configured YOLOmux account name; defaults to the first admin account")
-    parser.add_argument("--duration", type=positive_seconds, default=60)
+    parser.add_argument("--duration", type=positive_int, default=60)
+    parser.add_argument(
+        "--workload",
+        choices=("active", "idle-yostats"),
+        default="active",
+        help="active runs the established edit/reload/drag scenario; idle-yostats holds YO!stats at 5m/1s",
+    )
     parser.add_argument("--output", type=Path, required=True, help="browser evidence JSON path, normally under /tmp")
     return parser.parse_args(argv)
 
@@ -181,11 +180,20 @@ def install_local_auth_cookie(driver: webdriver.Chrome, base_url: str, port: int
     )
 
 
-def capture_measurement_metrics() -> dict[str, object]:
-    """Read only the generic capture-scoped metrics from the existing owner."""
+def capture_measurement_metrics(port: int) -> dict[str, object]:
+    """Read capture-scoped metrics from the server receiving the workload."""
     owner_debug = read_background_owner_debug_status()
-    owner = owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None
-    response = send_yolomux_control_request(owner, {"action": "runtime_measurement_metrics", "scope": "capture"})
+    generations = owner_debug.get("generations") if isinstance(owner_debug, dict) else None
+    server = next(
+        (
+            record
+            for record in generations if isinstance(record, dict) and record.get("port") == port
+        ),
+        None,
+    ) if isinstance(generations, list) else None
+    if server is None:
+        raise RuntimeError(f"capture server generation for port {port} is unavailable")
+    response = send_yolomux_control_request(server, {"action": "runtime_measurement_metrics", "scope": "capture"})
     performance = response.get("performance") if response.get("ok") else None
     if not isinstance(performance, dict):
         raise RuntimeError(f"capture measurement metrics unavailable: {response.get('error') or 'invalid response'}")
@@ -237,8 +245,6 @@ def perform_workload(driver: webdriver.Chrome, tmux_sessions: list[str]) -> dict
         r"""
         const done = arguments[arguments.length - 1];
         (async () => {
-          setDebugGraphRange(300);
-          setDebugGraphResolutionOverride(1);
           const finder = document.querySelector('[data-file-explorer-session-surface="finder"] [data-session-files-session]');
           if (!finder) throw new Error('Finder session selector was not rendered');
           finder.value = arguments[0];
@@ -269,10 +275,6 @@ def perform_workload(driver: webdriver.Chrome, tmux_sessions: list[str]) -> dict
           if (!view?.state || !view?.dispatch) throw new Error('opened file has no CodeMirror view');
           view.dispatch({changes: {from: view.state.doc.length, insert: ' '}});
           await selectSession(arguments[1], {userInitiated: true});
-          setDebugGraphRange(1800);
-          setDebugGraphResolutionOverride(10);
-          setDebugGraphRange(300);
-          setDebugGraphResolutionOverride(1);
           await selectSession(yocostItemId, {userInitiated: true});
           done({sessions: [arguments[0], arguments[1]], file: file.dataset.path});
         })().catch(error => done({error: String(error?.stack || error)}));
@@ -282,12 +284,70 @@ def perform_workload(driver: webdriver.Chrome, tmux_sessions: list[str]) -> dict
     )
     if result.get("error"):
         raise RuntimeError(str(result["error"]))
+    # Each range/resolution pair is an async history request. Wait for it before
+    # flipping again so a slower earlier request cannot overwrite the final 5m/1s state.
+    driver.execute_script("setDebugGraphRange(300); setDebugGraphResolutionOverride(1)")
     wait_for_exact_history(driver, 300, 1)
     driver.execute_script("setDebugGraphRange(1800); setDebugGraphResolutionOverride(10)")
     wait_for_exact_history(driver, 1800, 10)
     driver.execute_script("setDebugGraphRange(300); setDebugGraphResolutionOverride(1)")
     wait_for_exact_history(driver, 300, 1)
     return result
+
+
+def prepare_idle_yostats_workload(driver: webdriver.Chrome) -> dict[str, object]:
+    """Hold the exact live YO!stats state without edits, refreshes, or pane drags."""
+    driver.execute_script(
+        "setDebugGraphRange(300); setDebugGraphResolutionOverride(1); return selectSession(debugPaneItemId, {userInitiated: true});"
+    )
+    wait_for_exact_history(driver, 300, 1)
+    return WebDriverWait(driver, 20).until(
+        lambda current: current.execute_script(
+            "return jsDebugStatsPanelVisible() && itemIsActivePaneTab(debugPaneItemId) && document.querySelectorAll('[data-js-debug-graph]').length > 0"
+        )
+        and {
+            "surface": "YO!stats",
+            "range_seconds": 300,
+            "resolution_seconds": 1,
+            "idle": True,
+        }
+    )
+
+
+def install_ticker_callback_counter(driver: webdriver.Chrome) -> None:
+    """Count only the live-graph scheduler callbacks, never unrelated browser timers."""
+    driver.execute_script(
+        """
+        const prior = window.__yolomuxTickerMeasurement;
+        if (prior) prior.restore();
+        const names = new Set(['debugGraphLiveFrameTick', 'debugGraphLiveTimerTick']);
+        const counter = {requestAnimationFrame: 0, timeout: 0};
+        const originalRaf = window.requestAnimationFrame.bind(window);
+        const originalTimeout = window.setTimeout.bind(window);
+        const named = callback => typeof callback === 'function' && names.has(callback.name);
+        window.requestAnimationFrame = callback => originalRaf(timestamp => {
+          if (named(callback)) counter.requestAnimationFrame += 1;
+          return callback(timestamp);
+        });
+        window.setTimeout = (callback, delay, ...args) => {
+          if (typeof callback !== 'function') return originalTimeout(callback, delay, ...args);
+          return originalTimeout((...callbackArgs) => {
+            if (named(callback)) counter.timeout += 1;
+            return callback(...callbackArgs);
+          }, delay, ...args);
+        };
+        window.__yolomuxTickerMeasurement = {
+          snapshot: () => ({...counter, total: counter.requestAnimationFrame + counter.timeout}),
+          restore: () => { window.requestAnimationFrame = originalRaf; window.setTimeout = originalTimeout; },
+        };
+        """
+    )
+
+
+def ticker_callback_counter(driver: webdriver.Chrome) -> dict[str, int] | None:
+    return driver.execute_script(
+        "return window.__yolomuxTickerMeasurement ? window.__yolomuxTickerMeasurement.snapshot() : null"
+    )
 
 
 def settle_browser_frames(driver: webdriver.Chrome, frames: int = 2) -> None:
@@ -384,6 +444,25 @@ def descendants_of(root_pid: int) -> list[int]:
     return found
 
 
+def chrome_renderer_cpu_snapshot(chromedriver_pid: int) -> dict[str, object]:
+    """Capture only renderer descendants of this tool's temporary Chrome tree."""
+    renderer_pids: list[int] = []
+    cpu_seconds = 0.0
+    for pid in descendants_of(chromedriver_pid):
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        if "--type=renderer" not in command:
+            continue
+        elapsed = process_cpu_seconds(pid)
+        if elapsed is None:
+            continue
+        renderer_pids.append(pid)
+        cpu_seconds += elapsed
+    return {"pids": renderer_pids, "cpu_seconds": cpu_seconds}
+
+
 def stop_benchmark_group(process: subprocess.Popen | None) -> None:
     """Terminate the benchmark's own process group, then reap it."""
     if process is None or process.poll() is not None:
@@ -450,6 +529,10 @@ def main() -> int:
     options.add_argument("--window-size=1600,1000")
     options.set_capability("acceptInsecureCerts", True)
     driver = webdriver.Chrome(options=options)
+    driver_process = getattr(getattr(driver, "service", None), "process", None)
+    chromedriver_pid = int(driver_process.pid) if driver_process is not None else 0
+    if not chromedriver_pid:
+        raise RuntimeError("Chrome renderer capture requires a chromedriver PID")
     measurement_marker = f"capture-{uuid.uuid4().hex}"
     driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"X-YOLOmux-Measurement": measurement_marker}})
     # Client-side Selenium timeouts: a wedged server or chromedriver must
@@ -483,9 +566,15 @@ def main() -> int:
     watchdog_thread.start()
     try:
         tmux_sessions = authenticate_and_open(driver, base_url, args.port, args.username, timeout=20)
+        if args.workload == "idle-yostats":
+            workload = prepare_idle_yostats_workload(driver)
+            install_ticker_callback_counter(driver)
+        else:
+            workload = None
         install_measurement_fetch_header(driver, measurement_marker)
         driver.execute_script("clearClientPerfCounters(); performance.clearResourceTimings()")
-        measurement_before = capture_measurement_metrics()
+        measurement_before = capture_measurement_metrics(args.port)
+        renderer_before = chrome_renderer_cpu_snapshot(chromedriver_pid)
         benchmark_output = args.output.with_name(f"{args.output.stem}-contention.json")
         command = [sys.executable, str(REPO_ROOT / "tools" / "yostats_contention_benchmark.py"), "--web-pid", str(web_pid), "--duration", str(args.duration), "--output", str(benchmark_output)]
         if indexd_pid:
@@ -495,15 +584,25 @@ def main() -> int:
         # Own process group so a driver exception or signal can stop the whole
         # benchmark subtree without touching the dev stack's services.
         process = subprocess.Popen(command, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
-        workload = perform_workload(driver, tmux_sessions)
-        workload["drag"] = drag_yocost_pane(driver)
+        if args.workload == "active":
+            workload = perform_workload(driver, tmux_sessions)
+            workload["drag"] = drag_yocost_pane(driver)
         stdout, stderr = process.communicate(timeout=args.duration + 20)
         if process.returncode:
             raise RuntimeError(f"contention benchmark failed: {stderr.strip() or stdout.strip()}")
         browser = driver.execute_script("return {longTasks: clientPerfLongTaskSummary(), perf: clientPerfSummary(), resources: performance.getEntriesByType('resource').map(entry => ({name: entry.name, duration: entry.duration, transferSize: entry.transferSize}))}")
         browser["resources"] = bounded_api_resources(browser.get("resources", []))
-        measurement_after = capture_measurement_metrics()
-        args.output.write_text(json.dumps({"version": 1, "base_url": base_url, "duration_seconds": args.duration, "workload": workload, "browser": browser, "measurement": {"before": measurement_before, "after": measurement_after}, "contention": str(benchmark_output)}, sort_keys=True) + "\n", encoding="utf-8")
+        measurement_after = capture_measurement_metrics(args.port)
+        renderer_after = chrome_renderer_cpu_snapshot(chromedriver_pid)
+        renderer_delta = max(0.0, float(renderer_after["cpu_seconds"]) - float(renderer_before["cpu_seconds"]))
+        renderer = {
+            "before": renderer_before,
+            "after": renderer_after,
+            "cpu_seconds_delta": renderer_delta,
+            "cpu_percent_of_one_core": renderer_delta / args.duration * 100.0,
+        }
+        ticker_callbacks = ticker_callback_counter(driver) if args.workload == "idle-yostats" else None
+        args.output.write_text(json.dumps({"version": 3, "base_url": base_url, "duration_seconds": args.duration, "workload_mode": args.workload, "workload": workload, "ticker_callbacks": ticker_callbacks, "browser": browser, "renderer": renderer, "measurement": {"before": measurement_before, "after": measurement_after}, "contention": str(benchmark_output)}, sort_keys=True) + "\n", encoding="utf-8")
         print(f"wrote {args.output}")
         return 0
     finally:

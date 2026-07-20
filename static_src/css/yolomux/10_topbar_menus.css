@@ -39,23 +39,6 @@
 .brand {
   min-width: 92px;
 }
-.brand-update-badge {
-  margin-inline-start: var(--space-8);
-  padding: var(--space-1) var(--space-7);
-  border: 1px solid var(--active-control-border, var(--line));
-  border-radius: var(--radius-pill);
-  color: var(--active-control-text);
-  background: var(--active-control-bg);
-  font: 800 var(--ui-font-size-xs)/1 var(--ui-font);
-  cursor: pointer;
-  vertical-align: middle;
-}
-.brand-update-badge:hover {
-  filter: brightness(1.08);
-}
-.brand-update-badge[hidden] {
-  display: none;
-}
 .transport-warning {
   position: relative;
   width: 18px;
@@ -384,7 +367,7 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   }
 }
 #status {
-  max-width: 112px;
+  max-width: var(--topbar-status-max-inline-size);
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -411,10 +394,6 @@ body.share-view-mode.share-view-readonly .share-mirror-stage .xterm-viewport::-w
   color: var(--danger-panel-text);
   border-color: var(--danger-panel-border) !important;
   background: color-mix(in srgb, var(--danger-muted-bg) 86%, var(--panel2));
-}
-body.theme-light #status.layout-status-danger {
-  color: var(--danger-light-text);
-  background: var(--danger-panel-light-bg);
 }
 #status.layout-status-advisory {
   color: var(--warning-border-strong);
@@ -584,7 +563,7 @@ button.topbar-status-surface:focus-visible {
   align-items: center;
   justify-content: center;
   height: var(--compact-control-height);
-  max-width: 140px;
+  max-width: var(--topbar-account-max-inline-size);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--topbar-control-surface);
@@ -835,9 +814,6 @@ body.topbar-pack-icon-search .topbar-search-hint {
 .app-menu-button-badge {
   min-width: max(16px, calc(var(--ui-font-size) + 3px));
   height: max(16px, calc(var(--ui-font-size) + 3px));
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   padding: 0 var(--space-4);
   color: var(--active-control-text);
   background: var(--active-control-bg);
@@ -1420,19 +1396,6 @@ body.app-topbar-touch-compact .app-menu-command-row--shells .app-menu-command-ro
 .app-menu-tab-command .session-button-prefix,
 .app-menu-tab-command .session-button-dir {
   color: var(--menu-tab-rich-text);
-}
-.app-menu-yolo-session-command {
-  min-inline-size: min(42ch, var(--app-menu-max-inline-size));
-}
-body.app-vw-lte-720 .app-menu-yolo-session-command .pane-tab-core {
-  height: auto;
-  flex-wrap: wrap;
-}
-body.app-vw-lte-720 .app-menu-yolo-session-command .session-button-text {
-  flex: 1 0 100%;
-  height: auto;
-  min-height: 14px;
-  white-space: normal;
 }
 .app-menu-submenu-arrow {
   color: var(--pr-status-closed);

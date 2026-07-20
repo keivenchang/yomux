@@ -20,7 +20,7 @@ from yolomux_lib.stats_current import protocol, revision, storage
 
 SERVICE_NAME = "statsd"
 SERVICE_MODULE = "yolomux_lib.stats_current.service"
-SOCKET_FILENAME = "statsd.sock"
+SOCKET_FILENAME = storage.SOCKET_FILENAME
 LEASE_TIMEOUT_SECONDS = 3.0
 STATUS_TIMEOUT_SECONDS = LEASE_TIMEOUT_SECONDS
 
@@ -358,8 +358,10 @@ class StatsCurrentClient:
         return started
 
     def retry(self) -> bool:
-        if self._upgrade_required is not None:
-            return False
+        # A retry is the one recovery boundary for a read-side RPC fence.  The
+        # version-scoped socket keeps mixed builds apart, so clearing a stale
+        # cached reply cannot start a cross-version respawn war.
+        self._upgrade_required = None
         self._transport.registry.retry()
         return self.ensure_started()
 

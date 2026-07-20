@@ -10,7 +10,7 @@ from typing import Any
 
 from ..common import git
 from ..common import git_bytes
-from ..tmux_utils import cmd_error
+from ..tmux.tmux_utils import cmd_error
 from . import paths
 
 

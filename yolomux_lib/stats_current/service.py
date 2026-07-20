@@ -28,7 +28,7 @@ from yolomux_lib.local_services.runtime import run_local_rpc_service
 from yolomux_lib.stats_current import families, identity, materializer, migration, pricing, protocol, resolution as stats_resolution, revision, storage, usage
 
 SERVICE_NAME = "statsd"
-SOCKET_FILENAME = "statsd.sock"
+SOCKET_FILENAME = storage.SOCKET_FILENAME
 MAX_ID_BYTES = 512
 MAX_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_IDLE_SECONDS = 60.0

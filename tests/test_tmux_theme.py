@@ -9,7 +9,7 @@ from yolomux_lib.tmux_theme import tmux_theme_commands_for_new_session
 from yolomux_lib.tmux_theme import tmux_theme_color_from_settings
 
 
-UI_PINS = json.loads((Path(__file__).parent / "ui_pins.json").read_text(encoding="utf-8"))
+UI_PINS = json.loads((Path(__file__).parent / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))
 TMUX_BLUE = UI_PINS["textSelectionBg"]
 
 

@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 import yaml
 
 from . import filesystem
-from . import yolo_rules
+from .approval import yolo_rules
 from .app import TmuxWebtermApp
 from .common import DEFAULT_COLS
 from .common import DEFAULT_ROWS
@@ -56,19 +56,18 @@ from .filesystem import FilesystemError
 from .http_routes import dispatch_http_route
 from .http_routes import parse_query_float
 from .http_routes import parse_query_int
-from .http_routes import parse_repo_refs_param
+from .http_routes import parse_repo_refs_param  # noqa: F401 - compatibility re-export
 from .http_routes import query_bool
-from .http_routes import query_list
 from .http_routes import query_one
 from .http_routes import route_for_request
 from .http_routes import SHARE_ACCESS_NONE
-from .tmux_utils import tmux
-from .tmux_utils import tmux_command
-from .tmux_utils import tmux_session_client_rows
-from .tmux_utils import tmux_session_target
-from .transcripts import codex_event_text
-from .transcripts import strip_terminal_query_responses
-from .transcripts import transcript_items_from_raw_line
+from .tmux.tmux_utils import tmux
+from .tmux.tmux_utils import tmux_command
+from .tmux.tmux_utils import tmux_session_client_rows
+from .tmux.tmux_utils import tmux_session_target
+from .observability.transcripts import codex_event_text
+from .observability.transcripts import strip_terminal_query_responses
+from .observability.transcripts import transcript_items_from_raw_line
 from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
 from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
@@ -102,6 +101,7 @@ SHARE_VIEWER_OVERFLOW_LIMIT = 3
 SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
 SHARE_VIEWER_SEND_TIMEOUT_SECONDS = 5.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
+DEV_RELOAD_POLL_SECONDS = 2.0
 TMUX_ATTACH_REFRESH_DELAYS_SECONDS = (0.1, 0.5)
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
@@ -1836,7 +1836,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if str(client_bundle_revision or "") != last:
                 self.write_sse_json("reload", {"signature": last})
             while True:
-                time.sleep(0.5)
+                time.sleep(DEV_RELOAD_POLL_SECONDS)
                 current = self.dev_bundle_signature()
                 if current != last:
                     last = current
@@ -2385,7 +2385,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        content_type = "application/json; charset=utf-8"
         encode_started = time.perf_counter()
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         json_encode_ms = (time.perf_counter() - encode_started) * 1000
@@ -2883,6 +2882,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             os.write(master_fd, payload)
             return
         msg_type = message.get("type")
+        if readonly and msg_type != "refresh":
+            return
         if msg_type == "refresh":
             refresh_tmux_session_clients(session)
             # A refresh carrying a window-switch transaction id gets a structured TEXT-frame
@@ -2897,8 +2898,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 except OSError:
                     pass
         elif msg_type == "input":
-            if readonly:
-                return
             data = message.get("data")
             if isinstance(data, str):
                 filtered = strip_terminal_query_responses(data)
@@ -2907,8 +2906,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     # Queue input activity outside the PTY echo loop (readonly already returned above).
                     self.server.app.record_user_input(session, len(filtered), data=filtered)
         elif msg_type == "resize":
-            if readonly:
-                return
             if message.get("foreground") is False:
                 return
             dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
@@ -2933,8 +2930,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if callable(recorder) and (size_changed or authority_changed):
                     recorder(session, rows, cols)
         elif msg_type == "tmux-scroll":
-            if readonly:
-                return
             direction = message.get("direction")
             lines = message.get("lines")
             if isinstance(direction, str) and isinstance(lines, int):

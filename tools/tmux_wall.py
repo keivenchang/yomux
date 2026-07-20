@@ -32,18 +32,18 @@ from urllib.parse import urlparse
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from yolomux_lib.agent_tui import capture_agent_pane
-from yolomux_lib.agent_tui import classify_agent_pane
+from yolomux_lib.tmux.agent_tui import capture_agent_pane
+from yolomux_lib.tmux.agent_tui import classify_agent_pane
 from yolomux_lib.common import split_csv
 from yolomux_lib.common import path_mtime_or_zero
 from yolomux_lib.locales import message_fields
 from yolomux_lib.locales import resolve_locale_preference
 from yolomux_lib.locales import user_message_payload
-from yolomux_lib.tmux_utils import cmd_error
-from yolomux_lib.tmux_utils import run_cmd
-from yolomux_lib.tmux_utils import tmux
-from yolomux_lib.tmux_utils import tmux_capture_pane
-from yolomux_lib.tmux_utils import tmux_capture_pane_styled
+from yolomux_lib.tmux.tmux_utils import cmd_error
+from yolomux_lib.tmux.tmux_utils import run_cmd
+from yolomux_lib.tmux.tmux_utils import tmux
+from yolomux_lib.tmux.tmux_utils import tmux_capture_pane
+from yolomux_lib.tmux.tmux_utils import tmux_capture_pane_styled
 from yolomux_lib.web import current_language_pref
 from yolomux_lib.web import html_lang_dir_attrs
 from yolomux_lib.web import server_string

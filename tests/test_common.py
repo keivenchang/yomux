@@ -28,7 +28,7 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
             "start_tabber_activity_cache_warmer",
             "warm_metadata_cache_async",
         },
-        "yolomux_lib/file_index.py": {"_start_build"},
+        "yolomux_lib/search/file_index.py": {"_start_build"},
         "yolomux_lib/yoagent/controller.py": {
             "start_yoagent_action_result_watcher",
             "start_yoagent_backend_prewarm",
@@ -122,7 +122,7 @@ def test_main_process_cpu_work_has_named_allowlist():
     for pattern in retired_patterns:
         assert pattern not in source
 
-    jobd_source = (root / "yolomux_lib" / "jobd.py").read_text(encoding="utf-8")
+    jobd_source = (root / "yolomux_lib" / "infra" / "jobd.py").read_text(encoding="utf-8")
     assert '"transcript_view": _transcript_view' in jobd_source
     routes_source = (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
     assert routes_source.count("write_json_bytes(result.body, status=result.status)") == 2

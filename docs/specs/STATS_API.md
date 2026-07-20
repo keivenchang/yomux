@@ -7,7 +7,7 @@ This document is the normative contract for the current YO!stats pipeline. The c
 ```mermaid
 flowchart LR
     C[Independent collectors] -->|original observations| W[Supervised statsd sole writer]
-    W <--> D[(stats-v5.sqlite3\noriginals + usage + coverage)]
+    W <--> D[(stats-v<schema>.sqlite3\noriginals + usage + coverage)]
     W -->|source generation and dirty cells| M[Background materializer]
     D -->|startup and reconciliation snapshot| M
     M -->|atomic generation| K[1s / 10s / 60s / 300s layers]
@@ -30,12 +30,12 @@ flowchart LR
 
 ## Schema and writer fence
 
-- The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 5 contains only metadata, observations, usage atoms, covered epochs, explicit unavailable spans, and migration reconciliation; derived display buckets are absent.
-- Its active filename is schema-versioned (`stats-v5.sqlite3` for schema 5, minimum writer/service protocol 24, minimum writer build 2) and is not aliased to the retired `stats-history.sqlite3` path. This keeps a runner that predates the fence physically separated from the current database even when no current daemon holds the service lock. Build 2 transactionally normalizes overlapping synthetic coarse-loss spans left by the initial schema-5 migration and advances the source generation once; exact coverage/loss overlap fails closed, and build 1 is fenced before serving resumes. Protocol 24 also embeds the exact-model fork-repair contract in the database header and side fence, so a protocol-23 runner cannot reopen repaired schema-5 data.
+- The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 6 contains only metadata, observations, usage atoms, covered epochs, explicit unavailable spans, and migration reconciliation; derived display buckets are absent.
+- Its active filename is schema-versioned (`stats-v<schema>.sqlite3`) and its daemon socket is protocol-and-schema scoped (`statsd.p<protocol>s<schema>.sock`). Mixed-version worktrees therefore use distinct writer locks, RPC sockets, and databases; neither can discover, fence, or replace the other's daemon. The retired `stats-history.sqlite3` path is never aliased.
 - Every binary that can write performs a minimal read-only preflight of those markers before `CREATE TABLE`, migration, WAL-mode changes, quarantine, vacuum, or DML. A database newer than the binary supports raises the typed `SchemaTooNewError` result and closes unchanged.
 - A too-new database is not corrupt. The database, WAL, SHM, inode, bytes, timestamps, schema, and service record must not be renamed, recreated, downgraded, quarantined, or repaired.
 - Every mutating statsd RPC and HTTP observation upload carries the writer protocol and schema generation. A mismatch returns `upgrade_required` before dispatch, queueing, daemon replacement, or database mutation.
-- A web process that receives `upgrade_required` stops its stats client, exposes that terminal state in System, and does not retry, spawn an older statsd, retire the newer owner, or replace its socket.
+- A stale already-loaded browser writer treats HTTP 426 as terminal for its immutable writer fence. A fresh read client treats an RPC/read 426 as recoverable: it clears its local fence, retries its own version-scoped service once, and renders an actionable updating/retrying state. It never retires, replaces, or spawns another build's service.
 - Binaries that predate the fence are contained by the sole-writer boundary and exclusive writer lock. Schema activation first stops every old statsd owner, proves there is one current owner, and never exposes the database path as a web-process write surface.
 - The current daemon acquires the generic singleton lock before opening the versioned database and rejects old shutdown or mutation requests before dispatch. An old runner may recreate only retired-path files; current startup never imports them into serving and removes them through idempotent retirement cleanup.
 - A genuinely unreadable database is preserved as a timestamped forensic sidecar before a fresh current database is created with a visible warning. A merely newer database never enters that path.
@@ -180,7 +180,8 @@ A Range/Resolution selection, reconnect, missed generation, server identity chan
 | Unsupported Range/Resolution or retired parameter | `400` | Structured `unsupported` response with current valid choices; no substitution or fallback. |
 | No complete materialization yet | `503` | Structured `pending` response with bounded `retry_after_seconds`; no synchronous build. |
 | Current statsd unavailable | `503` | Structured `unavailable` response; no in-process database reader or older transport retry. |
-| Client/writer protocol or schema is too old | `426` | Structured `upgrade_required`; the client stops mutation and automatic retry. |
+| Stale page writer protocol or schema | `426` | Structured `upgrade_required`; the page stops mutation and automatic retry. |
+| Read-side RPC fence | `426` | Structured `upgrade_required` with required protocol/schema/build; client retries its own version-scoped service once and shows an updating/retrying state. |
 
 Current clients reject a response whose echoed key, concrete resolution, bucket duration, generation, or protocol does not match the active request. Stale success, failure, and cleanup handlers cannot replace or clear a newer request.
 
@@ -197,7 +198,7 @@ There is no rolling compatibility path in current stats serving. Retired read an
 
 ## Diagnostics
 
-YO!stats `System` renders the bounded `/api/system-status` result and `Logs` renders the bounded `/api/logs` result. Each polls only while its subview is selected, has an explicit Refresh action, preserves its internal scroll position across refreshes, and shows terminal upgrade state instead of retrying an incompatible stats owner. Service diagnostics may include schema/minimum-writer, sole-writer identity, generations, queue/build state, sampler state, and bounded failures; they never create a second stats data path.
+YO!stats `System` renders the bounded `/api/system-status` result and `Logs` renders the bounded `/api/logs` result. Each polls only while its subview is selected, has an explicit Refresh action, and preserves its internal scroll position across refreshes. Read fences show an actionable automatic-retry state; stale writer pages remain terminal. Service diagnostics may include schema/minimum-writer, version-scoped socket identity, sole-writer identity, generations, queue/build state, sampler state, and bounded failures; they never create a second stats data path.
 
 Diagnostics never expose raw client IDs, private series values, prompts, transcripts, paths, credentials, or secrets.
 

@@ -33,7 +33,7 @@ const {
   testAsync,
   runSuites,
   finishSuite,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 const {spawn} = require('node:child_process');
 const {runSuite} = require('./layout_url.test.js');
 

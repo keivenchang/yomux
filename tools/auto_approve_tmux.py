@@ -51,9 +51,12 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from yolomux_lib.agent_tui import AgentPaneState
-from yolomux_lib.agent_tui import classify_agent_pane
-from yolomux_lib.prompt_detector import (
+from yolomux_lib.tmux.agent_tui import AgentPaneState
+from yolomux_lib.tmux.agent_tui import classify_agent_pane
+from yolomux_lib.approval.approvals import blank_prompt_state
+from yolomux_lib.approval.approvals import hybrid_approval_prompt_state
+from yolomux_lib.approval.approvals import transcript_approval_prompt_state
+from yolomux_lib.approval.prompt_detector import (
     _find_full_path,
     action_for_bash_prompt,
     action_for_prompt,
@@ -71,22 +74,23 @@ from yolomux_lib.prompt_detector import (
     visible_choice_prompt_text,
     yes_is_selected,
 )
-from yolomux_lib import yolo_rules
-from yolomux_lib.tmux_utils import tmux_capture_pane
-from yolomux_lib.tmux_utils import tmux_exact_target_from_sessions
-from yolomux_lib.tmux_utils import tmux_has_session
-from yolomux_lib.tmux_utils import tmux_list_sessions
-from yolomux_lib.tmux_utils import tmux_move_to_option
-from yolomux_lib.tmux_utils import tmux_send_enter
-from yolomux_lib.tmux_utils import tmux_send_option
-from yolomux_lib.tmux_utils import tmux_session_names
+from yolomux_lib.approval import yolo_rules
+from yolomux_lib.tmux.tmux_utils import tmux_capture_pane
+from yolomux_lib.tmux.tmux_utils import tmux_has_session
+from yolomux_lib.tmux.tmux_utils import tmux_list_sessions
+from yolomux_lib.tmux.tmux_utils import tmux_send_option
+from yolomux_lib.tmux.tmux_utils import tmux_exact_target_from_sessions  # noqa: F401 - CLI compatibility export
+from yolomux_lib.tmux.tmux_utils import tmux_session_names
 
 _DETECTOR_REEXPORTS = (
+    blank_prompt_state,
     action_for_bash_prompt,
     action_for_prompt,
     agent_screen_state,
     approval_prompt_has_later_activity,
     approval_prompt_state,
+    hybrid_approval_prompt_state,
+    transcript_approval_prompt_state,
     detect_prompt,
     extract_command,
     is_dangerous,
@@ -101,18 +105,14 @@ _DETECTOR_REEXPORTS = (
 
 log = logging.getLogger("auto_approve")
 
-# The approval-prompt detection pipeline now lives in yolomux_lib.approvals (one shared library home,
+# The approval-prompt detection pipeline now lives in yolomux_lib.approval.approvals (one shared library home,
 # so app.py / the worker no longer reach detection through this CLI script). Re-exported here so this
 # script's own CLI keeps the same module-level names.
-from yolomux_lib.approvals import DEFAULT_PROMPT_SOURCE
-from yolomux_lib.approvals import PROMPT_RETRY_SECONDS
-from yolomux_lib.approvals import PROMPT_SOURCE_CHOICES
-from yolomux_lib.approvals import blank_prompt_state
-from yolomux_lib.approvals import hybrid_approval_prompt_state
-from yolomux_lib.approvals import target_session_name
-from yolomux_lib.approvals import transcript_approval_prompt_state
+from yolomux_lib.approval.approvals import DEFAULT_PROMPT_SOURCE
+from yolomux_lib.approval.approvals import PROMPT_RETRY_SECONDS
+from yolomux_lib.approval.approvals import PROMPT_SOURCE_CHOICES
 
-# Re-export detector helpers from yolomux_lib.prompt_detector so existing
+# Re-export detector helpers from yolomux_lib.approval.prompt_detector so existing
 # callers can keep importing them from this script.
 
 
@@ -500,8 +500,6 @@ def main() -> None:
                 continue
 
             selected_option = int(approval_state.get("selected_option") or prompt_state.get("selected_option") or 0)
-            prompt_source = str(approval_state.get("source") or prompt_state.get("source") or "pane")
-
             # Prompt is genuinely on screen — now grab the scrollback capture
             # to get enough context for command extraction / full-path lookup.
             if pane_text is None:

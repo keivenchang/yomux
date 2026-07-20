@@ -32,7 +32,7 @@ const {
   testAsync,
   runSuites,
   finishSuite,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 
 async function runLayoutRestoreSuite() {
   test('shared button builder owns attributes, accessibility state, dataset, and events', () => {
@@ -119,12 +119,12 @@ async function runLayoutRestoreSuite() {
     const fileActionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
     const agentSource = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
-    const markdownSource = fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8');
-    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_popout.js', 'utf8');
-    const panePopoutSource = fs.readFileSync('static_src/js/yolomux/96_pane_popout.js', 'utf8');
-    const shareStateSource = fs.readFileSync('static_src/js/yolomux/96_share_state.js', 'utf8');
-    const shareReplaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
-    const shareAdminSource = fs.readFileSync('static_src/js/yolomux/98_share_admin.js', 'utf8');
+    const markdownSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/91_preview_popout.js', 'utf8');
+    const panePopoutSource = fs.readFileSync('static_src/js/yolomux/90_pane_popout.js', 'utf8');
+    const shareStateSource = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
+    const shareReplaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
+    const shareAdminSource = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 
     for (const key of ['hidden', 'minimized', 'expanded', 'autoClosed', 'swapped']) {
@@ -148,13 +148,13 @@ async function runLayoutRestoreSuite() {
     assert.ok(fileActionsSource.includes("tPlural('editor.status.selections', selections)") && fileActionsSource.includes("tPlural('editor.status.selectedChars', selectedChars)"), 'cursor selection counts use plural-aware locale families');
     assert.ok(fileActionsSource.includes("tPlural('editor.status.characters', count)"), 'text-file status uses the shared plural character family');
     assert.ok(/function codeMirrorPhraseValues\(\)[\s\S]*Find: t\('common\.find'\)[\s\S]*'replace all': t\('editor\.search\.replaceAll'\)[\s\S]*function codeMirrorLocaleExtensions[\s\S]*EditorState\.phrases\.of\(codeMirrorPhraseValues\(\)\)/.test(fileActionsSource), 'CodeMirror search chrome resolves through one phrase-map parent');
-    const codeMirrorEditorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
+    const codeMirrorEditorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
     assert.ok(/_cmLocaleCompartment[\s\S]*reconfigureCodeMirrorPanelLocale/.test(codeMirrorEditorSource), 'mounted CodeMirror editors reconfigure localized phrases without rebuilding the editor');
     assert.ok(/function trackCodeMirrorViews\(panel, api, views\)[\s\S]*panel\._cmViews = views\.filter\(Boolean\)/.test(codeMirrorEditorSource)
       && (codeMirrorEditorSource.match(/Array\.isArray\(panel\?\._cmViews\)/g) || []).length === 3
       && !/_cm(?:Theme|EditorOption|Locale)Views/.test(codeMirrorEditorSource), 'theme, editor-option, and locale compartments consume one shared live CodeMirror view list');
     assert.ok(/function updateCodeMirrorViewPreservingState[\s\S]*requestMeasure[\s\S]*requestAnimationFrame[\s\S]*function syncCodeMirrorDocument[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*function reconfigureCodeMirrorPanelLocale[\s\S]*updateCodeMirrorViewPreservingState/.test(codeMirrorEditorSource), 'document sync and locale compartment refresh share one selection/scroll preservation parent');
-    const changesEditorSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+    const changesEditorSource = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
     assert.ok(/function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true[\s\S]*view\.hasFocus[\s\S]*captureFileEditorPanelViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep the focused live selection/scroll authoritative through the shared restore parent');
     assert.equal((fileActionsSource.match(/restoreFileEditorPanelViewState\(item, panel, \{restoreFocused: true\}\)/g) || []).length, 2, 'explicit disk replacement alone opts into restoring the captured focused editor snapshot');
     assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url: script.src})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
@@ -982,7 +982,7 @@ async function runLayoutRestoreSuite() {
       assert.equal(blockedTag.test(stringSanitized), false, `string SVG sanitizer removes ${tagName}`);
       assert.equal(stringSanitized.includes('href="#local"'), true, `string SVG sanitizer preserves local fragments while removing ${tagName}`);
     });
-    const standaloneSvgSanitizerSource = fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8');
+    const standaloneSvgSanitizerSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
     assert.ok(/STANDALONE_SVG_BLOCKED_TAG_SET = new Set\(STANDALONE_SVG_BLOCKED_TAGS\)/.test(standaloneSvgSanitizerSource), 'DOM SVG sanitizer consumes the shared blocked-tag owner');
     assert.ok(/STANDALONE_SVG_BLOCKED_TAG_PATTERN = STANDALONE_SVG_BLOCKED_TAGS\.map\(escapeRegExpLiteral\)\.join\('\|'\)/.test(standaloneSvgSanitizerSource), 'string SVG sanitizer derives its regex source from the shared blocked-tag owner');
     assert.equal(/\(\?:script\|foreignObject\|iframe\|object\|embed\|audio\|video\|canvas\|link\|meta\)/.test(standaloneSvgSanitizerSource), false, 'SVG sanitizer has no copied blocked-tag regex alternation');
@@ -1515,7 +1515,15 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
     assert.ok(source.includes('const sessionStatusRecords = new Map();'), 'session status, notification throttle, working tone, and badge pulse state share one session-keyed owner');
     assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);'), 'per-session notification signatures use the shared bounded-map helper');
-    assert.ok(source.includes('setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);'), 'global watched-PR notification signatures use the same bounded-map helper without pretending to be session state');
+    assert.ok(source.includes('const watchedPrRecords = new Map();'), 'watched-PR status and notification throttles share one PR-keyed owner');
+    assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, now, notificationLastSentLimit);'), 'watched-PR notification transition keys use the shared bounded-map helper');
+    assert.equal(/\b(?:openFiles|fileIdentityByPath|openFilePathByIdentity|fileOpenPromisesByPath)\b/.test(source), false, 'open-file content, identity, and in-flight state have no parallel legacy maps or aliases');
+    assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*function apiFetch\(url, options = \{\}\)[\s\S]*applyShareTokenHeaders\(requestOptions\)[\s\S]*function apiFetchJsonQuiet[\s\S]*applyShareTokenHeaders\(requestOptions\)/.test(source), 'normal and quiet API fetches share one share-token header owner');
+    assert.ok(/function readNotificationDelivery\(\)[\s\S]*safeJsonParse\(/.test(source) && /function clientEventEnvelope\(event\)[\s\S]*safeJsonParse\(/.test(source), 'stored notification and client-event JSON reads reuse the safe parser');
+    assert.ok(/function chatRelativeTimesVisibleConsumer\(\)[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemInLayout\(chatItemId\)[\s\S]*itemIsActivePaneTab\(chatItemId\)/.test(source), 'chat relative-time refresh has one foreground active-panel consumer predicate');
+    assert.ok(/function syncChatRelativeTimesRefresh\(\)[\s\S]*resetRuntimeInterval\('chat-relative-times',[\s\S]*!chatRelativeTimesVisibleConsumer\(\)\) return null;[\s\S]*refreshChatRelativeTimes\(\)/.test(source), 'chat relative-time timer skips the DOM query without a visible consumer');
+    assert.ok(/function latencyVisibleConsumer\(\)[\s\S]*topbar-pack-hide-latency[\s\S]*jsDebugStatsPanelVisible[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'latency work has one topbar-or-stats visible-consumer predicate');
+    assert.ok(/resetRuntimeInterval\('latency',[\s\S]*!latencyVisibleConsumer\(\)\) return null;[\s\S]*return updateLatency\(\)/.test(source), 'latency timer skips ping, JSON sizing, and DOM rendering without a visible consumer');
     assert.equal(/const (?:sessionStateKeys|notificationLastSent|workingAgentNotificationTones|workingAgentTransitionNotificationPending|metadataBadgePulseUntil) = new Map\(\)/.test(source), false, 'parallel session status maps cannot return');
     assert.ok(source.includes('const toastRecords = new Map();'), 'toast nodes and numeric-ID timers share one record owner');
     assert.equal(/const attentionAlertTimers = new Map\(\)|function replaceSessionMetadata[\s\S]*?toastRecords,/.test(source), false, 'toast records are not split into a parallel timer map or passed through session-key rekeying');
@@ -2696,10 +2704,10 @@ async function runLayoutRestoreSuite() {
 
   test('image preview uses delayed shared hover timing', () => {
     const api = loadYolomux('', ['1']);
-    assert.equal(api.fileImagePreviewMinShowDelayMs, 800);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(source.includes('Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs)'), 'image previews share the tab-style delayed hover threshold');
+    assert.ok(source.includes('Math.max(Number(popoverShowDelayMs)'), 'image previews use the shared hover-open delay');
+    assert.equal(source.includes('fileImagePreviewMinShowDelayMs'), false, 'image previews do not keep a separate hover threshold');
     assert.ok(css.includes('--file-image-preview-max-size: 320px'), 'Finder image preview default max size is tokenized');
     assert.ok(/\.file-image-preview-popover[\s\S]*pointer-events:\s*none/.test(css), 'Finder image previews cannot keep themselves hovered over terminals');
     assert.ok(source.includes('function installPreviewZoomSurface'), 'visual previews share one zoom installer');

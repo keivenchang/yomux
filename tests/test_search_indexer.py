@@ -145,7 +145,7 @@ def test_local_service_registry_serializes_starters_and_reuses_healthy_winner(tm
     service = search_indexer.PersistentSearchIndexer(socket_path)
     worker = threading.Thread(target=service.run, daemon=True)
     worker.start()
-    spec = LocalServiceSpec("indexd", "yolomux_lib.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
+    spec = LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION)
     first = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
     second = LocalServiceRegistry(tmp_path, spec, socket_path=socket_path)
 
@@ -191,7 +191,7 @@ def test_local_service_registry_starts_real_indexd_and_recovers_stale_socket_rec
     socket_path = tmp_path / "state directory with spaces" / "indexer.sock"
     registry = LocalServiceRegistry(
         socket_path.parent,
-        LocalServiceSpec("indexd", "yolomux_lib.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION, idle_seconds=30.0),
+        LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION, idle_seconds=30.0),
         socket_path=socket_path,
     )
     socket_path.parent.mkdir(parents=True)

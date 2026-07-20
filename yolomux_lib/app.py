@@ -43,46 +43,42 @@ try:
 except ImportError:  # pragma: no cover - direct-source fallback before setup
     watchfiles_watch = None
 
-from . import common
-from . import file_index
+from .infra import common
+from .search import file_index
 from . import filesystem
-from . import session_files
+from .filesystem.io_ops import read_json_file
+from .workspace import session_files
 from .local_services import registry as local_services_registry
 from .stats_current import resolution as stats_resolution
-from . import yolo_rules
-from .approvals import blank_prompt_state
-from .approvals import hybrid_approval_prompt_state
-from .activity_summary import activity_signature
-from .activity_summary import assemble_agent_window_rows
-from .activity_summary import build_recent_agents_payload
-from .activity_summary import build_global_activity_summary
-from .activity_summary import build_session_activity_summary
-from .activity_summary import build_yoagent_chat_prompt
-from .activity_summary import build_yoagent_resume_prompt
-from .activity_summary import deterministic_yoagent_reply
-from .activity_summary import yoagent_capabilities_payload
-from .activity_summary import yoagent_context_lines
-from .activity_summary import yoagent_question_requests_work_next
-from .approvald import ApprovalClient
-from .auto_approve_worker import auto_approve_lock_message
-from .auto_approve_worker import auto_approve_lock_message_fields
-from .auto_approve_worker import auto_approve_lock_owner
-from .background_owner import BACKGROUND_ROLE_SEARCH_INDEX
-from .background_owner import BACKGROUND_ROLE_SESSION_FILES
-from .background_owner import BACKGROUND_ROLE_STATS_SAMPLER
-from .background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
-from .background_owner import BACKGROUND_ROLE_WATCH_ROOTS
-from .background_owner import BackgroundOwnerRegistry
-from .background_owner import DisabledBackgroundOwner
-from .atomic_file import atomic_write_text
-from .atomic_file import file_lock
-from .cache import MISS as CACHE_MISS
-from .cache import TtlCache
+from .approval import yolo_rules
+from .approval.approvals import blank_prompt_state  # noqa: F401 - compatibility re-export
+from .approval.approvals import hybrid_approval_prompt_state
+from .observability.activity_summary import activity_signature
+from .observability.activity_summary import assemble_agent_window_rows
+from .observability.activity_summary import build_recent_agents_payload
+from .observability.activity_summary import build_global_activity_summary
+from .observability.activity_summary import build_session_activity_summary
+from .observability.activity_summary import yoagent_capabilities_payload
+from .approval.approvald import ApprovalClient
+from .approval.auto_approve_worker import auto_approve_lock_message
+from .approval.auto_approve_worker import auto_approve_lock_message_fields
+from .approval.auto_approve_worker import auto_approve_lock_owner
+from .infra.background_owner import BACKGROUND_ROLE_SEARCH_INDEX
+from .infra.background_owner import BACKGROUND_ROLE_SESSION_FILES
+from .infra.background_owner import BACKGROUND_ROLE_STATS_SAMPLER
+from .infra.background_owner import BACKGROUND_ROLE_TABBER_ACTIVITY
+from .infra.background_owner import BACKGROUND_ROLE_WATCH_ROOTS
+from .infra.background_owner import BackgroundOwnerRegistry
+from .infra.background_owner import DisabledBackgroundOwner
+from .infra.atomic_file import atomic_write_text
+from .infra.atomic_file import file_lock
+from .infra.cache import MISS as CACHE_MISS
+from .infra.cache import TtlCache
 from .client_events import CLIENT_EVENT_TYPES
 from .client_events import ClientEventBroker
 from .client_events import client_event_resource
 from .client_events import normalize_client_event_client_id
-from .activity import ActivityLedger
+from .observability.activity import ActivityLedger
 from .common import ACTIVITY_HEARTBEATS_PATH
 from .common import ACTIVITY_PATH
 from .common import AGENT_COMMANDS
@@ -114,19 +110,19 @@ from .locales import normalize_locale
 from .locales import user_message_payload
 from .common import as_dict
 from .common import next_numbered_session_name
-from .common import positive_finite_number
 from .common import tail_file_lines
 from .common import truncate_text
 from .common import yolomux_client_revision
 from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
-from .search_indexer import SearchIndexerClient
+from .search.search_indexer import SearchIndexerClient
 from .jobd import JobClient
-from .pricing_catalog import PricingCatalog
-from .pricing_catalog import PricingRefreshCoordinator
+from .observability.pricing_catalog import PricingCatalog
+from .observability.pricing_catalog import PricingRefreshCoordinator
 from .stats_current.client import StatsCurrentClient
 from .stats_current.client import iter_append_batches as stats_current_append_batches
 from .stats_current import collectors as stats_current_collectors
+from .stats_current import families as stats_current_families
 from .stats_current.http import StatsHttpForwarder
 from .stats_current import observations as stats_current_observations
 from .stats_current import protocol as stats_current_protocol
@@ -136,20 +132,20 @@ from .stats_current import storage as stats_current_storage
 from .stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from .stats_current import usage as stats_current_usage
 from .drop_actions import run_drop_action
-from .events import EventLog
-from .events import RunHistoryStore
-from .events import mutate_yolomux_state
-from .events import search_snippet
-from .events import read_yolomux_state
-from .events import update_yolomux_state
+from .observability.events import EventLog
+from .observability.events import RunHistoryStore
+from .observability.events import mutate_yolomux_state  # noqa: F401 - Yoagent dependency injection re-export
+from .observability.events import search_snippet
+from .observability.events import read_yolomux_state
+from .observability.events import update_yolomux_state
 from .server_logs import emit_server_log
-from .agent_tui import classify_agent_pane
-from .agent_tui import normalized_prompt_state
-from .chat_store import ChatStore
-from .chat_service import CHAT_YOAGENT_INSTANCE_ID
-from .chat_service import CHAT_YOAGENT_USERNAME
-from .chat_service import ChatService
-from .chat_store import CHAT_TYPING_LEASE_SECONDS
+from .tmux.agent_tui import classify_agent_pane
+from .tmux.agent_tui import normalized_prompt_state
+from .chat.chat_store import ChatStore
+from .chat.chat_service import CHAT_YOAGENT_INSTANCE_ID
+from .chat.chat_service import CHAT_YOAGENT_USERNAME
+from .chat.chat_service import ChatService
+from .chat.chat_store import CHAT_TYPING_LEASE_SECONDS
 from .metadata import MetadataCache
 from .metadata import github_checks_unknown
 from .metadata import git_inventory
@@ -163,9 +159,9 @@ from .metadata import activity_work_summary_from_graph
 from .metadata import session_work_graph
 from .metadata import session_to_json
 from .metadata import watched_pr_metadata
-from .sessions import active_window_for_panes
-from .sessions import discover_sessions
-from .sessions import discover_status_sessions
+from .tmux.sessions import active_window_for_panes
+from .tmux.sessions import discover_sessions
+from .tmux.sessions import discover_status_sessions
 from .statusd_client import StatusClient
 from .statusd_protocol import StatusProtocolError
 from .statusd_protocol import validate_snapshot as validate_status_snapshot
@@ -175,34 +171,31 @@ from .settings import SETTINGS_PATH
 from .settings import settings_payload
 from .settings import summary_settings as normalized_summary_settings
 from .settings import usage_pricing_profile as configured_usage_pricing_profile
-from .transcripts import codex_summary_prompt
-from .transcripts import codex_event_text
-from .transcripts import compact_summary_lines
-from .transcripts import format_transcript_item
-from .transcripts import transcript_activity_is_recent
-from .transcripts import transcript_delta_result_state
-from .transcripts import transcript_run_metadata
-from .transcripts import TRANSCRIPT_PARSER_GENERATION
-from .transcripts import terminal_input_counts_as_user_activity
-from .transcripts import trim_prompt_text
-from .prompt_detector import agent_screen_state
-from .prompt_detector import approval_prompt_state
-from .tmux_utils import cmd_error
-from .tmux_utils import list_tmux_session_names
-from .tmux_utils import tmux
-from .tmux_utils import tmux_clear_input
-from .tmux_utils import tmux_capture_pane
-from .tmux_utils import tmux_capture_pane_styled
-from .tmux_utils import tmux_has_exact_session
-from .tmux_utils import tmux_paste_text
-from .tmux_utils import tmux_session_client_rows
-from .tmux_utils import tmux_session_target
-from .tmux_theme import apply_tmux_theme_color_to_existing
-from .tmux_theme import apply_tmux_theme_color_to_new_session
-from .tmux_theme import tmux_theme_color_from_settings
-from .tmux_signals import fetch_tmux_signal_snapshot
-from .tmux_signals import TmuxSignalEventWatcher
-from .tmux_signals import window_record_key
+from .observability.transcripts import codex_summary_prompt
+from .observability.transcripts import compact_summary_lines
+from .observability.transcripts import format_transcript_item
+from .observability.transcripts import transcript_run_metadata
+from .observability.transcripts import TRANSCRIPT_PARSER_GENERATION
+from .observability.transcripts import terminal_input_counts_as_user_activity
+from .observability.transcripts import trim_prompt_text
+from .approval.prompt_detector import agent_screen_state
+from .approval.prompt_detector import approval_prompt_state
+from .tmux.tmux_utils import cmd_error
+from .tmux.tmux_utils import list_tmux_session_names
+from .tmux.tmux_utils import tmux
+from .tmux.tmux_utils import tmux_clear_input  # noqa: F401 - Yoagent dependency injection re-export
+from .tmux.tmux_utils import tmux_capture_pane
+from .tmux.tmux_utils import tmux_capture_pane_styled
+from .tmux.tmux_utils import tmux_has_exact_session
+from .tmux.tmux_utils import tmux_paste_text  # noqa: F401 - Yoagent dependency injection re-export
+from .tmux.tmux_utils import tmux_session_client_rows  # noqa: F401 - session-action compatibility seam
+from .tmux.tmux_utils import tmux_session_target
+from .tmux.tmux_theme import apply_tmux_theme_color_to_existing
+from .tmux.tmux_theme import apply_tmux_theme_color_to_new_session
+from .tmux.tmux_theme import tmux_theme_color_from_settings
+from .tmux.tmux_signals import fetch_tmux_signal_snapshot
+from .tmux.tmux_signals import TmuxSignalEventWatcher
+from .tmux.tmux_signals import window_record_key
 from .types import AutoApproveState
 from .types import AutoApproveStatusPayload
 from .types import RunHistoryEntry
@@ -227,7 +220,6 @@ from .uploads import unique_upload_path
 from .web import bootstrap_agent_auth_status as cached_agent_auth_status_snapshot
 from .web import server_string
 from .workdir import agent_command
-from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
@@ -235,15 +227,13 @@ from .workdir import terminal_command
 from .workdir import session_workdir
 from .yoagent import backends as yoagent_backends
 from .yoagent import conversation as yoagent_conversation
-from .yoagent.actions import parse_yoagent_action_intent
-from .yoagent.actions import parse_yoagent_job_intent
-from .yoagent.actions import parse_yoagent_skill_file_intent
+from .yoagent.backends import YOAGENT_STARTUP_QUESTION  # noqa: F401 - compatibility re-export
+from .yoagent.backends import codex_event_session_id  # noqa: F401 - compatibility re-export
+from .yoagent.backends import strip_yoagent_stream_hidden_thinking  # noqa: F401 - compatibility re-export
+from .yoagent.backends import yoagent_activity_payload_signature  # noqa: F401 - compatibility re-export
+from .yoagent.backends import yoagent_cli_fallback_reason  # noqa: F401 - compatibility re-export
+from .yoagent.backends import yoagent_language_directive  # noqa: F401 - compatibility re-export
 from .yoagent.actions import redacted_action_text
-from .yoagent.actions import redacted_action_preview
-from .yoagent.preferences import yoagent_operator_response
-from .yoagent.preferences import parse_settings_read
-from .yoagent.preferences import parse_settings_write
-from .yoagent.preferences import product_state_needs_activity
 from .yoagent.preferences import yoagent_user_message_text
 from .yoagent.skills import delete_user_skill_file
 from .yoagent.skills import list_user_skill_files
@@ -252,38 +242,15 @@ from .yoagent.skills import read_user_skill_file
 from .yoagent.skills import skill_validation_payload
 from .yoagent.skills import write_user_skill_file
 from .yoagent.skills import YoagentSkillValidationError
-from .yoagent.transports import TMUX_LEGACY_TRANSPORT_ID
 from .yoagent.transports import CodexAppServerSession
 from .yoagent.transports import default_yoagent_transport_registry
-from .yoagent.transports import normalize_yoagent_transport_id
-from .yoagent.backends import YOAGENT_CLI_TIMEOUT_SECONDS
-from .yoagent.backends import YOAGENT_STARTUP_QUESTION
-from .yoagent.backends import codex_event_session_id
-from .yoagent.backends import resolve_yoagent_backend
-from .yoagent.backends import strip_yoagent_hidden_thinking
-from .yoagent.backends import strip_yoagent_stream_hidden_thinking
 from .yoagent.streaming import YoagentStreamPublisher
 from .yoagent.conversation import sanitized_stream_items as sanitized_yoagent_stream_items
-from .yoagent.backends import yoagent_activity_payload_signature
-from .yoagent.backends import yoagent_cli_auth_failure
-from .yoagent.backends import yoagent_cli_fallback_reason
-from .yoagent.backends import yoagent_language_directive
-from .yoagent.controller import YOAGENT_ACTION_ACCEPTING_SCREEN_KEYS
-from .yoagent.controller import YOAGENT_ACTION_AGENT_KINDS
-from .yoagent.controller import YOAGENT_ACTION_PREVIEW_TTL_SECONDS
-from .yoagent.controller import YOAGENT_ACTION_RESULT_MAX_CHARS
-from .yoagent.controller import YOAGENT_ACTION_RESULT_POLL_SECONDS
-from .yoagent.controller import YOAGENT_ACTION_RESULT_WAIT_SECONDS
-from .yoagent.controller import YOAGENT_ACTION_TEXT_LIMIT
-from .yoagent.controller import YOAGENT_JOB_DEFAULT_TIMEOUT_MINUTES
-from .yoagent.controller import YOAGENT_JOB_IDLE_QUIET_SECONDS
-from .yoagent.controller import YOAGENT_JOB_MAX_ITEMS
 from .yoagent.controller import YOAGENT_JOB_POLL_SECONDS
-from .yoagent.controller import YOAGENT_JOBS_STATE_KEY
+from .yoagent.controller import YOAGENT_ACTION_RESULT_WAIT_SECONDS  # noqa: F401 - compatibility re-export
+from .yoagent.controller import YOAGENT_JOBS_STATE_KEY  # noqa: F401 - compatibility re-export
 from .yoagent.controller import YoagentController
-from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARIES_STATE_KEY
-from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_MAX_ITEMS
-from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_QUIET_SECONDS
+from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARIES_STATE_KEY  # noqa: F401 - compatibility re-export
 from .yoagent.session_summaries import YOAGENT_SESSION_SUMMARY_STATES
 from .yoagent.session_summaries import YoagentSummaryWorkerRecord
 
@@ -1117,7 +1084,7 @@ def ensure_xterm_runtime_assets(root: str | Path) -> tuple[bool, str]:
                 check=False,
             )
             if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
-                detail = (result.stderr or result.stdout or "download failed").strip()
+                detail = cmd_error(result, "download failed")
                 temporary.unlink(missing_ok=True)
                 return False, f"xterm asset download failed: {detail[:400]}"
             temporary.replace(destination)
@@ -1242,9 +1209,8 @@ class SharedWatchRootIndex:
         return {"version": 2, "owner_id": self.owner_id, "entries": {}, "updated_at": self._clock()}
 
     def _read_payload(self) -> dict[str, Any]:
-        try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
+        raw = read_json_file(self.path, None, exceptions=(OSError, ValueError, TypeError))
+        if raw is None:
             return self._empty_payload()
         if not isinstance(raw, dict):
             return self._empty_payload()
@@ -1270,9 +1236,8 @@ class SharedWatchRootIndex:
         return entries
 
     def _read_owner_payload(self) -> dict[str, Any]:
-        try:
-            raw = json.loads(self.owner_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
+        raw = read_json_file(self.owner_path, None, exceptions=(OSError, ValueError, TypeError))
+        if raw is None:
             legacy_owner = self._read_payload().get("owners", {}).get(self.owner_id, {})
             if isinstance(legacy_owner, dict) and isinstance(legacy_owner.get("entries"), dict):
                 return {
@@ -1394,9 +1359,8 @@ class SharedWatchRootIndex:
         except OSError:
             owner_files = []
         for owner_file in owner_files:
-            try:
-                raw = json.loads(owner_file.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError):
+            raw = read_json_file(owner_file, None, exceptions=(OSError, ValueError, TypeError))
+            if raw is None:
                 continue
             if not isinstance(raw, dict):
                 continue
@@ -1475,10 +1439,7 @@ class SharedWatchRootIndex:
         return True
 
     def signature_snapshot(self) -> tuple[Any, ...]:
-        try:
-            raw = json.loads(self.signature_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            return ()
+        raw = read_json_file(self.signature_path, (), exceptions=(OSError, ValueError, TypeError))
         if not isinstance(raw, dict):
             return ()
         frozen = self._freeze_signature(raw.get("signature"))
@@ -1962,6 +1923,7 @@ class TmuxWebtermApp:
             },
             owner_generation=self.stats_current_owner_generation,
             token_cadence_seconds=self.stats_current_token_cadence_seconds,
+            family_cadence_seconds=self.stats_current_family_cadence_seconds,
         )
         # A persistent child owns all Quick Open builds and SQLite writes.
         # HTTP/WebSocket processes remain read-only index consumers.
@@ -2001,16 +1963,10 @@ class TmuxWebtermApp:
 
     def _read_shared_tmux_ai_status_locked(self) -> dict[str, Any]:
         status = self.tmux_ai_status_empty()
-        try:
-            data = json.loads(common.TMUX_AI_STATUS_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            data = {}
+        data = read_json_file(common.TMUX_AI_STATUS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError, ValueError))
         if not isinstance(data, dict):
             data = {}
-        try:
-            legacy = json.loads(common.LEGACY_ATTENTION_ACKS_PATH.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            legacy = {}
+        legacy = read_json_file(common.LEGACY_ATTENTION_ACKS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError, ValueError))
         if not isinstance(legacy, dict):
             legacy = {}
         if not data and legacy:
@@ -2301,6 +2257,13 @@ class TmuxWebtermApp:
 
     def stats_current_token_cadence_seconds(self) -> float:
         return STATS_AGENT_TOKEN_SAMPLE_SECONDS if self.client_events.has_demand("stats") else STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+
+    def stats_current_family_cadence_seconds(self, family: str) -> float:
+        spec = stats_current_families.FAMILY_BY_NAME[family]
+        cadence = spec.cadence_seconds(watched=self.client_events.has_demand("stats"))
+        if cadence is None:
+            raise ValueError(f"{family} is not a scheduled stats collector")
+        return cadence
 
     def record_current_browser_observations(
         self,
@@ -4037,10 +4000,7 @@ class TmuxWebtermApp:
     def write_shared_background_client_event(self, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         record = self.shared_background_client_event_record(event_type, payload)
         with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
-            try:
-                manifest = json.loads(BACKGROUND_CLIENT_EVENTS_PATH.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, TypeError):
-                manifest = {}
+            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError))
             raw_events = manifest.get("events") if isinstance(manifest, dict) else []
             events = [item for item in raw_events if isinstance(item, dict)] if isinstance(raw_events, list) else []
             resource = client_event_resource(event_type, payload)
@@ -4057,9 +4017,8 @@ class TmuxWebtermApp:
     def replay_shared_background_client_events(self) -> int:
         """Replay the durable latest-per-resource manifest after a follower was offline."""
         with file_lock(BACKGROUND_CLIENT_EVENTS_PATH, dir_mode=0o700):
-            try:
-                manifest = json.loads(BACKGROUND_CLIENT_EVENTS_PATH.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, TypeError):
+            manifest = read_json_file(BACKGROUND_CLIENT_EVENTS_PATH, None, exceptions=(OSError, json.JSONDecodeError, TypeError))
+            if manifest is None:
                 return 0
         raw_events = manifest.get("events") if isinstance(manifest, dict) else []
         if not isinstance(raw_events, list):
@@ -4562,7 +4521,7 @@ class TmuxWebtermApp:
                 **user_message_payload("update.result.blocked", diagnostic),
             }
         if static_build.returncode != 0:
-            build_error = (static_build.stderr or static_build.stdout or "static build failed").strip()[:360]
+            build_error = cmd_error(static_build, "static build failed")[:360]
             diagnostic = f"static build failed: {build_error}"[:400]
             return {
                 "ok": False,
@@ -6097,6 +6056,23 @@ class TmuxWebtermApp:
                     changed = response.get("changed") is True and next_generation > generation
                     self.note_client_event_recurring_work(record, "status_generation_lease", useful=changed)
                     if changed:
+                        event_payload: dict[str, object] = {
+                            "status": int(HTTPStatus.OK),
+                            "refresh": True,
+                            "generation": next_generation,
+                            "signature": f"statusd:{next_generation}:{int(HTTPStatus.OK)}",
+                        }
+                        snapshot_response, snapshot_body = self.status_client.snapshot(self.sessions, timeout=1.0)
+                        if snapshot_response.get("ok") is True and snapshot_body:
+                            metadata = None
+                            try:
+                                metadata = validate_status_snapshot(snapshot_response, snapshot_body)
+                                snapshot_payload = json.loads(snapshot_body)
+                            except (StatusProtocolError, ValueError, TypeError):
+                                snapshot_payload = None
+                            if metadata is not None and metadata.generation == next_generation and isinstance(snapshot_payload, dict):
+                                event_payload["data"] = snapshot_payload
+                                event_payload["refresh"] = False
                         with self.client_watch_service.lock:
                             if self.client_watch_service.event_watcher_record is not record:
                                 return
@@ -6104,7 +6080,7 @@ class TmuxWebtermApp:
                             self.client_watch_service.auto_approve_signature = f"statusd:{next_generation}:{int(HTTPStatus.OK)}"
                         self.publish_client_event(
                             "auto_approve_changed",
-                            {"status": int(HTTPStatus.OK), "refresh": True, "generation": next_generation, "signature": f"statusd:{next_generation}:{int(HTTPStatus.OK)}"},
+                            event_payload,
                             trigger="statusd-generation",
                             cache="ready",
                         )
@@ -6587,10 +6563,7 @@ class TmuxWebtermApp:
         )
 
     def read_session_files_disk_cache_index_unlocked(self) -> dict[str, Any]:
-        try:
-            payload = json.loads(self.session_files_disk_cache_index_path().read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-            payload = None
+        payload = read_json_file(self.session_files_disk_cache_index_path(), None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
         entries = payload.get("entries") if isinstance(payload, dict) else None
         index = {
             "version": SESSION_FILES_DISK_CACHE_INDEX_VERSION,
@@ -6884,9 +6857,8 @@ class TmuxWebtermApp:
         allow_stale: bool = False,
     ) -> tuple[SessionFilesPayload, HTTPStatus, bool, float] | None:
         path, signature = self.session_files_disk_cache_path(key)
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        record = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if record is None:
             return None
         if not isinstance(record, dict):
             return None
@@ -6918,10 +6890,7 @@ class TmuxWebtermApp:
             return copy.deepcopy(payload_stale), status_stale, False, age_stale
         payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
         manifest_path = self.session_files_disk_manifest_path(signature)
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-            manifest = None
+        manifest = read_json_file(manifest_path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
         if isinstance(manifest, dict) and manifest.get("version") == SESSION_FILES_CACHE_VERSION and manifest.get("signature") == signature and manifest.get("payload_signature") == payload_signature:
             try:
                 status = HTTPStatus(int(manifest.get("status", int(status))))
@@ -6945,10 +6914,7 @@ class TmuxWebtermApp:
     ) -> None:
         payload_signature = self.session_files_payload_signature(payload)
         payload_changed = True
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-            existing = None
+        existing = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
         if isinstance(existing, dict) and existing.get("version") == SESSION_FILES_CACHE_VERSION and existing.get("signature") == signature:
             existing_payload = existing.get("payload")
             existing_payload_signature = str(existing.get("payload_signature") or "")
@@ -10044,9 +10010,8 @@ class TmuxWebtermApp:
         allow_source_mismatch: bool = False,
     ) -> tuple[dict[str, Any], bool, float] | None:
         path, signature = self.tabber_activity_cache_disk_path(hours, source_signature)
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+        record = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+        if record is None:
             return None
         if not isinstance(record, dict):
             return None
@@ -10060,10 +10025,7 @@ class TmuxWebtermApp:
             return None
         payload_signature = str(record.get("payload_signature") or self.session_files_payload_signature(payload))
         manifest_path = self.tabber_activity_cache_manifest_path(signature)
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-            manifest = None
+        manifest = read_json_file(manifest_path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
         try:
             stored_at_wall = float(record.get("stored_at", 0.0))
         except (TypeError, ValueError):
@@ -10086,10 +10048,7 @@ class TmuxWebtermApp:
     def write_tabber_activity_disk_cache_unlocked(self, path: Path, signature: str, payload: dict[str, Any], source_signature: str) -> None:
         payload_signature = self.session_files_payload_signature(payload)
         payload_changed = True
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-            existing = None
+        existing = read_json_file(path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
         if isinstance(existing, dict) and existing.get("version") == TABBER_ACTIVITY_CACHE_VERSION and existing.get("signature") == signature:
             existing_payload = existing.get("payload")
             existing_payload_signature = str(existing.get("payload_signature") or "")
@@ -11879,7 +11838,7 @@ class TmuxWebtermApp:
         target = f"{tmux_session_target(session)}{window_text}"
         result = tmux(["select-window", "-t", target], timeout=3.0)
         if result.returncode != 0:
-            diagnostic = (result.stderr or result.stdout or "tmux select-window failed").strip()
+            diagnostic = cmd_error(result, "tmux select-window failed")
             return tmux_command_failure_payload(session, diagnostic, window=window_text), HTTPStatus.INTERNAL_SERVER_ERROR
         # select-window is the WHOLE job: it changes the session's current window for every
         # attached client synchronously (that is what a tmux session is). The retired
@@ -12761,7 +12720,6 @@ class TmuxWebtermApp:
         key = "\x1f".join((session, window, pane_target, kind))
         with self.agent_window_transition_lock:
             previous = self.agent_window_transition_state.get(key, {})
-            previous_state = str(previous.get("state") or "")
             previous_stopped_ts = self.float_value(previous.get("working_stopped_ts"), 0.0)
             try:
                 previous_generation = max(0, int(previous.get("cooldown_generation", 0)))

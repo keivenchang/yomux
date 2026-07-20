@@ -942,9 +942,9 @@ body.layout-resizing {
   pointer-events: auto;
   transform: translateY(0);
   transition:
-    opacity var(--motion-interaction-fast) ease var(--popover-show-delay),
-    transform var(--motion-interaction-fast) ease var(--popover-show-delay),
-    visibility 0s linear var(--popover-show-delay);
+    opacity var(--motion-interaction-fast) ease 0s,
+    transform var(--motion-interaction-fast) ease 0s,
+    visibility 0s linear 0s;
 }
 .panel-popover-zone > .session-popover::before {
   left: 94px;
@@ -1055,10 +1055,10 @@ body.layout-resizing {
   max-width: none;
 }
 .panel-session-label .session-button-dir {
-  max-width: 104px;
+  max-width: var(--session-label-dir-max-inline-size);
 }
 .panel-session-label .session-button-detail {
-  max-width: 58px;
+  max-width: var(--session-label-detail-max-inline-size);
 }
 .panel-session-label.needs-attention .session-state-badge {
   box-shadow: 0 0 0 1px rgba(245, 197, 66, 0.26);
@@ -1103,8 +1103,7 @@ body.layout-resizing {
 .pane-info-bar:has(> .tmux-window-bar) > .pane-info-bar-controls {
   margin-inline-end: 0;
 }
-.pane-info-bar-controls,
-.pane-info-bar-fixed-sep {
+.pane-info-bar-controls {
   flex: 0 0 auto;
 }
 .pane-info-bar > .pane-info-bar-controls {
@@ -1754,7 +1753,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 .tmux-window-button {
   flex: 0 1 auto;
   min-width: 18px;
-  max-width: 96px;
+  max-width: var(--tmux-window-tab-max-inline-size);
   padding-inline: var(--space-2);
   /* DOIT.57: window buttons read in the normal UI font, not the condensed/bold .tab control font. */
   font-family: var(--ui-font);
@@ -1961,7 +1960,7 @@ body.share-replay-shell .share-mirror-stage .pane-tab-detached-popover {
 }
 .terminal-tab {
   flex: 0 1 auto;
-  max-width: 72px;
+  max-width: var(--terminal-tab-max-inline-size);
   min-width: 0;
   padding-inline: var(--space-3);
 }

@@ -35,8 +35,8 @@ def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
 def test_classify_agent_requires_an_agent_entry_point():
     assert sessions.classify_agent("/Users/me/.local/bin/claude --resume abc") == "claude"
     assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
-    assert sessions.classify_agent("python3 tools/claude.py --mock") == "claude"
-    assert sessions.classify_agent("python3 tools/codex.py --mock") == "codex"
+    assert sessions.classify_agent("python3 tools/agent_clients/claude.py --mock") == "claude"
+    assert sessions.classify_agent("python3 tools/agent_clients/codex.py --mock") == "codex"
     assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
     assert sessions.classify_agent("python3 -m pytest -k codex") is None
     assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
@@ -674,7 +674,7 @@ def test_pane_process_label_recognizes_merged_mock_entrypoints():
         _pane(100),
         [
             ProcessInfo(pid=100, ppid=1, command="bash"),
-            ProcessInfo(pid=321, ppid=100, command="python3 tools/codex.py --mock"),
+            ProcessInfo(pid=321, ppid=100, command="python3 tools/agent_clients/codex.py --mock"),
         ],
     )
     assert label == "codex"
@@ -684,7 +684,7 @@ def test_pane_process_label_recognizes_merged_mock_entrypoints():
         _pane(100),
         [
             ProcessInfo(pid=100, ppid=1, command="bash"),
-            ProcessInfo(pid=654, ppid=100, command="python3 tools/claude.py --mock"),
+            ProcessInfo(pid=654, ppid=100, command="python3 tools/agent_clients/claude.py --mock"),
         ],
     )
     assert label == "claude"

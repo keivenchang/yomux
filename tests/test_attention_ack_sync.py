@@ -13,22 +13,14 @@ from yolomux_lib.app import ATTENTION_ACK_TTL_SECONDS
 
 
 @pytest.fixture
-def make_app(monkeypatch):
-    created = []
-
+def make_app(monkeypatch, make_tmux_webterm_app):
     def factory():
-        monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
-        app = app_module.TmuxWebtermApp(["1"])
-        created.append(app)
+        app = make_tmux_webterm_app()
         monkeypatch.setattr(app, "notify_background_client_event_followers", lambda *args, **kwargs: None)
         monkeypatch.setattr(app.background_owner, "live_generation_records", lambda: [])
         return app
 
-    yield factory
-
-    for app in created:
-        app.background_owner.stop()
-        app.control_server.stop()
+    return factory
 
 
 def patch_shared_path(monkeypatch, tmp_path):

@@ -21,6 +21,7 @@ from urllib.parse import quote
 
 from yolomux_lib.atomic_file import atomic_write_text
 from yolomux_lib.atomic_file import file_lock
+from yolomux_lib.filesystem.io_ops import read_json_file
 
 from . import identity
 from . import materializer
@@ -1681,7 +1682,7 @@ def _remove_retirement_journal(plan: _RetirementPlan, *, missing_ok: bool = Fals
 
 def _read_json_file(path: Path, name: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = read_json_file(path, {}, exceptions=())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise MigrationError(f"{name} cannot be read: {error}") from error
     if not isinstance(value, dict):

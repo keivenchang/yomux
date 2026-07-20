@@ -2570,6 +2570,23 @@ def test_concurrent_views_share_one_git_identity_run(tmp_path, monkeypatch):
 
         errors = []
         lined_up = threading_module.Barrier(6, timeout=10)
+        identity_gate = threading_module.Barrier(6, timeout=10)
+        identity_gate_lock = threading_module.Lock()
+        identity_gate_calls = 0
+        real_shared_identity = webapp.shared_git_identity
+
+        def synchronized_shared_identity(*args, **kwargs):
+            # Every caller reaches the same handoff before the owner begins its expensive
+            # identity read, replacing the former timing guess with an actual coalesce fence.
+            nonlocal identity_gate_calls
+            with identity_gate_lock:
+                identity_gate_calls += 1
+                use_gate = identity_gate_calls <= 6
+            if use_gate:
+                identity_gate.wait()
+            return real_shared_identity(*args, **kwargs)
+
+        monkeypatch.setattr(webapp, "shared_git_identity", synchronized_shared_identity)
 
         def view():
             try:
@@ -2582,7 +2599,6 @@ def test_concurrent_views_share_one_git_identity_run(tmp_path, monkeypatch):
         for thread in threads:
             thread.start()
         assert owner_entered.wait(timeout=10)
-        time.sleep(1.0)  # let the five coalescers park on the shared future
         allow_finish.set()
         for thread in threads:
             thread.join(timeout=30)

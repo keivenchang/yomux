@@ -41,6 +41,56 @@ def test_dockview_representative_light_retina_visual_profile(browser, tmp_path):
     assert light["page"] != dark["page"] or light["tab"] != dark["tab"], {"dark": dark, "light": light}
 
 
+def test_ipad_590px_view_layout_explains_single_column_split_limit(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+    browser.execute_cdp_cmd(
+        "Emulation.setDeviceMetricsOverride",
+        {"width": 590, "height": 884, "deviceScaleFactor": 1, "mobile": False},
+    )
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=left&tabs=left:1,2",
+            sessions=["1", "2"],
+            grid_width=590,
+            grid_height=700,
+        )
+        layout_rows = WebDriverWait(browser, 5).until(
+            lambda driver: driver.execute_script(
+                """
+                if (!narrowSingleColumnMode()) return false;
+                const view = document.querySelector('.app-menu[data-app-menu="view"]');
+                const button = view?.querySelector(':scope > .app-menu-button');
+                button?.click();
+                const layout = Array.from(view?.querySelectorAll(':scope > .app-menu-popover > .app-menu-submenu-wrap') || [])
+                  .find(node => node.querySelector(':scope > .app-menu-command')?.textContent.trim().startsWith('Layout'));
+                layout?.querySelector(':scope > .app-menu-command')?.click();
+                const rows = Array.from(layout?.querySelectorAll(':scope > .app-submenu-popover > .app-menu-command') || []);
+                return rows.length === 3 ? rows.map(row => ({
+                  label: row.querySelector('.app-menu-label')?.textContent.trim() || '',
+                  disabled: row.disabled,
+                  detail: row.querySelector('.app-menu-detail')?.textContent.trim() || '',
+                })) : false;
+                """
+            )
+        )
+        assert layout_rows == [
+            {"label": "Single pane", "disabled": True, "detail": "Widen the window to split panes"},
+            {"label": "Split", "disabled": True, "detail": "Widen the window to split panes"},
+            {"label": "Grid", "disabled": True, "detail": "Widen the window to split panes"},
+        ], layout_rows
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
 def test_dockview_active_tab_switch_uses_mounted_panel_without_layout_reload(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
@@ -122,7 +172,7 @@ def test_dockview_quick_open_keeps_distinct_notes_files_open(browser, tmp_path):
           await waitFor(() => commandPaletteState.items.some(item => item.path === path), {description: `Quick Open result for ${query}`});
           const row = Array.from(document.querySelectorAll('.command-palette-row')).find(node => Number(node.dataset.commandIndex) === commandPaletteState.items.findIndex(item => item.path === path));
           row.click();
-          await waitFor(() => openFiles.has(path) && slotForItem(fileEditorItemFor(path)) === 'left', {description: `editor tab for ${query}`});
+          await waitFor(() => fileState.has(path) && slotForItem(fileEditorItemFor(path)) === 'left', {description: `editor tab for ${query}`});
         };
         (async () => {
           await openPath('t5t.md', t5tPath);
@@ -515,7 +565,7 @@ def test_dockview_tab_actions_preserve_target_focus_and_one_line_description(bro
     assert result["detailClosesOnTerminalEngagement"] is True, result
     assert result["descriptionStyle"] == {"whiteSpace": "nowrap", "textOverflow": "ellipsis", "overflow": "hidden"}, result
     assert "details" not in result["initial"], result
-    assert all(f"Move {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
+    assert all(f"Split {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
     assert all(f"Swap {zone}" in result["directionalLabels"] for zone in ("left", "right", "top", "bottom")), result
     assert len(result["directionalGeometry"]) == 2, result
     for geometry in result["directionalGeometry"]:
@@ -563,6 +613,92 @@ def test_dockview_touch_long_press_opens_sheet_without_activating_tab(browser, t
     assert result["sheetTop"] >= result["tabBottom"] and result["sheetTop"] - result["tabBottom"] <= 12, result
 
 
+def test_ipad_touch_long_press_split_action_creates_a_wide_local_pane_and_is_absent_narrow(browser, tmp_path):
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    browser.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {"userAgent": "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"},
+    )
+
+    def long_press_tab(width):
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True})
+        browser.execute_cdp_cmd(
+            "Emulation.setDeviceMetricsOverride",
+            {"width": width, "height": 884, "deviceScaleFactor": 1, "mobile": False},
+        )
+        browser.execute_script("dispatchEvent(new Event('resize'))")
+        wait_for_dockview(browser, min_tabs=2)
+        point = browser.execute_script(
+            """
+            const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
+            const rect = tab.getBoundingClientRect();
+            return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+            """
+        )
+        touch = {"x": point["x"], "y": point["y"], "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [touch]})
+        menu = WebDriverWait(browser, 2).until(
+            lambda driver: driver.execute_script(
+                """
+                const menu = document.querySelector('.session-context-menu');
+                return menu?.classList.contains('tab-action-sheet') ? menu : false;
+                """
+            )
+        )
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        return menu
+
+    try:
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=left&tabs=left:1,2",
+            sessions=["1", "2"],
+            grid_width=1366,
+            grid_height=700,
+        )
+        wide_menu = long_press_tab(1366)
+        wide_action = wide_menu.find_element("css selector", '.tab-move-action[aria-label="Split right"]')
+        assert wide_action.is_enabled()
+        browser.execute_script("arguments[0].click()", wide_action)
+        wide = WebDriverWait(browser, 3).until(
+            lambda driver: driver.execute_script(
+                """
+                const tree = layoutSlots[layoutTreeKey];
+                return tree?.split === 'row' && slotForItem('2') !== 'left'
+                  ? {tree, slot: slotForItem('2'), single: narrowSingleColumnMode()}
+                  : false;
+                """
+            )
+        )
+        assert wide["single"] is False, wide
+
+        load_dockview_runtime_boot_fixture(
+            browser,
+            tmp_path,
+            "?sessions=1,2&layout=left&tabs=left:1,2",
+            sessions=["1", "2"],
+            grid_width=590,
+            grid_height=700,
+        )
+        long_press_tab(590)
+        narrow = browser.execute_script(
+            """
+            const menu = document.querySelector('.session-context-menu');
+            return {
+              single: narrowSingleColumnMode(),
+              splitButtons: menu?.querySelectorAll('.tab-split-action').length || 0,
+              splitRight: Array.from(menu?.querySelectorAll('button') || []).some(button => button.getAttribute('aria-label') === 'Split right'),
+            };
+            """,
+        )
+        assert narrow == {"single": True, "splitButtons": 0, "splitRight": False}, narrow
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
 def test_dockview_touch_tap_cancels_long_press_after_tab_activation(browser, tmp_path):
     load_dockview_runtime_boot_fixture(browser, tmp_path, "?sessions=1,2&layout=left&tabs=left:1,2", sessions=["1", "2"])
     wait_for_dockview(browser, min_tabs=2)
@@ -607,7 +743,7 @@ def test_dockview_tab_action_move_creates_a_local_split_for_the_pressed_tmux_tab
         const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="2"]');
         const rect = tab.getBoundingClientRect();
         tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom}));
-        const action = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move left');
+        const action = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Split left');
         action?.click();
         const wait = () => {
           const oneSlot = slotForItem('1');
@@ -699,8 +835,8 @@ def test_dockview_tab_action_splits_inside_docked_finder_content(browser, tmp_pa
         const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
         const rect = tab.getBoundingClientRect();
         tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.bottom}));
-        const moveLeft = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move left');
-        const moveRight = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Move right');
+        const moveLeft = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Split left');
+        const moveRight = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === 'Split right');
         const enabled = {left: moveLeft?.disabled === false, right: moveRight?.disabled === false};
         moveLeft?.click();
         const finish = () => {
@@ -747,7 +883,7 @@ def test_dockview_tab_action_vertical_move_splits_only_the_selected_leaf(browser
             const tab = document.querySelector('.dockview-pane-tab[data-pane-tab="1"]');
             const tabRect = tab.getBoundingClientRect();
             tab.dispatchEvent(new MouseEvent('contextmenu', {bubbles: true, cancelable: true, clientX: tabRect.left + tabRect.width / 2, clientY: tabRect.bottom}));
-            moveAction = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === `Move ${zone}`);
+            moveAction = Array.from(document.querySelectorAll('.tab-move-action')).find(button => button.getAttribute('aria-label') === `Split ${zone}`);
             moveAction?.click();
             const wait = () => {
               const root = layoutSlots[layoutTreeKey];
@@ -6065,19 +6201,19 @@ def test_ipad_touch_drag_stats_tab_to_bottom_root_creates_lower_pane(browser, tm
                 preview = current_preview
             time.sleep(0.01)
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
-        time.sleep(0.5)
-        result = browser.execute_script(
+        result = WebDriverWait(browser, 5, poll_frequency=0.05).until(lambda driver: driver.execute_script(
             """
             const tree = layoutSlots[layoutTreeKey];
-            return {
+            const result = {
               moved: tree?.split === 'column' && slotForItem(debugPaneItemId) !== 'left',
               tree,
               itemSlot: slotForItem(debugPaneItemId),
               events: window.__touchPaneDragEvents,
               errors: [...(window.__bootErrors || []), ...(window.__bootRejections || [])],
             };
+            return result.moved ? result : false;
             """
-        )
+        ))
         expected_preview = {"root": True, "bottom": True, "tracked": True, "rememberedZone": "bottom"}
         if preview is not None:
             assert preview == expected_preview, {"preview": preview, "result": result}

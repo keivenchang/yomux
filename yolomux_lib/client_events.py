@@ -217,13 +217,16 @@ class ClientEventBroker:
                 "resource_revision": resource_revision,
             }
             self.next_event_id += 1
-            event_bytes = len(json.dumps(event, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8"))
             event_channels = client_event_type_channels(safe_type)
+            subscribers = list(self.subscribers.values())
+            # There is no wire payload without an SSE consumer. Avoid serializing a discarded
+            # event solely for byte diagnostics; once a subscriber exists this one measurement is
+            # shared by published, filtered, delivered, and coalesced accounting below.
+            event_bytes = len(json.dumps(event, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")) if subscribers else 0
             self.published_events += 1
             self.published_bytes += event_bytes
             self.increment_type_counter(self.published_by_type, safe_type, event_bytes)
             self.increment_type_counter(self.published_by_resource, resource, event_bytes)
-            subscribers = list(self.subscribers.values())
             for subscriber in subscribers:
                 if subscriber.channels.isdisjoint(event_channels):
                     self.filtered_events += 1

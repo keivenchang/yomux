@@ -1640,10 +1640,10 @@ function isVirtualItem(item) {
 
 function openFileEditorItems() {
   const items = [];
-  if (sharedImageViewerPath && openFiles.has(sharedImageViewerPath)) {
+  if (sharedImageViewerPath && fileState.has(sharedImageViewerPath)) {
     items.push(imageViewerItemFor(sharedImageViewerPath));
   }
-  for (const [path, state] of openFiles.entries()) {
+  for (const [path, state] of fileState.entries()) {
     normalizeFileStateRecord(state);
     for (const item of state.editorTabItems) items.push(item);
   }
@@ -1843,7 +1843,7 @@ function registerFileEditorLayoutItem(path, options = {}) {
   const optionItem = options.item && fileItemPath(options.item) === path ? options.item : '';
   const item = optionItem || fileEditorItemFor(path);
   addFileEditorTabItem(path, item);
-  if (openFiles.get(path)?.loading !== true && openFiles.get(path)?.kind) {
+  if (fileState.get(path)?.loading !== true && fileState.get(path)?.kind) {
     syncFileLayoutItems();
     return item;
   }
@@ -1862,7 +1862,7 @@ function registerFileEditorLayoutItem(path, options = {}) {
 function registerImageViewerLayoutItem(path) {
   if (!path || !path.startsWith('/')) return null;
   sharedImageViewerPath = path;
-  if (!openFiles.get(path)?.kind) {
+  if (!fileState.get(path)?.kind) {
     ensureFileState(path, {
       mtime: 0,
       kind: 'image',
@@ -2510,9 +2510,10 @@ function tmuxSignalPanePathForSession(session) {
   return path ? normalizeDirectoryPath(path) : '';
 }
 
-// An alternate-screen pane is a mouse-owning TUI (claude, codex, vim, less): it has its own
-// scroll view and its tmux pane carries no scrollback (history_size stays 0), so routing the
-// wheel into tmux copy-mode is a dead end. Callers use this to let xterm forward the wheel to
+// An alternate-screen pane is a mouse-owning TUI (for example Claude, Codex, vim, less, or
+// htop): it has its own scroll view and its tmux pane carries no scrollback (history_size stays
+// 0), so routing the wheel into tmux copy-mode is a dead end. The live tmux alternate_on signal,
+// rather than an app-name guess, is authoritative; callers use it to let xterm forward input to
 // the app instead of hijacking it.
 function sessionPaneIsAlternateScreen(session) {
   return tmuxSignalActivePaneForSession(session)?.alternate_on === true;
@@ -2740,6 +2741,9 @@ function updateDocumentTitle() {
 function globalActivityCounts() {
   const agentWindowCounts = globalActivityCountsFromAgentWindows();
   if (agentWindowCounts) return agentWindowCounts;
+  // The fallback runs before agent-window payloads exist, so it must classify
+  // tmux signals and approval state directly; its overlapping states are pinned
+  // against the primary per-window path in layout_restore.test.js.
   const signalWindows = tmuxSignalWindows();
   let running = 0;
   let ask = 0;
@@ -2835,10 +2839,12 @@ function globalActivityCountsFromAgentWindows() {
       const itemOptions = agentWindowActivityOptionsForStatus(agent, session, {scheduleRefresh: false});
       const item = agentWindowActivityIconForStatusItem(agent, agent.kind, session, itemOptions);
       total += 1;
-      if (!item || item.acknowledged === true) continue;
-      if (item.state === STATE_KEY.working) running += 1;
-      else if (item.state === 'attention') ask += 1;
-      else if (item.state === 'cooldown') blocked += 1;
+      const classification = typeof agentWindowStatusClassification === 'function'
+        ? agentWindowStatusClassification(item)
+        : {activity: 'idle'};
+      if (classification.activity === STATE_KEY.working) running += 1;
+      else if (classification.activity === 'ask') ask += 1;
+      else if (classification.activity === 'blocked') blocked += 1;
     }
   }
   if (!total) return null;
@@ -3219,7 +3225,7 @@ function statusIndicatorLabelHtml(text, tone, ...classes) {
 }
 
 function stateBadgeHtml(key, short, title, options = {}) {
-  const classes = ['session-state-badge', 'tab-symbol', `session-state-${key}`];
+  const classes = ['badge-base', 'session-state-badge', 'tab-symbol', `session-state-${key}`];
   const attention = stateDef(key).attention;
   const tone = attention ? 'attention' : '';
   if (attention) classes.push('session-state-reminder');
@@ -3250,13 +3256,9 @@ function inactiveTabItems() {
 }
 
 function readNotificationDelivery() {
-  try {
-    const stored = JSON.parse(storageGet(notificationDeliveryStorageKey, ''));
-    if (!stored || typeof stored !== 'object') return {...notificationDeliveryDefaults};
-    return {inApp: stored.inApp !== false, system: stored.system === true};
-  } catch (_) {
-    return {...notificationDeliveryDefaults};
-  }
+  const stored = safeJsonParse(storageGet(notificationDeliveryStorageKey, ''), null);
+  if (!stored || typeof stored !== 'object') return {...notificationDeliveryDefaults};
+  return {inApp: stored.inApp !== false, system: stored.system === true};
 }
 
 function notificationDeliveryEnabled(channel) {
@@ -3878,7 +3880,7 @@ function commandPaletteDropActionItems() {
 function fileQuickOpenRootForFile(path) {
   const normalized = normalizeDirectoryPath(path || '');
   if (!normalized || normalized === '/') return '';
-  const rawGitRoot = openFiles.get(normalized)?.gitRoot || '';
+  const rawGitRoot = fileState.get(normalized)?.gitRoot || '';
   const gitRoot = rawGitRoot ? normalizeDirectoryPath(rawGitRoot) : '';
   if (gitRoot && pathIsInsideDirectory(normalized, gitRoot)) return gitRoot;
   return dirnameOf(normalized);
@@ -4085,11 +4087,11 @@ function fileQuickOpenItem(path, options = {}) {
 }
 
 function recentFileQuickOpenItems() {
-  return Array.from(openFiles.keys()).reverse()
+  return Array.from(fileState.keys()).reverse()
     .filter(path => !commandPaletteFilePathKnownMissing(path))
     .map((path, index) => fileQuickOpenItem(path, {
       group: t('palette.group.recent'),
-      mtime: openFiles.get(path)?.mtime || 0,
+      mtime: fileState.get(path)?.mtime || 0,
       sortBonus: 120 - index,
     }));
 }
@@ -4505,7 +4507,7 @@ function commandPaletteResultsHtml(items, query) {
   return items.map((item, index) => `
     <button type="button" class="command-palette-row${index === commandPaletteState.index ? ' active' : ''}" data-command-index="${index}" role="option" aria-selected="${index === commandPaletteState.index ? 'true' : 'false'}"${item.disabled ? ' disabled' : ''}>
       <span class="command-palette-group">${esc(item.group)}</span>
-      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
+      <span class="command-palette-main"><span class="command-palette-title">${item.iconText ? `<span class="command-palette-file-icon" aria-hidden="true">${esc(item.iconText)}</span>` : ''}<span class="command-palette-label">${commandPaletteItemLabelHtml(item, query)}</span>${(item.viewModes && item.viewModes.length) ? `<span class="command-palette-views">${item.viewModes.map(v => `<span class="chip-base command-palette-view-chip" role="button" tabindex="-1" data-view-item="${esc(v.item)}" data-view-mode="${esc(v.mode)}" title="${esc(t('palette.openView', {view: v.label}))}">${esc(v.label)}</span>`).join('')}</span>` : ''}</span><span class="command-palette-detail">${fuzzyHighlightHtml(query, item.detail || '')}</span></span>
       <span class="command-palette-keybinding">${esc(item.keybinding || '')}</span>
     </button>`).join('');
 }
@@ -5827,8 +5829,9 @@ function notifyWatchedPrTransitions(prs) {
     const ref = String(pr?.ref || (pr?.number ? `#${pr.number}` : ''));
     if (!ref) continue;
     const next = watchedPrStatusSnapshot(pr);
-    const prev = watchedPrLastStatus.get(ref);
-    watchedPrLastStatus.set(ref, next);
+    const record = watchedPrRecord(ref, true);
+    const prev = record.lastStatus;
+    record.lastStatus = next;
     for (const key of watchedPrTransitionKeys(prev, next)) {
       let message;
       if (key === 'pr-merged') message = t('notify.pr.merged', {ref});
@@ -5841,16 +5844,17 @@ function notifyWatchedPrTransitions(prs) {
 
 // Fire a watched-PR transition through the shared notification channel: an in-page toast (clicks open
 // the PR) + a browser Notification, gated by notificationsEnabled + notify_transitions, deduped and
-// throttled by notifications.throttle_seconds via the bounded watched-PR throttle map.
+// throttled by notifications.throttle_seconds via the bounded watched-PR record owner.
 function maybeNotifyWatchedPr(ref, key, message, url) {
   if (!notificationDeliveryEnabled()) return;
   if (!shouldNotifyTransitionKey(key)) return;
   const signature = `watched-pr:${ref}:${key}`;
   const now = Date.now();
   const throttleMs = Math.max(0, (Number(initialSetting('notifications.throttle_seconds', 60)) || 0) * 1000);
-  const lastSent = watchedPrNotificationLastSent.get(signature) || 0;
+  const record = watchedPrRecord(ref, true);
+  const lastSent = record.notificationLastSent.get(key) || 0;
   if (now - lastSent < throttleMs) return;
-  setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);
+  setLimitedMapEntry(record.notificationLastSent, key, now, notificationLastSentLimit);
   if (notificationDeliveryEnabled('inApp')) emitNotification('watchedPullRequest', {title: message, lines: [ref], body: ref, url, coalesceKey: signature, onClick: () => { try { window.open(url, '_blank', 'noopener,noreferrer'); } catch (_) {} }, system: false});
   postEvent(null, 'watched_pr_alert', message, {ref, transition: key});
   if (!notificationDeliveryEnabled('system') || !('Notification' in window) || Notification.permission !== 'granted') return;
@@ -5951,6 +5955,7 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
   if (options.preserveFilledWorkspaceLayout !== true) filledWorkspaceLayout = null;
@@ -5970,7 +5975,11 @@ function applyLayoutSlots(nextSlots, options = {}) {
     previousActive,
     prevShape,
     nextShape: layoutShapeSignature(layoutSlots),
-    options: {prune: options.prune},
+    options: {
+      prune: options.prune,
+      sessionButtons: options.sessionButtons,
+      deferDockviewLoad: options.deferDockviewLoad,
+    },
     reason: 'applyLayoutSlots',
     forceFull: options.forceFull === true,
   });
@@ -6042,13 +6051,16 @@ function performLayoutRender(request = {}) {
     }
     return;
   }
-  renderSessionButtons();
-  renderPanels(previousActive, {prune: renderRequest.options.prune});
+  if (renderRequest.options.sessionButtons !== false) renderSessionButtons();
+  renderPanels(previousActive, {
+    prune: renderRequest.options.prune,
+    deferDockviewLoad: renderRequest.options.deferDockviewLoad,
+  });
 }
 
 function requestLayoutRender(request = {}) {
   const renderRequest = layoutRenderRequest(request);
-  if (dragState.item != null) {
+  if (dragState.item != null || pendingLayoutRenderFrame) {
     pendingLayoutRender = mergePendingLayoutRender(pendingLayoutRender, renderRequest);
     return;
   }
@@ -6056,9 +6068,18 @@ function requestLayoutRender(request = {}) {
 }
 
 function flushPendingLayoutRender(reason = 'drag-flush') {
-  const renderRequest = pendingLayoutRender;
-  pendingLayoutRender = null;
-  if (renderRequest) requestLayoutRender({...renderRequest, reason});
+  if (!pendingLayoutRender || pendingLayoutRenderFrame) return;
+  const flush = () => {
+    pendingLayoutRenderFrame = 0;
+    const renderRequest = pendingLayoutRender;
+    pendingLayoutRender = null;
+    if (renderRequest) requestLayoutRender({...renderRequest, reason});
+  };
+  if (typeof requestAnimationFrame !== 'function') {
+    flush();
+    return;
+  }
+  pendingLayoutRenderFrame = requestAnimationFrame(flush);
 }
 
 function updateActiveSessionParam() {

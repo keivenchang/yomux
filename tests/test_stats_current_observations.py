@@ -124,7 +124,7 @@ def test_http_route_is_authenticated_bounded_and_passes_username(monkeypatch):
     calls = []
     writes = []
     value = payload()
-    monkeypatch.setattr(http_routes, "_json_body", lambda _request, _route: value)
+    monkeypatch.setattr(http_routes, "require_json_body", lambda _request, _route: value)
     app = SimpleNamespace(record_current_browser_observations=lambda body, *, authenticated_username: calls.append((body, authenticated_username)) or ({"ok": True}, HTTPStatus.OK))
     request = SimpleNamespace(
         server=SimpleNamespace(app=app),

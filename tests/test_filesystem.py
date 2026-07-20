@@ -8,8 +8,19 @@ import pytest
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import search as filesystem_search
 from yolomux_lib.filesystem import FilesystemError
+from yolomux_lib.filesystem.io_ops import read_json_file
 
 from _git_helpers import git, init_repo
+
+
+def test_read_json_file_returns_default_for_missing_or_invalid_json(tmp_path):
+    path = tmp_path / "state.json"
+
+    assert read_json_file(path, {}) == {}
+    path.write_text('{"ready": true}', encoding="utf-8")
+    assert read_json_file(path, {}) == {"ready": True}
+    path.write_text("{", encoding="utf-8")
+    assert read_json_file(path, []) == []
 
 
 def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog):

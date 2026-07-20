@@ -20,7 +20,7 @@ from yolomux_lib.stats_current import service as stats_service
 from yolomux_lib.stats_current import storage
 
 
-CURRENT_STATS_SOURCE = Path("static_src/js/yolomux/82_stats_current.js").read_text(encoding="utf-8")
+CURRENT_STATS_SOURCE = Path("static_src/js/yolomux/84_stats_current.js").read_text(encoding="utf-8")
 
 
 def _current_stats_fixture_html(*, network_fetch=False) -> str:

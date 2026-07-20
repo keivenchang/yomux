@@ -18,6 +18,8 @@ const dockviewLayoutState = {
   adoptingFromDockview: false,
   syncQueued: false,
   hostLayoutFrame: 0,
+  pendingLoadFrame: 0,
+  pendingCompletionFrame: 0,
   lastHostLayoutSignature: '',
   lastAppliedLayoutSignature: '',
   lastAppliedActiveOnlySignature: '',
@@ -273,10 +275,6 @@ function dockviewShouldSuppressPaneContentDrop(event) {
   ));
 }
 
-function dockviewShouldSuppressReservedRootBoundary(event) {
-  return false;
-}
-
 function dockviewClearRootBoundaryPreview() {
   if (!grid?.classList?.contains('drop-preview-root')) return;
   clearDropPreview();
@@ -339,7 +337,7 @@ function dockviewTrackRootBoundaryOverlay(event) {
   }
   const paneIntent = dockviewPaneContentDropIntent(event);
   dockviewLayoutState.pendingRootBoundaryDrop = null;
-  if (dockviewShouldSuppressPaneContentDrop(event) || (!paneIntent && dockviewShouldSuppressReservedRootBoundary(event))) {
+  if (dockviewShouldSuppressPaneContentDrop(event)) {
     dockviewClearRootBoundaryPreview();
     event.preventDefault?.();
   } else {
@@ -1001,6 +999,66 @@ function dockviewScheduleLayoutToHost(api = dockviewLayoutState.api, host = dock
   });
 }
 
+function dockviewCancelPendingLoad() {
+  if (!dockviewLayoutState.pendingLoadFrame) return;
+  cancelAnimationFrame(dockviewLayoutState.pendingLoadFrame);
+  clearTimeout(dockviewLayoutState.pendingLoadFrame);
+  dockviewLayoutState.pendingLoadFrame = 0;
+}
+
+function dockviewScheduleDeferredLoad(previousActive = [], options = {}) {
+  dockviewCancelPendingLoad();
+  const deferredActive = [...previousActive];
+  const deferredOptions = {...options, deferDockviewLoad: false, deferDockviewPostLoad: true};
+  if (typeof requestAnimationFrame !== 'function') {
+    renderPanelsDockview(deferredActive, deferredOptions);
+    return;
+  }
+  // Let the host-layout/header-reservation frame queued by dockviewLayoutToHost
+  // settle before fromJSON mutates the group tree. Combining them is what turns
+  // an otherwise bounded topology load into one browser long task.
+  dockviewLayoutState.pendingLoadFrame = requestAnimationFrame(() => {
+    // A timer task follows the host paint instead of becoming another part of
+    // its rendering callback. The exact Dockview JSON reload remains unchanged.
+    dockviewLayoutState.pendingLoadFrame = window.setTimeout(() => {
+      dockviewLayoutState.pendingLoadFrame = 0;
+      renderPanelsDockview(deferredActive, deferredOptions);
+    }, 0);
+  });
+}
+
+function dockviewRefreshLoadedLayout(items = []) {
+  const tabsPerf = clientPerfStart('dockviewRefreshTabs');
+  try {
+    dockviewRefreshTabs();
+  } finally {
+    clientPerfEnd(tabsPerf, {nodes: items.length});
+  }
+  const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
+  try {
+    dockviewSyncMountedPanels();
+  } finally {
+    clientPerfEnd(mountedPerf, {nodes: items.length});
+  }
+}
+
+function dockviewScheduleLoadedLayoutCompletion(items = [], previousActive = [], options = {}) {
+  if (dockviewLayoutState.pendingCompletionFrame) cancelAnimationFrame(dockviewLayoutState.pendingCompletionFrame);
+  const completedItems = [...items];
+  const completedActive = [...previousActive];
+  const completedOptions = {...options, deferDockviewPostLoad: false};
+  const complete = () => {
+    dockviewLayoutState.pendingCompletionFrame = 0;
+    dockviewRefreshLoadedLayout(completedItems);
+    finishPanelLayoutRender(completedActive, completedOptions);
+  };
+  if (typeof requestAnimationFrame !== 'function') {
+    complete();
+    return;
+  }
+  dockviewLayoutState.pendingCompletionFrame = requestAnimationFrame(complete);
+}
+
 function dockviewHostLayoutSize(host = dockviewLayoutState.host) {
   if (!host) return {width: DOCKVIEW_MIN_LAYOUT_WIDTH, height: DOCKVIEW_MIN_LAYOUT_HEIGHT};
   const rect = host.getBoundingClientRect?.();
@@ -1352,7 +1410,7 @@ function dockviewInit() {
         });
         return;
       }
-      if (dockviewShouldSuppressPaneContentDrop(event) || dockviewShouldSuppressReservedRootBoundary(event)) {
+      if (dockviewShouldSuppressPaneContentDrop(event)) {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
@@ -1370,22 +1428,6 @@ function dockviewInit() {
   return api;
 }
 
-function dockviewDispose() {
-  for (const disposable of dockviewLayoutState.disposables) disposable?.dispose?.();
-  dockviewLayoutState.disposables = [];
-  dockviewLayoutState.api?.dispose?.();
-  dockviewLayoutState.api = null;
-  dockviewLayoutState.host = null;
-  if (dockviewLayoutState.hostLayoutFrame) cancelAnimationFrame(dockviewLayoutState.hostLayoutFrame);
-  if (dockviewLayoutState.tabActivationPerf?.frame) cancelAnimationFrame(dockviewLayoutState.tabActivationPerf.frame);
-  dockviewLayoutState.tabActivationPerf = null;
-  dockviewLayoutState.hostLayoutFrame = 0;
-  dockviewLayoutState.lastHostLayoutSignature = '';
-  dockviewLayoutState.lastAppliedLayoutSignature = '';
-  dockviewLayoutState.lastAppliedActiveOnlySignature = '';
-  dockviewLayoutState.groupSlots.clear();
-}
-
 function renderPanelsDockview(previousActive = [], options = {}) {
   if (!dockviewLayoutEnabled()) return false;
   const api = dockviewInit();
@@ -1398,11 +1440,22 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   const signature = layoutSlotsSignature(layoutSlots);
   let activeOnlyChange = false;
   let layoutReloaded = false;
+  let layoutLoadDeferred = false;
+  let layoutCompletionDeferred = false;
   if (!dockviewLayoutState.adoptingFromDockview && dockviewLayoutState.lastAppliedLayoutSignature !== signature) {
     const activeOnlySignature = dockviewLayoutActiveOnlySignature(layoutSlots);
     if (dockviewLayoutState.lastAppliedActiveOnlySignature !== activeOnlySignature || !dockviewActivateLayoutTabs(layoutSlots)) {
-      dockviewLoadLayout(layoutSlots);
-      layoutReloaded = true;
+      if (options.deferDockviewLoad === true) {
+        dockviewScheduleDeferredLoad(previousActive, options);
+        layoutLoadDeferred = true;
+      } else {
+        layoutCompletionDeferred = dockviewLoadLayout(layoutSlots, {
+          deferPostLoad: options.deferDockviewPostLoad === true,
+          previousActive,
+          renderOptions: options,
+        });
+        layoutReloaded = true;
+      }
     } else {
       dockviewLayoutState.lastAppliedLayoutSignature = signature;
       activeOnlyChange = true;
@@ -1411,7 +1464,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
   // dockviewLoadLayout already refreshes these once after fromJSON. Repeating
   // the same mounted-panel walk on a whole-pane swap made the drop path a
   // single long task even though Dockview reused every panel instance.
-  if (!layoutReloaded) {
+  if (!layoutReloaded && !layoutLoadDeferred) {
     const tabsPerf = clientPerfStart('dockviewRefreshTabs');
     try {
       dockviewRefreshTabs();
@@ -1425,7 +1478,7 @@ function renderPanelsDockview(previousActive = [], options = {}) {
       clientPerfEnd(mountedPerf, {nodes: activePaneCount});
     }
   }
-  finishPanelLayoutRender(previousActive, options);
+  if (!layoutLoadDeferred && !layoutCompletionDeferred) finishPanelLayoutRender(previousActive, options);
   return true;
 }
 
@@ -1433,7 +1486,7 @@ function syncActivePanelsDockview(previousActive = []) {
   renderPanelsDockview(previousActive, {prune: false});
 }
 
-function dockviewLoadLayout(slots = layoutSlots) {
+function dockviewLoadLayout(slots = layoutSlots, options = {}) {
   const api = dockviewLayoutState.api;
   if (!api) return;
   const items = paneItems(slots);
@@ -1443,7 +1496,7 @@ function dockviewLoadLayout(slots = layoutSlots) {
       api.clear();
       dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
       dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
-      return;
+      return false;
     }
     const loadPerf = clientPerfStart('dockviewFromJson');
     try {
@@ -1453,21 +1506,15 @@ function dockviewLoadLayout(slots = layoutSlots) {
     }
     dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
     dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
-    const tabsPerf = clientPerfStart('dockviewRefreshTabs');
-    try {
-      dockviewRefreshTabs();
-    } finally {
-      clientPerfEnd(tabsPerf, {nodes: items.length});
+    if (options.deferPostLoad === true) {
+      dockviewScheduleLoadedLayoutCompletion(items, options.previousActive, options.renderOptions);
+      return true;
     }
-    const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
-    try {
-      dockviewSyncMountedPanels();
-    } finally {
-      clientPerfEnd(mountedPerf, {nodes: items.length});
-    }
+    dockviewRefreshLoadedLayout(items);
   } finally {
     dockviewLayoutState.applyingFromLayout = false;
   }
+  return false;
 }
 
 // An active-tab change does not alter the Dockview topology or its mounted panel contents. Calling
@@ -2084,8 +2131,6 @@ function createDockviewTabRenderer() {
   };
   element.__yolomuxDockviewRefresh = render;
   element.addEventListener('pointerdown', event => {
-    dragTimingReset();
-    dragTimingMark('pointerdown');
     if (event.target.closest('[data-pane-tab-close], [data-auto-session]')) event.stopPropagation();
     else {
       dockviewBeginTabActivationPerf(item);

@@ -99,11 +99,8 @@ SETTING_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "performance.server_event_poll_ms": ("server event poll", "visible file poll"),
     "performance.server_background_file_event_poll_ms": ("background file poll", "background file refresh"),
     "performance.server_directory_event_poll_ms": ("directory poll", "finder poll", "differ poll"),
-    "performance.popover_show_delay_ms": ("popover show delay", "tooltip delay"),
-    "performance.popover_hide_delay_ms": ("popover hide delay", "tooltip hide delay"),
-    "performance.menu_hover_open_delay_ms": ("menu hover delay", "menu open delay"),
-    "performance.tab_popover_show_delay_ms": ("tab popover delay", "tab hover delay"),
-    "performance.tab_popover_follow_delay_ms": ("tab popover follow delay", "tab follow delay"),
+    "performance.popover_show_delay_ms": ("popover show delay", "tooltip delay", "menu hover delay", "menu open delay", "tab popover delay", "tab hover delay"),
+    "performance.popover_hide_delay_ms": ("popover hide delay", "tooltip hide delay", "tab popover follow delay", "tab follow delay"),
     "performance.remote_resize_delay_ms": ("remote resize delay", "tmux resize delay"),
     "performance.auto_approve_interval_seconds": ("auto approve interval", "yolo worker interval", "approval poll interval"),
     "github.watched_prs": ("watched pr", "watched prs", "watched pull request", "watched pull requests", "pr watch list", "watch pr"),
@@ -377,7 +374,6 @@ def coerce_bool_from_question(question: str, current: bool) -> bool | None:
 def numeric_value_from_question(question: str, item: dict[str, Any], current: Any, locale: str = "en") -> tuple[int | float | None, str]:
     text = normalize_text(question)
     units = str(item.get("units") or "")
-    limits = item.get("limits") if isinstance(item.get("limits"), dict) else {}
     step = 1
     if units == "milliseconds":
         step = 100

@@ -7,7 +7,7 @@ const {
   test,
   testAsync,
   runSuites,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 
 async function runSidePaneSuite() {
   test('Side Pane role inherits the generic pane contract and overrides only specialization data', () => {

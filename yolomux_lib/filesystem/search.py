@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .. import file_index
+from ..search import file_index
 from ..common import is_generated_upload_name
 from ..settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from ..settings import settings_payload

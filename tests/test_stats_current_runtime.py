@@ -61,6 +61,20 @@ def test_runtime_requires_every_manifest_owned_collector_exactly_once():
         )
 
 
+def test_runtime_uses_one_demand_cadence_parent_for_every_scheduled_family():
+    current = runtime.StatsCurrentRuntime(
+        FakeClient(),
+        complete_collectors(lambda _attempt: collectors.CollectorFacts()),
+        owner_generation=lambda: 1,
+        token_cadence_seconds=lambda: 10,
+        family_cadence_seconds=lambda family: 1 if family == "cpu" else 60,
+    )
+
+    assert current.scheduler._cadence(current.scheduler._workers["cpu"].job) == 1
+    assert current.scheduler._cadence(current.scheduler._workers["gpu"].job) == 60
+    assert current.scheduler._cadence(current.scheduler._workers["agent_tokens"].job) == 60
+
+
 def test_runtime_leases_before_append_and_releases_after_workers_stop():
     client = FakeClient()
     collected = threading.Event()

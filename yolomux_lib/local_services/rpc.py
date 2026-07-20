@@ -12,8 +12,6 @@ import hashlib
 import json
 import os
 import socket
-import tempfile
-import time
 import uuid
 from time import monotonic as monotonic_clock
 from dataclasses import dataclass

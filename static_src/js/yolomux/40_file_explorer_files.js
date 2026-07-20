@@ -464,7 +464,7 @@ async function refreshOpenFilesFromPush(payload = {}) {
   for (const item of files) {
     const fetched = fileEntryStatusFromWatchFilePayload(item);
     if (!fetched.path) continue;
-    const state = openFiles.get(fetched.path);
+    const state = fileState.get(fetched.path);
     if (!state || state.loading) continue;
     await refreshOpenFileFromFetchedStatus(fetched.path, state, fetched);
   }
@@ -516,7 +516,7 @@ async function refreshFileExplorerFromPush(payload = {}) {
           entriesByDir,
         });
       }
-      const openFileDirs = Array.from(openFiles.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
+      const openFileDirs = Array.from(fileState.keys()).map(path => normalizeDirectoryPath(dirnameOf(path)));
       if (openFileDirs.every(path => fileExplorerFsResourceHasValue('list', path))) await refreshOpenFilesIfChanged();
     } finally {
       fileExplorerPushRefreshDepth = Math.max(0, fileExplorerPushRefreshDepth - 1);
@@ -633,17 +633,13 @@ function normalizeFileExplorerRepoInfo(repo, fallbackRoot = '') {
 function hydrateFileExplorerRepoInfoCache() {
   if (fileExplorerRepoInfoCacheLoaded) return;
   fileExplorerRepoInfoCacheLoaded = true;
-  try {
-    const raw = window.localStorage?.getItem(fileExplorerRepoInfoStorageKey);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    const repos = Array.isArray(parsed?.repos) ? parsed.repos : [];
-    for (const item of repos) {
-      const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
-      const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
-      if (path && repo) setLimitedMapEntry(fileExplorerRepoInfoCache, path, repo, fileExplorerMemoryCacheLimit);
-    }
-  } catch (_) {}
+  const parsed = safeJsonParse(window.localStorage?.getItem(fileExplorerRepoInfoStorageKey), null);
+  const repos = Array.isArray(parsed?.repos) ? parsed.repos : [];
+  for (const item of repos) {
+    const path = normalizeDirectoryPath(item?.path || item?.repo?.root || '');
+    const repo = normalizeFileExplorerRepoInfo(item?.repo, path);
+    if (path && repo) setLimitedMapEntry(fileExplorerRepoInfoCache, path, repo, fileExplorerMemoryCacheLimit);
+  }
 }
 
 function persistFileExplorerRepoInfoCache() {
@@ -787,15 +783,6 @@ function activeTmuxDirectoryPath(preferredItem = null) {
   for (const item of finderCandidateItems(preferredItem)) {
     const path = tmuxDirectoryForItem(item);
     if (path) return path;
-  }
-  return '';
-}
-
-function activeTmuxGitRootPath(preferredItem = null) {
-  if (preferredItem && !isTmuxSession(preferredItem)) return '';
-  for (const item of finderCandidateItems(preferredItem)) {
-    const root = tmuxGitRootForItem(item);
-    if (root) return root;
   }
   return '';
 }
@@ -3069,7 +3056,7 @@ function bindFileImagePreview(anchor, path, entry, options = {}) {
     anchor,
     popover: () => fileImagePreviewPopover?.dataset.previewPath === path ? fileImagePreviewPopover : null,
     stateClass: '',
-    showDelay: () => Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs),
+    showDelay: () => popoverShowDelayMs,
     hideDelay: () => popoverHideDelayMs,
     canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
     stillActive: () => popoverStillActive(anchor, fileImagePreviewPopover?.dataset.previewPath === path ? fileImagePreviewPopover : null),
@@ -4428,12 +4415,7 @@ function tabberSessionPopoverRefreshIsUnsafe() {
 
 function scheduleDeferredTabberRefresh() {
   if (tabberRefreshDeferredTimer) clearTimeout(tabberRefreshDeferredTimer);
-  const delay = Math.max(
-    Number(popoverHideDelayMs) || 0,
-    Number(tabPopoverShowDelayMs) || 0,
-    Number(tabPopoverFollowDelayMs) || 0,
-    160,
-  );
+  const delay = Math.max(Number(popoverShowDelayMs) || 0, Number(popoverHideDelayMs) || 0, 160);
   tabberRefreshDeferredTimer = setTimeout(() => {
     tabberRefreshDeferredTimer = null;
     if (itemInLayout(tabberItemId)) refreshTabberPanels();

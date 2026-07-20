@@ -9,10 +9,11 @@ import signal
 import subprocess
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from yolomux_lib.filesystem.io_ops import read_json_file
 from typing import Callable
 from time import monotonic as monotonic_clock
 from time import sleep as sleep_clock
@@ -140,9 +141,8 @@ def tracked_local_service_groups(
     except OSError:
         return groups
     for record_path in record_paths:
-        try:
-            record = json.loads(record_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        record = read_json_file(record_path, None)
+        if record is None:
             continue
         if not isinstance(record, dict) or not service_record_identity_matches(record, table):
             continue
@@ -167,10 +167,7 @@ def tracked_local_service_groups(
 def read_server_port_lease_record(port: int, state_dir: Path) -> dict[str, Any]:
     """Read the existing per-port ownership record written by acquire_server_port_lease."""
     lease_path = Path(state_dir) / "server-leases" / f"{int(port)}.lock"
-    try:
-        record = json.loads(lease_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    record = read_json_file(lease_path, {})
     return record if isinstance(record, dict) else {}
 
 
@@ -300,10 +297,7 @@ class LocalServiceRegistry:
         return self.socket_path.with_suffix(".stderr.log")
 
     def _read_record(self) -> dict[str, Any]:
-        try:
-            value = json.loads(self.record_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
+        value = read_json_file(self.record_path, {})
         return value if isinstance(value, dict) else {}
 
     def _write_record(self, record: dict[str, Any]) -> None:
@@ -492,8 +486,9 @@ class LocalServiceRegistry:
         }
 
     def retry(self) -> None:
-        """Clear a latched startup failure for one explicit operator retry."""
+        """Clear a latched startup or version-fence failure for one retry."""
         with self.lock:
+            self._upgrade_required = None
             self.failures = 0
             self.next_start_at = 0.0
             self._start_exit_count = 0

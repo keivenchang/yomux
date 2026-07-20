@@ -1651,13 +1651,6 @@ body :is(
 }
 .file-editor-diff-codemirror {
   position: relative;
-  --diff-add-line-bg: #2b5d16;
-  --diff-remove-line-bg: #540c06;
-  --diff-search-match-bg: #ffd54a;
-  --diff-search-match-fg: #0b1020;
-  --diff-search-match-ring: var(--file-hover-bg);
-  --diff-search-selected-bg: #ff9f1c;
-  --diff-search-selected-ring: #fff7c2;
 }
 .file-editor-diff-codemirror .cm-mergeViewEditors {
   height: 100%;
@@ -1784,14 +1777,6 @@ body :is(
   border-radius: 2px;
   background: rgba(226, 238, 248, 0.045);
   pointer-events: none;
-}
-body.editor-theme-light .file-editor-diff-codemirror {
-  --diff-add-line-bg: #bfeac8;
-  --diff-remove-line-bg: #f3b7b7;
-  --diff-search-match-bg: #ffcc00;
-  --diff-search-match-fg: var(--lt-text);
-  --diff-search-match-ring: #7c2d12;
-  --diff-search-selected-ring: var(--diff-search-match-ring);
 }
 body.editor-theme-light .file-editor-diff-codemirror .cm-merge-a .cm-changedLine,
 body.editor-theme-light .file-editor-diff-codemirror .cm-deletedChunk,
@@ -2175,17 +2160,6 @@ body.editor-theme-light .file-editor-code-preview {
   --markdown-link: var(--lt-markdown-link);
   --markdown-strong: var(--lt-markdown-strong);
   --markdown-emphasis: var(--lt-markdown-emphasis);
-}
-body.editor-theme-light {
-  /* One light-editor owner feeds both merge and inline diff surfaces; local remaps previously drifted. */
-  --code-diff-add: #00a152;
-  --code-diff-remove: #d81f32;
-  --drop-outline: var(--drop-outline-light);
-  --drop-outline-text: #0f2d69;
-  --drop-outline-bg: rgba(29, 78, 216, 0.14);
-  --drop-outline-strong: rgba(29, 78, 216, 0.98);
-  --drop-outline-shadow: rgba(29, 78, 216, 0.58);
-  --drop-outline-surface: rgba(239, 246, 255, 0.88);
 }
 body.editor-theme-light .file-editor-content .markdown-body h1,
 body.editor-theme-light .file-editor-content .markdown-body h2 {
@@ -3063,10 +3037,6 @@ body.editor-theme-light .file-editor-codemirror-panel .cm-search .cm-search-coun
   display: block;
   max-width: min(100%, 960px);
   color: var(--text);
-}
-.file-editor-native-video {
-  max-height: min(72vh, 720px);
-  background: var(--markdown-preview-bg);
 }
 .file-editor-image-panel {
   z-index: var(--z-file-editor-preview-layer);

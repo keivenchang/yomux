@@ -6,11 +6,11 @@ const {execFileSync} = require('child_process');
 const fs = require('fs');
 const vm = require('vm');
 
-const source = fs.readFileSync('static_src/js/yolomux/82_stats_current.js', 'utf8');
+const source = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 
 function loadNamespace() {
   const context = vm.createContext({console});
-  vm.runInContext(source, context, {filename: '82_stats_current.js'});
+  vm.runInContext(source, context, {filename: '84_stats_current.js'});
   return context.YOLOmuxStatsCurrent;
 }
 
@@ -1392,6 +1392,53 @@ test('terminal 503 reason reaches state and explicit retry restarts snapshot and
   client.stop();
 });
 
+test('read-side 426 identifies the version fence, posts one automatic recovery, and repairs without a click', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  const fetches = [];
+  let recovered = false;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async (url, options) => {
+      fetches.push({url, options});
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      if (url === '/api/stats-retry') {
+        recovered = true;
+        return response(200, {ok: true, status: 'ready'});
+      }
+      if (!recovered) return response(426, {
+        status: 'upgrade_required', reason: 'client or writer is too old',
+        required_protocol_version: 24, required_schema_generation: 6, required_build: '3',
+      });
+      return response(200, snapshot({range: 7200, requested: 300, resolution: 300}));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'read-fence-auto-retry',
+    savedRange: 7200,
+    savedResolution: 300,
+    onState: (state, error) => states.push({state, error}),
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 250},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'error');
+  assert.equal(states.at(-1).error.versionFence, true);
+  assert.equal(states.at(-1).error.requiredProtocolVersion, 24);
+  assert.equal(fetches.filter(item => item.url === '/api/stats-retry').length, 1);
+  assert.equal(clock.nextDelay(), 200);
+  await clock.advance(200);
+  await flushPromises();
+  await flushPromises();
+  assert.equal(states.at(-1).state, 'ready');
+  assert.equal(FakeEventSource.instances.length, 1);
+  client.stop();
+});
+
 test('invalid streamed JSON and protocol deltas share the controller bounded repair path', async () => {
   for (const [streamedValue, immediate] of [
     ['{', true],
@@ -1663,8 +1710,8 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(html.includes('data-series="usage_tokens" data-point-count="2"'));
   assert.equal(html.includes('data-stats-chart="agent-tokens"'), false);
   assert.ok(html.includes('Cost Summary'));
-  assert.ok(html.includes('Marginal <strong>$0.30</strong>'));
-  assert.ok(html.includes('At API list prices <strong>$0.60</strong>'));
+  assert.ok(html.includes('<strong>$0.30</strong> marginal'));
+  assert.ok(html.includes('<strong>$0.60</strong> list'));
   assert.ok(html.includes('Total tokens: <strong>1.2K tokens</strong>'));
   assert.ok(html.includes('Input=600, Cached=300, Cache write=100, Output=200, Other=0'));
   assert.ok(html.includes('data-stats-current-cost-more>More Info</button>'));
@@ -1682,7 +1729,7 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(modal.includes('gpt-5.6-sol'));
   assert.ok(modal.includes('By Agent'));
   assert.ok(modal.includes('Pricing attribution'));
-  assert.ok(modal.includes('Marginal $0.10 · At API list prices $0.20'));
+  assert.ok(modal.includes('$0.10 marginal · $0.20 list'));
   assert.ok(modal.includes('https://example.com/pricing'));
   assert.ok(modal.includes('Reasoning breakdown unavailable'));
   root.listeners.get('click')({target: {
@@ -1730,8 +1777,8 @@ test('static build registers the current controller once without a second namesp
     'from tools.static_build import ASSETS, build_asset, lint_duplicate_functions',
     'parts = ASSETS["yolomux.js"]',
     'built = build_asset("yolomux.js")',
-    'current = "static_src/js/yolomux/82_stats_current.js"',
-    'legacy = "static_src/js/yolomux/83_debug_panel.js"',
+    'current = "static_src/js/yolomux/84_stats_current.js"',
+    'legacy = "static_src/js/yolomux/85_debug_panel.js"',
     'print(json.dumps({',
     '  "current_count": parts.count(current),',
     '  "current_index": parts.index(current),',
@@ -1748,19 +1795,25 @@ test('static build registers the current controller once without a second namesp
   assert.equal(summary.namespace_owner_count, 1);
   assert.ok(summary.legacy_position < 0 || summary.namespace_position < summary.legacy_position);
   assert.deepStrictEqual(summary.duplicate_declarations, []);
-  if (fs.existsSync('static_src/js/yolomux/83_debug_panel.js')) {
-    const legacySource = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+  if (fs.existsSync('static_src/js/yolomux/85_debug_panel.js')) {
+    const legacySource = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
     assert.equal(legacySource.includes('globalThis.YOLOmuxStatsCurrent ='), false, 'the established renderer adapter cannot own the current namespace');
   }
 });
 
 test('new controller has one namespace and no old temporal processing dependency', () => {
   const context = vm.createContext({console});
-  vm.runInContext(source, context, {filename: '82_stats_current.js'});
+  vm.runInContext(source, context, {filename: '84_stats_current.js'});
   assert.deepStrictEqual(Object.keys(context).sort(), ['YOLOmuxStatsCurrent', 'console']);
   for (const forbidden of [
     'debugGraph', 'aggregateBucket', 'sampleHold', 'interpolate', 'prefetch', 'mergeRanges',
   ]) assert.equal(source.includes(forbidden), false, `current controller must not contain ${forbidden}`);
+});
+
+test('isolated current-stats escaping and UTF-8 validation retain their fail-closed contract', () => {
+  assert.match(source, /This module is intentionally self-contained:[\s\S]*escaping and UTF-8 validation helpers cannot depend on the app bundle's lexical core helpers\./);
+  assert.match(source, /function currentStatsEscape\(value\) \{\s+return String\(value\)\.replace/);
+  assert.match(source, /function utf8ByteLength\(value\) \{\s+try \{\s+return encodeURIComponent\(value\)[\s\S]*?\} catch \(_error\) \{\s+return Infinity;/);
 });
 
 (async () => {

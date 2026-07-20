@@ -10,21 +10,19 @@ already exist outside YO!agent's control.
 from __future__ import annotations
 
 import asyncio
-import os
 import importlib
 import importlib.util
 import json
 import shutil
 import subprocess
 import tempfile
-import threading
 import time
 from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 from typing import Any
 
-from ..agent_tui import send_prompt
+from ..tmux.agent_tui import send_prompt
 from ..agent_comms.claude_stream_json import claude_stream_json_argv
 from ..agent_comms.claude_stream_json import claude_stream_json_env
 from ..agent_comms.claude_stream_json import claude_stream_json_result
@@ -39,12 +37,11 @@ from ..common import PROJECT_ROOT
 from ..common import YOLOMUX_VERSION
 from ..common import codex_exec_argv
 from ..common import codex_runtime_env
-from ..tmux_utils import cmd_error
-from ..tmux_utils import tmux_capture_pane
-from ..tmux_utils import tmux_capture_pane_styled
-from ..tmux_utils import tmux_clear_input
-from ..tmux_utils import tmux_paste_text
-from ..transcripts import codex_event_text
+from ..tmux.tmux_utils import tmux_capture_pane
+from ..tmux.tmux_utils import tmux_capture_pane_styled
+from ..tmux.tmux_utils import tmux_clear_input
+from ..tmux.tmux_utils import tmux_paste_text
+from ..observability.transcripts import codex_event_text
 from .stream_events import ClaudeStreamJsonNormalizer
 from .stream_events import ERROR
 
@@ -120,6 +117,19 @@ class AgentTransport:
     capabilities: tuple[str, ...] = ()
     aliases: tuple[str, ...] = ()
 
+    def _result(self, **kwargs: Any) -> TransportSendResult:
+        return TransportSendResult(transport=self.id, transport_label=self.label, **kwargs)
+
+    def _ok(self, *, result_source: str, text: str = "", **kwargs: Any) -> TransportSendResult:
+        return self._result(ok=True, sent=True, result_source=result_source, text=text, **kwargs)
+
+    def _fail(self, *, result_source: str = "", error: str, sent: bool = False, **kwargs: Any) -> TransportSendResult:
+        return self._result(ok=False, sent=sent, result_source=result_source, error=error, **kwargs)
+
+    def _reject_if_cannot_send(self, target: dict[str, Any]) -> TransportSendResult | None:
+        can_send, reason = self.can_send(target)
+        return None if can_send else self._fail(error=reason)
+
     def describe(self) -> TransportDescription:
         return TransportDescription(
             id=self.id,
@@ -145,14 +155,7 @@ class AgentTransport:
         }
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **_kwargs: Any) -> TransportSendResult:
-        return TransportSendResult(
-            ok=False,
-            sent=False,
-            transport=self.id,
-            transport_label=self.label,
-            result_source="",
-            error="transport is not implemented",
-        )
+        return self._fail(error="transport is not implemented")
 
     def watch_result(self, target: dict[str, Any], marker: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "target": target, "marker": marker, "error": "transport does not support result watching"}
@@ -373,12 +376,7 @@ class TmuxLegacyTransport(AgentTransport):
         clear_payload = result.clear_result.as_dict()
         include_clear = result.cleared or bool(clear_payload.get("detected_text") or clear_payload.get("remaining_text") or clear_payload.get("error"))
         if not result.ok:
-            return TransportSendResult(
-                ok=False,
-                sent=False,
-                transport=self.id,
-                transport_label=self.label,
-                result_source="",
+            return self._fail(
                 error=result.error or "tmux paste-buffer failed",
                 pasted=result.pasted,
                 cleared=result.cleared,
@@ -386,11 +384,7 @@ class TmuxLegacyTransport(AgentTransport):
                 reason_code=result.reason_code,
                 returncode=result.returncode,
             )
-        return TransportSendResult(
-            ok=True,
-            sent=True,
-            transport=self.id,
-            transport_label=self.label,
+        return self._ok(
             result_source="transcript-or-screen",
             pasted=True,
             cleared=result.cleared,
@@ -417,9 +411,9 @@ class CodexExecTransport(AgentTransport):
         return True, "target can run through codex exec"
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        can_send, reason = self.can_send(target)
-        if not can_send:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
         timeout = float(kwargs.get("timeout") or 45.0)
         cwd = str(target.get("cwd") or PROJECT_ROOT)
         session_id = str(target.get("agent_session_id") or "").strip()
@@ -449,7 +443,7 @@ class CodexExecTransport(AgentTransport):
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
-                return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=str(exc))
+                return self._fail(error=str(exc))
             output_text = ""
             try:
                 output_text = result_path.read_text(encoding="utf-8").strip()
@@ -468,17 +462,13 @@ class CodexExecTransport(AgentTransport):
                             parts.append(piece)
                 output_text = "\n".join(parts).strip()
             if completed.returncode == 0 and output_text:
-                return TransportSendResult(
-                    ok=True,
-                    sent=True,
-                    transport=self.id,
-                    transport_label=self.label,
+                return self._ok(
                     result_source="codex-exec-jsonl",
                     text=output_text,
                     returncode=completed.returncode,
                 )
             error = str(completed.stderr or "").strip() or f"codex exited {completed.returncode}"
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="codex-exec-jsonl", error=error, returncode=completed.returncode)
+            return self._fail(result_source="codex-exec-jsonl", error=error, returncode=completed.returncode)
 
 
 class ClaudeSdkTransport(AgentTransport):
@@ -530,9 +520,9 @@ class ClaudeSdkTransport(AgentTransport):
         return "".join(assistant_parts).strip()
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        can_send, reason = self.can_send(target)
-        if not can_send:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
         timeout = float(kwargs.get("timeout") or CODEX_APP_SERVER_TIMEOUT_SECONDS)
         sdk_error = RuntimeError
         try:
@@ -540,10 +530,10 @@ class ClaudeSdkTransport(AgentTransport):
             sdk_error = getattr(sdk, "ClaudeSDKError", RuntimeError)
             final_text = asyncio.run(asyncio.wait_for(self._send_async(sdk, target, text), timeout=timeout))
             if final_text:
-                return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="claude-sdk", text=final_text)
-            return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="claude-sdk", error="Claude SDK response completed without final text")
+                return self._ok(result_source="claude-sdk", text=final_text)
+            return self._fail(result_source="claude-sdk", sent=True, error="Claude SDK response completed without final text")
         except (OSError, RuntimeError, ValueError, TypeError, asyncio.TimeoutError, sdk_error) as exc:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="claude-sdk", error=str(exc))
+            return self._fail(result_source="claude-sdk", error=str(exc))
 
 
 class ClaudeChannelsTransport(AgentTransport):
@@ -573,8 +563,10 @@ class ClaudeChannelsTransport(AgentTransport):
         return False, "Claude Channels transport requires a YOLOmux channel MCP plugin implementation"
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        _can_send, reason = self.can_send(target)
-        return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
+        return self._fail(error="Claude Channels transport requires a YOLOmux channel MCP plugin implementation")
 
 
 class CodexSdkTransport(AgentTransport):
@@ -610,9 +602,9 @@ class CodexSdkTransport(AgentTransport):
         return sdk.ApprovalMode.auto_review
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        can_send, reason = self.can_send(target)
-        if not can_send:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
         sdk_error = RuntimeError
         try:
             sdk = importlib.import_module("openai_codex")
@@ -638,10 +630,10 @@ class CodexSdkTransport(AgentTransport):
                 result = thread.run(text, approval_mode=approval_mode, cwd=cwd, model=model, sandbox=sandbox)
             final_response = str(result.final_response or "").strip()
             if final_response:
-                return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="codex-sdk", text=final_response)
-            return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="codex-sdk", error="Codex SDK turn completed without a final response")
+                return self._ok(result_source="codex-sdk", text=final_response)
+            return self._fail(result_source="codex-sdk", sent=True, error="Codex SDK turn completed without a final response")
         except (OSError, RuntimeError, ValueError, TypeError, sdk_error) as exc:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="codex-sdk", error=str(exc))
+            return self._fail(result_source="codex-sdk", error=str(exc))
 
 
 class CodexAppServerTransport(AgentTransport):
@@ -663,9 +655,9 @@ class CodexAppServerTransport(AgentTransport):
         return True, "target can run through codex app-server stdio"
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        can_send, reason = self.can_send(target)
-        if not can_send:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
         timeout = float(kwargs.get("timeout") or CODEX_APP_SERVER_TIMEOUT_SECONDS)
         popen = kwargs.get("popen") or subprocess.Popen
         session = CodexAppServerSession(target, popen=popen)
@@ -755,9 +747,9 @@ class CodexMcpServerTransport(CodexAppServerTransport):
         return True, "target can run through codex mcp-server stdio"
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        can_send, reason = self.can_send(target)
-        if not can_send:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
         timeout = float(kwargs.get("timeout") or CODEX_APP_SERVER_TIMEOUT_SECONDS)
         cwd = str(target.get("cwd") or PROJECT_ROOT)
         popen = kwargs.get("popen") or subprocess.Popen
@@ -787,7 +779,7 @@ class CodexMcpServerTransport(CodexAppServerTransport):
             thread_id = str(target.get("thread_id") or target.get("agent_session_id") or "").strip()
             tool_name = "codex-reply" if thread_id else "codex"
             if tool_name not in tool_names:
-                return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="codex-mcp-json-rpc", error=f"codex MCP tool `{tool_name}` is not available")
+                return self._fail(result_source="codex-mcp-json-rpc", error=f"codex MCP tool `{tool_name}` is not available")
             arguments: dict[str, Any] = {"prompt": text}
             if thread_id:
                 arguments["threadId"] = thread_id
@@ -808,10 +800,10 @@ class CodexMcpServerTransport(CodexAppServerTransport):
             call_response = protocol.read_response(process, "call-1", deadline, notifications)
             final_text = codex_mcp_tool_result_text(call_response)
             if final_text:
-                return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="codex-mcp-json-rpc", text=final_text)
-            return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="codex-mcp-json-rpc", error="codex MCP tool completed without content")
+                return self._ok(result_source="codex-mcp-json-rpc", text=final_text)
+            return self._fail(result_source="codex-mcp-json-rpc", sent=True, error="codex MCP tool completed without content")
         except (OSError, subprocess.SubprocessError) as exc:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="codex-mcp-json-rpc", error=str(exc))
+            return self._fail(result_source="codex-mcp-json-rpc", error=str(exc))
         finally:
             if process is not None:
                 protocol.terminate_process(process)
@@ -836,9 +828,9 @@ class ClaudeStreamJsonTransport(AgentTransport):
         return True, "target can run through claude stream-json"
 
     def send(self, target: dict[str, Any], text: str, *, submit: bool = True, **kwargs: Any) -> TransportSendResult:
-        can_send, reason = self.can_send(target)
-        if not can_send:
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="", error=reason)
+        rejected = self._reject_if_cannot_send(target)
+        if rejected is not None:
+            return rejected
         timeout = float(kwargs.get("timeout") or CODEX_APP_SERVER_TIMEOUT_SECONDS)
         cwd = str(target.get("cwd") or PROJECT_ROOT)
         run = kwargs.get("run") or subprocess.run
@@ -880,16 +872,16 @@ class ClaudeStreamJsonTransport(AgentTransport):
         except TransportInterrupted as exc:
             if callable(on_event):
                 on_event({"kind": ERROR, "event": ERROR, "backend": "claude", "native_type": "subprocess", "text": str(exc)})
-            return TransportSendResult(ok=False, sent=True, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=str(exc), reason_code="interrupted")
+            return self._fail(result_source="claude-stream-json", sent=True, error=str(exc), reason_code="interrupted")
         except (OSError, subprocess.TimeoutExpired) as exc:
             if callable(on_event):
                 on_event({"kind": ERROR, "event": ERROR, "backend": "claude", "native_type": "subprocess", "text": str(exc)})
-            return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=str(exc))
+            return self._fail(result_source="claude-stream-json", error=str(exc))
         output_text, output_error = claude_stream_json_result(stdout_text)
         if returncode == 0 and output_text:
-            return TransportSendResult(ok=True, sent=True, transport=self.id, transport_label=self.label, result_source="claude-stream-json", text=output_text, returncode=returncode)
+            return self._ok(result_source="claude-stream-json", text=output_text, returncode=returncode)
         error = output_error or stderr_text.strip() or f"claude exited {returncode}"
-        return TransportSendResult(ok=False, sent=False, transport=self.id, transport_label=self.label, result_source="claude-stream-json", error=error, returncode=returncode)
+        return self._fail(result_source="claude-stream-json", error=error, returncode=returncode)
 
 
 class AgentTransportRegistry:

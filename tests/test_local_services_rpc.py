@@ -329,7 +329,7 @@ def test_local_service_transport_has_no_pickle_or_decompression_surface():
         "yolomux_lib/local_services/rpc.py",
         "yolomux_lib/local_services/runtime.py",
         "yolomux_lib/local_services/registry.py",
-        "yolomux_lib/jobd.py",
+        "yolomux_lib/infra/jobd.py",
         "yolomux_lib/stats_current/service.py",
         "yolomux_lib/approvald.py",
     ]

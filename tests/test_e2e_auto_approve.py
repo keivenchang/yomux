@@ -98,7 +98,7 @@ def test_e2e_mock_prompt_reaches_structured_ask_payload(monkeypatch, tmp_path, a
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+        f"cd {REPO_ROOT} && exec python3 tools/agent_clients/{agent}.py --mock",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
@@ -142,7 +142,7 @@ def test_e2e_mock_codex_sleep_10_uses_working_turn_without_approval(monkeypatch,
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 tools/codex.py --mock",
+        f"cd {REPO_ROOT} && exec python3 tools/agent_clients/codex.py --mock",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 
@@ -188,7 +188,7 @@ def test_e2e_yoagent_mock_sends_capture_multiple_results(monkeypatch, tmp_path):
     for agent, session in sessions.items():
         created = _tmux(
             socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/{agent}.py --mock",
+            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/agent_clients/{agent}.py --mock",
         )
         assert created.returncode == 0, f"tmux new-session failed for {agent}: {created.stderr or created.stdout}"
 
@@ -276,7 +276,7 @@ def test_e2e_yoagent_roster_job_sends_exact_command_once(monkeypatch, tmp_path):
     for session in sessions:
         created = _tmux(
             socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/claude.py --mock",
+            f"cd {mock_cwd} && exec python3 {REPO_ROOT}/tools/agent_clients/claude.py --mock",
         )
         assert created.returncode == 0, f"tmux new-session failed for {session}: {created.stderr or created.stdout}"
 
@@ -338,7 +338,7 @@ def test_e2e_yo_auto_approves_mock_yesno(monkeypatch, tmp_path, agent, steps):
 
     created = _tmux(
         socket_path, "new-session", "-d", "-s", session, "-x", "120", "-y", "40",
-        f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+        f"cd {REPO_ROOT} && exec python3 tools/agent_clients/{agent}.py --mock",
     )
     assert created.returncode == 0, f"tmux new-session failed: {created.stderr or created.stdout}"
 

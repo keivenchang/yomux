@@ -10,6 +10,18 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools" / "yostats_active_browser_window.py"
+CONTENTION_TOOL_PATH = ROOT / "tools" / "yostats_contention_benchmark.py"
+
+
+def test_capture_tools_share_proc_cpu_reader_and_positive_validators():
+    active_source = TOOL_PATH.read_text(encoding="utf-8")
+    contention_source = CONTENTION_TOOL_PATH.read_text(encoding="utf-8")
+
+    assert "from tools.yostats_capture_common import positive_int, process_cpu_seconds" in active_source
+    assert "from tools.yostats_capture_common import positive_float, positive_int, process_cpu_seconds" in contention_source
+    assert "def process_cpu_seconds" not in active_source
+    assert "def process_cpu_time_seconds" not in contention_source
+    assert "process_cpu_seconds(pid)" in contention_source
 
 
 def load_tool_module():
@@ -27,7 +39,11 @@ def test_active_browser_window_requires_normal_login_and_tmp_output():
 
     assert args.username is None
     assert args.duration == 60
+    assert args.workload == "active"
     assert args.output == Path("/tmp/window.json")
+    idle_args = tool.parse_args(["--workload", "idle-yostats", "--duration", "60", "--output", "/tmp/idle-window.json"])
+    assert idle_args.workload == "idle-yostats"
+    assert idle_args.duration == 60
     source = TOOL_PATH.read_text(encoding="utf-8")
     assert "YOLOMUX_TEST_AUTH_BYPASS" not in source
     assert 'parser.add_argument("--password",' not in source
@@ -45,12 +61,19 @@ def test_active_browser_window_requires_normal_login_and_tmp_output():
     assert 'workload["drag"] = drag_yocost_pane(driver)' in source
     assert "sessions.filter(isTmuxSession)" in source
     assert "selectSession(yocostItemId" in source
+    assert "a slower earlier request cannot overwrite the final 5m/1s state" in source
+    assert source.index('wait_for_exact_history(driver, 300, 1)') < source.index('driver.execute_script("setDebugGraphRange(1800); setDebugGraphResolutionOverride(10)")')
     assert "clearClientPerfCounters(); performance.clearResourceTimings()" in source
     assert "runtime_service_pids" in source
     assert "X-YOLOmux-Measurement" in source
     assert "capture_measurement_metrics" in source
     assert "install_measurement_fetch_header" in source
     assert "window.fetch =" in source
+    assert 'choices=("active", "idle-yostats")' in source
+    assert "prepare_idle_yostats_workload" in source
+    assert "install_ticker_callback_counter" in source
+    assert '"ticker_callbacks"' in source
+    assert '"renderer"' in source
 
 
 def test_active_browser_window_uses_configured_admin_without_plaintext_credentials(monkeypatch):
@@ -79,12 +102,24 @@ def test_active_browser_window_reads_service_records_without_starting_another_ap
     assert "--print-runtime-report" not in TOOL_PATH.read_text(encoding="utf-8")
 
 
-def test_active_browser_window_reads_only_generic_capture_metrics(monkeypatch):
+def test_active_browser_window_reads_only_generic_capture_metrics_from_the_target_server(monkeypatch):
     tool = load_tool_module()
-    monkeypatch.setattr(tool, "read_background_owner_debug_status", lambda: {"current_owner": {"control_socket": "/tmp/control.sock"}})
-    monkeypatch.setattr(tool, "send_yolomux_control_request", lambda owner, request: {"ok": True, "performance": {"summary": []}})
+    stale_owner = {"port": 7770, "control_socket": "/tmp/stale-owner.sock"}
+    target_server = {"port": 7772, "control_socket": "/tmp/target-server.sock"}
+    monkeypatch.setattr(tool, "read_background_owner_debug_status", lambda: {"current_owner": stale_owner, "generations": [stale_owner, target_server]})
+    requests = []
+    monkeypatch.setattr(tool, "send_yolomux_control_request", lambda server, request: requests.append((server, request)) or {"ok": True, "performance": {"summary": []}})
 
-    assert tool.capture_measurement_metrics() == {"summary": []}
+    assert tool.capture_measurement_metrics(7772) == {"summary": []}
+    assert requests == [(target_server, {"action": "runtime_measurement_metrics", "scope": "capture"})]
+
+
+def test_active_browser_window_rejects_a_missing_target_server_generation(monkeypatch):
+    tool = load_tool_module()
+    monkeypatch.setattr(tool, "read_background_owner_debug_status", lambda: {"generations": [{"port": 7770, "control_socket": "/tmp/stale-owner.sock"}]})
+
+    with pytest.raises(RuntimeError, match="port 7772"):
+        tool.capture_measurement_metrics(7772)
 
 
 def test_active_browser_window_bounds_resource_evidence_and_strips_query_values():
@@ -184,3 +219,22 @@ def test_bounded_driver_quit_falls_back_to_killing_the_chromedriver_tree():
         tool.descendants_of = original_descendants
 
     assert kills == [(5000, tool.signal.SIGKILL), (5001, tool.signal.SIGKILL), (5002, tool.signal.SIGKILL)]
+
+
+def test_idle_yostats_counter_is_limited_to_the_two_live_ticker_callback_names():
+    tool = load_tool_module()
+
+    class FakeDriver:
+        script = ""
+
+        def execute_script(self, script):
+            self.script = script
+
+    driver = FakeDriver()
+    tool.install_ticker_callback_counter(driver)
+
+    assert "debugGraphLiveFrameTick" in driver.script
+    assert "debugGraphLiveTimerTick" in driver.script
+    assert "counter.requestAnimationFrame += 1" in driver.script
+    assert "counter.timeout += 1" in driver.script
+    assert "setTimeout =" in driver.script

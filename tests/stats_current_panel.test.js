@@ -7,11 +7,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-const source = fs.readFileSync('static_src/js/yolomux/83_debug_panel.js', 'utf8');
+const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
-const retiredMount = fs.readFileSync('static_src/js/yolomux/83_stats_panel.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
 let passed = 0;
 let failed = 0;
@@ -56,7 +55,7 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.match(source, /function debugSystemInnerHtml\(/);
   assert.match(source, /function debugLogsInnerHtml\(/);
   assert.doesNotMatch(source, /data-stats-current-view/);
-  assert.doesNotMatch(retiredMount, /YOLOmuxStatsCurrent\.mount|data-current-stats-mount/);
+  assert.equal(fs.existsSync('static_src/js/yolomux/83_stats_panel.js'), false);
 });
 
 test('zero-valued CPU samples remain visibly inside the chart viewBox', () => {
@@ -93,7 +92,7 @@ test('CPU promotes the newest sampled owner instead of covering it with a duplic
 });
 
 test('all established chart controls and semantic renderers remain present', () => {
-  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agent windows', 'Agent sessions', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
+  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agents', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
     assert.ok(source.includes(`toggleLabelEn: '${label}'`), label);
   }
   for (const token of ['data-js-debug-range-slider', 'data-js-debug-resolution-override', 'data-js-debug-chart-layout', 'data-js-debug-chart-close']) {
@@ -105,29 +104,55 @@ test('all established chart controls and semantic renderers remain present', () 
   assert.match(css, /\.js-debug-logs-view/);
 });
 
-test('Agent windows chart keeps live identities revision-gated against its status sample', () => {
+test('Agents keeps revision-gated live state and semantic paint', () => {
   assert.match(source, /agent_window_snapshot_revision/);
-  assert.match(source, /function debugGraphLiveAgentWindowDetailHtml\(\)/);
-  assert.match(source, /Live window details are waiting for the chart snapshot/);
+  assert.match(source, /function debugGraphLiveAgentWindowDetailHtml\(groupKey = 'activity'\)/);
+  assert.match(source, /Live status is waiting for the chart snapshot/);
   assert.match(source, /agentWindowPhysicalKey\(agent\)/);
-  assert.match(source, /group\.key === 'activity' \? debugGraphLiveAgentWindowDetailHtml\(\) : ''/);
+  assert.match(source, /group\.key === 'activity' \? debugGraphLiveAgentWindowDetailHtml\(group\.key\) : ''/);
+  assert.match(source, /cssKey: key/);
+  assert.doesNotMatch(source, /activitySessions|Agent sessions|askSessionTotal/);
   assert.match(css, /\.js-debug-agent-window-detail/);
+  assert.match(css, /\.js-debug-legend-swatch--workingAgents/);
 });
 
-test('Agent sessions chart is separate and uses server-provided session rollups', () => {
-  assert.match(source, /key: 'activitySessions'/);
-  assert.match(source, /askSessionTotal/);
-  assert.match(source, /runSessionTotal/);
-  assert.match(source, /name === 'ask_sessions'/);
-  assert.match(source, /chartGroups: Object\.freeze\(\['activity', 'activitySessions'\]\)/);
+test('Agent-window live detail rejects mixed revisions and recovers only on the accepted snapshot', () => {
+  const detailStart = source.indexOf('function debugGraphLiveAgentWindowRows()');
+  const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
+  assert.notEqual(detailStart, -1, 'live detail owner exists');
+  assert.notEqual(detailEnd, -1, 'live detail owner has a bounded source region');
+  const detailSource = source.slice(detailStart, detailEnd);
+  const context = {
+    Map,
+    Set,
+    Number,
+    String,
+    autoApproveStates: new Map(),
+    jsDebugStatsPollState: {agentWindowSnapshotRevision: 7},
+    agentWindowSnapshotRevision: payload => Number(payload?.agent_window_snapshot_revision || 0),
+    agentWindowPayloadRows: rows => Array.isArray(rows) ? rows : [],
+    agentWindowKind: kind => String(kind || ''),
+    agentWindowPhysicalKey: agent => String(agent?.window_index ?? ''),
+    agentWindowIndex: agent => Number(agent?.window_index),
+    agentWindowCanonicalLabel: (_index, kind) => kind,
+    esc: value => String(value),
+    document: {querySelectorAll: () => []},
+    result: null,
+  };
+  vm.runInNewContext(`${detailSource}\nautoApproveStates.set('one', {agent_window_snapshot_revision: 8, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});\nautoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="changed"/);
+  assert.match(context.result, /waiting for the chart snapshot/);
+  context.autoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /Live breakdown/);
 });
 
-test('YO!stats and YO!cost place shared size before range and resolution', () => {
+test('YO!stats puts Charts before Size, Range, and Resolution without changing YO!cost ordering', () => {
   const controlsSource = sourceFunction('debugGraphControlsHtml', 'debugGraphLocalDateKey');
   const costSource = sourceFunction('yoCostPanelHtml', 'openYoCostTranscriptPreview');
   const controlOrder = [
-    controlsSource.indexOf('debugGraphLayoutControlsHtml()'),
     controlsSource.indexOf('debugGraphChartToggleControlsHtml()'),
+    controlsSource.indexOf('debugGraphLayoutControlsHtml()'),
     controlsSource.indexOf('debugGraphRangeResolutionControlsHtml(nowMs)'),
   ];
   const costOrder = [
@@ -138,15 +163,38 @@ test('YO!stats and YO!cost place shared size before range and resolution', () =>
   ];
   assert.ok(controlOrder.every((index, position) => index >= 0 && (position === 0 || index > controlOrder[position - 1])), 'YO!stats control order');
   assert.ok(costOrder.every((index, position) => index >= 0 && (position === 0 || index > costOrder[position - 1])), 'YO!cost control order');
-  assert.match(css, /\.js-debug-chart-layout-control \{\s+grid-column: 2;\s+grid-row: 1;/);
-  assert.match(css, /\.js-debug-chart-toggle-control \{\s+grid-column: 1;\s+grid-row: 1;/);
+  assert.match(css, /\.js-debug-graph-controls \{\s+flex-wrap: nowrap;/);
+  assert.match(css, /\.js-debug-range-resolution-controls \{\s+flex: 1 1 12rem;/);
   assert.match(source, /<details class="js-debug-chart-toggle-control" data-js-debug-chart-menu>/);
   assert.match(source, /<input type="checkbox" data-js-debug-chart-toggle=/);
   assert.match(source, /event\.type === 'change' && chartToggle[\s\S]*?chartToggle\.checked/);
   assert.match(source, /function handleDebugGraphOutsideTapDismiss\(event\)[\s\S]*?data-js-debug-chart-menu\]\[open\][\s\S]*?menu\.open = false/);
   assert.match(css, /\.js-debug-chart-toggle-menu \{[\s\S]*?position: absolute;/);
-  assert.match(css, /@container \(max-width: 20rem\) \{\s+\.js-debug-graph-controls/);
+  assert.match(css, /@container \(max-width: 34rem\) \{\s+\.js-debug-graph-controls/);
+  assert.match(css, /grid-template-rows: auto auto;/);
   assert.match(css, /\.js-yocost-controls > \.js-debug-range-resolution-controls \{\s+flex: 1 0 100%;\s+order: 2;/);
+});
+
+test('one shared spike-compression descriptor preserves token behavior and makes rare daemon spikes readable', () => {
+  const axisSource = sourceFunction('debugGraphSpikeCompressedAxisDescriptor', 'debugGraphTokenSpikeAxisDescriptor');
+  const plotSource = sourceFunction('debugGraphPlotYForValue', 'debugGraphXForTime');
+  const context = {
+    Object,
+    Number,
+    Math,
+    result: null,
+    jsDebugGraphGeometry: {plotTop: 8, plotHeight: 150},
+    debugGraphChartAxisMax: (_group, rawMax) => rawMax <= 10 ? 10 : 100,
+  };
+  vm.runInNewContext(`${axisSource}\n${plotSource}\nconst token = debugGraphSpikeCompressedAxisDescriptor({unit: 'tokensPerMinute'}, [1, 2, 3, 4, 5, 5, 5, 5, 5, 100]);\nconst daemon = debugGraphSpikeCompressedAxisDescriptor({unit: 'percent'}, [1, 2, 3, 4, 5, 5, 5, 5, 5, 100]);\nconst quiet = debugGraphSpikeCompressedAxisDescriptor({unit: 'percent'}, [1, 2, 3, 4, 5, 5, 5, 5]);\nresult = {token, daemon, quiet, compressedY: debugGraphPlotYForValue(5, daemon.axisMax, daemon.scale), linearY: debugGraphPlotYForValue(5, daemon.axisMax)};`, context);
+  assert.equal(context.result.token.scale.mode, 'broken-linear', 'token descriptor retains its previous rare-spike mode');
+  assert.deepEqual(JSON.parse(JSON.stringify(context.result.token)), JSON.parse(JSON.stringify(context.result.daemon)), 'tokens and daemon load use the same descriptor thresholds and geometry');
+  assert.equal(context.result.quiet.scale, false, 'ordinary low daemon load stays linear');
+  assert.ok(context.result.compressedY + 40 < context.result.linearY, context.result);
+  assert.match(source, /function debugGraphTokenSpikeAxisDescriptor\(buckets\)[\s\S]*?debugGraphSpikeCompressedAxisDescriptor/);
+  assert.match(source, /group\.key === 'serversLoad' \? debugGraphSpikeCompressedAxisDescriptor\(group, plotSeries\.flatMap\(debugGraphSeriesPlotValues\)\)/);
+  assert.match(source, /data-js-debug-chart-scale/);
+  assert.match(source, /data-js-debug-chart-axis-break/);
 });
 
 test('the System sampler renders stalled usage as an explicit bounded warning', () => {
@@ -445,9 +493,9 @@ test('the retained YO!cost adapter and totals preserve marginal and API-list pri
       html: debugGraphCostPricePairHtml(0, 600000),
     };
   `, priceContext);
-  assert.equal(priceContext.result.subscription, 'Marginal $0.00 · At API list prices $0.60');
-  assert.equal(priceContext.result.defaultProfile, 'At API list prices $0.60');
-  assert.match(priceContext.result.html, /Marginal \$0\.00[\s\S]*At API list prices \$0\.60/);
+  assert.equal(priceContext.result.subscription, '$0.00 marginal · $0.60 list');
+  assert.equal(priceContext.result.defaultProfile, '$0.60');
+  assert.match(priceContext.result.html, /\$0\.00 marginal[\s\S]*\$0\.60 list/);
   assert.match(sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml'), /grandTotalDual[\s\S]*grandTotalApiList/);
   assert.match(sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml'), /debugGraphCostPricePairText\(summary\.totalMicroUsd, summary\.apiListMicroUsd\)/);
 });
@@ -475,6 +523,7 @@ test('same-range resolution replacement is not mislabeled as older history', () 
 
 test('active touch charts preserve vertical scrolling and arm only deliberate zoom gestures', () => {
   assert.match(css, /\.js-debug-line-chart\s*\{[\s\S]*?touch-action:\s*pan-y;/);
+  assert.match(source, /const jsDebugGraphTouchHoldMs = 200;/, 'touch zoom has an explicit hold duration instead of an undefined timer delay');
   const gestureSource = [
     sourceFunction('debugGraphPointerRatioFromRect', 'debugGraphPointerRatioForEvent'),
     sourceFunction('debugGraphPointerRatioForEvent', 'debugGraphSetInteractionLines'),
@@ -493,8 +542,8 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
     let jsDebugGraphTouchCandidateState = null;
     let jsDebugGraphZoomDomain = null;
     let jsDebugGraphLastPointerType = 'mouse';
-    const jsDebugGraphTouchArmDistancePx = 12;
-    const jsDebugGraphTouchDirectionRatio = 2;
+    const jsDebugGraphTouchArmDistancePx = 24;
+    const jsDebugGraphTouchDirectionRatio = 3;
     const jsDebugGraphTouchHoldMs = 200;
     const jsDebugGraphZoomMinRatio = 0.04;
     const jsDebugGraphZoomMinBuckets = 3;
@@ -557,8 +606,17 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
       return {prevented: prevented.count, zoomed};
     }
     const wiggle = runTouch(6, 1, 100);
+    const horizontalJitter = runTouch(23, 2, 100);
     const vertical = runTouch(6, 40, 100);
     const horizontal = runTouch(60, 2, 100);
+    const heldPrevented = {count: 0};
+    handleDebugGraphPointerDown(pointer('touch', 100, 100, 0, heldPrevented), panel);
+    handleDebugGraphPointerMove(pointer('touch', 100, 100, 200, heldPrevented), panel);
+    const heldSelectionStarted = jsDebugGraphSelectionState !== null;
+    handleDebugGraphPointerMove(pointer('touch', 700, 102, 250, heldPrevented), panel);
+    handleDebugGraphPointerUp(pointer('touch', 700, 102, 251, heldPrevented), panel);
+    const heldZoomed = jsDebugGraphZoomDomain !== null;
+    jsDebugGraphZoomDomain = null;
     const mousePrevented = {count: 0};
     handleDebugGraphPointerDown(pointer('mouse', 100, 100, 0, mousePrevented), panel);
     const mouseImmediate = jsDebugGraphSelectionState !== null;
@@ -576,8 +634,11 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
     const holdCandidate = {startClientX: 0, startClientY: 0, startedAtMs: 0};
     result = {
       wiggle,
+      horizontalJitter,
       vertical,
       horizontal,
+      heldSelectionStarted,
+      heldZoomed,
       mouseImmediate,
       mousePrevented: mousePrevented.count,
       touchClaimed,
@@ -592,14 +653,17 @@ test('active touch charts preserve vertical scrolling and arm only deliberate zo
     };
   `, context);
   assert.deepEqual({...context.result.wiggle}, {prevented: 0, zoomed: false});
+  assert.deepEqual({...context.result.horizontalJitter}, {prevented: 0, zoomed: false});
   assert.deepEqual({...context.result.vertical}, {prevented: 0, zoomed: false});
-  assert.equal(context.result.horizontal.zoomed, true);
-  assert.ok(context.result.horizontal.prevented >= 1);
+  assert.equal(context.result.horizontal.zoomed, false);
+  assert.equal(context.result.horizontal.prevented, 0);
+  assert.equal(context.result.heldSelectionStarted, true);
+  assert.equal(context.result.heldZoomed, true);
   assert.equal(context.result.mouseImmediate, true);
   assert.ok(context.result.mousePrevented >= 1);
-  assert.equal(context.result.touchClaimed, true);
-  assert.equal(context.result.cancelCommitted, true);
-  assert.ok(context.result.cancelPrevented >= 1);
+  assert.equal(context.result.touchClaimed, false);
+  assert.equal(context.result.cancelCommitted, false);
+  assert.equal(context.result.cancelPrevented, 0);
   assert.equal(context.result.verticalClaimed, false);
   assert.equal(context.result.nativeScrollPrevented, 0);
   assert.ok(context.result.refreshCount >= 1);
@@ -616,7 +680,6 @@ test('accepted snapshots bypass the event debounce and render immediately', () =
   );
   const context = {result: null};
   vm.runInNewContext(`
-    var jsDebugCollectionEnabled = true;
     var jsDebugRenderForce = false;
     var jsDebugRenderDragDeferred = false;
     var jsDebugRenderTimer = null;
@@ -730,7 +793,6 @@ test('already-selected current views keep their cached generation and skip selec
       start() { calls.start += 1; return Promise.resolve(); },
     };
     const jsDebugCurrentStatsClientState = {client, selectionKey: '7200:300', startPromise: null};
-    const jsDebugCollectionEnabled = true;
     function ensureJsDebugCurrentStatsClient() { return client; }
     function jsDebugStatsPanelVisible() { return true; }
     function jsDebugCurrentStatsSelection() { return selection; }
@@ -784,6 +846,89 @@ test('live chart slide cadence follows effective resolution with one shared repa
   assert.equal(context.result.oneSecondBefore, 0);
   assert.equal(context.result.oneSecondAt, 1);
   assert.equal(context.result.forced, true);
+});
+
+test('live ticker sleeps until the next slide boundary instead of polling animation frames', () => {
+  const tickerSource = [
+    sourceFunction('debugCostAgeLabels', 'debugCostAgeLabelText'),
+    sourceFunction('refreshDebugCostAgeLabels', 'debugGraphSlideIntervalMs'),
+    sourceFunction('debugGraphSlideIntervalMs', 'debugGraphSlidingAxisActive'),
+    sourceFunction('debugGraphSlidingAxisActive', 'debugGraphLiveTickerNextDueMs'),
+    sourceFunction('debugGraphLiveTickerNextDueMs', 'debugGraphLiveTickerNeeded'),
+    sourceFunction('debugGraphLiveTickerNeeded', 'debugGraphSlideLiveViews'),
+    sourceFunction('debugGraphSlideLiveViews', 'stopDebugGraphLiveTicker'),
+    sourceFunction('stopDebugGraphLiveTicker', 'debugGraphLiveTimerTick'),
+    sourceFunction('debugGraphLiveTimerTick', 'syncDebugGraphLiveTicker'),
+    sourceFunction('syncDebugGraphLiveTicker', 'flushDeferredDebugGraphRefresh'),
+  ].join('\n');
+  const context = {result: null};
+  vm.runInNewContext(`
+    let nowMs = 0;
+    let jsDebugGraphLiveTimer = 0;
+    let jsDebugCostAgeNextRefreshAtMs = 0;
+    let jsDebugGraphRangeSeconds = 300;
+    const jsDebugGraphSlideMaxRangeSeconds = 3600;
+    let queryCount = 0;
+    const timers = [];
+    const document = {visibilityState: 'visible', querySelectorAll() { queryCount += 1; return [{offsetParent: {}, dataset: {jsDebugGraphRenderedAt: '0'}}]; }};
+    const yocostItemId = '__yocost__';
+    function itemIsActivePaneTab() { return false; }
+    function jsDebugStatsPanelVisible() { return true; }
+    function debugGraphZoomDomainValid() { return false; }
+    function debugGraphDomain(now) { return {startMs: now - 300000, endMs: now}; }
+    function debugGraphDisplayResolutionMs() { return 1000; }
+    function refreshDebugGraphElement() {}
+    function debugCostAgeRefreshDelayMs() { return 3000; }
+    function setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; }
+    function clearTimeout() {}
+    const Date = {now: () => nowMs};
+    ${tickerSource}
+    syncDebugGraphLiveTicker();
+    const firstDelay = timers[0].delay;
+    nowMs = 1000;
+    timers[0].callback();
+    result = {firstDelay, timerCount: timers.length, nextDelay: timers[1].delay, queryCount, liveTimer: jsDebugGraphLiveTimer};
+  `, context);
+  assert.equal(context.result.firstDelay, 1000, 'a 1s live chart sleeps directly to its next slide boundary');
+  assert.equal(context.result.timerCount, 2, 'one timer fire schedules exactly one later wake instead of a frame loop');
+  assert.equal(context.result.nextDelay, 1000, 'the next wake remains one slide interval away');
+  assert.equal(context.result.queryCount, 1, 'the ticker queries live graphs only at its due fire');
+  assert.equal(context.result.liveTimer, 2, 'one pending timeout remains after the due work completes');
+  assert.doesNotMatch(source, /requestAnimationFrame\(debugGraphLiveFrameTick\)/, 'the live ticker no longer perpetually arms a frame callback');
+});
+
+test('cost-age refresh checks its due time before querying label DOM', () => {
+  const ageSource = [
+    sourceFunction('debugCostAgeLabels', 'debugCostAgeLabelText'),
+    sourceFunction('debugCostAgeLabelText', 'refreshDebugCostAgeLabels'),
+    sourceFunction('refreshDebugCostAgeLabels', 'debugGraphSlideIntervalMs'),
+  ].join('\n');
+  const context = {result: null};
+  vm.runInNewContext(`
+    let jsDebugCostAgeNextRefreshAtMs = 100;
+    let queries = 0;
+    const label = {textContent: '', closest() { return null; }, getClientRects() { return [{}]; }};
+    const document = {querySelectorAll() { queries += 1; return [label]; }};
+    const yocostItemId = '__yocost__';
+    const jsDebugStatsPollState = {lastSampleAtMs: 1};
+    const jsDebugPricingRefreshState = {lastRequestedAtMs: 0};
+    function itemIsActivePaneTab() { return true; }
+    function debugCostAgeRefreshDelayMs() { return 3000; }
+    function debugGraphCostText(_key, fallback) { return fallback; }
+    function relativeTimeFormat(value) { return String(value); }
+    function t() { return 'n/a'; }
+    ${ageSource}
+    const beforeDue = refreshDebugCostAgeLabels(99);
+    const queriedBeforeDue = queries;
+    const atDue = refreshDebugCostAgeLabels(100);
+    result = {beforeDue, queriedBeforeDue, atDue, queries, text: label.textContent, nextDue: jsDebugCostAgeNextRefreshAtMs};
+  `, context);
+  assert.equal(context.result.beforeDue, false);
+  assert.equal(context.result.queriedBeforeDue, 0, 'an early timer wake does not read label layout');
+  assert.equal(context.result.atDue, true);
+  assert.equal(context.result.queries, 1);
+  assert.match(context.result.text, /Last refreshed/);
+  assert.equal(context.result.nextDue, 3100);
 });
 
 test('stats and cost renders defer while a chart gesture owns their live DOM', () => {

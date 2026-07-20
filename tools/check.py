@@ -39,7 +39,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yolomux_lib.background_owner import pid_is_alive
-from tools.test_catalog import PYTEST_PHASE_FILES, pytest_files
+from yolomux_lib.filesystem.io_ops import read_json_file
+from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner compatibility export
+from tools.test_catalog import pytest_files
 
 DEFAULT_TOOL_LOCK_PATH = Path(
     os.environ.get("YOLOMUX_TOOL_LOCK_PATH", str(Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"))
@@ -295,9 +297,8 @@ def active_yolomux_server_records(
         return []
     records: list[dict[str, object]] = []
     for path in paths:
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        record = read_json_file(path, None, exceptions=(OSError, json.JSONDecodeError))
+        if record is None:
             continue
         if not isinstance(record, dict):
             continue
@@ -538,7 +539,6 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     usage_before = child_usage_snapshot()
     results: list[LaneResult] = []
-    interrupted = False
     try:
         with expensive_tool_lock(enabled=guard_enabled):
             if guard_enabled:
@@ -554,7 +554,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 3
     except KeyboardInterrupt:
-        interrupted = True
         elapsed = time.monotonic() - started
         print("CHECK INTERRUPTED", file=sys.stderr, flush=True)
         if report_path is not None:

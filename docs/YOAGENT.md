@@ -117,7 +117,7 @@ The file-management API is admin-only: `GET /api/yoagent/skill-files?kind=skill&
 
 ### Transports
 
-YO!agent skills describe intent; the server selects the transport. Existing visible Claude/Codex panes use `tmux-legacy`, a verified tmux paste-plus-Return fallback backed by `yolomux_lib/agent_tui.py` for pane capture, cursor/composer facts, prompt-state preflight, clear, paste-submit, and post-send checks. Managed providers such as Claude SDK, Claude Channels, Codex SDK, Codex app-server, Codex MCP server, `codex-exec`, and Claude stream-json are separate transports with different guarantees around result events, auth, sandbox, opt-in session identity, and completion semantics. A skill should request `preview_send_prompt`, `execute_confirmed_send`, or a watch tool instead of telling an agent to use tmux or contact another session directly.
+YO!agent skills describe intent; the server selects the transport. Existing visible Claude/Codex panes use `tmux-legacy`, a verified tmux paste-plus-Return fallback backed by `yolomux_lib/tmux/agent_tui.py` for pane capture, cursor/composer facts, prompt-state preflight, clear, paste-submit, and post-send checks. Managed providers such as Claude SDK, Claude Channels, Codex SDK, Codex app-server, Codex MCP server, `codex-exec`, and Claude stream-json are separate transports with different guarantees around result events, auth, sandbox, opt-in session identity, and completion semantics. A skill should request `preview_send_prompt`, `execute_confirmed_send`, or a watch tool instead of telling an agent to use tmux or contact another session directly.
 
 ### Perspectives
 
@@ -159,7 +159,7 @@ YO!agent chat keeps normal assistant text separate from auxiliary backend activi
 4. YOLOmux-managed work queues and explicit artifact files provide a durable cross-brand bridge.
 5. Shared external systems such as commits, PRs, issue comments, Slack, email, or tickets provide durable, auditable handoff when needed.
 6. Transcript/event observation is read-only monitoring and result extraction, not a send channel.
-7. Tmux paste plus Return is the visible-TUI compatibility fallback. It must use `yolomux_lib/agent_tui.py` to resolve the pane, inspect prompt/cursor state, clear verified drafts, send, verify, and capture a result.
+7. Tmux paste plus Return is the visible-TUI compatibility fallback. It must use `yolomux_lib/tmux/agent_tui.py` to resolve the pane, inspect prompt/cursor state, clear verified drafts, send, verify, and capture a result.
 8. Blind `tmux send-keys` is last resort only and is not a normal automation path.
 
 ### Handoff patterns

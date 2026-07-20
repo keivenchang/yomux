@@ -10,13 +10,13 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 
 ## Implementation Owners
 
-- Visible Claude/Codex tmux pane control: `yolomux_lib/agent_tui.py`. This is the public API for capture, cursor facts, composer state, prompt/screen classification, clearing, paste-submit, and send verification.
-- Pure visible screen state classification: `yolomux_lib/prompt_detector.py::agent_screen_state`.
-- Pure approval prompt classification: `yolomux_lib/prompt_detector.py::approval_prompt_state`.
-- Claude AskUserQuestion text: `yolomux_lib/prompt_detector.py::ask_user_question_prompt_text`.
-- Generic visible user-choice question text: `yolomux_lib/prompt_detector.py::visible_choice_prompt_text`.
-- Transcript activity state: `yolomux_lib/transcripts.py::transcript_activity_state_from_text`.
-- Hybrid approval source order: `yolomux_lib/approvals.py::hybrid_approval_prompt_state`.
+- Visible Claude/Codex tmux pane control: `yolomux_lib/tmux/agent_tui.py`. This is the public API for capture, cursor facts, composer state, prompt/screen classification, clearing, paste-submit, and send verification.
+- Pure visible screen state classification: `yolomux_lib/approval/prompt_detector.py::agent_screen_state`.
+- Pure approval prompt classification: `yolomux_lib/approval/prompt_detector.py::approval_prompt_state`.
+- Claude AskUserQuestion text: `yolomux_lib/approval/prompt_detector.py::ask_user_question_prompt_text`.
+- Generic visible user-choice question text: `yolomux_lib/approval/prompt_detector.py::visible_choice_prompt_text`.
+- Transcript activity state: `yolomux_lib/observability/transcripts.py::transcript_activity_state_from_text`.
+- Hybrid approval source order: `yolomux_lib/approval/approvals.py::hybrid_approval_prompt_state`.
 - App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`, routed through `agent_tui.classify_agent_pane`.
 - Claude/Codex structured stream normalization for YO!agent and text clients: `yolomux_lib/agent_comms/stream_events.py`. Current Claude CLI stream-json can emit Anthropic-style partials either directly or wrapped as `{"type":"stream_event","event":{...}}`; normalizers must unwrap those events, preserve outer `session_id` metadata, separate assistant-visible text from thinking/tool-call auxiliary rows, and dedupe snapshot tool-use echoes without dropping the later tool output.
 - Regression fixtures: `tests/test_auto_approve_detector.py` and `tests/test_transcripts.py`.
@@ -242,7 +242,7 @@ Codex can show a working row above an input-looking composer and model line. The
 gpt-5.5 xhigh   <dev-worktree>
 ```
 
-The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
+The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/agent_clients/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
 
 Codex working examples embedded in explanatory text are not live state when a bottom composer follows them as part of an old response.
 

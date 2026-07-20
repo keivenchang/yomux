@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import multiprocessing
 import os
 import threading
 import time
@@ -13,11 +12,9 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-from . import common
 from .app import TmuxWebtermApp
-from .sessions import discover_status_sessions
-from .tmux_utils import list_tmux_session_names
-from .local_services.rpc import safe_socket_path
+from .tmux.sessions import discover_status_sessions
+from .tmux.tmux_utils import list_tmux_session_names
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
 from .local_services.runtime import LocalRpcServiceState
@@ -29,10 +26,8 @@ from .statusd_protocol import STATUSD_CODE_REVISION
 from .statusd_protocol import STATUSD_SERVICE_NAME
 from .statusd_protocol import StatusProtocolError
 from .statusd_protocol import StatusSnapshotMetadata
-from .statusd_protocol import stamped_request
 from .statusd_protocol import validate_request
 from .statusd_client import STATUSD_DEFAULT_IDLE_SECONDS
-from .statusd_client import STATUSD_SOCKET_NAME
 from .statusd_client import default_socket_path
 
 
@@ -58,6 +53,7 @@ class PersistentStatusService(LocalRpcServiceState):
         self.session_names: tuple[str, ...] = ()
         self.snapshot: tuple[StatusSnapshotMetadata, bytes] | None = None
         self.snapshot_payload: dict[str, Any] | None = None
+        self.snapshot_signature: str | None = None
         self.generation = 0
         self.build_count = 0
         self.encode_count = 0
@@ -93,11 +89,17 @@ class PersistentStatusService(LocalRpcServiceState):
         if not isinstance(payload, dict):
             raise StatusProtocolError("invalid status payload")
         payload["timings"] = timings
+        source_payload = {key: value for key, value in payload.items() if key != "timings"}
+        source_signature = hashlib.sha1(
+            json.dumps(source_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
         # Reserve the generation before encoding so the immutable body forwarded to every
         # consumer identifies the exact statusd snapshot it represents. Do not advance the
         # public counter until this body is committed: waiters must never observe a generation
         # for a snapshot that cannot yet be read.
         with self.lock:
+            if self.snapshot is not None and not self.invalidation_reason and source_signature == self.snapshot_signature:
+                return self.snapshot
             generation = self.generation + 1
         payload["agent_window_snapshot_revision"] = generation
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -113,6 +115,7 @@ class PersistentStatusService(LocalRpcServiceState):
             )
             self.snapshot = (metadata, body)
             self.snapshot_payload = payload
+            self.snapshot_signature = source_signature
             self.invalidation_reason = ""
             self.last_error = ""
             self.lock.notify_all()

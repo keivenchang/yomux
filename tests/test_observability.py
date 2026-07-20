@@ -1,16 +1,15 @@
 import json
-import threading
 import time
 from http import HTTPStatus
 
+import pytest
+
 from yolomux_lib import events as events_module
-from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.events import EventLog
 from yolomux_lib.events import RunHistoryStore
-from yolomux_lib.metadata import MetadataCache
 from yolomux_lib.metadata import empty_work_graph
 from yolomux_lib.transcripts import format_transcript_item
 from yolomux_lib.transcripts import transcript_items_from_raw_line
@@ -23,21 +22,19 @@ def write_event_lines(path, events):
     )
 
 
-def make_app(tmp_path, sessions=("s1",)):
-    app = TmuxWebtermApp.__new__(TmuxWebtermApp)
-    app.sessions = list(sessions)
-    app.event_log = EventLog(tmp_path / "events.jsonl")
-    app.run_history_store = RunHistoryStore(tmp_path / "run-history.json")
-    app.metadata_cache = MetadataCache()
-    app.metadata_warm_lock = threading.Lock()
-    app.metadata_warm_running = False
-    app.yoagent_session_summary_lock = threading.RLock()
-    app.yoagent_session_summaries = {}
-    app.refresh_sessions = lambda *args, **kwargs: []
-    # Observability unit tests construct only the event-storage slice; production log writes
-    # additionally publish their durable invalidation through the full app's event broker.
-    app.publish_background_client_event = lambda *_args, **_kwargs: {}
-    return app
+@pytest.fixture
+def make_app(make_tmux_webterm_app, tmp_path):
+    def factory(sessions=("s1",)):
+        app = make_tmux_webterm_app(sessions)
+        app.event_log = EventLog(tmp_path / "events.jsonl")
+        app.run_history_store = RunHistoryStore(tmp_path / "run-history.json")
+        app.refresh_sessions = lambda *args, **kwargs: []
+        # Observability unit tests replace the durable event-storage slice; production writes
+        # additionally publish their invalidation through the full app event broker.
+        app.publish_background_client_event = lambda *_args, **_kwargs: {}
+        return app
+
+    return factory
 
 
 def test_event_log_search_filters_session_and_details(tmp_path):
@@ -127,8 +124,8 @@ def test_event_log_legacy_message_keeps_compatible_raw_payload(tmp_path):
     assert event["message_params"] == {}
 
 
-def test_auto_event_descriptor_is_promoted_out_of_diagnostic_details(tmp_path):
-    app = make_app(tmp_path)
+def test_auto_event_descriptor_is_promoted_out_of_diagnostic_details(tmp_path, make_app):
+    app = make_app()
 
     app.log_auto_event(
         "s1",
@@ -232,8 +229,8 @@ def test_event_log_tail_many_matches_per_session_tail(tmp_path):
     assert [event["message"] for event in tails["s2"]] == ["s2 old", "s2 new", "global new"]
 
 
-def test_search_payload_combines_events_and_current_summaries(tmp_path):
-    app = make_app(tmp_path)
+def test_search_payload_combines_events_and_current_summaries(tmp_path, make_app):
+    app = make_app()
     app.event_log.append("s1", "note", "alpha event", {"detail": "beta event detail"})
     app.summary = lambda session: ({"text": f"{session} beta summary"}, HTTPStatus.OK)
 
@@ -278,8 +275,8 @@ def test_transcript_items_keep_structured_role_timestamp_and_cwd():
     assert format_transcript_item(item) == "assistant (2026-07-02T01:02:03Z, /repo/demo)\ndone"
 
 
-def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, tmp_path):
-    app = make_app(tmp_path)
+def test_run_history_payload_summarizes_and_persists_live_session(monkeypatch, tmp_path, make_app):
+    app = make_app()
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text(
         "\n".join([

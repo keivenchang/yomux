@@ -37,7 +37,7 @@ Keep the `<textarea>` + overlay and hand-build Find + the editor-options list on
 
 ## What got removed when CM won (concrete)
 - JS editor-layer functions (`static/yolomux.js`): `renderStandaloneSyntaxHighlight`, `renderSyntaxHighlight`, `renderSyntaxHighlightInto`, `editorVisualColumnCount`, `editorVisualLineFragments`, `applyEditorWrapToTextarea`, `highlightLanguageAvailable`, the wrap/gutter toggles' textarea plumbing, and the textarea-era `renderEditorForActive`. ~53 `fileEditorTextarea`/`fileEditorHighlight` refs collapse into the CM adapter.
-  - Correction: `editorVisualHighlightHtml`, `simpleCodeSyntaxHtml`, and `syncFileEditorSplitScroll` were previously listed here as removed but are still defined+used in `95_codemirror_editor.js` (the editor module's CodeMirror half, split out of `90_changes_editor.js`); they power the raw/preview render + split-scroll. Only the textarea layer itself (`renderStandaloneSyntaxHighlight`, `fileEditorTextarea`) is gone.
+  - Correction: `editorVisualHighlightHtml`, `simpleCodeSyntaxHtml`, and `syncFileEditorSplitScroll` were previously listed here as removed but are still defined+used in `92_codemirror_editor.js` (the editor module's CodeMirror half, split out of `86_changes_editor.js`); they power the raw/preview render + split-scroll. Only the textarea layer itself (`renderStandaloneSyntaxHighlight`, `fileEditorTextarea`) is gone.
 - CSS (`static/yolomux.css`): the ~121 lines for `.file-editor-textarea`, `.file-editor-highlight`, `.syntax-highlighted`, `.editor-wrap`, the `--editor-line-number*` / `--editor-wrap-marker*` vars, and the visual-overlay grid. (CM owns gutter/wrap/highlight.)
 - `web.py`: the `#fileEditorHighlight` `<pre><code>` + `#fileEditorTextarea` markup (`web.py:138-139`); the `#`/wrap toolbar buttons if CM commands replace them.
 - KEEP: marked.js + `#fileEditorPreviewPane` (markdown Preview), the Edit/Preview/Split mode control, `editor_font_size`/`word_wrap`/`line_numbers` settings (now drive CM config). DECIDE on highlight.js: keep it only for the code-file Preview read view, or let a read-only CM render that too and drop highlight.js entirely.
@@ -64,7 +64,7 @@ No-build project gaining a dep + (one-time) build for the vendored bundle; bundl
 ## Recommendation
 Path A with loader A2 shipped. CodeMirror is the only editor engine, and the textarea layer was deleted. Future editor work should build on the CodeMirror adapter and the vendored bundle rather than reviving a second editor path.
 
-## Diff overview rail — rendering invariants (95_codemirror_editor.js)
+## Diff overview rail — rendering invariants (92_codemirror_editor.js)
 
 The diff overview is the colored rail painted alongside the `unifiedMergeView` scroller (red removed bands, green added bands) as a single `linear-gradient`. `updateCodeMirrorDiffOverview(panel, container, state, currentText, original)` builds it. Two invariants, the first learned by reintroducing the exact bug a guard test exists for:
 

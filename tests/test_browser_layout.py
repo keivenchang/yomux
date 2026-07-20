@@ -14,10 +14,8 @@ def test_browser_wait_timeout_has_one_xdist_only_floor():
     assert browser_wait_timeout(5, worker="") == 5
 
 
-def test_session_scoped_browser_reuse_is_an_explicit_experiment(monkeypatch):
+def test_session_scoped_browser_reuse_is_the_default(monkeypatch):
     monkeypatch.delenv(SESSION_SCOPED_BROWSER_REUSE_ENV, raising=False)
-    assert browser_layout_module._browser_fixture_scope(fixture_name="browser", config=None) == "module"
-    monkeypatch.setenv(SESSION_SCOPED_BROWSER_REUSE_ENV, "1")
     assert browser_layout_module._browser_fixture_scope(fixture_name="browser", config=None) == "session"
 
 
@@ -800,8 +798,8 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "primitive": False,
         "range": True,
         "resolution": True,
-        "toggles": 13,
-        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agent windows", "Agent sessions", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
+        "toggles": 12,
+        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agents", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -1008,6 +1006,103 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
     assert all(metrics["narrow"].values()), metrics
 
 
+def test_current_stats_daemons_load_spike_scale_keeps_low_hover_value_true(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    result = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            if (typeof debugGraphChartHtml !== 'function' || typeof debugGraphSetHoverTooltip !== 'function') return false;
+            const now = Date.now();
+            const durationMs = 10000;
+            const buckets = Array.from({length: 10}, (_unused, index) => ({
+              startMs: now - (10 - index) * durationMs,
+              durationMs,
+              hostMetrics: {serviceLoad: new Map([
+                ['low', {label: 'low daemon', cpuSamples: 1, cpuTotalPercent: 5, cpuMinPercent: 5, cpuMaxPercent: 5}],
+                ['spike', {label: 'spike daemon', cpuSamples: 1, cpuTotalPercent: index === 9 ? 100 : 0, cpuMinPercent: index === 9 ? 100 : 0, cpuMaxPercent: index === 9 ? 100 : 0}],
+              ])},
+            }));
+            const group = jsDebugGraphChartGroups.find(item => item.key === 'serversLoad');
+            const domain = {startMs: buckets[0].startMs, endMs: buckets.at(-1).startMs + durationMs, rangeSeconds: 100, zoomed: true};
+            const mount = document.createElement('div');
+            mount.dataset.jsDebugGraph = '';
+            mount.innerHTML = debugGraphChartShellHtml(debugGraphChartHtml(group, debugGraphSeriesData(buckets), domain, buckets, buckets, [], {}), domain);
+            document.body.append(mount);
+            const chart = mount.querySelector('[data-js-debug-chart="serversLoad"]');
+            const svg = chart?.querySelector('.js-debug-line-chart');
+            if (!chart || !svg) return false;
+            const rect = svg.getBoundingClientRect();
+            const ratio = 0.45;
+            debugGraphSetHoverTooltip(mount, {target: svg, clientX: rect.left + rect.width * ratio, clientY: rect.top + rect.height / 2}, ratio);
+            const tooltip = chart.querySelector('[data-js-debug-hover-tooltip]');
+            const result = {
+              scale: chart.dataset.jsDebugChartScale,
+              breakValue: chart.dataset.jsDebugChartAxisBreak,
+              tooltip: tooltip?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+              visible: tooltip?.hidden === false,
+            };
+            mount.remove();
+            return result;
+            """
+        )
+    )
+    assert result["scale"] == "broken-linear", result
+    assert float(result["breakValue"]) > 0, result
+    assert result["visible"] is True and re.search(r"low daemon: 5(?:\.0+)?%", result["tooltip"]), result
+
+
+def test_current_stats_graph_toolbar_uses_one_wide_row_and_two_narrow_rows(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+
+    def toolbar_metrics(width):
+        return browser.execute_script(
+            """
+            const width = arguments[0];
+            const graph = document.querySelector('[data-js-debug-graph]');
+            const controls = graph?.querySelector('.js-debug-graph-controls');
+            const charts = controls?.querySelector('.js-debug-chart-toggle-control');
+            const size = controls?.querySelector('.js-debug-chart-layout-control');
+            const range = controls?.querySelector('.js-debug-range-resolution-controls');
+            const slider = range?.querySelector('[data-js-debug-range-slider]');
+            const resolution = range?.querySelector('[data-js-debug-resolution-override]');
+            if (!graph || !controls || !charts || !size || !range || !slider || !resolution) return false;
+            graph.style.width = width + 'px';
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, top: rect.top, width: rect.width, height: rect.height};
+            };
+            return {charts: box(charts), size: box(size), range: box(range), slider: box(slider), resolution: box(resolution), sliderDisabled: slider.disabled, resolutionDisabled: resolution.disabled};
+            """,
+            width,
+        )
+
+    wide = WebDriverWait(browser, 8).until(lambda _driver: toolbar_metrics(760))
+    assert max(wide[item]["top"] for item in ("charts", "size", "range")) - min(wide[item]["top"] for item in ("charts", "size", "range")) <= 1, wide
+    assert wide["charts"]["left"] < wide["size"]["left"] < wide["range"]["left"], wide
+    assert wide["slider"]["width"] >= 128 and wide["resolution"]["width"] > 0, wide
+    assert not wide["sliderDisabled"] and not wide["resolutionDisabled"], wide
+
+    narrow = toolbar_metrics(480)
+    assert abs(narrow["charts"]["top"] - narrow["size"]["top"]) <= 1 < narrow["range"]["top"] - narrow["charts"]["top"], narrow
+    assert max(narrow[item]["top"] for item in ("slider", "resolution", "range")) - min(narrow[item]["top"] for item in ("slider", "resolution", "range")) <= 4, narrow
+    assert narrow["range"]["left"] <= narrow["charts"]["left"] + 1 and narrow["range"]["width"] >= 470, narrow
+    assert narrow["slider"]["width"] >= 128 and narrow["resolution"]["width"] > 0, narrow
+    assert not narrow["sliderDisabled"] and not narrow["resolutionDisabled"], narrow
+
+    menu_state = browser.execute_script(
+        """
+        const menu = document.querySelector('[data-js-debug-chart-menu]');
+        const summary = menu?.querySelector('summary');
+        if (!menu || !summary) return false;
+        summary.click();
+        const opened = menu.open;
+        summary.click();
+        return {opened, closed: !menu.open};
+        """
+    )
+    assert menu_state == {"opened": True, "closed": True}, menu_state
+
+
 def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     result = WebDriverWait(browser, 8).until(
@@ -1042,6 +1137,81 @@ def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path
     assert all(result.values()), result
 
 
+def test_current_stats_zoomed_toolbar_keeps_reset_and_range_inside_the_viewport(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+
+    def zoomed_metrics(width):
+        return browser.execute_script(
+            """
+            const width = arguments[0];
+            if (typeof debugGraphControlsHtml !== 'function') return false;
+            const graph = document.createElement('div');
+            graph.className = 'js-debug-graph';
+            graph.style.width = width + 'px';
+            document.body.append(graph);
+            const now = Date.now();
+            jsDebugGraphZoomDomain = {startMs: now - 240000, endMs: now - 60000};
+            graph.innerHTML = debugGraphControlsHtml(now);
+            const controls = graph.querySelector('.js-debug-graph-controls');
+            const range = controls?.querySelector('.js-debug-range-resolution-controls');
+            const reset = range?.querySelector('[data-js-debug-zoom-reset]');
+            const label = range?.querySelector('.js-debug-range-label--zoomed');
+            const resolution = range?.querySelector('[data-js-debug-resolution-override]');
+            if (!controls || !range || !reset || !label || !resolution) { graph.remove(); return false; }
+            const box = node => {
+              const rect = node.getBoundingClientRect();
+              return {left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width};
+            };
+            const initialPrefixAbsent = !range.querySelector('.js-debug-range-prefix');
+            const initial = {range: box(range), reset: box(reset), resetText: reset.textContent, resetAria: reset.getAttribute('aria-label'), label: box(label), resolution: box(resolution), fullRange: label.title, compactRange: label.textContent};
+            jsDebugGraphZoomDomain = null;
+            graph.innerHTML = debugGraphControlsHtml(now);
+            jsDebugGraphZoomDomain = {startMs: now - 240000, endMs: now - 60000};
+            syncDebugGraphControls(graph, now);
+            const refreshedRange = graph.querySelector('.js-debug-range-resolution-controls');
+            const refreshedControl = refreshedRange?.querySelector('[data-js-debug-range-control]');
+            const refreshedLabel = refreshedRange?.querySelector('.js-debug-range-label--zoomed');
+            const result = {...initial, initialPrefixAbsent, refreshedPrefixAbsent: !refreshedRange?.querySelector('.js-debug-range-prefix'), refreshedResetFirst: refreshedControl?.firstElementChild?.matches('[data-js-debug-zoom-reset]'), refreshedCompactLabel: refreshedLabel?.textContent, refreshedFullRange: refreshedLabel?.title};
+            graph.remove();
+            return result;
+            """,
+            width,
+        )
+
+    wide = WebDriverWait(browser, 8).until(lambda _driver: zoomed_metrics(760))
+    narrow = zoomed_metrics(320)
+    for metrics in (wide, narrow):
+        assert metrics["reset"]["left"] >= metrics["range"]["left"] - 1, metrics
+        assert metrics["reset"]["right"] <= metrics["range"]["right"] + 1, metrics
+        assert metrics["label"]["right"] <= metrics["resolution"]["left"] + 1 or metrics["label"]["top"] >= metrics["resolution"]["bottom"] - 1 or metrics["resolution"]["top"] >= metrics["label"]["bottom"] - 1, metrics
+        assert metrics["fullRange"] and len(metrics["fullRange"]) > len(metrics["compactRange"]), metrics
+        assert metrics["resetText"] == metrics["resetAria"], metrics
+        assert metrics["initialPrefixAbsent"] and metrics["refreshedPrefixAbsent"], metrics
+        assert metrics["refreshedResetFirst"], metrics
+        assert metrics["refreshedFullRange"] and len(metrics["refreshedFullRange"]) > len(metrics["refreshedCompactLabel"]), metrics
+    assert abs(wide["reset"]["top"] - wide["resolution"]["top"]) <= 2, wide
+
+
+def test_current_stats_zoom_reset_uses_completed_click_not_pointerdown(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    result = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        const panel = document.querySelector('.js-debug-panel');
+        const now = Date.now();
+        jsDebugGraphZoomDomain = {startMs: now - 240000, endMs: now - 60000};
+        refreshDebugGraphSurfaces({force: true, deferFocusedControl: false});
+        const reset = panel.querySelector('[data-js-debug-zoom-reset]');
+        if (!reset) { done(false); return; }
+        reset.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
+        const remainsZoomedAfterDown = jsDebugGraphZoomDomain !== null;
+        reset.click();
+        setTimeout(() => done({remainsZoomedAfterDown, cleared: jsDebugGraphZoomDomain === null}), 0);
+        """
+    )
+    assert result == {"remainsZoomedAfterDown": True, "cleared": True}
+
+
 def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoom(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     WebDriverWait(browser, 8).until(
@@ -1049,8 +1219,9 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
             "return document.querySelector('.js-debug-panel [data-js-debug-graph]') !== null"
         )
     )
-    result = browser.execute_script(
+    result = browser.execute_async_script(
         """
+        const done = arguments[0];
         const panel = document.querySelector('.js-debug-panel');
         const graph = panel.querySelector('[data-js-debug-graph]');
         let svg = panel.querySelector('.js-debug-line-chart');
@@ -1089,22 +1260,29 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
         const wiggle = gesture(41, 6, 1);
         const vertical = gesture(42, 6, 40);
         const horizontal = gesture(43, Math.max(60, rect.width * 0.08), 2);
-        const resetVisible = document.querySelector('[data-js-debug-zoom-reset]') !== null;
-        clearDebugGraphZoom();
-        return {
-          touchAction: getComputedStyle(svg).touchAction,
-          wiggle,
-          vertical,
-          horizontal,
-          resetVisible,
-        };
+        setTimeout(() => {
+          jsDebugGraphZoomDomain = null;
+          dispatch('pointerdown', startX, startY, 44);
+          setTimeout(() => {
+            dispatch('pointermove', startX + Math.max(60, rect.width * 0.08), startY + 2, 44);
+            dispatch('pointerup', startX + Math.max(60, rect.width * 0.08), startY + 2, 44);
+            const heldZoomed = jsDebugGraphZoomDomain !== null;
+            clearDebugGraphZoom();
+            done({
+              touchAction: getComputedStyle(svg).touchAction,
+              wiggle,
+              vertical,
+              horizontal,
+              heldZoomed,
+            });
+          }, 220);
+        }, 0);
         """
     )
     assert result["touchAction"] == "pan-y", result
     assert result["wiggle"] == {"down": False, "move": False, "up": False, "zoomed": False}, result
     assert result["vertical"] == {"down": False, "move": False, "up": False, "zoomed": False}, result
-    assert result["horizontal"]["down"] is False and result["horizontal"]["move"] is True, result
-    assert result["horizontal"]["zoomed"] is True and result["resetVisible"] is True, result
+    assert result["horizontal"] == {"down": False, "move": False, "up": False, "zoomed": False}, result
     points = browser.execute_script(
         """
         clearDebugGraphZoom();
@@ -1128,6 +1306,7 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
         "Input.dispatchTouchEvent",
         {"type": "touchStart", "touchPoints": [touch_point(points["start"]["x"], points["start"]["y"])]},
     )
+    browser.execute_async_script("const done = arguments[0]; setTimeout(done, 220);")
     for step in range(1, 9):
         fraction = step / 8
         x = points["start"]["x"] + (points["end"]["x"] - points["start"]["x"]) * fraction
@@ -1160,9 +1339,9 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
         lambda driver: driver.execute_script(
             """
             const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
-            if (jsDebugGraphZoomDomain === null || graph.dataset.jsDebugGraphRefreshPending === 'true') return false;
+            if (graph.dataset.jsDebugGraphRefreshPending === 'true') return false;
             return {
-              zoomed: jsDebugGraphZoomDomain.endMs > jsDebugGraphZoomDomain.startMs,
+              zoomed: jsDebugGraphZoomDomain !== null,
               refreshed: Number(graph.dataset.jsDebugGraphRenderedAt) > 1,
               currentSvg: graph.querySelector('.js-debug-line-chart') !== null,
             };
@@ -1423,6 +1602,9 @@ def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seco
     result = browser.execute_script(
         """
         const graph = document.querySelector('.js-debug-panel [data-js-debug-graph]');
+        const scrollOwner = graph.closest('.js-debug-graph-view');
+        scrollOwner.style.width = '160px';
+        graph.style.minWidth = '640px';
         const originalNow = Date.now;
         const originalResolution = debugGraphDisplayResolutionMs;
         const base = originalNow();
@@ -1436,6 +1618,8 @@ def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seco
         debugGraphDisplayResolutionMs = () => 10000;
         try {
           refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
+          scrollOwner.scrollLeft = Math.min(80, Math.max(0, scrollOwner.scrollWidth - scrollOwner.clientWidth));
+          const leftScrolled = scrollOwner.scrollLeft;
           graph.dataset.jsDebugGraphRenderedAt = String(base);
           const initialGrid = graph.querySelector('[data-js-debug-chart-grid]');
           const initialAxis = graph.querySelector('[data-js-debug-x-axis]');
@@ -1449,6 +1633,30 @@ def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seco
           debugGraphSlideLiveViews(base + 5000);
           const atGrid = graph.querySelector('[data-js-debug-chart-grid]');
           const atAxis = graph.querySelector('[data-js-debug-x-axis]');
+          const leftScrolledAfterTick = scrollOwner.scrollLeft;
+          const renderedAtDelta = Number(graph.dataset.jsDebugGraphRenderedAt) - base;
+          scrollOwner.scrollLeft = leftScrolled;
+          const svg = graph.querySelector('.js-debug-line-chart');
+          const rect = svg.getBoundingClientRect();
+              const dispatch = (type, x, pointerId) => svg.dispatchEvent(new PointerEvent(type, {
+            bubbles: true, cancelable: true, pointerType: 'touch', pointerId, button: 0,
+            clientX: x, clientY: rect.top + rect.height / 2,
+              }));
+              dispatch('pointerdown', rect.left + rect.width * 0.2, 74);
+              jsDebugGraphTouchCandidateState.startedAtMs -= jsDebugGraphTouchHoldMs;
+              dispatch('pointermove', rect.left + rect.width * 0.8, 74);
+          dispatch('pointerup', rect.left + rect.width * 0.8, 74);
+          const zoomedWhileScrolled = jsDebugGraphZoomDomain !== null;
+          clearDebugGraphZoom({render: false});
+          scrollOwner.scrollLeft = 0;
+          graph.dataset.jsDebugGraphRenderedAt = String(base + 5000);
+          Date.now = () => base + 10000;
+          debugGraphSlideLiveViews(base + 10000);
+          const frontGrid = graph.querySelector('[data-js-debug-chart-grid]');
+          const frontFollowed = frontGrid !== atGrid && Number(frontGrid.dataset.jsDebugDomainEnd) > Number(atGrid.dataset.jsDebugDomainEnd);
+          graph.style.minWidth = '';
+          scrollOwner.style.width = '';
+          refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
           return {
             interval: debugGraphSlideIntervalMs(10000),
             gridStableBefore: beforeGrid === initialGrid,
@@ -1458,7 +1666,13 @@ def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seco
             gridReplacedAt: atGrid !== initialGrid,
             axisReplacedAt: atAxis !== initialAxis,
             endAdvancedAt: Number(atGrid.dataset.jsDebugDomainEnd) > Number(initialEnd),
-            renderedAtDelta: Number(graph.dataset.jsDebugGraphRenderedAt) - base,
+            renderedAtDelta,
+            leftScrolled,
+            leftScrolledAfterTick,
+            zoomedWhileScrolled,
+            frontFollowed,
+            frontScrollLeft: scrollOwner.scrollLeft,
+            wideDoesNotScroll: scrollOwner.scrollWidth <= scrollOwner.clientWidth + 1,
           };
         } finally {
           Date.now = originalNow;
@@ -1476,6 +1690,12 @@ def test_current_stats_coarse_slide_replaces_plot_and_axis_together_at_five_seco
         "axisReplacedAt": True,
         "endAdvancedAt": True,
         "renderedAtDelta": 5000,
+        "leftScrolled": 80,
+        "leftScrolledAfterTick": 80,
+        "zoomedWhileScrolled": True,
+        "frontFollowed": True,
+        "frontScrollLeft": 0,
+        "wideDoesNotScroll": True,
     }, result
 
 
@@ -4575,6 +4795,7 @@ def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmu
 
 
 def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_inertia(browser, tmp_path):
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
     load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
@@ -4594,12 +4815,16 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
         const textarea = document.createElement('textarea');
         textarea.className = 'xterm-helper-textarea';
         screen.append(textarea);
+        const elsewhere = document.createElement('button');
+        elsewhere.id = 'terminal-touch-focus-elsewhere';
+        elsewhere.textContent = 'focused elsewhere';
+        document.body.append(elsewhere);
         screen.addEventListener('click', () => textarea.focus());
         textarea.value = 'unchanged';
-        textarea.blur();
+        elsewhere.focus();
         window.__terminalTouchSocket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
         window.__terminalTouchSocket.sent.length = 0;
-        return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 3};
+        return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 3, beforeFocus: document.activeElement.id};
         """
     )
 
@@ -4643,13 +4868,14 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
             }).filter(value => value?.type === 'tmux-scroll');
             if (!frames.length) return false;
             const textarea = document.querySelector('#term-1 textarea');
-            return {frames, value: textarea.value, focused: document.activeElement === textarea};
+            return {frames, value: textarea.value, focused: document.activeElement === textarea, activeId: document.activeElement.id};
             """
         )
     )
     assert normal["frames"][0]["direction"] == "up", normal
     assert normal["frames"][0]["lines"] >= 1, normal
     assert normal["value"] == "unchanged" and normal["focused"] is False, normal
+    assert normal["activeId"] == geometry["beforeFocus"] == "terminal-touch-focus-elsewhere", normal
     assert synthetic_mouse["focused"] is False and all(event["defaultPrevented"] and not event["accepted"] for event in synthetic_mouse["events"]), synthetic_mouse
 
     browser.execute_script(
@@ -4671,13 +4897,14 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
             const frames = window.__terminalTouchSocket.sent.map(value => {
               try { return JSON.parse(value); } catch (_error) { return null; }
             }).filter(value => value?.type === 'input');
-            return frames.length ? frames : false;
+            return frames.length ? {frames, activeId: document.activeElement.id, textareaFocused: document.activeElement === document.querySelector('#term-1 textarea')} : false;
             """
         )
     )
     browser.execute_script("performanceNow = window.__terminalTouchOriginalPerformanceNow;")
-    assert any(frame["data"] == "\x1b[A" for frame in alternate), alternate
-    assert any(frame["data"] == "\x1b[5~" for frame in alternate), alternate
+    assert any(frame["data"] == "\x1b[A" for frame in alternate["frames"]), alternate
+    assert all(frame["data"] not in {"\x1b[5~", "\x1b[6~"} for frame in alternate["frames"]), alternate
+    assert alternate["activeId"] == "terminal-touch-focus-elsewhere" and alternate["textareaFocused"] is False, alternate
 
     browser.execute_script(
         """
@@ -4716,6 +4943,7 @@ def test_terminal_touch_routes_normal_and_alternate_screens_without_post_end_ine
             "return document.activeElement === document.querySelector('#term-1 textarea')"
         )
     )
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
 
 
 def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browser, tmp_path):
@@ -4759,6 +4987,53 @@ def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browse
     )
     assert metrics["historyUp"] == {"key": "ArrowUp", "accepted": False, "defaultPrevented": True}, metrics
     assert metrics["historyDown"] == {"key": "ArrowDown", "accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["frames"] == [
+        {"type": "tmux-scroll", "direction": "up", "lines": metrics["pageLines"]},
+        {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
+    ], metrics
+    assert metrics["errors"] == [], metrics
+    assert metrics["rejections"] == [], metrics
+
+
+def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+            return document.querySelector('#term-1 .xterm') !== null
+              && terminals.get('1')?.term?.rows > 0
+              && socket?.readyState === WebSocket.OPEN;
+            """
+        )
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const screen = document.querySelector('#term-1 .xterm');
+        const socket = window.__bootSocketInstances.find(item => item.url.includes('/ws?session=1'));
+        const pageLines = terminalScrollPageLines(terminals.get('1').term);
+        const signalState = alternateOn => ({windows: [{key: '1:0', session: '1', window_index: '0', active: true, panes: [{window_key: '1:0', session: '1', window_index: '0', pane_index: '0', target: '%11', pane_id: '%11', current_command: alternateOn ? 'less' : 'claude', active: true, alternate_on: alternateOn, pid: 1234, dead: false}]}]});
+        const dispatch = (key, shiftKey = false) => {
+          const event = new KeyboardEvent('keydown', {key, code: key, shiftKey, bubbles: true, cancelable: true});
+          return {accepted: screen.dispatchEvent(event), defaultPrevented: event.defaultPrevented};
+        };
+        tmuxSignalState = signalState(false);
+        const normal = dispatch('PageUp');
+        setTimeout(() => {
+          tmuxSignalState = signalState(true);
+          const alternatePlain = dispatch('PageUp');
+          const alternateShift = dispatch('PageDown', true);
+          setTimeout(() => {
+            const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } }).filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
+            done({pageLines, normal, alternatePlain, alternateShift, frames, errors: window.__bootErrors || [], rejections: window.__bootRejections || []});
+          }, 60);
+        }, 60);
+        """
+    )
+    assert metrics["normal"] == {"accepted": False, "defaultPrevented": True}, metrics
+    assert metrics["alternatePlain"] == {"accepted": True, "defaultPrevented": False}, metrics
+    assert metrics["alternateShift"] == {"accepted": False, "defaultPrevented": True}, metrics
     assert metrics["frames"] == [
         {"type": "tmux-scroll", "direction": "up", "lines": metrics["pageLines"]},
         {"type": "tmux-scroll", "direction": "down", "lines": metrics["pageLines"]},
@@ -4988,7 +5263,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             monkeypatch,
             tmp_path,
             session_commands={
-                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock"
+                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/agent_clients/{agent}.py --mock"
                 for agent, spec in specs.items()
             },
             columns=120,
@@ -10215,6 +10490,7 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
 
 def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_prices(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path)
+    browser.set_window_size(260, 720)
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return typeof selectSession === 'function' && window.__terminalOpened >= 1")
     )
@@ -10272,11 +10548,18 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
           const report = document.querySelector('.js-yocost-panel .js-debug-cost-report');
+          const agentWrap = report?.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap');
+          agentWrap.scrollLeft = Math.min(37, Math.max(0, agentWrap.scrollWidth - agentWrap.clientWidth));
+          const expectedScrollLeft = agentWrap.scrollLeft;
+          renderYoCostPanels({force: true});
+          await new Promise(resolve => requestAnimationFrame(resolve));
           return {
             preferences,
             reportText: report?.textContent?.replace(/\\s+/g, ' ').trim() || '',
             grandTotals: [...report?.querySelectorAll('tfoot th') || []].map(node => node.textContent.trim()),
             pairCount: report?.querySelectorAll('.js-debug-cost-price-pair').length || 0,
+            restoredScrollLeft: document.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap')?.scrollLeft || 0,
+            expectedScrollLeft,
             errors: window.__bootErrors || [],
             rejections: window.__bootRejections || [],
           };
@@ -10288,8 +10571,10 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert "OpenAI / Codex pricing" in result["preferences"]["text"], result
     assert "Anthropic / Claude pricing" in result["preferences"]["text"], result
     assert "Subscription records $0 marginal cost" in result["preferences"]["text"], result
-    assert "Marginal $0.00" in result["reportText"], result
-    assert "At API list prices $0.60" in result["reportText"], result
+    assert "$0.00 marginal" in result["reportText"], result
+    assert "list" in result["reportText"], result
+    assert result["reportText"].count("At API list prices") == 1, result
+    assert result["restoredScrollLeft"] == result["expectedScrollLeft"], result
     assert set(result["grandTotals"]) == {"Grand total · marginal / API list prices"}, result
     assert result["pairCount"] >= 2, result
     assert result["errors"] == [] and result["rejections"] == [], result
@@ -11854,7 +12139,7 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
             cachedHead: cached.head,
             snapshotAnchor: modeEntry.viewState?.anchor,
             snapshotHead: modeEntry.viewState?.head,
-            dirty: openFiles.get(path)?.dirty === true,
+            dirty: fileState.get(path)?.dirty === true,
             sentSockets: window.__bootSockets || [],
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
@@ -13743,7 +14028,7 @@ def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tm
           <div class="file-editor-content"><div class="file-editor-preview-pane-panel"><p>alpha</p></div><div class="file-editor-find-overview" hidden></div><form class="file-editor-preview-find-panel" hidden><input type="search"><span class="file-editor-preview-find-count"></span></form></div>
           <button class="file-editor-find-panel"></button>`;
         document.body.append(host);
-        openFiles.set(path, {kind: 'text'});
+        fileState.set(path, {kind: 'text'});
         fileEditorViewModesForPath(path, true).set(item, 'preview');
         focusedPanelItem = item;
         const event = new KeyboardEvent('keydown', {key: 'f', ...(isMacPlatform() ? {metaKey: true} : {ctrlKey: true}), bubbles: true, cancelable: true});
@@ -13752,7 +14037,7 @@ def test_file_editor_find_shortcut_claims_ctrl_f_before_browser_find(browser, tm
           const find = host.querySelector('.file-editor-preview-find-panel');
           const result = {prevented: event.defaultPrevented, visible: !find.hidden, focused: document.activeElement === find.querySelector('input')};
           host.remove();
-          openFiles.delete(path);
+          fileState.delete(path);
           fileEditorViewModesForPath(path, true).delete(item);
           resolve(result);
         }, 0));
@@ -13829,7 +14114,7 @@ def test_codemirror_find_uses_the_shared_scrollbar_overview(browser, tmp_path):
         host.innerHTML = `<div class="file-editor-content"><div class="file-editor-find-overview" hidden></div><div class="cm-search"><input name="search" value="alpha"></div></div>`;
         host._cmView = {state: {doc: {toString: () => text, lines: text.split(newline).length, lineAt}, selection: {main: {from: 0, to: 5, head: 0}}}};
         document.body.append(host);
-        openFiles.set(path, {kind: 'text'});
+        fileState.set(path, {kind: 'text'});
         fileEditorViewModesForPath(path, true).set(item, 'edit');
         refreshCodeMirrorFindOverview(host);
         const rail = host.querySelector('.file-editor-find-overview');
@@ -13843,7 +14128,7 @@ def test_codemirror_find_uses_the_shared_scrollbar_overview(browser, tmp_path):
         refreshCodeMirrorFindOverview(host);
         const closed = {hidden: rail.hidden, ticks: rail.children.length};
         host.remove();
-        openFiles.delete(path);
+        fileState.delete(path);
         fileEditorViewModesForPath(path, true).delete(item);
         return {opened, closed};
         """
@@ -14882,3 +15167,47 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
     # Every needs-attention pane resolves the red ring color, regardless of focus/yolo-ready state.
     for pid, ring in rings.items():
         assert ring.lower() == ui_pin("paneRingAttention"), f"{pid}: needs-attention pane must keep the red ring, got {ring}"
+
+
+def test_agent_status_card_holds_one_revision_coherent_live_state(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    mismatch = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            if (typeof debugGraphLiveAgentWindowDetailHtml !== 'function' || typeof debugGraphAgentStatusSeriesDef !== 'function') return false;
+            autoApproveStates.clear();
+            autoApproveStates.set('one', {agent_window_snapshot_revision: 8, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
+            autoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});
+            jsDebugStatsPollState.agentWindowSnapshotRevision = 7;
+            const keys = ['working', 'ask', 'transition', 'idle'];
+            const swatches = keys.map(key => {
+              const agent = debugGraphAgentStatusSeriesDef(`${key === 'ask' ? 'ask' : key}Agents`).cssKey;
+              return `<span data-agent="${key}" class="js-debug-legend-swatch js-debug-legend-swatch--${agent}"></span>`;
+            }).join('');
+            document.body.insertAdjacentHTML('beforeend', `<div id="agent-status-contract"><section data-js-debug-chart="activity">${debugGraphLiveAgentWindowDetailHtml('activity')}</section>${swatches}</div>`);
+            const cards = [...document.querySelectorAll('#agent-status-contract [data-js-debug-chart]')];
+            const details = cards.map(card => card.querySelector('[data-js-debug-agent-window-detail]'));
+            if (!details.every(Boolean)) return false;
+            const colors = {};
+            for (const theme of ['theme-dark', 'theme-light']) {
+              document.body.classList.remove('theme-dark', 'theme-light');
+              document.body.classList.add(theme);
+              colors[theme] = keys.map(key => getComputedStyle(document.querySelector(`[data-agent="${key}"]`)).color);
+            }
+            return {details: details.map(detail => ({state: detail.dataset.jsDebugAgentWindowDetailState, text: detail.textContent.trim()})), colors};
+            """
+        )
+    )
+    assert all(item["state"] == "changed" for item in mismatch["details"]), mismatch
+    assert all("waiting for the chart snapshot" in item["text"] for item in mismatch["details"]), mismatch
+    assert all(color for theme in mismatch["colors"].values() for color in theme), mismatch
+    recovery = browser.execute_script(
+        """
+        autoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
+        const root = document.getElementById('agent-status-contract');
+        root.querySelector('[data-js-debug-chart="activity"]').innerHTML = debugGraphLiveAgentWindowDetailHtml('activity');
+        const activity = root.querySelector('[data-js-debug-chart="activity"] [data-js-debug-agent-window-detail]');
+        return {activity: activity?.textContent.trim() || ''};
+        """
+    )
+    assert "Live breakdown" in recovery["activity"], recovery

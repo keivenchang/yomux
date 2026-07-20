@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from .local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
-from .local_services.rpc import LOCAL_RPC_VERSION
 
 
 STATUSD_PROTOCOL_VERSION = 1

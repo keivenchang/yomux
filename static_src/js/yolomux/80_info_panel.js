@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// YO!info and YO!agent panel shells split from 80_panes_preferences.js.
+// YO!info and YO!agent panel shells.
 
 function setInfoSessionFileLookbackHours(hours, options = {}) {
   const previous = infoSessionFileLookbackHours;
@@ -362,10 +362,6 @@ function splitVirtualItemToRightPane(item, sourceSlot = null) {
   next[newSlot] = paneStateWithTabs([item], item);
   next[layoutTreeKey] = splitNode('row', root, leafNode(newSlot), splitPercentForNewItem(item, 'right'));
   applyLayoutSlots(next, {focusSession: item, prune: false});
-}
-
-function splitInfoItemToRightPane(sourceSlot = null) {
-  splitVirtualItemToRightPane(infoItemId, sourceSlot);
 }
 
 function openYoagentRightPane() {

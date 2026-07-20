@@ -480,18 +480,16 @@
   gap: var(--space-8);
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
 }
 .js-debug-graph--empty {
   min-height: 180px;
 }
 .js-debug-graph-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
+  flex-wrap: nowrap;
   gap: var(--space-6);
   justify-self: stretch;
   min-width: 0;
-  container-type: inline-size;
 }
 .js-debug-resolution-label {
   min-width: 0;
@@ -527,30 +525,22 @@
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
 .js-debug-chart-layout-control {
-  grid-column: 2;
-  grid-row: 1;
-  justify-self: start;
+  flex: 0 0 auto;
 }
 .js-debug-range-resolution-controls {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-row: 2;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
+  flex: 1 1 12rem;
   gap: var(--space-6);
   min-width: 0;
 }
 .js-debug-range-resolution-controls > .js-debug-resolution-label {
-  grid-column: 2;
-  grid-row: 1;
+  flex: 0 0 auto;
 }
 .js-debug-range-resolution-controls > .js-debug-range-slider-control {
-  grid-column: 1;
-  grid-row: 1;
+  flex: 1 1 auto;
+  min-inline-size: 12rem;
 }
 .js-debug-chart-toggle-control {
-  grid-column: 1;
-  grid-row: 1;
+  flex: 0 0 auto;
   position: relative;
 }
 .js-debug-chart-layout-control button,
@@ -594,33 +584,29 @@
 .js-debug-chart-toggle-menu input {
   accent-color: var(--active-accent-bright);
 }
-@container (max-width: 20rem) {
+/* 34rem is the measured intrinsic width of Charts + Size + a usable range slider + Resolution. */
+@container (max-width: 34rem) {
   .js-debug-graph-controls {
-    grid-template-columns: minmax(0, 1fr);
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-rows: auto auto;
   }
   .js-debug-range-resolution-controls {
-    grid-template-columns: minmax(0, 1fr);
-    grid-row: 4;
-    justify-self: start;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
   }
   .js-debug-chart-layout-control,
   .js-debug-chart-toggle-control {
-    grid-column: 1;
+    white-space: nowrap;
   }
   .js-debug-chart-layout-control {
+    grid-column: 2;
     grid-row: 1;
-  }
-  .js-debug-range-resolution-controls > .js-debug-range-slider-control {
-    grid-column: 1;
-    grid-row: 1;
-  }
-  .js-debug-range-resolution-controls > .js-debug-resolution-label {
-    grid-column: 1;
-    grid-row: 2;
   }
   .js-debug-chart-toggle-control {
+    grid-column: 1;
     grid-row: 1;
-    justify-self: start;
   }
 }
 .js-debug-subtab:not(.active):hover,
@@ -629,6 +615,9 @@
   background: var(--pane-inactive-tab-bg-hover);
 }
 .js-debug-range-slider-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   min-width: 0;
 }
 .js-debug-chart-close {
@@ -647,8 +636,8 @@
 }
 .js-debug-range-slider {
   flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
+  inline-size: auto;
+  min-inline-size: 8rem;
   accent-color: var(--active-accent-bright);
 }
 .js-debug-range-slider-control datalist {
@@ -668,6 +657,16 @@
   min-width: 2.5rem;
   color: var(--text);
   text-align: center;
+}
+.js-debug-range-slider-control--zoomed .js-debug-range-slider {
+  display: none;
+}
+.js-debug-range-label--zoomed {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
 }
 .js-debug-zoom-reset {
   flex: 0 0 auto;
@@ -1511,9 +1510,6 @@
   animation-iteration-count: infinite;
   animation-direction: normal;
 }
-body.theme-light .js-debug-live-pulse.heartbeat-pulse {
-  fill: rgb(var(--active-accent-rgb) / 0.1);
-}
 .js-debug-hover-line {
   opacity: 0;
   stroke: color-mix(in srgb, var(--text) 46%, transparent);
@@ -2111,27 +2107,13 @@ body.theme-light .js-debug-live-pulse.heartbeat-pulse {
   padding: 0;
   vertical-align: 0;
 }
-.changes-meta-separator {
-  color: rgba(174, 184, 199, 0.62);
-}
 .changes-diff-add {
   color: var(--30-preferences-changes-changes-diff-add-fg-43);
-  font-weight: 800;
-}
-.changes-diff-add-neutral {
-  color: var(--muted);
   font-weight: 800;
 }
 .changes-diff-remove {
   color: var(--30-preferences-changes-changes-diff-remove-fg-44);
   font-weight: 800;
-}
-.changes-diff-file-label {
-  color: var(--muted);
-  font-weight: 700;
-}
-.changes-count-badge {
-  margin-inline-start: var(--space-5);
 }
 .preferences-path-row {
   display: grid;

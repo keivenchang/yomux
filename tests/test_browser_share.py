@@ -1,5 +1,7 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tests.browser_helpers.share_test_helpers import share_debug_url
+from tests.browser_helpers.share_test_helpers import verify_share_token as build_verify_share_token
 
 def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
     page = tmp_path / "share-viewer-banner-grid.html"
@@ -669,7 +671,7 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
                 diffReady: modeReady && diffRowsVisible,
                 mode: panel._cmMode || '',
                 viewMode: editorViewModeFor(path, item),
-                diffLoaded: openFiles.get(path)?.diffLoaded === true,
+                diffLoaded: fileState.get(path)?.diffLoaded === true,
                 diffExpandPressed: panel.querySelector('.file-editor-diff-expand-panel')?.getAttribute('aria-pressed') || '',
                 tabMetaHidden: document.body.classList.contains('tab-meta-hidden'),
                 legacyInfoSubtab: infoPanelSubTab || '',
@@ -1000,9 +1002,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     }
     seen_tokens = []
 
-    def verify_share_token(token):
-        seen_tokens.append(token)
-        return record if token == "valid-share-token" else None
+    verify_share_token = build_verify_share_token(record, seen_tokens)
 
     git_payload = {
         "root": root_path,
@@ -1069,8 +1069,9 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
         dangerously_yolo=False,
         verify_share_token=verify_share_token,
         share_record_for_short_id=lambda short_id: record if short_id == "share123" else None,
-        http_allowed_share_is_active=lambda: True,
-        share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == done_path,
+            http_allowed_share_is_active=lambda: True,
+            session_metadata_payload=lambda force=False: transcript_payload,
+            share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == done_path,
         share_status_payload=lambda token, **kwargs: ({
             "ok": True,
             "active": True,
@@ -1211,9 +1212,7 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
     }
     seen_tokens = []
 
-    def verify_share_token(token):
-        seen_tokens.append(token)
-        return record if token == "valid-share-token" else None
+    verify_share_token = build_verify_share_token(record, seen_tokens)
 
     app = SimpleNamespace(
         sessions=["6"],
@@ -1672,12 +1671,6 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
     viewer = new_chrome_driver("1220,742")
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
 
-    def share_debug_url(url: str) -> str:
-        parts = urlsplit(url)
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        query["shareDebug"] = "1"
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
-
     try:
         browser.get(f"{base_url}/")
         WebDriverWait(browser, 10).until(
@@ -1884,12 +1877,6 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
     viewer = new_chrome_driver("1220,742")
     install_browser_websocket_tracker(viewer)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
-
-    def share_debug_url(url: str) -> str:
-        parts = urlsplit(url)
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
-        query["shareDebug"] = "1"
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
     def host_phase(name, *args):
         result = browser.execute_async_script(
@@ -5056,7 +5043,7 @@ def test_share_topology_snapshot_converges_finder_tab_move_and_editor_mode(brows
           const waitFor = window.__yolomuxTestWaitFor;
           const path = '/home/test/yolomux.dev/DONE.md';
           const item = fileEditorItemFor(path);
-          openFiles.set(path, {
+          fileState.set(path, {
             kind: 'text',
             content: '# Done\\n',
             original: '# Done\\n',
@@ -5241,12 +5228,12 @@ def test_share_geometry_digest_ignores_editor_scroll_height_jitter_in_browser(br
         panel.style.height = '280px';
         panel.innerHTML = '<div class="file-editor-content"><div class="file-editor-codemirror-panel"></div></div>';
         panel._cmView = {scrollDOM: {scrollHeight: 100}};
-        openFiles.set(path, {kind: 'text', content: 'same editor content', original: 'same editor content', dirty: false, mtime: 10, size: 19});
+        fileState.set(path, {kind: 'text', content: 'same editor content', original: 'same editor content', dirty: false, mtime: 10, size: 19});
         root.appendChild(panel);
         const host = shareGeometryDigestFrame();
         panel._cmView.scrollDOM.scrollHeight = 9999;
         const scrollOnlyDiff = shareGeometryFirstDifference(host, shareGeometryDigestFrame());
-        openFiles.set(path, {kind: 'text', content: 'different editor content', original: 'different editor content', dirty: false, mtime: 10, size: 24});
+        fileState.set(path, {kind: 'text', content: 'different editor content', original: 'different editor content', dirty: false, mtime: 10, size: 24});
         const contentDiff = shareGeometryFirstDifference(host, shareGeometryDigestFrame());
         return {
           scrollOnlyDiff,

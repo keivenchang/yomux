@@ -93,7 +93,7 @@ def test_independent_families_keep_their_native_timestamps_and_cadences():
     [
         ("cpu", 10),
         ("agent_status", 1),
-        ("gpu", 60),
+        ("gpu", 1),
         ("service_load", 1),
         ("system_memory", 10),
     ],

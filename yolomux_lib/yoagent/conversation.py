@@ -18,6 +18,7 @@ from ..atomic_file import file_lock
 from ..common import STATE_DIR
 from ..common import tail_file_lines
 from ..common import truncate_text
+from ..filesystem.io_ops import read_json_file
 from ..locales import message_descriptor
 
 
@@ -346,7 +347,7 @@ def load_cli_sessions(path: Path | None = None, monotonic_now: float | None = No
     target = path or YOAGENT_CLI_STATE_PATH
     try:
         with file_lock(target, dir_mode=0o700):
-            raw = json.loads(target.read_text(encoding="utf-8"))
+            raw = read_json_file(target, {}, exceptions=())
     except (OSError, json.JSONDecodeError):
         return {}
     return sanitize_cli_sessions(raw, monotonic_now=monotonic_now)

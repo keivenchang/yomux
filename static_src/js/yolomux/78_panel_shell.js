@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers split from 80_panes_preferences.js.
+// Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers.
 
 function renderPanels(previousActive = [], options = {}) {
   const perf = clientPerfStart('renderPanels');
@@ -847,7 +847,7 @@ function maybeLoadFileTabForPopover(tab, item) {
   if (!state?.loading) return;
   const path = fileItemPath(item);
   if (!state.loadingPromise) loadFileEditorState(path, panelNodes.get(item), item);
-  const pending = openFiles.get(path)?.loadingPromise;
+  const pending = fileState.get(path)?.loadingPromise;
   pending?.finally?.(() => refreshFilePopoversForPath(path));
 }
 
@@ -989,7 +989,7 @@ function searchHistoryPaneTabHtml(item = searchHistoryItemId, options = {}) {
 
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
-  const state = openFiles.get(path) || {};
+  const state = fileState.get(path) || {};
   const owners = openFileOwnerSessionsForPath(path);
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
@@ -1279,6 +1279,10 @@ function bindPanelShell(panel, session) {
         return;
       }
       if (eventTargetIsTerminalFocusSurface(event?.target)) {
+        // enableTerminalScroll owns the tap-versus-pan decision for touch.
+        // Calling xterm.focus() on pointerdown raises the iPad keyboard before
+        // its following touchmove can claim a vertical scroll.
+        if (event.pointerType === 'touch') return;
         focusTerminalFromUserAction(session);
       } else {
         noteFileExplorerChangesSessionInteraction(session);

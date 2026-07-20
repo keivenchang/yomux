@@ -18,6 +18,7 @@ from typing import Mapping
 from urllib.parse import quote
 
 from yolomux_lib.atomic_file import atomic_write_text
+from yolomux_lib.filesystem.io_ops import read_json_file
 
 from . import identity
 
@@ -31,6 +32,24 @@ MIN_WRITER_PROTOCOL = 24
 MIN_WRITER_BUILD = 3
 RETENTION_SECONDS = 24 * 60 * 60
 DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
+
+
+def socket_filename(protocol_version: int, schema_generation: int) -> str:
+    """Return the service identity for one mutually compatible stats build."""
+
+    if isinstance(protocol_version, bool) or not isinstance(protocol_version, int) or protocol_version < 1:
+        raise ValueError("protocol_version must be a positive integer")
+    if isinstance(schema_generation, bool) or not isinstance(schema_generation, int) or schema_generation < 1:
+        raise ValueError("schema_generation must be a positive integer")
+    return f"statsd.p{protocol_version}s{schema_generation}.sock"
+
+
+# A stats daemon is only compatible with one writer protocol/schema pair.  Keep
+# that pair in its socket identity so concurrently running worktrees cannot
+# discover, fence, and replace each other's daemon.  The database has already
+# been schema-scoped since v5; it deliberately remains the durable owner for
+# all compatible protocol builds of this schema.
+SOCKET_FILENAME = socket_filename(MIN_WRITER_PROTOCOL, SCHEMA_VERSION)
 WRITER_FENCE_FILENAME = "stats-writer-compat.json"
 MAX_DIRTY_INTERVALS = 32
 MAX_DIRTY_INTERVAL_SPAN_SECONDS = 60 * 60
@@ -717,11 +736,11 @@ class Store:
     def _preflight_fence(path: Path, writer_protocol: int, writer_build: int) -> None:
         fence_path = path.parent / WRITER_FENCE_FILENAME
         try:
-            value = json.loads(fence_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return
+            value = read_json_file(fence_path, None, exceptions=(FileNotFoundError,))
         except (OSError, json.JSONDecodeError) as error:
             raise SchemaMismatchError("stats writer fence cannot be read") from error
+        if value is None:
+            return
         if not isinstance(value, dict):
             raise SchemaMismatchError("stats writer fence must be an object")
         try:
@@ -973,6 +992,155 @@ class Store:
             )
         return timestamp
 
+    def _apply_observations(
+        self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
+    ) -> int:
+        accepted = 0
+        for values in prepared:
+            previous = connection.execute(
+                "SELECT observed_at, epoch_id, owner_generation, payload_json FROM observations "
+                "WHERE event_id = ? AND family = ? AND source_id = ?", values[:3],
+            ).fetchone()
+            if previous is None:
+                connection.execute(
+                    "INSERT INTO observations(event_id, family, source_id, observed_at, epoch_id, "
+                    "owner_generation, payload_json) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
+                )
+                accepted += 1
+            elif tuple(previous) != values[3:]:
+                raise StorageValidationError("observation event identity conflicts with stored data")
+        return accepted
+
+    def _apply_coverage_epochs(
+        self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
+    ) -> int:
+        changed = 0
+        for values in prepared:
+            key = values[:3]
+            previous = connection.execute(
+                "SELECT started_at, ended_at, native_cadence_seconds, owner_generation "
+                "FROM coverage_epochs WHERE family = ? AND source_id = ? AND epoch_id = ?", key,
+            ).fetchone()
+            current = values[3:]
+            conflict = connection.execute(
+                "SELECT 1 FROM unavailable_spans WHERE family = ? AND source_id = ? "
+                "AND ended_at > ? AND (? IS NULL OR started_at < ?) LIMIT 1",
+                (values[0], values[1], current[0], current[1], current[1]),
+            ).fetchone()
+            if conflict is not None:
+                raise StorageValidationError("coverage epoch overlaps an unavailable span")
+            if previous is None:
+                connection.execute(
+                    "INSERT INTO coverage_epochs(family, source_id, epoch_id, started_at, ended_at, "
+                    "native_cadence_seconds, owner_generation) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
+                )
+                changed += 1
+            elif tuple(previous) != current:
+                if previous[0] != current[0] or previous[2] != current[2]:
+                    raise StorageValidationError("coverage epoch start and cadence are immutable")
+                if previous[1] is not None and (current[1] is None or current[1] < previous[1]):
+                    raise StorageValidationError("coverage epoch end cannot move backward")
+                if current[3] < previous[3]:
+                    raise StorageValidationError("coverage owner_generation cannot move backward")
+                connection.execute(
+                    "UPDATE coverage_epochs SET ended_at = ?, owner_generation = ? "
+                    "WHERE family = ? AND source_id = ? AND epoch_id = ?", (current[1], current[3], *key),
+                )
+                changed += 1
+        return changed
+
+    def _apply_usage_atoms(
+        self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
+    ) -> tuple[int, int]:
+        accepted = conflicts = 0
+        for values in prepared:
+            previous = connection.execute(
+                "SELECT observed_at, payload_json FROM usage_atoms WHERE event_id = ? "
+                "AND direction = ? AND modality = ? AND cache_role = ? AND unit = ?", values[:5],
+            ).fetchone()
+            if previous is None:
+                connection.execute(
+                    "INSERT INTO usage_atoms(event_id, direction, modality, cache_role, unit, observed_at, "
+                    "payload_json) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
+                )
+                accepted += 1
+            elif tuple(previous) != values[5:]:
+                repaired = _usage_unknown_model_repair(tuple(previous), values[5:])
+                compatible, agent_changed = _usage_compatible_metadata_change(tuple(previous), values[5:])
+                if repaired is not None:
+                    payload_json, repair_agent_changed = repaired
+                    connection.execute(
+                        "UPDATE usage_atoms SET payload_json = ? WHERE event_id = ? AND direction = ? "
+                        "AND modality = ? AND cache_role = ? AND unit = ?", (payload_json, *values[:5]),
+                    )
+                    accepted += 1
+                    conflicts += int(repair_agent_changed)
+                elif compatible:
+                    conflicts += int(agent_changed)
+                else:
+                    raise UsageAtomIdentityConflict(
+                        event_id=str(values[0]), identity_hash=_usage_conflict_hash(tuple(values[:5])),
+                        first_payload_hash=_usage_conflict_hash(tuple(previous)),
+                        attempted_payload_hash=_usage_conflict_hash(tuple(values[5:])),
+                    )
+        return accepted, conflicts
+
+    def _apply_usage_tombstones(
+        self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
+    ) -> tuple[int, int]:
+        accepted = duplicate = 0
+        for values in prepared:
+            key = values[:5]
+            previous = connection.execute(
+                "SELECT observed_at, payload_json FROM usage_atoms WHERE event_id = ? "
+                "AND direction = ? AND modality = ? AND cache_role = ? AND unit = ?", key,
+            ).fetchone()
+            if previous is None:
+                duplicate += 1
+                continue
+            payload = _decode_json_object(previous[1], "usage atom payload")
+            expected = (values[5], values[6], values[7], values[8], values[9], "codex")
+            actual = (float(previous[0]), payload.get("quantity"), payload.get("provider"), payload.get("model"), payload.get("thread_id"), payload.get("execution_source"))
+            if actual != expected:
+                raise StorageValidationError("usage tombstone conflicts with stored data")
+            connection.execute(
+                "DELETE FROM usage_atoms WHERE event_id = ? AND direction = ? AND modality = ? "
+                "AND cache_role = ? AND unit = ?", key,
+            )
+            accepted += 1
+        return accepted, duplicate
+
+    def _apply_unavailable_spans(
+        self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
+    ) -> int:
+        accepted = 0
+        for values in prepared:
+            previous = connection.execute(
+                "SELECT native_cadence_seconds, reason, owner_generation FROM unavailable_spans "
+                "WHERE family = ? AND source_id = ? AND epoch_id = ? AND started_at = ? AND ended_at = ?", values[:5],
+            ).fetchone()
+            if previous is None:
+                coverage_conflict = connection.execute(
+                    "SELECT 1 FROM coverage_epochs WHERE family = ? AND source_id = ? "
+                    "AND (ended_at IS NULL OR ended_at > ?) AND started_at < ? LIMIT 1", (values[0], values[1], values[3], values[4]),
+                ).fetchone()
+                if coverage_conflict is not None:
+                    raise StorageValidationError("unavailable span overlaps a coverage epoch")
+                unavailable_conflict = connection.execute(
+                    "SELECT 1 FROM unavailable_spans WHERE family = ? AND source_id = ? "
+                    "AND ended_at > ? AND started_at < ? LIMIT 1", (values[0], values[1], values[3], values[4]),
+                ).fetchone()
+                if unavailable_conflict is not None:
+                    raise StorageValidationError("unavailable spans overlap")
+                connection.execute(
+                    "INSERT INTO unavailable_spans(family, source_id, epoch_id, started_at, ended_at, "
+                    "native_cadence_seconds, reason, owner_generation) VALUES(?, ?, ?, ?, ?, ?, ?, ?)", values,
+                )
+                accepted += 1
+            elif tuple(previous) != values[5:]:
+                raise StorageValidationError("unavailable span identity conflicts with stored data")
+        return accepted
+
     def append_batch(
         self,
         *,
@@ -1001,152 +1169,17 @@ class Store:
             generation = int(connection.execute(
                 "SELECT source_generation FROM schema_meta WHERE singleton = 1"
             ).fetchone()[0])
-            for values in prepared_observations:
-                previous = connection.execute(
-                    "SELECT observed_at, epoch_id, owner_generation, payload_json FROM observations "
-                    "WHERE event_id = ? AND family = ? AND source_id = ?", values[:3],
-                ).fetchone()
-                if previous is None:
-                    connection.execute(
-                        "INSERT INTO observations("
-                        "event_id, family, source_id, observed_at, epoch_id, owner_generation, "
-                        "payload_json) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
-                    )
-                    observations_accepted += 1
-                elif tuple(previous) != values[3:]:
-                    raise StorageValidationError("observation event identity conflicts with stored data")
-            for values in prepared_coverage:
-                key = values[:3]
-                previous = connection.execute(
-                    "SELECT started_at, ended_at, native_cadence_seconds, owner_generation "
-                    "FROM coverage_epochs WHERE family = ? AND source_id = ? AND epoch_id = ?",
-                    key,
-                ).fetchone()
-                current = values[3:]
-                coverage_conflict = connection.execute(
-                    "SELECT 1 FROM unavailable_spans WHERE family = ? AND source_id = ? "
-                    "AND ended_at > ? AND (? IS NULL OR started_at < ?) LIMIT 1",
-                    (values[0], values[1], current[0], current[1], current[1]),
-                ).fetchone()
-                if coverage_conflict is not None:
-                    raise StorageValidationError("coverage epoch overlaps an unavailable span")
-                if previous is None:
-                    connection.execute(
-                        "INSERT INTO coverage_epochs("
-                        "family, source_id, epoch_id, started_at, ended_at, native_cadence_seconds, "
-                        "owner_generation) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
-                    )
-                    coverage_changed += 1
-                elif tuple(previous) != current:
-                    if previous[0] != current[0] or previous[2] != current[2]:
-                        raise StorageValidationError("coverage epoch start and cadence are immutable")
-                    if previous[1] is not None and (current[1] is None or current[1] < previous[1]):
-                        raise StorageValidationError("coverage epoch end cannot move backward")
-                    if current[3] < previous[3]:
-                        raise StorageValidationError("coverage owner_generation cannot move backward")
-                    connection.execute(
-                        "UPDATE coverage_epochs SET ended_at = ?, owner_generation = ? "
-                        "WHERE family = ? AND source_id = ? AND epoch_id = ?",
-                        (current[1], current[3], *key),
-                    )
-                    coverage_changed += 1
-            for values in prepared_usage:
-                previous = connection.execute(
-                    "SELECT observed_at, payload_json FROM usage_atoms WHERE event_id = ? "
-                    "AND direction = ? AND modality = ? AND cache_role = ? AND unit = ?",
-                    values[:5],
-                ).fetchone()
-                if previous is None:
-                    connection.execute(
-                        "INSERT INTO usage_atoms("
-                        "event_id, direction, modality, cache_role, unit, observed_at, payload_json) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?)", values,
-                    )
-                    usage_accepted += 1
-                elif tuple(previous) != values[5:]:
-                    repaired = _usage_unknown_model_repair(tuple(previous), values[5:])
-                    compatible, agent_changed = _usage_compatible_metadata_change(
-                        tuple(previous), values[5:],
-                    )
-                    if repaired is not None:
-                        payload_json, repair_agent_changed = repaired
-                        connection.execute(
-                            "UPDATE usage_atoms SET payload_json = ? WHERE event_id = ? "
-                            "AND direction = ? AND modality = ? AND cache_role = ? AND unit = ?",
-                            (payload_json, *values[:5]),
-                        )
-                        usage_accepted += 1
-                        usage_attribution_conflicts += int(repair_agent_changed)
-                    elif compatible:
-                        usage_attribution_conflicts += int(agent_changed)
-                    else:
-                        raise UsageAtomIdentityConflict(
-                            event_id=str(values[0]),
-                            identity_hash=_usage_conflict_hash(tuple(values[:5])),
-                            first_payload_hash=_usage_conflict_hash(tuple(previous)),
-                            attempted_payload_hash=_usage_conflict_hash(tuple(values[5:])),
-                        )
-            for values in prepared_tombstones:
-                key = values[:5]
-                previous = connection.execute(
-                    "SELECT observed_at, payload_json FROM usage_atoms WHERE event_id = ? "
-                    "AND direction = ? AND modality = ? AND cache_role = ? AND unit = ?",
-                    key,
-                ).fetchone()
-                if previous is None:
-                    tombstones_duplicate += 1
-                    continue
-                payload = _decode_json_object(previous[1], "usage atom payload")
-                expected = (
-                    values[5], values[6], values[7], values[8], values[9], "codex",
-                )
-                actual = (
-                    float(previous[0]), payload.get("quantity"), payload.get("provider"),
-                    payload.get("model"), payload.get("thread_id"),
-                    payload.get("execution_source"),
-                )
-                if actual != expected:
-                    raise StorageValidationError(
-                        "usage tombstone conflicts with stored data"
-                    )
-                connection.execute(
-                    "DELETE FROM usage_atoms WHERE event_id = ? AND direction = ? "
-                    "AND modality = ? AND cache_role = ? AND unit = ?",
-                    key,
-                )
-                tombstones_accepted += 1
-            for values in prepared_unavailable:
-                previous = connection.execute(
-                    "SELECT native_cadence_seconds, reason, owner_generation FROM unavailable_spans "
-                    "WHERE family = ? AND source_id = ? AND epoch_id = ? "
-                    "AND started_at = ? AND ended_at = ?",
-                    values[:5],
-                ).fetchone()
-                if previous is None:
-                    coverage_conflict = connection.execute(
-                        "SELECT 1 FROM coverage_epochs WHERE family = ? AND source_id = ? "
-                        "AND (ended_at IS NULL OR ended_at > ?) AND started_at < ? LIMIT 1",
-                        (values[0], values[1], values[3], values[4]),
-                    ).fetchone()
-                    if coverage_conflict is not None:
-                        raise StorageValidationError("unavailable span overlaps a coverage epoch")
-                    unavailable_conflict = connection.execute(
-                        "SELECT 1 FROM unavailable_spans WHERE family = ? AND source_id = ? "
-                        "AND ended_at > ? AND started_at < ? LIMIT 1",
-                        (values[0], values[1], values[3], values[4]),
-                    ).fetchone()
-                    if unavailable_conflict is not None:
-                        raise StorageValidationError("unavailable spans overlap")
-                    connection.execute(
-                        "INSERT INTO unavailable_spans("
-                        "family, source_id, epoch_id, started_at, ended_at, "
-                        "native_cadence_seconds, reason, owner_generation) "
-                        "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
-                        values,
-                    )
-                    unavailable_accepted += 1
-                elif tuple(previous) != values[5:]:
-                    raise StorageValidationError("unavailable span identity conflicts with stored data")
+            observations_accepted = self._apply_observations(connection, prepared_observations)
+            coverage_changed = self._apply_coverage_epochs(connection, prepared_coverage)
+            usage_accepted, usage_attribution_conflicts = self._apply_usage_atoms(
+                connection, prepared_usage,
+            )
+            tombstones_accepted, tombstones_duplicate = self._apply_usage_tombstones(
+                connection, prepared_tombstones,
+            )
+            unavailable_accepted = self._apply_unavailable_spans(
+                connection, prepared_unavailable,
+            )
             changed = (
                 observations_accepted + coverage_changed + usage_accepted
                 + unavailable_accepted + tombstones_accepted

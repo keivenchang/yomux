@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import STATE_DIR
+from .infra.common import STATE_DIR
 
 
 @dataclass

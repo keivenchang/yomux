@@ -2274,6 +2274,14 @@ def test_status_generation_waiter_publishes_once_per_advanced_generation(monkeyp
     record = webapp.client_watch_service.event_watcher_record
     record.status_generation = 7
     monkeypatch.setattr(webapp.status_client, "wait_generation", lambda _generation, timeout: next(responses))
+    monkeypatch.setattr(
+        webapp.status_client,
+        "snapshot",
+        lambda _sessions, timeout: (
+            {"ok": True, "protocol_version": 1, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            b'{"session_order":[],"sessions":{}}',
+        ),
+    )
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     original_publish = webapp.publish_client_event
     def publish_then_stop(*args, **kwargs):
@@ -2288,7 +2296,8 @@ def test_status_generation_waiter_publishes_once_per_advanced_generation(monkeyp
 
     assert [event_type for event_type, _payload in events] == ["auto_approve_changed"]
     assert events[0][1]["generation"] == 8
-    assert events[0][1]["refresh"] is True
+    assert events[0][1]["refresh"] is False
+    assert events[0][1]["data"] == {"session_order": [], "sessions": {}}
 
 
 def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monkeypatch):
@@ -3264,8 +3273,8 @@ def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(
         panes=[pane0, pane1],
         selected_pane=pane0,
         agents=[
-            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
-            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/agent_clients/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/agent_clients/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
         ],
     )
     captures = {"%claude": claude_capture, "%codex": codex_capture}

@@ -158,7 +158,7 @@ function tabIsEvictableForCap(item, keepItem) {
   const keep = keepItem instanceof Set ? keepItem : capKeepItemSet(keepItem);
   if (keep.has(item) || tabIsPinned(item) || isFileExplorerItem(item)) return false;
   if (isFileEditorItem(item)) {
-    const state = openFiles.get(fileItemPath(item));
+    const state = fileState.get(fileItemPath(item));
     if (state && state.dirty) return false;
   }
   return true;
@@ -1581,7 +1581,7 @@ function pullRequestStatusBadgeHtml(session, text, statusClass, options = {}) {
     classes = metadataBadgeClasses(
       session,
       options.kind || 'status',
-      ['ci-indicator', 'tab-symbol', extraClass, stateClass].filter(Boolean).join(' '),
+      ['ci-indicator', 'tab-symbol', extraClass, stateClass, 'chip-base'].filter(Boolean).join(' '),
     );
   }
   return `<span class="${esc(classes)}">${labelHtml}</span>`;
@@ -1605,8 +1605,8 @@ function pullRequestNumberIndicatorHtml(session, pr) {
   // No native title — the rich custom session popover already shows PR #, CI, and review state
   // (avoid a duplicate browser tooltip alongside the popover).
   const classes = pullRequestIsMerged(pr)
-    ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)}`)
-    : 'ci-indicator tab-symbol pr-number-chip';
+    ? metadataBadgeClasses(session, 'status', `ci-indicator tab-symbol pr-number-chip ${pullRequestStatusClass(pr)} chip-base`)
+    : 'ci-indicator tab-symbol pr-number-chip chip-base';
   return `<span class="${esc(classes)}">#${esc(String(pr.number))}</span>`;
 }
 
@@ -1775,7 +1775,7 @@ function projectMetaParts(session, info, options = {}) {
     const switchLabel = `${position}/${repos.length}`;
     return `<span class="meta-repo-switch" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">
       <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="-1" title="${esc(t('detail.repos.previous'))}" aria-label="${esc(t('detail.repos.previous'))}">&lt;</button>
-      <button type="button" class="btn-base meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
+      <button type="button" class="btn-base chip-base meta-repo-chip" data-repo-chip="${esc(session)}" title="${esc(t('detail.repos.more', {count: repos.length - 1}))}" aria-label="${esc(t('detail.repos.switch', {position, count: repos.length}))}">${esc(switchLabel)}</button>
       <button type="button" class="btn-base meta-repo-cycle" data-repo-cycle="${esc(session)}" data-repo-cycle-dir="1" title="${esc(t('detail.repos.next'))}" aria-label="${esc(t('detail.repos.next'))}">&gt;</button>
     </span>`;
   })() : '';
@@ -3060,8 +3060,6 @@ const altScreenWheelRemainder = new Map();
 
 const terminalTouchGestureSlopPx = 8;
 const terminalTouchSendIntervalMs = 30;
-const terminalTouchFastFlickMinDistancePx = 32;
-const terminalTouchFastFlickMinVelocityPxPerMs = 0.8;
 const terminalTouchSyntheticMouseSuppressMs = 350;
 
 function terminalTouchGestureDecision(deltaX, deltaY, slopPx = terminalTouchGestureSlopPx) {
@@ -3079,19 +3077,12 @@ function terminalTouchSignedRows(deltaY, rowHeight) {
   return -distance / height;
 }
 
-function terminalTouchIsFastFlick(distanceY, elapsedMs) {
-  const distance = Math.abs(Number(distanceY) || 0);
-  const elapsed = Math.max(1, Number(elapsedMs) || 0);
-  return distance >= terminalTouchFastFlickMinDistancePx
-    && distance / elapsed >= terminalTouchFastFlickMinVelocityPxPerMs;
-}
-
-function terminalTouchAlternateCommand(signedLines, fastFlick = false) {
+function terminalTouchAlternateCommand(signedLines) {
   const signed = Number(signedLines) || 0;
   if (!signed) return null;
   return {
-    action: fastFlick ? (signed < 0 ? 'page-up' : 'page-down') : (signed < 0 ? 'arrow-up' : 'arrow-down'),
-    repeat: fastFlick ? 1 : Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signed)))),
+    action: signed < 0 ? 'arrow-up' : 'arrow-down',
+    repeat: Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signed)))),
   };
 }
 
@@ -3107,14 +3098,13 @@ function enableTerminalScroll(session, term, container) {
   const flushTouchLines = state => {
     if (!state) return false;
     clearTouchTimer(state);
-    if (state.cancelled || state.flickSent) return false;
+    if (state.cancelled) return false;
     const whole = Math.trunc(state.pendingLines);
     if (!whole) return false;
     state.pendingLines -= whole;
     return routeTerminalScrollLines(session, term, container, whole, {source: 'touch'});
   };
   const queueTouchLines = (state, signedLines) => {
-    if (state.flickSent) return;
     state.pendingLines += signedLines;
     if (Math.abs(state.pendingLines) < 1 || state.timer) return;
     state.timer = setTimeout(() => {
@@ -3148,7 +3138,6 @@ function enableTerminalScroll(session, term, container) {
       startAt: performanceNow(),
       claimed: false,
       cancelled: false,
-      flickSent: false,
       pendingLines: 0,
       timer: 0,
     };
@@ -3164,6 +3153,12 @@ function enableTerminalScroll(session, term, container) {
     }
     const touch = touchForIdentifier(event, state.identifier);
     if (!touch) return;
+    if (state.touchSelection) {
+      event.preventDefault();
+      event.stopPropagation();
+      terminalExtendTouchSelection(term, state.touchSelection, container, touch.clientX, touch.clientY);
+      return;
+    }
     if (!state.claimed) {
       const decision = terminalTouchGestureDecision(touch.clientX - state.startX, touch.clientY - state.startY);
       if (decision === 'pending') return;
@@ -3181,14 +3176,6 @@ function enableTerminalScroll(session, term, container) {
     const rowHeight = terminalCellDimensions(term, container).height;
     const signedLines = terminalTouchSignedRows(deltaY, rowHeight);
     if (!signedLines) return;
-    if (sessionPaneIsAlternateScreen(session)
-      && terminalTouchIsFastFlick(touch.clientY - state.startY, performanceNow() - state.startAt)) {
-      clearTouchTimer(state);
-      state.pendingLines = 0;
-      const flickLines = terminalTouchSignedRows(touch.clientY - state.startY, rowHeight);
-      state.flickSent = routeTerminalScrollLines(session, term, container, flickLines, {source: 'touch', fastFlick: true});
-      return;
-    }
     queueTouchLines(state, signedLines);
   }, {capture: true, passive: false});
 
@@ -3203,11 +3190,29 @@ function enableTerminalScroll(session, term, container) {
       event.preventDefault();
       event.stopPropagation();
     }
-    if (cancelled) cancelTouch(state);
-    else flushTouchLines(state);
+    if (cancelled) {
+      cancelTouch(state);
+    } else if (state.claimed) {
+      flushTouchLines(state);
+    } else {
+      // Panel pointerdown deliberately defers touch focus until this shared
+      // classifier proves the gesture was a tap. Focusing xterm sooner opens
+      // the iPad keyboard before a vertical pan can claim terminal scroll.
+      focusTerminalFromUserAction(session);
+    }
   };
   container.addEventListener('touchend', event => finishTouch(event), {capture: true, passive: false});
   container.addEventListener('touchcancel', event => finishTouch(event, true), {capture: true, passive: false});
+
+  // `installTouchContextMenuOwner` dispatches the shared long-press contextmenu event. The
+  // terminal menu puts the selected range on that event, allowing this owner to claim and extend
+  // it while preserving the existing tap/pan decision state.
+  container.addEventListener('contextmenu', event => {
+    const selection = event.yolomuxTerminalTouchSelection;
+    if (!selection || !touchState) return;
+    touchState.claimed = true;
+    touchState.touchSelection = selection;
+  });
 
   // iPadOS may synthesize a complete mouse chain after touchend even when touchmove was prevented.
   // Swallow only that short post-pan window; an unclaimed tap never arms the latch and still focuses.
@@ -3239,18 +3244,17 @@ function enableTerminalScroll(session, term, container) {
 
 function routeTerminalScrollLines(session, term, container, signedLines, options = {}) {
   if (!signedLines) return false;
-  if (sessionPaneIsAlternateScreen(session)) {
-    if (options.source !== 'touch') {
+  if (!options.forceTmuxScrollback && sessionPaneIsAlternateScreen(session)) {
+    // Explicit tmux keys keep their native meaning in an alternate-screen TUI. Plain page keys
+    // become wheel reports only for mouse-owning apps; other TUIs receive their native key event.
+    if (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term))) return false;
+    if (options.source !== 'touch' || terminalHasMouseTracking(term)) {
       forwardAltScreenWheel(session, container, signedLines);
       return true;
     }
-    const command = terminalTouchAlternateCommand(signedLines, options.fastFlick === true);
+    const command = terminalTouchAlternateCommand(signedLines);
     if (!command) return false;
-    const data = command.action === 'page-up'
-      ? '\x1b[5~'
-      : (command.action === 'page-down'
-        ? '\x1b[6~'
-        : terminalMobileAccessoryCursorData(session, command.action).repeat(command.repeat));
+    const data = terminalMobileAccessoryCursorData(session, command.action).repeat(command.repeat);
     noteTerminalExplicitInput(session);
     return handleTerminalData(session, data, {bypassMobileAccessoryModifiers: true});
   }
@@ -3262,6 +3266,10 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
   }
   queueLocalTerminalScroll(term, signedLines);
   return true;
+}
+
+function terminalScrollPageLines(term) {
+  return Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
 }
 
 // Re-emit `lines` worth of single-line wheel events at xterm's screen element. xterm encodes each
@@ -3291,7 +3299,7 @@ function terminalWheelSignedLines(event, rows = 0) {
   const deltaY = Number(event?.deltaY);
   if (!Number.isFinite(deltaY) || deltaY === 0 || event?.ctrlKey) return 0;
   const direction = deltaY < 0 ? -1 : 1;
-  const pageLines = Math.max(1, Math.floor((Number(rows) || 0) * terminalWheelPageFraction));
+  const pageLines = terminalScrollPageLines({rows});
   if (event?.shiftKey) return direction * pageLines;
   const magnitude = Math.abs(deltaY);
   let lines;
@@ -3715,6 +3723,10 @@ function swapPaneSlots(sourceSlot, targetSlot) {
   applyLayoutSlots(next, {
     focusSession: activeItemForSide(targetSlot, next) || activeItemForSide(sourceSlot, next),
     prune: false,
+    // A pane swap does not change the session roster; rebuilding global tabs only
+    // combines unrelated work with Dockview's required group reconciliation.
+    sessionButtons: false,
+    deferDockviewLoad: dockviewLayoutActive(),
     forceFull: dockviewLayoutActive(),
     message: t('layout.status.swapped'),
   });

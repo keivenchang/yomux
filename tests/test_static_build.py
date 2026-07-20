@@ -46,7 +46,7 @@ from tools.static_build import _light_covers
 from tools.static_build import lint_light_mode_pairs
 
 
-UI_PINS = json.loads(repo_path("tests/ui_pins.json").read_text(encoding="utf-8"))
+UI_PINS = json.loads(repo_path("tests/fixtures/ui_pins.json").read_text(encoding="utf-8"))
 
 
 def _grouped_css_selectors(css):
@@ -64,8 +64,8 @@ def test_generated_static_assets_are_current():
 
 
 def test_markdown_source_change_invalidates_derived_preview_artifacts():
-    markdown = repo_path("static_src/js/yolomux/93_markdown_preview.js").read_text(encoding="utf-8")
-    renderers = repo_path("static_src/js/yolomux/94_preview_renderers.js").read_text(encoding="utf-8")
+    markdown = repo_path("static_src/js/yolomux/88_markdown_preview.js").read_text(encoding="utf-8")
+    renderers = repo_path("static_src/js/yolomux/89_preview_renderers.js").read_text(encoding="utf-8")
 
     assert "function invalidateMarkdownPreviewArtifacts" in markdown
     assert "container._markdownPreviewGeneration" in markdown
@@ -867,9 +867,9 @@ def test_panel_frame_builder_owns_the_shared_panel_chrome():
         "static_src/js/yolomux/78_panel_shell.js",
         "static_src/js/yolomux/80_info_panel.js",
         "static_src/js/yolomux/82_chat_panel.js",
-        "static_src/js/yolomux/82_preferences_panel.js",
-        "static_src/js/yolomux/83_debug_panel.js",
-        "static_src/js/yolomux/90_changes_editor.js",
+        "static_src/js/yolomux/83_preferences_panel.js",
+        "static_src/js/yolomux/85_debug_panel.js",
+        "static_src/js/yolomux/86_changes_editor.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ):
         source = repo_path(path).read_text(encoding="utf-8")
@@ -911,27 +911,27 @@ def test_shared_ui_ownership_lint_rejects_a_raw_pane_control_family(monkeypatch,
 
 
 def test_shared_ui_ownership_lint_rejects_parallel_share_connection_maps(monkeypatch, tmp_path):
-    share_state = tmp_path / "96_share_state.js"
+    share_state = tmp_path / "93_share_state.js"
     share_state.write_text(
         "const shareHostConnectionRecords = new Map();\n"
         "const shareHostSockets = new Map();\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_REQUIREMENTS", {
-        "96_share_state.js": (("share connection record", "shareHostConnectionRecords"),),
+        "93_share_state.js": (("share connection record", "shareHostConnectionRecords"),),
     })
     monkeypatch.setattr(sb, "SHARED_UI_OWNERSHIP_FORBIDDEN_NEEDLES", (("parallel share host socket map", "shareHostSockets"),))
-    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["96_share_state.js"])
+    monkeypatch.setitem(sb.ASSETS, "yolomux.js", ["93_share_state.js"])
     monkeypatch.setattr(sb, "repo_path", lambda path: tmp_path / Path(path).name)
 
     assert sb.lint_shared_ui_ownership() == [
-        "96_share_state.js: shared ownership forbids parallel share host socket map ('shareHostSockets')",
+        "93_share_state.js: shared ownership forbids parallel share host socket map ('shareHostSockets')",
     ]
 
 
 def test_node_shard_launcher_has_unique_behavior_owners_and_a_terminal_summary():
     launcher = repo_path("tests/layout_url.test.js").read_text(encoding="utf-8")
-    helper = repo_path("tests/layout_test_helper.js").read_text(encoding="utf-8")
+    helper = repo_path("tests/browser_helpers/layout_test_helper.js").read_text(encoding="utf-8")
     suite_files = re.findall(r"'(tests/[^']+\.test\.js)'", launcher)
 
     assert len(suite_files) == len(set(suite_files)) and set(suite_files) == {f"tests/{path.name}" for path in repo_path("tests").glob("*.test.js") if path.name != "layout_url.test.js"}

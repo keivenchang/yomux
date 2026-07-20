@@ -64,6 +64,58 @@ def test_expected_client_disconnect_is_counted_without_traceback(monkeypatch):
     })]
 
 
+def test_route_micro_helpers_keep_session_scope_body_and_client_address_contracts():
+    assert http_routes.session_param({"session": ["alpha"]}) == "alpha"
+    assert http_routes.session_param({}, None) is None
+    assert http_routes.session_param({"session": [""]}) == ""
+
+    assert http_routes.client_ip(SimpleNamespace(client_address=("203.0.113.4", 443))) == "203.0.113.4"
+    assert http_routes.client_ip(SimpleNamespace(client_address=None)) == ""
+    assert http_routes.client_ip(SimpleNamespace(client_address=())) == ""
+
+    request = SimpleNamespace(share_sessions=lambda: ["one", "two"])
+    allowed, blocked = http_routes.check_share_session_scope(request, ["two"])
+    assert allowed == ["two"] and blocked is None
+    defaulted, blocked = http_routes.check_share_session_scope(request, [], default_to_shared_sessions=True)
+    assert defaulted == ["one", "two"] and blocked is None
+    denied, blocked = http_routes.check_share_session_scope(request, ["other"])
+    assert denied == [] and blocked is not None and blocked[1] == HTTPStatus.FORBIDDEN
+
+    calls = []
+    request = SimpleNamespace(read_json_body=lambda limit, **kwargs: calls.append((limit, kwargs)) or {"ok": True})
+    route = http_routes.Route("POST", "/api/test", "admin", lambda *_args: None, body_limit=123)
+    assert http_routes.require_json_body(request, route) == {"ok": True}
+    assert calls == [(123, {})]
+
+
+def test_dev_reload_stream_waits_for_its_low_frequency_poll_before_rechecking_signature(monkeypatch):
+    handler = object.__new__(Handler)
+    signatures = iter(("bundle-a", "bundle-b"))
+    sleeps = []
+    events = []
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda *_args: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    handler.dev_bundle_signature = lambda: next(signatures)
+
+    def write_sse_json(event, payload):
+        events.append((event, payload))
+        if event == "reload" and payload["signature"] == "bundle-b":
+            raise OSError("fixture client disconnected")
+
+    handler.write_sse_json = write_sse_json
+    monkeypatch.setattr(server_module.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    handler.stream_dev_reload("bundle-a")
+
+    assert sleeps == [server_module.DEV_RELOAD_POLL_SECONDS]
+    assert events == [
+        ("ready", {"signature": "bundle-a"}),
+        ("reload", {"signature": "bundle-b"}),
+    ]
+
+
 def test_unexpected_server_error_keeps_the_standard_traceback_path(monkeypatch):
     delegated = []
     server = object.__new__(server_module.TmuxWebtermHTTPServer)
@@ -823,7 +875,7 @@ def test_request_body_reader_owns_content_length_validation():
         body = inspect.getsource(method)
         assert "read_request_body" in body
         assert "self.headers.get(\"Content-Length" not in body
-    assert "read_json_body" in inspect.getsource(http_routes._json_body)
+    assert "read_json_body" in inspect.getsource(http_routes.require_json_body)
     assert "Content-Length" not in inspect.getsource(http_routes.post_share_stop)
 
 

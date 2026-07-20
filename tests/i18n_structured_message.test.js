@@ -1,15 +1,15 @@
 const assert = require('node:assert');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const {makeCatalogT, sourceBetween} = require('./layout_test_helper');
+const {makeCatalogT, sourceBetween} = require('./browser_helpers/layout_test_helper');
 
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const i18nSource = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const shareSource = fs.readFileSync('static_src/js/yolomux/98_share_admin.js', 'utf8');
+const shareSource = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
 const fileSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
-const editorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
+const editorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
 const catalog = {
   'events.message.test': 'localized event {count}',
   'share.error.test': 'localized share {reason}',

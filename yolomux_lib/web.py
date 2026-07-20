@@ -6,6 +6,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from .filesystem.io_ops import read_json_file
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
@@ -40,7 +41,7 @@ from .workdir import agent_auth_status
 from .workdir import agent_command
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
-from .yolo_rules import rules_status
+from .approval.yolo_rules import rules_status
 
 
 STATIC_CONTENT_TYPES = {
@@ -104,10 +105,7 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
     normalized = normalize_locale(locale)
     for code in dict.fromkeys([FALLBACK_LOCALE, normalized]):
         path = STATIC_DIR / "locales" / f"{code}.json"
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            data = {}
+        data = read_json_file(path, {}, exceptions=(OSError, ValueError))
         if isinstance(data, dict):
             catalogs[code] = data
     return catalogs

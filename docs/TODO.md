@@ -14,7 +14,7 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 - Build, test, restart, and CPS commands live in [`DEVELOPMENT.md`](DEVELOPMENT.md). The local gate is `python3 tools/check.py`.
 - AI-agent behavior rules and repo lessons live in [`../AGENTS.md`](../AGENTS.md). Do not re-inline those rules here.
-- Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state and tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem/`; shared helpers and paths `yolomux_lib/common.py`; HTML shell `yolomux_lib/web.py`; frontend partials `static_src/js/yolomux/*.js` and `static_src/css/yolomux/*.css` generate `static/yolomux.js` and `static/yolomux.css`.
+- Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state and tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/tmux/sessions.py`; repo/PR/CI metadata `yolomux_lib/workspace/metadata.py`; file ops `yolomux_lib/filesystem/`; shared helpers and paths `yolomux_lib/infra/common.py`; HTML shell `yolomux_lib/web.py`; frontend partials `static_src/js/yolomux/*.js` and `static_src/css/yolomux/*.css` generate `static/yolomux.js` and `static/yolomux.css`.
 - State lives in `~/.config/yolomux/state.json`; events live in `~/.local/state/yolomux/events.jsonl`; YO!agent skill files live under `~/.config/yolomux/skills.d/` and context under `~/.config/yolomux/context.d/`.
 - Line numbers drift. Search by symbol, route, CSS class, setting key, or test name before editing.
 - `DOIT*.md` files are active work queues. When a queue is fully implemented and validated, archive the result in [`DONE.md`](DONE.md) and remove the queue file.
@@ -72,7 +72,6 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [ ] [M] Add a peek/reply action for a session when it needs only a short response and the user does not need to attach to the full terminal.
 - [ ] [M] Add worktree cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
 - [ ] [M] Add per-session token/cost/context metrics only if they can be read reliably from Claude/Codex metadata without scraping fragile terminal text.
-- [x] [L] Added an opt-in displayed-range Cost summary with source-linked API list-price evidence, exact `Σ displayed` range reuse, text/image input/output/cache, model and source breakdowns, retained-history migration, effective revisions, and opaque/unknown/partial lower-bound labeling; see [`DONE.md`](DONE.md) and [`RESEARCH.md`](RESEARCH.md#transparent-model-pricing-and-estimated-cost--2026-07-11).
 - [ ] [M] Add lightweight CPU/memory/load probes and per-session process trees. Add optional `nv-smi` GPU status when available, but do not make GPU support required.
 
 ## Global Summaries

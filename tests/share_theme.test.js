@@ -31,9 +31,30 @@ const {
   test,
   runSuites,
   finishSuite,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 
 async function runShareThemeSuite() {
+  test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
+    assert.ok(source.includes("popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms')"), 'one JS owner reads the shared hover-open setting');
+    assert.ok(source.includes("popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms')"), 'one JS owner reads the shared hover-close/follow setting');
+    for (const retiredName of ['hoverCloseDelayMs', 'menuHoverOpenDelayMs', 'menuHoverCloseDelayMs', 'tabPopoverShowDelayMs', 'tabPopoverFollowDelayMs', 'fileImagePreviewMinShowDelayMs']) {
+      assert.equal(source.includes(retiredName), false, `${retiredName} cannot reintroduce a per-surface hover delay`);
+    }
+    const css = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(css.includes('--popover-show-delay: 1300ms;'), 'CSS defaults to the shared open delay');
+    assert.ok(css.includes('--popover-hide-delay: 120ms;'), 'CSS defaults to the shared close/follow delay');
+    const runtime = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    assert.ok(runtime.includes("root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);"), 'settings keep the CSS open-delay token synchronized');
+    assert.ok(runtime.includes("root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);"), 'settings keep the CSS close-delay token synchronized');
+    const popoverCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8') + fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    assert.equal(popoverCss.includes('ease var(--popover-show-delay)'), false, 'CSS does not add a second hover-open wait');
+    assert.equal(popoverCss.includes('ease var(--popover-hide-delay)'), false, 'CSS does not add a second hover-close wait');
+  });
   // Keep independent fresh-runtime scenarios below. Shared-state behavior is split into named
   // checkpoints so one assertion cannot conceal later cross-surface contracts.
   test('cross-surface host state survives layout, share, and terminal transitions', () => {
@@ -449,7 +470,7 @@ async function runShareThemeSuite() {
     for (const listener of api.documentListenersForTest('scroll')) listener({target: new TestElement('outside')});
     assert.equal(api.diffRefPopoverStateForTest().input, null, 'scroll cleanup drops a detached owning input');
     for (const name of ['diffRefPopoverInput', 'diffRefPopoverItemsCurrent', 'diffRefPopoverActiveIndex', 'diffRefPopoverListenersInstalled']) {
-      assert.equal(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
+      assert.equal(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
     }
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
@@ -980,12 +1001,19 @@ async function runShareThemeSuite() {
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
     assert.ok(/showRepoChipMenu\([\s\S]*?sessionRepoDisplayRoot\.set\(session, root\)/.test(c9Src), 'C9: clicking a repo row switches the Info Bar to that repo (the <N/M> display)');
     assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-cycle"'), 'CSS-2: repo arrow buttons use the shared button reset');
-    assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-chip"'), 'CSS-2: repo count button uses the shared button reset');
+    assert.ok(multiMetaHtml.includes('class="btn-base chip-base meta-repo-chip"'), 'CSS-2: repo count button uses shared button reset and chip geometry');
     assert.ok(/\.btn-base,[\s\S]*?\{[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(c9Css), 'CSS-2: shared btn-base owns the button reset cluster');
     assert.ok(/\.control-active-hover:hover,\s*\.control-active-hover:focus-visible\s*\{[\s\S]*outline:\s*0;[\s\S]*color:\s*var\(--active-control-text\);[\s\S]*background:\s*var\(--active-control-bg\);/.test(c9Css), 'CSS-3: shared control-active-hover owns the active hover/focus recolor');
     assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
+    assert.ok(/\.badge-base,\s*\.chip-base\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;/.test(c9Css), 'D7: badge-base and chip-base own compact inline geometry');
+    assert.ok(/\.badge-base\s*\{[\s\S]*justify-content:\s*center;/.test(c9Css), 'D7: badge-base owns centered badge content');
+    assert.ok(c9Src.includes("className: 'chip-base share-status-pill'"), 'D7: share status uses the shared chip base');
+    assert.ok(c9Src.includes('badge-base app-menu-button-badge'), 'D7: menu count badge uses the shared badge base');
+    assert.ok(c9Src.includes("['badge-base', 'session-state-badge', 'tab-symbol'"), 'D7: session-state badges use the shared badge base');
+    assert.ok(c9Src.includes('chip-base command-palette-view-chip'), 'D7: command-palette view chips use the shared chip base');
+    assert.ok(c9Src.includes('btn-base chip-base meta-repo-chip'), 'D7: repository switcher chips use the shared chip base');
     // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
     // and taking precedence over the global Mod+Delete tab-close.
     assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
@@ -2043,7 +2071,7 @@ async function runShareThemeSuite() {
     assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
-    assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
     assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
     assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
@@ -2122,8 +2150,8 @@ async function runShareThemeSuite() {
     assert.equal(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'terminal no longer has a local hover scrollbar color rule');
     assert.ok(/--diff-add-line-bg:\s*#2b5d16/.test(preferencesCss), '#250: diff added lines use the sampled opaque green fill over the dark bg');
     assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
-    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(preferencesCss), 'light diff added lines use a more visible green fill');
-    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(preferencesCss), 'light diff removed lines use a more visible red fill');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light diff added lines use a more visible green fill through root theme tokens');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light diff removed lines use a more visible red fill through root theme tokens');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine \*\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines and descendants share one dark-red text rule on the stronger red fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*var\(--success-text-strong\)[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
@@ -2218,10 +2246,9 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'notification pulse duration defaults to 60 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
-    assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
-    assert.ok(/data-setting-path="performance\.menu_hover_open_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'menu hover timing remains in milliseconds');
-    assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
-    assert.ok(/data-setting-path="performance\.tab_popover_follow_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover follow timing remains in milliseconds');
+    assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?value="1300"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'shared hover-open timing defaults to 1300ms in Preferences');
+    assert.ok(/data-setting-path="performance\.popover_hide_delay_ms"[\s\S]*?value="120"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'shared hover-close/follow timing defaults to 120ms in Preferences');
+    for (const retiredPath of ['performance.menu_hover_open_delay_ms', 'performance.tab_popover_show_delay_ms', 'performance.tab_popover_follow_delay_ms']) assert.equal(preferencesHtml.includes(`data-setting-path="${retiredPath}"`), false, `${retiredPath} is not a divergent Preferences control`);
     assert.ok(/data-setting-path="performance\.remote_resize_delay_ms"[\s\S]*?value="220"[\s\S]*?min="50"[\s\S]*?max="2000"[\s\S]*?step="10"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'remote resize client/server debounce displays milliseconds');
     const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="performance"'), preferencesHtml.indexOf('data-preference-section="github"'));
     const notificationsHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="notifications"'), preferencesHtml.indexOf('data-preference-section="file_explorer"'));
@@ -2780,7 +2807,9 @@ async function runShareThemeSuite() {
     assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'right'}), false, 'mobile edge drops cannot create a split');
     assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'middle'}), true, 'mobile middle drops remain ordinary tab moves');
     const mobileViewMenu = mobileApi.appMenuTree().find(menu => menu.id === 'view');
-    assert.equal(mobileViewMenu.items.some(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout')), false, 'mobile removes the multi-pane Layout menu');
+    const mobileLayoutMenu = mobileViewMenu.items.find(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout'));
+    assert.ok(mobileLayoutMenu, 'mobile keeps View > Layout visible so the one-column policy is explained rather than silently hiding split controls');
+    assert.ok(mobileLayoutMenu.items.every(item => item.disabled === true && item.detail === mobileApi.t('menu.view.layout.narrow.detail')), 'mobile disables every layout command with the shared localized width hint');
     assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
     const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
@@ -3092,7 +3121,7 @@ async function runShareThemeSuite() {
     }
     {
       const shareSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
+      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
       const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
       const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
       const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
@@ -3163,7 +3192,7 @@ async function runShareThemeSuite() {
       assert.ok(/function normalizeSharePayload\(payload\)[\s\S]*viewerDetails:\s*normalizeShareViewerDetails\(payload\)/.test(shareSource), 'YO!share payload normalization preserves active viewer details for the manage modal');
       assert.ok(/<button type="button" class="danger share-stop-inline" data-share-stop>/.test(shareSource), 'YO!share manage rows place Stop inline with mode/protocol metadata');
       assert.ok(/async function stopActiveShare\(tokenOrShortId = ''\)[\s\S]*JSON\.stringify\(\{token: target\}\)/.test(shareSource), 'YO!share stop is scoped to a selected token when a row is stopped');
-      assert.ok(/function apiFetch\(url, options = \{\}\)[\s\S]*X-Share-Token/.test(shareSource), 'share-view API calls attach the fragment token as X-Share-Token');
+      assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*X-Share-Token/.test(shareSource) && (shareSource.match(/applyShareTokenHeaders\(requestOptions\)/g) || []).length === 3, 'share-view API calls attach the fragment token through the one shared request-header helper');
       assert.ok(/const shareWriteMode = shareViewMode && shareBootstrap\?\.mode === 'rw'/.test(shareSource), 'share-view write mode is explicit and token-driven');
       assert.ok(/disableStdin:\s*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view terminals are created with stdin enabled');
       assert.ok(/function insertIntoTerminal\(session, text\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view can send terminal insertions while ro share-view stays blocked');
@@ -3181,13 +3210,24 @@ async function runShareThemeSuite() {
       assert.ok(/function sendOrQueueShareHostMessage\(token, message\)[\s\S]*ensureShareHostSocket\(token\)[\s\S]*enqueueShareHostMessage\(token, message\)/.test(shareSource), 'host and replay publication share one send-or-queue path');
       assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareSenderRecordEntries\('connection'\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*deleteShareSenderRecord\(token\)/.test(shareSource), 'inactive share pruning closes and deletes the complete token record');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
-      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
+      assert.ok(/function syncShareRuntimeIntervals\(\)[\s\S]*shareViewMode \|\| shareHasActiveShare\(\)[\s\S]*!shareRuntimeActive[\s\S]*clearRuntimeInterval\('share-status'\)[\s\S]*clearRuntimeInterval\('share-geometry-digest'\)[\s\S]*if \(!shareViewMode\) installShareGeometryDigestLoop\(\)/.test(shareSource), 'T1: share timers start only for active hosts or viewers and both clear on host deactivation');
+      assert.ok(/function syncShareRuntimeIntervals\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
       assert.ok(/function shareStatusSocketHealthy\(\)[\s\S]*WebSocket\.OPEN/.test(shareSource) && /shareViewMode && !shareStatusSocketHealthy\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource) && /function shareHostStatusBackupPollDue[\s\S]*!shareStatusSocketHealthy\(\)/.test(shareSource), 'YO!share uses pushed share-socket status while healthy and reserves host/viewer HTTP status refreshes for a disconnected repair path');
       assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
       assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
       assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
       assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*sendOrQueueShareHostMessage\(token, serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication through one serialized send-or-queue path');
       const connectionApi = loadYolomux('', ['1'], 'https:');
+      connectionApi.setActiveSharesForTest([]);
+      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), false, 'T1: a non-sharing host page keeps neither share timer active');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-status'), false, 'T1: inactive host has no share-status timer');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-geometry-digest'), false, 'T1: inactive host has no share geometry timer');
+      connectionApi.setActiveSharesForTest([{token: 'timer-share'}]);
+      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), true, 'T1: active host starts share lifecycle timers');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-status'), true, 'T1: active host starts status timer');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-geometry-digest'), true, 'T1: active host starts geometry timer');
+      connectionApi.setActiveSharesForTest([]);
+      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), false, 'T1: stopped host clears share lifecycle timers');
       connectionApi.setActiveSharesForTest([{token: 'closed-share'}]);
       const closedSocket = connectionApi.ensureShareHostSocketForTest('closed-share');
       assert.equal(connectionApi.enqueueShareHostMessageForTest('closed-share', {type: 'queued-before-close'}), true);
@@ -3293,6 +3333,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareGeometryFirstDifference\(host = \{\}, local = \{\}\)[\s\S]*'textWraps'/.test(shareSource), 'M9: digest comparison names wrapped text/control drift separately');
       assert.ok(/function shareHostConnectedViewerCount\(\)[\s\S]*share\?\.viewers[\s\S]*share\?\.viewerDetails/.test(shareSource), 'YO!share host perf gates count active viewers from status payloads');
       assert.ok(/function publishShareGeometryDigest\(\)[\s\S]*!shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('geometryDigest'\)[\s\S]*shareGeometryDigestFrame\(\)/.test(shareSource), 'YO!share skips expensive geometry digest snapshots when an active share has no connected viewers');
+      assert.ok(/const shareGeometryDigestDirtyState = \{[\s\S]*revision:[\s\S]*publishedRevision:[\s\S]*function installShareGeometryDigestDirtyTracking\(\)[\s\S]*MutationObserver[\s\S]*ResizeObserver[\s\S]*function publishShareGeometryDigest\(\)[\s\S]*revision === shareGeometryDigestDirtyState\.publishedRevision[\s\S]*shareReplayRecordHostPerfUnchanged\('geometryDigest'\)/.test(shareSource), 'YO!share dirty-tracks layout and skips forced geometry snapshots when the layout has not changed');
     assert.ok(/function shareReplayEnqueueMutationRecords\(records = \[\], options = \{\}\)[\s\S]*options\.requireViewers === true && !shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('mutationRecords'\)[\s\S]*shareReplayRecordHostPerf\('mutationRecords'/.test(shareSource), 'YO!share mutation replay batches record cost while observer-driven mutation publishing stops when no viewers are connected');
       assert.ok(/function shareReplayRecordHostPerfEvent\(kind = '', payload = \{\}, durationMs = null\)[\s\S]*recordJsDebugEvent\('share-replay-perf'/.test(shareSource), 'YO!share replay performance samples reuse the JS debug event stream');
       assert.ok(/async function boot\(\)[\s\S]*waitForYolomuxFontsReady\(\{timeoutMs: 0\}\)\.catch\(\(\) => \{\}\)[\s\S]*paintInitialAppShell\(\)[\s\S]*installYolomuxFontMetricRefresh\(\)/.test(shareSource), 'M9: first app render starts bundled font loading and corrects wrapped widgets after metrics settle');
@@ -3333,6 +3374,10 @@ async function runShareThemeSuite() {
       assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
       assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
       assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
+      digestApi.publishShareGeometryDigestForTest();
+      digestPerf = digestApi.shareReplayHostPerformanceForTest();
+      assert.equal(digestPerf.geometryDigest.count, 1, 'an unchanged share layout skips the expensive geometry snapshot on the next cadence');
+      assert.equal(digestPerf.geometryDigest.skippedUnchanged, 1, 'the geometry digest diagnostics count unchanged-layout skips');
       assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'share pointer DOM and hide timer state have one sender-keyed record owner');
       assert.equal(/sharePointerGhosts|sharePointerHideTimers|let sharePointerGhost\b|let sharePointerHideTimer\b/.test(shareSource), false, 'parallel and scalar share pointer state owners are removed');
       assert.equal(/const (?:IMAGE|PDF|MERMAID)_EXTENSIONS\b/.test(shareSource), false, 'dead preview extension-set mirrors are removed');
@@ -3453,8 +3498,8 @@ async function runShareThemeSuite() {
   	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
       assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)[\s\S]*scheduleShareTopologySnapshot\('tab-activation'\)/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'tab activation schedules a full topology snapshot behind the narrow active-tab frame');
       assert.ok(/async function openFileExplorerAt\(path, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-root'\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Finder root changes schedule a full topology snapshot');
-      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
-      assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
+      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
+      assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*scheduleShareTopologySnapshot\('editor-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor mode changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorThemeMode\(mode\)[\s\S]*scheduleShareTopologySnapshot\('editor-theme'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor theme changes schedule a full topology snapshot');
       assert.ok(/function applyGlobalThemeMode\(options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('theme'\)[\s\S]*scheduleShareAppearancePublish\(\{reason: options\.reason \|\| 'theme', topology: false\}\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'all host theme applications publish appearance frames through the shared apply parent');
@@ -4545,12 +4590,12 @@ async function runShareThemeSuite() {
     api.clearBrowserSelectionForTest();
     const terminalContextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     const urlReference = {type: 'url', href: 'https://github.com/ai-dynamo/dynamo/pull/172'};
-    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, null, urlReference.href, urlReference);
+    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {presetSelection: urlReference.href, reference: urlReference});
     let terminalUrlMenu = terminalContextMenuNode();
     let terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu puts the link action first and drops the redundant generic Copy row when the selection already equals the href');
     assert.equal(terminalUrlLabels.includes('Copy'), false, 'terminal URL menu does not show the ambiguous generic Copy row when it would duplicate Copy URL');
-    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, null, 'YOLOmux PR 172', urlReference);
+    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {presetSelection: 'YOLOmux PR 172', reference: urlReference});
     terminalUrlMenu = terminalContextMenuNode();
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
@@ -4589,6 +4634,7 @@ async function runShareThemeSuite() {
     terminalCopyApi.installTerminalCopyShortcutForTest('1', {
       getSelection: () => '',
       clearSelection: () => { clearSelectionCount += 1; },
+      scrollLines() {},
       attachCustomKeyEventHandler(handler) { domCopyShortcutHandler = handler; },
     }, {
       addEventListener(type, handler, options) {
@@ -4635,7 +4681,7 @@ async function runShareThemeSuite() {
         stopPropagation() {},
         stopImmediatePropagation() {},
       };
-      assert.equal(domCopyShortcutHandler(xtermEvent), true, `${key} remains available to the foreground terminal application`);
+      assert.equal(domCopyShortcutHandler(xtermEvent), false, `${key} is claimed by the xterm handler for normal-screen tmux history`);
       const terminalEvent = {
         type: 'keydown',
         code: key,
@@ -4649,9 +4695,9 @@ async function runShareThemeSuite() {
         stopImmediatePropagation() { stoppedImmediate += 1; },
       };
       domKeydownHandler(terminalEvent);
-      assert.equal(prevented, 0, `${key} is not claimed by the tmux history shortcut`);
-      assert.equal(stopped, 0, `${key} reaches xterm and the foreground terminal application`);
-      assert.equal(stoppedImmediate, 0, `${key} does not stop sibling terminal handlers`);
+      assert.equal(prevented, 1, `${key} is claimed by the capture-phase tmux history shortcut`);
+      assert.equal(stopped, 1, `${key} does not reach xterm on a normal-screen pane`);
+      assert.equal(stoppedImmediate, 1, `${key} stops sibling terminal handlers on a normal-screen pane`);
     }
     const pcPageApi = loadYolomux('', ['1'], 'https:', 'Win32');
     for (const [name, api] of [['Mac', terminalCopyApi], ['PC', pcPageApi]]) {
@@ -5081,9 +5127,9 @@ async function runShareThemeSuite() {
     assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
     assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');
     assert.equal(api.sessionStorageValueForTest('test.stable-id'), 'created-id', 'shared ID helper persists the created ID');
-    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_renderers.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8');
     assert.ok(/function previewFileActionLinks\(path,[\s\S]*rawFileUrl\(path\)[\s\S]*noopener noreferrer[\s\S]*rawFileDownloadUrl\(path\)/.test(previewSource), 'one preview-link helper owns safe Open and Download URLs');
-    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
+    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
     assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');

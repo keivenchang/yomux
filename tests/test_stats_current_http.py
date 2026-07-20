@@ -288,6 +288,39 @@ def test_explicit_retry_clears_terminal_startup_failure_and_reports_result():
     assert client.retry_calls == 2
 
 
+def test_read_fence_retry_recovers_the_next_snapshot_without_a_writer_page_reload():
+    class RecoveringClient(FakeClient):
+        def __init__(self):
+            super().__init__({
+                "ok": False,
+                "status": "upgrade_required",
+                "required_protocol_version": 24,
+                "required_schema_generation": 6,
+                "required_build": "3",
+            })
+            self.started = False
+
+        def retry(self):
+            self.retry_calls += 1
+            self.started = True
+            self.metadata = {"ok": True, "content_type": "application/json"}
+            self.body = b'{"recovered":true}'
+            return True
+
+    client = RecoveringClient()
+    adapter = http.StatsHttpForwarder(client, client_binding_secret=b"s" * 32)
+    query = "range_seconds=300&resolution=1&client_id=browser-a"
+
+    initial = adapter.snapshot(query, authenticated_username="alice")
+    assert initial.status == HTTPStatus.UPGRADE_REQUIRED
+    assert initial.payload["required_schema_generation"] == 6
+    assert adapter.retry() == {"ok": True, "status": "ready"}
+    assert client.retry_calls == 1
+    assert adapter.snapshot(query, authenticated_username="alice") == http.SnapshotHttpResult(
+        HTTPStatus.OK, b'{"recovered":true}',
+    )
+
+
 @pytest.mark.parametrize(
     "result",
     (

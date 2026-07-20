@@ -136,6 +136,13 @@
   --drop-outline-strong: rgba(255, 255, 255, 0.95);
   --drop-outline-shadow: rgba(245, 197, 66, 0.82);
   --drop-outline-surface: rgba(17, 23, 34, 0.84);
+  --diff-add-line-bg: #2b5d16;
+  --diff-remove-line-bg: #540c06;
+  --diff-search-match-bg: #ffd54a;
+  --diff-search-match-fg: #0b1020;
+  --diff-search-match-ring: var(--file-hover-bg);
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: #fff7c2;
   --auto-text: #071000;
   --auto-surface: #182512;
   --auto-surface-active: #25400f;
@@ -317,8 +324,8 @@
   --space-10: 10px;
   --space-11: 11px;
   --space-12: 12px;
-  --popover-show-delay: 1000ms;
-  --popover-hide-delay: 300ms;
+  --popover-show-delay: 1300ms;
+  --popover-hide-delay: 120ms;
   --popover-edge-gap: 1vw;
   --popover-max-inline-size: calc(100vw - var(--popover-edge-gap) - var(--popover-edge-gap));
   --context-menu-direction-count: 4;
@@ -349,6 +356,13 @@
   --file-explorer-open-inline-size: calc(var(--file-explorer-tree-inline-size) + var(--file-explorer-editor-inline-size));
   --min-split-pane-width: 300px;
   --min-split-pane-height: 220px;
+  --touch-row-height: 36px;
+  --session-label-dir-max-inline-size: clamp(5rem, 12vw, 6.5rem);
+  --session-label-detail-max-inline-size: clamp(3.5rem, 8vw, 4rem);
+  --tmux-window-tab-max-inline-size: clamp(4.5rem, 12vw, 6rem);
+  --terminal-tab-max-inline-size: clamp(3.5rem, 9vw, 4.5rem);
+  --topbar-status-max-inline-size: clamp(5rem, 14vw, 7rem);
+  --topbar-account-max-inline-size: clamp(7rem, 18vw, 8.75rem);
   --z-layer-background: 0;
   --z-layer-raised: 1;
   --z-layer-control: 2;
@@ -378,7 +392,8 @@
   --z-file-tree-drag: 60;
   --z-terminal-badge: 150;
   --z-terminal-popover: 240;
-  --z-full-screen-overlay: 200;
+  /* Full-screen overlays cover drop suggestions when both are mounted. */
+  --z-full-screen-overlay: 210;
   --z-resizer: 20;
   --z-pane-overlay: 12;
   --z-drop-preview: 38;
@@ -681,11 +696,9 @@
   --20-sessions-popovers-popover-row-border-top-31: var(--line);
   --20-sessions-popovers-popover-subtitle-fg-32: var(--text);
   --20-sessions-popovers-popover-label-fg-33: var(--text);
-  --20-sessions-popovers-popover-desc-body-fg-34: var(--text);
   --20-sessions-popovers-state-legend-item-fg-35: var(--text);
   --20-sessions-popovers-session-popover-fg-36: var(--text);
   --20-sessions-popovers-session-popover-fg-37: var(--text);
-  --20-sessions-popovers-popover-desc-fg-38: var(--text);
   --20-sessions-popovers-session-popover-fg-39: var(--text);
   --20-sessions-popovers-branch-link-fg-40: var(--text);
   --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: #596273;
@@ -1114,11 +1127,18 @@ body.theme-light {
   --git-transcript: var(--muted);
   --git-transcript-badge: #64748b;
   --drop-outline: var(--drop-outline-light);
-  --drop-outline-text: #071327;
+  --drop-outline-text: #0f2d69;
   --drop-outline-bg: rgba(29, 78, 216, 0.14);
-  --drop-outline-strong: rgba(29, 78, 216, 0.92);
-  --drop-outline-shadow: rgba(29, 78, 216, 0.42);
-  --drop-outline-surface: rgba(255, 255, 255, 0.90);
+  --drop-outline-strong: rgba(29, 78, 216, 0.98);
+  --drop-outline-shadow: rgba(29, 78, 216, 0.58);
+  --drop-outline-surface: rgba(239, 246, 255, 0.88);
+  --diff-add-line-bg: #bfeac8;
+  --diff-remove-line-bg: #f3b7b7;
+  --diff-search-match-bg: #ffcc00;
+  --diff-search-match-fg: var(--lt-text);
+  --diff-search-match-ring: #7c2d12;
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: var(--diff-search-match-ring);
   --auto-surface: #e9f7dd;
   --auto-surface-active: #d5efbf;
   --auto-muted-text: #2d4f0b;
@@ -1203,11 +1223,9 @@ body.theme-light {
   --20-sessions-popovers-popover-row-border-top-31: var(--paint-overlay-slate-10);
   --20-sessions-popovers-popover-subtitle-fg-32: var(--lt-muted);
   --20-sessions-popovers-popover-label-fg-33: var(--lt-muted);
-  --20-sessions-popovers-popover-desc-body-fg-34: var(--lt-muted);
   --20-sessions-popovers-state-legend-item-fg-35: var(--lt-muted);
   --20-sessions-popovers-session-popover-fg-36: var(--lt-muted);
   --20-sessions-popovers-session-popover-fg-37: #9aa3b2;
-  --20-sessions-popovers-popover-desc-fg-38: var(--pc-control-fg);
   --20-sessions-popovers-session-popover-fg-39: var(--accent);
   --20-sessions-popovers-branch-link-fg-40: var(--accent);
   --30-preferences-changes-js-debug-graph-view-js-debug-idle-agent-status-1: var(--editor-line-number);
@@ -1429,6 +1447,16 @@ body.theme-light {
   --50-terminal-file-tree-file-tree-row-shadow-113: 0 0 0 1px rgba(255, 255, 255, 0.95), 0 0 6px rgba(122, 160, 0, 0.55);
   --50-terminal-file-tree-file-tree-children-border-left-114: rgba(100, 116, 139, 0.28);
 }
+
+body.editor-theme-light {
+  --diff-add-line-bg: #bfeac8;
+  --diff-remove-line-bg: #f3b7b7;
+  --diff-search-match-bg: #ffcc00;
+  --diff-search-match-fg: var(--lt-text);
+  --diff-search-match-ring: #7c2d12;
+  --diff-search-selected-bg: #ff9f1c;
+  --diff-search-selected-ring: var(--diff-search-match-ring);
+}
 * { box-sizing: border-box; }
 .a11y-only {
   position: absolute !important;
@@ -1485,6 +1513,17 @@ body.theme-light {
   background: transparent;
   cursor: pointer;
   font: inherit;
+}
+
+/* Compact status/count badges and interactive chips share their inline layout. Their local rules retain size, paint, and radius. */
+.badge-base,
+.chip-base {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+.badge-base {
+  justify-content: center;
 }
 .share-view-fit-toggle,
 .pane-drag-image-tabs span,
@@ -1591,6 +1630,7 @@ body.theme-light {
 .popover-value:has(.popover-copy-value),
 .js-debug-toolbar,
 .js-debug-graph-controls,
+.js-debug-range-resolution-controls,
 .preferences-setting-advisory,
 .preferences-search-row,
 .panel-popover-zone,
@@ -1659,23 +1699,24 @@ body.theme-light {
   align-items: center;
   gap: var(--space-5);
 }
-.js-debug-toolbar,
 .js-debug-summary,
 .js-debug-actions,
-.js-debug-graph-controls,
+.yoagent-job-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+}
+.js-debug-toolbar,
 .preferences-setting-advisory,
 .info-tree-primary-controls,
 .info-tree-presets,
 .info-tree-group-selects,
 .info-tree-sort-controls,
-.yoagent-job-controls,
 .yoagent-chat-error,
 .js-debug-logs-toolbar,
 .js-debug-log-levels,
 .js-debug-log-meta {
-  display: flex;
   flex-wrap: wrap;
-  gap: var(--space-6);
 }
 .pane-info-bar-popover-zone .pane-info-bar-meta,
 .file-editor-toolbar-right {

@@ -31,35 +31,36 @@ function noteBackendHealthSuccess() {
   syncBackendHealthIndicator();
 }
 
+function applyShareTokenHeaders(requestOptions) {
+  if (!shareToken) return requestOptions;
+  if (typeof Headers === 'function') {
+    const headers = new Headers(requestOptions.headers || {});
+    if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
+    requestOptions.headers = headers;
+  } else {
+    requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
+  }
+  return requestOptions;
+}
+
 async function apiFetch(url, options = {}) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
-  if (shareToken) {
-    if (typeof Headers === 'function') {
-      const headers = new Headers(requestOptions.headers || {});
-      if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
-      requestOptions.headers = headers;
-    } else {
-      requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
-    }
-  }
-  const apiDebugEnabled = jsDebugCollectionEnabled;
-  const startedAt = apiDebugEnabled ? jsDebugPerformanceNow() : 0;
-  const method = apiDebugEnabled ? jsDebugRequestMethod(requestOptions) : '';
-  const requestBytes = apiDebugEnabled ? jsDebugRequestBytes(url, requestOptions) : 0;
+  applyShareTokenHeaders(requestOptions);
+  const startedAt = jsDebugPerformanceNow();
+  const method = jsDebugRequestMethod(requestOptions);
+  const requestBytes = jsDebugRequestBytes(url, requestOptions);
   let response;
   try {
     response = await fetch(url, requestOptions);
   } catch (error) {
     noteBackendHealthFailure();
-    if (apiDebugEnabled) recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
+    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
     throw error;
   }
   noteBackendHealthSuccess();
-  if (apiDebugEnabled) {
-    const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
-    recordApiDebugResponseBytes(event, response);
-  }
+  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
+  recordApiDebugResponseBytes(event, response);
   if (response.status === 401) {
     await redirectToLogin(response);
     throw new Error('authentication required');
@@ -87,15 +88,7 @@ async function apiFetchJson(url, options = {}) {
 async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
   const requestOptions = {...options};
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
-  if (shareToken) {
-    if (typeof Headers === 'function') {
-      const headers = new Headers(requestOptions.headers || {});
-      if (!headers.has('X-Share-Token')) headers.set('X-Share-Token', shareToken);
-      requestOptions.headers = headers;
-    } else {
-      requestOptions.headers = {...(requestOptions.headers || {}), 'X-Share-Token': shareToken};
-    }
-  }
+  applyShareTokenHeaders(requestOptions);
   const fetchStartedAt = performanceNow();
   let response;
   try {
@@ -257,7 +250,6 @@ function singleLineText(value) {
 }
 
 function jsDebugPerformanceNow() {
-  if (!jsDebugCollectionEnabled) return 0;
   return performanceNow();
 }
 
@@ -266,7 +258,6 @@ function jsDebugRequestMethod(options = {}) {
 }
 
 function jsDebugRequestBytes(url, options = {}) {
-  if (!jsDebugCollectionEnabled) return 0;
   let bytes = utf8ByteLength(jsDebugUrlText(url));
   const body = options?.body;
   if (typeof body === 'string') bytes += utf8ByteLength(body);
@@ -276,7 +267,7 @@ function jsDebugRequestBytes(url, options = {}) {
 }
 
 function jsDebugDurationMs(startedAt) {
-  if (!jsDebugCollectionEnabled || !Number.isFinite(startedAt)) return null;
+  if (!Number.isFinite(startedAt)) return null;
   const duration = jsDebugPerformanceNow() - startedAt;
   return Number.isFinite(duration) ? Number(duration.toFixed(1)) : null;
 }
@@ -296,7 +287,6 @@ function jsDebugErrorText(error) {
 }
 
 function recordApiDebugEvent(url, method, startedAt, result = {}) {
-  if (!jsDebugCollectionEnabled) return null;
   const payload = {
     method,
     url: jsDebugUrlText(url),
@@ -310,7 +300,7 @@ function recordApiDebugEvent(url, method, startedAt, result = {}) {
 }
 
 function recordApiDebugResponseBytes(event, response) {
-  if (!jsDebugCollectionEnabled || !event || !response) return;
+  if (!event || !response) return;
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
@@ -327,7 +317,6 @@ function recordApiDebugResponseBytes(event, response) {
 }
 
 function recordJsDebugEvent(type, payload = {}) {
-  if (!jsDebugCollectionEnabled) return null;
   const event = {
     id: ++jsDebugEventSeq,
     ts: new Date().toISOString(),
@@ -482,7 +471,6 @@ function terminalRemovalLatencyKey(targetKind, target) {
 }
 
 function noteTerminalRemovalLatencyStart(targetKind, target, details = {}) {
-  if (!jsDebugCollectionEnabled) return;
   const key = terminalRemovalLatencyKey(targetKind, target);
   terminalRemovalLatencyPending.set(key, {
     targetKind: String(targetKind || 'target'),
@@ -498,7 +486,6 @@ function clearTerminalRemovalLatency(targetKind, target) {
 }
 
 function completeTerminalRemovalLatency(targetKind, target, details = {}) {
-  if (!jsDebugCollectionEnabled) return null;
   const key = terminalRemovalLatencyKey(targetKind, target);
   const pending = terminalRemovalLatencyPending.get(key) || null;
   const explicitStartedAtMs = Number(details.startedAtMs);
@@ -594,7 +581,7 @@ function runJsDebugPanelRefresh() {
 }
 
 function scheduleJsDebugPanelRefresh(options = {}) {
-  if (!jsDebugCollectionEnabled || typeof refreshDebugPanelsFromEvents !== 'function') return;
+  if (typeof refreshDebugPanelsFromEvents !== 'function') return;
   if (options.force === true) jsDebugRenderForce = true;
   if (dragState.item != null) {
     jsDebugRenderDragDeferred = true;
@@ -617,7 +604,7 @@ function flushDeferredJsDebugPanelRefresh() {
 }
 
 function installJsDebugEventCapture() {
-  if (!jsDebugCollectionEnabled || jsDebugEventCaptureInstalled || !window?.addEventListener) return;
+  if (jsDebugEventCaptureInstalled || !window?.addEventListener) return;
   jsDebugEventCaptureInstalled = true;
   window.addEventListener('error', event => {
     recordJsDebugEvent('error', {
@@ -1217,44 +1204,25 @@ function registerFileIdentityForPath(path, payload) {
   const normalized = String(path || '').trim();
   const identity = physicalFileIdentityFromPayload(payload);
   if (!normalized || !identity) return '';
-  fileIdentityByPath.set(normalized, identity);
-  if (!openFilePathByIdentity.has(identity)) openFilePathByIdentity.set(identity, normalized);
+  applyFileIdentityMetadata(ensureFileState(normalized), payload);
   return identity;
 }
 
 function primaryOpenPathForFileIdentity(identity) {
   const text = String(identity || '').trim();
   if (!text) return '';
-  const mapped = openFilePathByIdentity.get(text);
-  if (mapped && openFiles.has(mapped) && fileStateFor(mapped)?.externalMissing !== true) return mapped;
-  for (const [path, state] of openFiles.entries()) {
+  for (const [path, state] of fileState.entries()) {
     if (state?.externalMissing === true) continue;
     if (physicalFileIdentityFromPayload(state) === text) {
-      openFilePathByIdentity.set(text, path);
       return path;
     }
   }
-  openFilePathByIdentity.delete(text);
   return '';
 }
 
 function openPathForPhysicalFile(path, payload = null) {
-  const identity = registerFileIdentityForPath(path, payload) || fileIdentityByPath.get(path) || physicalFileIdentityFromPayload(payload);
+  const identity = registerFileIdentityForPath(path, payload) || physicalFileIdentityFromPayload(fileStateFor(path)) || physicalFileIdentityFromPayload(payload);
   return primaryOpenPathForFileIdentity(identity);
-}
-
-function reassignOpenFileIdentityPath(oldPath, newPath) {
-  const identity = fileIdentityByPath.get(oldPath) || physicalFileIdentityFromPayload(fileStateFor(oldPath));
-  if (!identity) return;
-  fileIdentityByPath.delete(oldPath);
-  fileIdentityByPath.set(newPath, identity);
-  if (openFilePathByIdentity.get(identity) === oldPath) openFilePathByIdentity.set(identity, newPath);
-}
-
-function clearOpenFileIdentityPath(path) {
-  const identity = fileIdentityByPath.get(path) || physicalFileIdentityFromPayload(fileStateFor(path));
-  fileIdentityByPath.delete(path);
-  if (identity && openFilePathByIdentity.get(identity) === path) openFilePathByIdentity.delete(identity);
 }
 
 function normalizedFileGitHistory(value) {
@@ -1318,25 +1286,35 @@ function setFileState(path, state) {
     if (!Object.prototype.hasOwnProperty.call(state, 'realpath')) state.realpath = previous.realpath;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileId')) state.fileId = previous.fileId;
     if (!Object.prototype.hasOwnProperty.call(state, 'fileIdentity')) state.fileIdentity = previous.fileIdentity;
+    if (!Object.prototype.hasOwnProperty.call(state, 'openPromise')) state.openPromise = previous.openPromise;
   }
   const normalized = normalizeFileStateRecord(state);
   fileState.set(path, normalized);
-  registerFileIdentityForPath(path, normalized);
   return normalized;
 }
 
 function deleteFileState(path) {
   if (!path) return false;
-  clearOpenFileIdentityPath(path);
   return fileState.delete(path);
+}
+
+function fileOpenPromiseFor(path) {
+  return fileStateFor(path)?.openPromise || null;
+}
+
+function setFileOpenPromise(path, promise) {
+  const state = ensureFileState(path);
+  if (state) state.openPromise = promise;
+  return promise;
+}
+
+function clearFileOpenPromise(path, promise) {
+  const state = fileStateFor(path);
+  if (state?.openPromise === promise) delete state.openPromise;
 }
 
 function fileEditorTabItemsForPath(path) {
   return Array.from(fileStateFor(path)?.editorTabItems || []);
-}
-
-function fileHasEditorTab(path) {
-  return fileEditorTabItemsForPath(path).length > 0;
 }
 
 function addFileEditorTabItem(path, item = fileEditorItemFor(path)) {
@@ -1727,13 +1705,8 @@ function normalizeCollapsedPreferenceSections(values, sections = []) {
 function readStoredCollapsedPreferenceSections() {
   const raw = storageGet(preferencesCollapsedStorageKey);
   if (!raw) return defaultCollapsedPreferenceSections();
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return defaultCollapsedPreferenceSections();
-    return normalizeCollapsedPreferenceSections(parsed);
-  } catch (_) {
-    return defaultCollapsedPreferenceSections();
-  }
+  const parsed = safeJsonParse(raw, null);
+  return Array.isArray(parsed) ? normalizeCollapsedPreferenceSections(parsed) : defaultCollapsedPreferenceSections();
 }
 
 function writeStoredCollapsedPreferenceSections() {
@@ -1775,20 +1748,16 @@ function writeStoredDiffRefs() {
 
 function readStoredDiffRefsByRepo() {
   // C6: restore {repoPath: {from, to}}; tolerate corrupt/absent storage by returning an empty map.
-  try {
-    const parsed = JSON.parse(storageGet(diffRefsByRepoStorageKey) || '{}');
-    if (!parsed || typeof parsed !== 'object') return {};
-    const result = {};
-    for (const [repo, refs] of Object.entries(parsed)) {
-      if (typeof repo !== 'string' || !refs || typeof refs !== 'object') continue;
-      const from = cleanDiffRef(refs.from, '');
-      const to = cleanDiffRef(refs.to, '');
-      if (from || to) result[repo] = {from: from || 'HEAD', to: to || 'current'};
-    }
-    return result;
-  } catch (_error) {
-    return {};
+  const parsed = safeJsonParse(storageGet(diffRefsByRepoStorageKey), null);
+  if (!parsed || typeof parsed !== 'object') return {};
+  const result = {};
+  for (const [repo, refs] of Object.entries(parsed)) {
+    if (typeof repo !== 'string' || !refs || typeof refs !== 'object') continue;
+    const from = cleanDiffRef(refs.from, '');
+    const to = cleanDiffRef(refs.to, '');
+    if (from || to) result[repo] = {from: from || 'HEAD', to: to || 'current'};
   }
+  return result;
 }
 
 function normalizeFileExplorerTreeDateMode(value) {
@@ -2738,6 +2707,24 @@ function restoreElementScrollPosition(element, scrollTop, scrollLeft) {
   });
 }
 
+function captureKeyedScrollPositions(root, selector) {
+  const positions = new Map();
+  for (const element of root?.querySelectorAll?.(selector) || []) {
+    const key = String(element.dataset?.jsDebugCostTable || '').trim();
+    const scrollOwner = element.closest?.('.js-debug-cost-table-wrap') || element;
+    if (key) positions.set(key, {scrollTop: scrollOwner.scrollTop || 0, scrollLeft: scrollOwner.scrollLeft || 0});
+  }
+  return positions;
+}
+
+function restoreKeyedScrollPositions(root, selector, positions) {
+  if (!(positions instanceof Map)) return;
+  for (const element of root?.querySelectorAll?.(selector) || []) {
+    const position = positions.get(String(element.dataset?.jsDebugCostTable || '').trim());
+    if (position) restoreElementScrollPosition(element.closest?.('.js-debug-cost-table-wrap') || element, position.scrollTop, position.scrollLeft);
+  }
+}
+
 function replaceHtmlPreservingScroll(element, html) {
   if (!element) return;
   const scrollTop = element.scrollTop || 0;
@@ -3453,6 +3440,40 @@ function terminalPositionFromClientPoint(term, container, clientX, clientY) {
   const screenRow = Math.max(1, Math.min(rows, Math.floor(localY / cell.height) + 1));
   const viewportY = Math.max(0, Number(term?.buffer?.active?.viewportY || 0));
   return {x, y: viewportY + screenRow};
+}
+
+function terminalTouchWordSelectionAtClientPoint(term, container, clientX, clientY) {
+  const position = terminalPositionFromClientPoint(term, container, clientX, clientY);
+  if (!position || typeof term?.select !== 'function') return null;
+  const row = Math.max(0, position.y - 1);
+  const column = Math.max(0, position.x - 1);
+  const line = term?.buffer?.active?.getLine?.(row);
+  const text = String(line?.translateToString?.(true) || '');
+  if (!text || column >= text.length || /\s/.test(text[column])) return null;
+  let start = column;
+  let end = column + 1;
+  while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
+  while (end < text.length && !/\s/.test(text[end])) end += 1;
+  const selected = text.slice(start, end);
+  if (!selected) return null;
+  term.select(start, row, end - start);
+  return {text: selected, start: {column: start, row}, end: {column: end - 1, row}};
+}
+
+function terminalExtendTouchSelection(term, selection, container, clientX, clientY) {
+  const position = terminalPositionFromClientPoint(term, container, clientX, clientY);
+  const anchor = selection?.start;
+  if (!position || !anchor || typeof term?.select !== 'function') return false;
+  const cols = Math.max(1, Number(term?.cols || 1));
+  const lead = {column: Math.max(0, position.x - 1), row: Math.max(0, position.y - 1)};
+  const anchorOffset = anchor.row * cols + anchor.column;
+  const leadOffset = lead.row * cols + lead.column;
+  const start = anchorOffset <= leadOffset ? anchor : lead;
+  const end = anchorOffset <= leadOffset ? lead : selection.end || anchor;
+  const length = Math.max(1, Math.abs(leadOffset - anchorOffset) + 1);
+  term.select(start.column, start.row, length);
+  selection.end = end;
+  return true;
 }
 
 function terminalRangeContainsPosition(range, position) {
@@ -4416,28 +4437,38 @@ function handleTerminalTmuxWindowShortcutKeydown(session, event) {
   return true;
 }
 
-function terminalTmuxHistoryNavigationDirection(event) {
-  if (event?.type !== 'keydown' || !appModifier(event) || event.shiftKey) return 0;
-  if (event.key === 'ArrowUp' || event.code === 'ArrowUp') return -1;
-  if (event.key === 'ArrowDown' || event.code === 'ArrowDown') return 1;
-  return 0;
+function terminalKeyScrollIntent(event) {
+  if (event?.type !== 'keydown') return null;
+  if (appModifier(event) && !event.shiftKey) {
+    if (event.key === 'ArrowUp' || event.code === 'ArrowUp') return {direction: -1, source: 'keyboard', forceTmuxScrollback: true};
+    if (event.key === 'ArrowDown' || event.code === 'ArrowDown') return {direction: 1, source: 'keyboard', forceTmuxScrollback: true};
+    return null;
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) return null;
+  if (event.key === 'PageUp' || event.code === 'PageUp') return {direction: -1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  if (event.key === 'PageDown' || event.code === 'PageDown') return {direction: 1, source: 'page-key', forceTmuxScrollback: event.shiftKey === true};
+  return null;
+}
+
+function terminalHasMouseTracking(term) {
+  const mode = term?.modes?.mouseTrackingMode;
+  return mode === 'x10' || mode === 'vt200' || mode === 'drag' || mode === 'any';
 }
 
 function handleTerminalTmuxHistoryNavigationKeydown(session, term, event) {
-  const direction = terminalTmuxHistoryNavigationDirection(event);
-  if (!direction) return false;
-  // PageUp/PageDown belong to foreground TUIs such as vim and Emacs. The app modifier has no
-  // terminal escape-sequence meaning, so reserve it for explicit tmux scrollback paging.
-  event.preventDefault?.();
-  const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
-  const signedLines = direction * pageLines;
+  const intent = terminalKeyScrollIntent(event);
+  if (!intent) return false;
   const item = terminals.get(session);
-  if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
-    queueTmuxScroll(item, signedLines);
-    return true;
-  }
-  if (term) queueLocalTerminalScroll(term, signedLines);
-  return true;
+  const handled = routeTerminalScrollLines(session, term, item?.container || document.getElementById(terminalDomId(session)), intent.direction * terminalScrollPageLines(term), {
+    source: intent.source,
+    forceTmuxScrollback: intent.forceTmuxScrollback,
+  });
+  if (handled) event.preventDefault?.();
+  return handled;
+}
+
+function handleTerminalScrollbackKeydown(session, term, container, event) {
+  return handleTerminalTmuxHistoryNavigationKeydown(session, term, event);
 }
 
 function installTerminalCopyShortcut(session, term, container = null) {
@@ -4445,20 +4476,21 @@ function installTerminalCopyShortcut(session, term, container = null) {
   // must still send SIGINT to the PTY, and Cmd-C must stay browser/xterm copy
   // only. Tmux copy-mode text has a separate explicit shortcut/menu action.
   container?.addEventListener?.('keydown', event => {
-    if (!handleTerminalTmuxHistoryNavigationKeydown(session, term, event)
+    if (!handleTerminalScrollbackKeydown(session, term, container, event)
       && !handleTerminalTmuxWindowShortcutKeydown(session, event)
       && !handleTerminalCopyShortcutKeydown(session, term, container, event)) return;
     event.stopImmediatePropagation?.();
     event.stopPropagation?.();
   }, {capture: true});
   term.attachCustomKeyEventHandler?.(event => {
-    return (handleTerminalTmuxHistoryNavigationKeydown(session, term, event)
+    return (handleTerminalScrollbackKeydown(session, term, container, event)
       || handleTerminalTmuxWindowShortcutKeydown(session, event)
       || handleTerminalCopyShortcutKeydown(session, term, container, event)) ? false : true;
   });
 }
 
-async function showTerminalContextMenu(session, term, x, y, container = null, presetSelection = null, reference = null) {
+async function showTerminalContextMenu(session, term, x, y, options = {}) {
+  const {container = null, presetSelection = null, reference = null} = options || {};
   closeFileContextMenu();
   closeSessionContextMenu();
   closeFileImagePreview();
@@ -4519,7 +4551,13 @@ function installTerminalContextMenu(session, term, container) {
   container.addEventListener('contextmenu', event => {
     event.preventDefault();
     event.stopPropagation();
-    showTerminalContextMenu(session, term, event.clientX, event.clientY, container, rightClickSelection);
+    const touchSelection = touchContextMenuSyntheticEvents.has(event)
+      ? terminalTouchWordSelectionAtClientPoint(term, container, event.clientX, event.clientY)
+      : null;
+    // The touch-scroll owner observes this same bridged contextmenu after us, so its existing
+    // state machine can claim the press and extend this selection without another gesture owner.
+    if (touchSelection) event.yolomuxTerminalTouchSelection = touchSelection;
+    showTerminalContextMenu(session, term, event.clientX, event.clientY, {container, presetSelection: touchSelection?.text || rightClickSelection});
     rightClickSelection = null;
   });
 }
@@ -4594,6 +4632,16 @@ function tabDirectionalActionIconHtml(zone) {
   return `<span class="tab-directional-action-icon tab-directional-action-icon--${zone}" aria-hidden="true"></span>`;
 }
 
+function tabDirectionalMoveActionLabel(capabilities, sourceSlot, zone) {
+  // `moveLayoutItemDirectional` uses this same target map: a neighboring target receives a Move,
+  // while no generic target creates a local split. Side-pane horizontal actions transfer to the
+  // opposite edge. Keep the visible and accessible verb aligned with that one action path.
+  const sourceRole = paneRoleForSlot(sourceSlot);
+  const transfersSideEdge = sourceRole.kind === paneRoleSide && (zone === 'left' || zone === 'right');
+  const verb = capabilities.targets[zone] || transfersSideEdge ? t('tab.actions.move') : t('menu.view.layout.split');
+  return `${verb} ${t(`layout.zone.${zone}`)}`;
+}
+
 function appendTabSplitCommands(menu, item, options = {}) {
   const sourceSlot = options.sourceSlot || slotForItem(item);
   const capabilities = tabDirectionalActionCapabilities(item, sourceSlot);
@@ -4617,7 +4665,9 @@ function appendTabSplitCommands(menu, item, options = {}) {
     title.textContent = label;
     group.appendChild(title);
     for (const zone of zones) {
-      const directionLabel = `${label} ${t(`layout.zone.${zone}`)}`;
+      const directionLabel = kind === 'move'
+        ? tabDirectionalMoveActionLabel(capabilities, sourceSlot, zone)
+        : `${label} ${t(`layout.zone.${zone}`)}`;
       const button = appendContextMenuButton(
         group,
         directionLabel,

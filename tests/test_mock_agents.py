@@ -18,7 +18,7 @@ from yolomux_lib.tmux_utils import YOLOMUX_TMUX_SOCKET_ENV
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TOOLS_DIR = REPO_ROOT / "tools"
+TOOLS_DIR = REPO_ROOT / "tools" / "agent_clients"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
@@ -170,7 +170,7 @@ def run_mockcase(monkeypatch, tmp_path, case):
         "78",
         "-y",
         "35",
-        f"cd {REPO_ROOT} && exec python3 tools/{agent}.py --mock",
+            f"cd {REPO_ROOT} && exec python3 tools/agent_clients/{agent}.py --mock",
     )
     assert created.returncode == 0, created.stderr or created.stdout
     try:
@@ -983,7 +983,7 @@ def test_background_codex_working_animation_reuses_its_status_row(monkeypatch):
 
 def test_all_mock_timer_paths_obey_the_no_repaint_contract():
     source = Path(mock_agent_common.__file__).read_text(encoding="utf-8")
-    client_docs = (REPO_ROOT / "tools" / "CLIENTS.md").read_text(encoding="utf-8")
+    client_docs = (REPO_ROOT / "tools" / "agent_clients" / "CLIENTS.md").read_text(encoding="utf-8")
     claude_loop = source.split("def handle_claude_live_working_tty", 1)[1].split("def handle_codex_live_working_tty", 1)[0]
     codex_loop = source.split("def handle_codex_live_working_tty", 1)[1].split("def handle_codex_goal_active_tty", 1)[0]
     background_loop = source.split("def agent_working_status", 1)[1].split("def run_with_agent_working_status", 1)[0]
@@ -2497,7 +2497,7 @@ def test_tmux_codex_startup_box_matches_requested_shape_and_survives_first_submi
     expected_box = expected_codex_startup_box("gpt-5.5", "xhigh", "~")
     session = visual_tmux.launch(
         "codex-startup",
-        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
+        [sys.executable, "tools/agent_clients/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
         width=103,
         height=58,
     )
@@ -2519,7 +2519,7 @@ def test_tmux_codex_startup_box_matches_requested_shape_and_survives_first_submi
 def test_tmux_codex_startup_expands_long_model_row_without_ellipsis(visual_tmux):
     session = visual_tmux.launch(
         "codex-long-model",
-        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.4-mini", "--effort", "medium", "-C", str(REPO_ROOT)],
+        [sys.executable, "tools/agent_clients/codex.py", "--mock", "-m", "gpt-5.4-mini", "--effort", "medium", "-C", str(REPO_ROOT)],
         width=103,
         height=58,
     )
@@ -2538,7 +2538,7 @@ def test_tmux_codex_compact_startup_keeps_box_after_typing(visual_tmux):
     expected_box = expected_codex_startup_box("gpt-5.5", "xhigh", "~")
     session = visual_tmux.launch(
         "codex-compact",
-        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
+        [sys.executable, "tools/agent_clients/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
         width=80,
         height=12,
     )
@@ -2560,7 +2560,7 @@ def test_tmux_claude_startup_cwd_survives_first_mock_submit(visual_tmux):
     cwd_row = f"▘▘ ▝▝    {expected_display_cwd(REPO_ROOT)}"
     session = visual_tmux.launch(
         "claude-startup-submit",
-        [sys.executable, "tools/claude.py", "--mock", "-m", "opus", "--effort", "xhigh", "-C", str(REPO_ROOT)],
+        [sys.executable, "tools/agent_clients/claude.py", "--mock", "-m", "opus", "--effort", "xhigh", "-C", str(REPO_ROOT)],
         width=120,
         height=42,
     )
@@ -2588,7 +2588,7 @@ def test_tmux_claude_shell_launch_scrolls_history_instead_of_clobbering(visual_t
     visual_tmux.send_keys(session, "printf 'history-one\\nhistory-two\\nhistory-three\\nhistory-four\\n'", "Enter")
     printed, pane = visual_tmux.wait_until(session, lambda text: "history-four" in text)
     assert printed, pane
-    visual_tmux.send_keys(session, "python3 tools/claude.py --mock", "Enter")
+    visual_tmux.send_keys(session, "python3 tools/agent_clients/claude.py --mock", "Enter")
     booted, pane = visual_tmux.wait_until(
         session,
         lambda text: "Claude Code v2.1.185" in text and '❯ Try "fix typecheck errors"' in text,
@@ -2605,7 +2605,7 @@ def test_tmux_claude_shell_launch_scrolls_history_instead_of_clobbering(visual_t
 def test_tmux_codex_working_command_counter_keeps_single_visual_working_block_while_typing(visual_tmux):
     session = visual_tmux.launch(
         "codex-working",
-        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
+        [sys.executable, "tools/agent_clients/codex.py", "--mock", "-m", "gpt-5.5", "--effort", "xhigh", "-C", "~"],
         width=103,
         height=30,
     )
@@ -2630,7 +2630,7 @@ def test_tmux_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_after_re
     long_fixture_file = "question_with_answer_draft__codex-cli-0.141.0_20260620.yaml"
     session = visual_tmux.launch(
         "codex-mock-list-resize",
-        [sys.executable, "tools/codex.py", "--mock", "-m", "gpt-5.4-mini", "--effort", "medium", "-C", str(REPO_ROOT)],
+        [sys.executable, "tools/agent_clients/codex.py", "--mock", "-m", "gpt-5.4-mini", "--effort", "medium", "-C", str(REPO_ROOT)],
         width=92,
         height=42,
     )
@@ -2658,7 +2658,7 @@ def test_tmux_claude_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_a
     long_fixture_file = "parser_dependency_choice_question__claude-code-2.1.185_20260622.yaml"
     session = visual_tmux.launch(
         "claude-mock-list-resize",
-        [sys.executable, "tools/claude.py", "--mock", "-m", "sonnet", "--effort", "medium", "-C", str(REPO_ROOT)],
+        [sys.executable, "tools/agent_clients/claude.py", "--mock", "-m", "sonnet", "--effort", "medium", "-C", str(REPO_ROOT)],
         width=92,
         height=42,
     )
@@ -2686,7 +2686,7 @@ def test_tmux_claude_mock_fixture_list_wraps_rows_instead_of_printing_ellipsis_a
 def test_tmux_claude_labelled_composer_fixture_stays_live_and_working(visual_tmux):
     session = visual_tmux.launch(
         "claude-labelled-composer-working",
-        [sys.executable, "tools/claude.py", "--mock", "-C", str(REPO_ROOT)],
+        [sys.executable, "tools/agent_clients/claude.py", "--mock", "-C", str(REPO_ROOT)],
         width=96,
         height=54,
     )

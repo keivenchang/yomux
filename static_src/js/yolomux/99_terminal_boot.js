@@ -981,8 +981,9 @@ async function pasteTerminalMobileAccessoryClipboard(session) {
 
 function sendTerminalMobileAccessoryInput(session, action) {
   if (action === 'copy') {
-    const term = terminals.get(session)?.term || null;
-    const container = document.getElementById(terminalDomId(session));
+    const item = terminals.get(session);
+    const term = item?.term || null;
+    const container = item?.container || document.getElementById(terminalDomId(session));
     void copyTerminalSelection(session, term, {}, container);
     return true;
   }
@@ -997,16 +998,15 @@ function sendTerminalMobileAccessoryInput(session, action) {
   if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
     const item = terminals.get(session);
     const term = item?.term;
-    const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+    const container = item?.container || document.getElementById(terminalDomId(session));
+    const pageLines = terminalScrollPageLines(term);
     const signedLines = action === 'tmux-scroll-up' ? -pageLines : pageLines;
-    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
-      queueTmuxScroll(item, signedLines);
-      return true;
-    }
-    if (term) {
-      queueLocalTerminalScroll(term, signedLines);
-      return true;
-    }
+    if (routeTerminalScrollLines(session, term, container, signedLines, {source: 'page-key'})) return true;
+    // The palette represents physical PgUp/PgDn. In an alternate-screen TUI the router leaves
+    // those keys to the app, so send their normal xterm byte rather than stealing its paging.
+    const data = action === 'tmux-scroll-up' ? '\x1b[5~' : '\x1b[6~';
+    noteTerminalExplicitInput(session);
+    if (handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true})) return true;
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
@@ -1650,12 +1650,7 @@ function normalizeInfoLegacyPresetGrouping(grouping) {
 function readStoredInfoGrouping() {
   const raw = storageGet(infoGroupingStorageKey, '') || storageGet(infoLegacyGroupingStorageKey, '');
   if (!raw) return infoDefaultGrouping.slice();
-  try {
-    const parsed = JSON.parse(raw);
-    return normalizeInfoGrouping(parsed, {migrateLegacyPresets: true});
-  } catch (_) {
-    return normalizeInfoGrouping(raw, {migrateLegacyPresets: true});
-  }
+  return normalizeInfoGrouping(safeJsonParse(raw, raw), {migrateLegacyPresets: true});
 }
 
 function writeInfoGrouping(value) {
@@ -5739,7 +5734,7 @@ function stopSummaryStream(session) {
 
 function reloadIsSafe() {
   // Don't yank the page out from under unsaved work or active typing.
-  for (const file of openFiles.values()) {
+  for (const file of fileState.values()) {
     if (file?.dirty) return false;
   }
   const active = document.activeElement;
@@ -5812,7 +5807,7 @@ function selfUpdateOwnsServerVersion(serverVersion) {
 }
 
 function selfUpdateReloadDeferredReason() {
-  for (const file of openFiles.values()) {
+  for (const file of fileState.values()) {
     if (file?.dirty) return t('update.defer.unsavedEdits');
   }
   const active = document.activeElement;
@@ -6779,7 +6774,6 @@ async function boot() {
   installShareViewerBanner();
   installSharePointerPublisher();
   installShareScrollPublisher();
-  installShareGeometryDigestLoop();
   installSharePopupLayerPublisher();
   installShareReplayMutationPublisher();
   startShareStatusRefresh();
@@ -6789,12 +6783,8 @@ async function boot() {
 }
 
 function clientEventEnvelope(event) {
-  try {
-    const parsed = JSON.parse(event?.data || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch (_error) {
-    return {};
-  }
+  const parsed = safeJsonParse(event?.data, {});
+  return parsed && typeof parsed === 'object' ? parsed : {};
 }
 
 function clientEventPayloadFromEnvelope(envelope) {
@@ -6890,7 +6880,6 @@ function clientEventEnvelopeIsCurrent(envelope = {}) {
 }
 
 function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
-  if (!jsDebugCollectionEnabled) return;
   const payload = clientEventPayloadFromEnvelope(envelope);
   const rawData = rawEvent?.data || '';
   const dataBytes = utf8ByteLength(rawData);

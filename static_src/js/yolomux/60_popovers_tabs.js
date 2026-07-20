@@ -420,7 +420,7 @@ function tabInteractionControllerForApp() {
     return createHoverPopover({
       anchor,
       popover: detailPopover,
-      showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? tabPopoverFollowDelayMs : tabPopoverShowDelayMs),
+      showDelay: () => (document.querySelector('.pane-tab.popover-open, .tabber-session-tab.popover-open') ? popoverHideDelayMs : popoverShowDelayMs),
       hideDelay: () => popoverHideDelayMs,
       canOpen: () => !appMenuIsOpen() && !contextMenuIsOpen() && !topbar?.matches?.(':hover'),
       onQueue: event => currentDescriptor(descriptor)?.positionDetail?.(event),
@@ -797,7 +797,7 @@ function pullRequestAggregateLabel(pullRequests = []) {
 function pullRequestSummaryBadgesHtml(session, info) {
   const summary = sessionWorkSummary(session, info);
   if (summary.graphBacked && summary.pullRequests.length > 1) {
-    return `<span class="${metadataBadgeClasses(session, 'pr', 'pr-number-indicator tab-symbol pr-aggregate-indicator')}">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`;
+    return `<span class="${metadataBadgeClasses(session, 'pr', 'pr-number-indicator tab-symbol pr-aggregate-indicator')} badge-base">${esc(pullRequestAggregateLabel(summary.pullRequests))}</span>`;
   }
   const pr = summary.graphBacked ? (summary.focusedPullRequest || displayPullRequestForGit(info, summary.git)) : displayPullRequest(info);
   return pullRequestCompactBadgesHtml(session, pr);
@@ -836,7 +836,7 @@ function updateMetadataBadgePulses(meta) {
 
 function defaultBranchBadgeHtml(session, info) {
   if (!isDefaultBranch(sessionWorkSummary(session, info).git)) return '';
-  return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')}">MAIN</span>`;
+  return `<span class="${metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol chip-base branch-indicator')}">MAIN</span>`;
 }
 
 function sessionWorkDescriptionSource(session, info) {
@@ -918,7 +918,7 @@ function pathBasename(path) {
 
 function filePopoverHtml(item) {
   const path = fileItemPath(item);
-  const state = openFiles.get(path) || {};
+  const state = fileState.get(path) || {};
   const rows = filePopoverRows(path, state);
   return `<div class="session-popover file-popover" role="tooltip">
     <div class="popover-head">
@@ -1359,8 +1359,8 @@ function branchListBranchHtml(session, git, branch) {
   const branchName = branch?.name || '';
   if (isDefaultBranch({branch: branchName})) {
     const classes = branch?.current
-      ? metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol branch-indicator')
-      : 'ci-indicator tab-symbol branch-indicator';
+      ? metadataBadgeClasses(session, 'main', 'ci-indicator tab-symbol chip-base branch-indicator')
+      : 'ci-indicator tab-symbol chip-base branch-indicator';
     return `<span class="${esc(classes)}">MAIN</span>`;
   }
   return branchLinkHtml(git, branchName);
@@ -1438,24 +1438,16 @@ function dragPayload(event) {
   if (!raw && dragState.paneSlot) return null;
   if (!raw && dragState.item) return {session: dragState.item, sourceSlot: dragState.sourceSlot};
   if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return isLayoutItem(parsed.session) ? parsed : null;
-  } catch (_) {
-    return isLayoutItem(raw) ? {session: raw, sourceSlot: null} : null;
-  }
+  const parsed = safeJsonParse(raw, null);
+  return isLayoutItem(parsed?.session) ? parsed : (isLayoutItem(raw) ? {session: raw, sourceSlot: null} : null);
 }
 
 function paneDragPayload(event) {
   const raw = event.dataTransfer?.getData('application/x-yolomux-pane') || '';
   if (!raw && dragState.paneSlot) return {slot: dragState.paneSlot};
   if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    return layoutSlotKeys().includes(parsed.slot) ? parsed : null;
-  } catch (_) {
-    return layoutSlotKeys().includes(raw) ? {slot: raw} : null;
-  }
+  const parsed = safeJsonParse(raw, null);
+  return layoutSlotKeys().includes(parsed?.slot) ? parsed : (layoutSlotKeys().includes(raw) ? {slot: raw} : null);
 }
 
 function normalizeFileDragPayload(parsed) {
@@ -1466,11 +1458,7 @@ function normalizeFileDragPayload(parsed) {
 
 function parseFileDragPayload(raw) {
   if (!raw) return null;
-  try {
-    return normalizeFileDragPayload(JSON.parse(raw));
-  } catch (_) {
-    return null;
-  }
+  return normalizeFileDragPayload(safeJsonParse(raw, null));
 }
 
 function hasYolomuxFileDrag(event) {
@@ -1501,7 +1489,7 @@ async function openDraggedFilesInEditor(payload, options = {}) {
       // view (ensureCodeMirrorDiffPanel) as openChangedFileInDiff, not a plain edit-mode editor.
       // Files with no diff payload stay in edit.
       await refreshOpenFileDiff(path, {silent: true});
-      const draggedState = openFiles.get(path);
+      const draggedState = fileState.get(path);
       if (draggedState && openFileDiffAvailable(draggedState)) {
         setFileEditorViewMode(path, 'diff', fileEditorItemFor(path));
         for (const draggedPanel of fileEditorPanelsForPath(path)) {

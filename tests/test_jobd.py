@@ -1021,8 +1021,8 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, and v11 exposes timeouts.
-    assert jobd.JOBD_PROTOCOL_VERSION == 11
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, and v12 records requester attribution at acceptance.
+    assert jobd.JOBD_PROTOCOL_VERSION == 12
     assert "session_files_view" in jobd.REGISTERED_TASKS
     assert "tabber_activity_view" in jobd.REGISTERED_TASKS
     assert "metadata_warm_view" in jobd.REGISTERED_TASKS
@@ -1257,6 +1257,35 @@ def test_jobd_records_only_bounded_session_files_phase_aggregates(tmp_path):
     service._pump()
     assert service.common_status()["source_change_counters"] == {"initial": 1, "repository-state": 1, "dirty-generation-changed": 1}
     assert service.common_status()["session_files_requester_counters"] == {"api-session-files": 1, "unknown": 1}
+
+
+def test_jobd_records_session_files_requester_when_product_is_accepted(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    block = service._queue_record("json_compact", {"x": 1}, "interactive", 1, "block")
+    block.status = "running"
+    block.future = Future()
+
+    accepted = service._submit({
+        "action": "submit",
+        "task": "session_files_view",
+        "payload": {"source": {"requester": "api-session-files-batch"}},
+        "priority": "freshness",
+        "generation": 1,
+        "coalesce_key": "session-files-accepted",
+    })
+    assert accepted["ok"] is True and accepted["coalesced"] is False
+    assert service.common_status()["session_files_accepted_requester_counters"] == {"api-session-files-batch": 1}
+    assert service.common_status()["session_files_requester_counters"] == {}
+
+    service._submit({
+        "action": "submit",
+        "task": "session_files_view",
+        "payload": {"source": {"requester": "not-a-public-label"}},
+        "priority": "freshness",
+        "generation": 2,
+        "coalesce_key": "session-files-unknown",
+    })
+    assert service.common_status()["session_files_accepted_requester_counters"] == {"api-session-files-batch": 1, "unknown": 1}
 
 
 def test_jobd_product_store_evicts_oldest_completion_past_the_bound(tmp_path):

@@ -7,7 +7,7 @@ function editorViewModeFor(path, item = null) {
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
   if (!editorPreviewModeAvailable(path)) return 'edit';
-  const state = openFiles.get(path);
+  const state = fileState.get(path);
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
@@ -18,7 +18,7 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
   const previousMode = editorViewModeFor(path, item);
   if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
-  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, openFiles.get(path)))) {
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, fileState.get(path)))) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
@@ -210,8 +210,8 @@ function refreshOpenEditorThemePanels() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    if (!path || openFiles.get(path)?.kind !== 'text') return;
-    const state = openFiles.get(path);
+    if (!path || fileState.get(path)?.kind !== 'text') return;
+    const state = fileState.get(path);
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
@@ -573,7 +573,7 @@ async function openEditorFindShortcut(host = null) {
 
 async function focusFileEditorSearch(panel = null) {
   const opened = await openEditorFindShortcut(panel);
-  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(panel)), panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(fileEditorPanelPath(panel)), panel);
   return opened;
 }
 
@@ -584,7 +584,7 @@ function applyEditorWrapPreference() {
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
     updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
     const path = panel.dataset.filePath;
-    const state = openFiles.get(path);
+    const state = fileState.get(path);
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (liveText !== null && state.content !== liveText) state.content = liveText;
@@ -613,7 +613,7 @@ async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
     const path = panel.dataset.filePath;
-    const state = openFiles.get(path);
+    const state = fileState.get(path);
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
@@ -647,17 +647,13 @@ function setDiffExpandUnchanged(enabled) {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    const state = openFiles.get(path);
+    const state = fileState.get(path);
     updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
     if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
       renderFileEditorPanel(panel, item);
     }
   });
   scheduleShareUiStatePublish();
-}
-
-function toggleDiffExpandUnchanged() {
-  setDiffExpandUnchanged(!diffExpandUnchanged);
 }
 
 function fileEditorDiffExpandUnchangedForItem(item = null) {
@@ -669,7 +665,7 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (!isFileEditorItem(item)) return;
   fileEditorDiffExpandOverrides.set(item, enabled === true);
   const panel = panelNodes.get(item);
-  const state = openFiles.get(path);
+  const state = fileState.get(path);
   if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);
@@ -1081,12 +1077,7 @@ function applySettingsPayload(payload, options = {}) {
   workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
-  hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');
-  popoverHideDelayMs = hoverCloseDelayMs;
-  menuHoverOpenDelayMs = numberSetting('performance.menu_hover_open_delay_ms');
-  menuHoverCloseDelayMs = hoverCloseDelayMs;
-  tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms');
-  tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms');
+  popoverHideDelayMs = numberSetting('performance.popover_hide_delay_ms');
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
@@ -1311,8 +1302,17 @@ function runtimeIntervalActive(name) {
   return runtimeIntervals.get(name)?.active === true;
 }
 
+function latencyVisibleConsumer() {
+  const topbarLatencyVisible = Boolean(latencyMeter) && !document.body?.classList?.contains('topbar-pack-hide-latency');
+  const statsLatencyVisible = typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible();
+  return document.visibilityState !== 'hidden' && (topbarLatencyVisible || statsLatencyVisible);
+}
+
 function installRuntimeIntervals() {
-  resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
+  resetRuntimeInterval('latency', () => {
+    if (!latencyVisibleConsumer()) return null;
+    return updateLatency();
+  }, latencyRefreshMs);
   // Event-log writes publish `event_log_changed` over the shared SSE stream. Retain this
   // interval solely as an outage repair path so an EventSource failure cannot leave an open Log
   // pane permanently stale.

@@ -4,8 +4,20 @@ from pathlib import Path
 
 import pytest
 
+import yolomux_lib.client_events as client_events
 from yolomux_lib.client_events import CLIENT_EVENT_TYPES
 from yolomux_lib.client_events import ClientEventBroker
+
+
+def test_client_event_broker_skips_json_byte_measurement_without_subscribers(monkeypatch):
+    broker = ClientEventBroker()
+    monkeypatch.setattr(client_events.json, "dumps", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no-subscriber publish must not serialize for metrics")))
+
+    event = broker.publish("fs_changed", {"paths": ["/repo/app.py"]})
+
+    assert event["type"] == "fs_changed"
+    assert broker.snapshot()["published_events"] == 1
+    assert broker.snapshot()["published_bytes"] == 0
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

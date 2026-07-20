@@ -11,9 +11,9 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PINS = json.loads((REPO_ROOT / "tests" / "ui_pins.json").read_text(encoding="utf-8"))
+PINS = json.loads((REPO_ROOT / "tests" / "fixtures" / "ui_pins.json").read_text(encoding="utf-8"))
 TOKENS_CSS = (REPO_ROOT / "static_src" / "css" / "yolomux" / "00_tokens_base.css").read_text(encoding="utf-8")
-CM_JS = (REPO_ROOT / "static_src" / "js" / "yolomux" / "95_codemirror_editor.js").read_text(encoding="utf-8")
+CM_JS = (REPO_ROOT / "static_src" / "js" / "yolomux" / "92_codemirror_editor.js").read_text(encoding="utf-8")
 EN_CATALOG = json.loads((REPO_ROOT / "static_src" / "locales" / "en.json").read_text(encoding="utf-8"))
 def ui_pin_color_literals(pins: dict | None = None) -> frozenset[str]:
     """Return registry colors that test code must reference by pin name, not retype."""

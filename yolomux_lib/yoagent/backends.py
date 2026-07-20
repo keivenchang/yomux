@@ -15,9 +15,9 @@ import time
 import uuid
 from typing import Any
 
-from ..activity_summary import build_yoagent_chat_prompt
-from ..activity_summary import build_yoagent_resume_prompt
-from ..activity_summary import yoagent_question_requests_session_list
+from ..observability.activity_summary import build_yoagent_chat_prompt
+from ..observability.activity_summary import build_yoagent_resume_prompt
+from ..observability.activity_summary import yoagent_question_requests_session_list
 from ..agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_DEFAULT_TOOLS
 from ..agent_comms.claude_stream_json import CLAUDE_STREAM_JSON_PERMISSION_MODE
 from ..common import PROJECT_ROOT
@@ -31,12 +31,11 @@ from ..locales import PSEUDO_LOCALE
 from ..locales import SYSTEM_LOCALE_PREFERENCE
 from ..locales import message_descriptor
 from ..locales import normalize_locale
-from ..transcripts import codex_event_text
+from ..observability.transcripts import codex_event_text
 from ..web import server_string
 from ..workdir import AGENT_LOGIN_COMMANDS
 from ..workdir import agent_auth_status
 from . import conversation as yoagent_conversation
-from .preferences import yoagent_text
 from .transports import ClaudeStreamJsonTransport
 from .transports import CodexAppServerSession
 

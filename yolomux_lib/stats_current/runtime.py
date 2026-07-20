@@ -50,6 +50,7 @@ class StatsCurrentRuntime:
         *,
         owner_generation: Callable[[], int | None],
         token_cadence_seconds: Callable[[], float],
+        family_cadence_seconds: Callable[[str], float] | None = None,
         retry_initial_seconds: float = DEFAULT_RETRY_INITIAL_SECONDS,
         retry_max_seconds: float = DEFAULT_RETRY_MAX_SECONDS,
         owner_check_seconds: float = DEFAULT_OWNER_CHECK_SECONDS,
@@ -65,6 +66,7 @@ class StatsCurrentRuntime:
         self.client = client
         self._owner_generation = owner_generation
         self._collectors = MappingProxyType(dict(collectors_by_family))
+        self._family_cadence_seconds = family_cadence_seconds
         self._retry_initial_seconds = _positive_seconds(
             retry_initial_seconds,
             "retry_initial_seconds",
@@ -95,7 +97,9 @@ class StatsCurrentRuntime:
             scheduler.CollectorJob(
                 family,
                 self._collector_callback(family),
-                token_cadence_seconds if family == "agent_tokens" else None,
+                (lambda family=family: self._family_cadence_seconds(family))
+                if self._family_cadence_seconds is not None
+                else (token_cadence_seconds if family == "agent_tokens" else None),
             )
             for family in sorted(scheduler.COLLECTED_FAMILIES)
         )

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-import threading
 from http import HTTPStatus
 from types import SimpleNamespace
 
+import pytest
+
 import yolomux_lib.app as app_module
 import yolomux_lib.sessions as sessions_module
-from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.app import tmux_session_name_error
 from yolomux_lib.app import tmux_session_name_sanitize
 from yolomux_lib.common import PaneInfo
@@ -21,24 +21,14 @@ class FakeTmuxResult:
         self.stderr = stderr
 
 
-def make_app(sessions: list[str]) -> TmuxWebtermApp:
-    app = object.__new__(TmuxWebtermApp)
-    app.sessions = sessions
-    app.approval_client = SimpleNamespace(status_session=lambda _session: [], stop_session=lambda _session: {"ok": True})
-    app.share_tokens = {}
-    app.share_tokens_lock = threading.RLock()
-    app.refresh_sessions = lambda *args, **kwargs: []
-    app.set_persisted_auto_session = lambda _session, _enabled: None
-    def log_event(
-        session,
-        event_type,
-        message,
-        details=None,
-        *,
-        message_key="",
-        message_params=None,
-    ):
-        return {
+@pytest.fixture
+def make_app(make_tmux_webterm_app):
+    def factory(sessions: list[str]):
+        app = make_tmux_webterm_app(sessions)
+        app.approval_client = SimpleNamespace(status_session=lambda _session: [], stop_session=lambda _session: {"ok": True})
+        app.refresh_sessions = lambda *args, **kwargs: []
+        app.set_persisted_auto_session = lambda _session, _enabled: None
+        app.log_event = lambda session, event_type, message, details=None, *, message_key="", message_params=None: {
             "session": session,
             "event_type": event_type,
             "message": message,
@@ -46,9 +36,9 @@ def make_app(sessions: list[str]) -> TmuxWebtermApp:
             "message_key": message_key,
             "message_params": message_params or {},
         }
+        return app
 
-    app.log_event = log_event
-    return app
+    return factory
 
 
 def test_tmux_session_name_validation_is_url_and_tmux_safe():
@@ -69,7 +59,15 @@ def test_tmux_session_name_sanitize_mirrors_tmux_dot_and_colon_rewrite():
     assert tmux_session_name_sanitize("plain-name_2") == "plain-name_2"
 
 
-def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch):
+def test_session_action_app_builder_keeps_the_full_app_contract(make_app):
+    app = make_app(["1"])
+
+    assert app.__class__.__name__ == "TmuxWebtermApp"
+    assert hasattr(app, "client_events")
+    assert hasattr(app, "control_server")
+
+
+def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch, make_app):
     app = make_app(["1", "ant"])
     calls = []
 
@@ -90,7 +88,7 @@ def test_rename_session_calls_tmux_and_updates_session_order(monkeypatch):
     assert calls == [["rename-session", "-t", "1:", "agent"]]
 
 
-def test_rename_session_rejects_duplicate_and_invalid_names(monkeypatch):
+def test_rename_session_rejects_duplicate_and_invalid_names(monkeypatch, make_app):
     app = make_app(["1", "ant"])
     calls = []
     monkeypatch.setattr(app_module, "tmux", lambda args, timeout=5.0: calls.append(args) or FakeTmuxResult())
@@ -105,7 +103,7 @@ def test_rename_session_rejects_duplicate_and_invalid_names(monkeypatch):
     assert calls == []
 
 
-def test_rename_session_sanitizes_dot_to_match_tmux_stored_name(monkeypatch):
+def test_rename_session_sanitizes_dot_to_match_tmux_stored_name(monkeypatch, make_app):
     app = make_app(["1", "ant"])
     calls = []
 
@@ -126,7 +124,7 @@ def test_rename_session_sanitizes_dot_to_match_tmux_stored_name(monkeypatch):
     assert calls == [["rename-session", "-t", "1:", "dynamo-utils_dev"]]
 
 
-def test_rename_session_detects_collision_after_sanitizing(monkeypatch):
+def test_rename_session_detects_collision_after_sanitizing(monkeypatch, make_app):
     app = make_app(["1", "dynamo-utils_dev"])
     calls = []
     monkeypatch.setattr(app_module, "tmux", lambda args, timeout=5.0: calls.append(args) or FakeTmuxResult())
@@ -139,7 +137,7 @@ def test_rename_session_detects_collision_after_sanitizing(monkeypatch):
     assert calls == []
 
 
-def test_kill_session_calls_tmux_and_removes_session(monkeypatch):
+def test_kill_session_calls_tmux_and_removes_session(monkeypatch, make_app):
     app = make_app(["1", "ant"])
     calls = []
 
@@ -159,7 +157,7 @@ def test_kill_session_calls_tmux_and_removes_session(monkeypatch):
     assert calls == [["kill-session", "-t", "1:"]]
 
 
-def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeypatch):
+def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeypatch, make_app):
     """select-window IS the whole job: it switches every client attached to the session
     synchronously. The retired per-client `switch-client` fan-out was a no-op by
     construction, serially delayed every switch response, and poked the user's own
@@ -188,7 +186,7 @@ def test_tmux_select_window_runs_exactly_one_select_and_no_client_fanout(monkeyp
     assert not any(args and args[0] == "switch-client" for args in calls)
 
 
-def test_tmux_select_window_failure_surfaces_diagnostic(monkeypatch):
+def test_tmux_select_window_failure_surfaces_diagnostic(monkeypatch, make_app):
     app = make_app(["1"])
 
     def fake_tmux(args, timeout=5.0):
@@ -219,7 +217,7 @@ def test_list_tmux_panes_captures_window_name(monkeypatch):
     assert "#{window_name}" in calls[0][-1]
 
 
-def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch):
+def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch, make_app):
     pane = PaneInfo(
         session="1",
         window="0",
@@ -271,7 +269,7 @@ def test_tmux_copy_selection_reads_fresh_tmux_buffer(monkeypatch):
     ]
 
 
-def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch):
+def test_tmux_copy_selection_does_not_return_stale_buffer(monkeypatch, make_app):
     app = make_app(["1"])
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     calls = []
