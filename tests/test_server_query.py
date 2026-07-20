@@ -1665,24 +1665,59 @@ def test_handle_fs_batch_returns_typed_permission_failure_without_raising(monkey
     })]
 
 
-def test_handle_fs_batch_records_performance(monkeypatch):
-    records = []
-    app = SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)))
+def test_handle_fs_batch_sets_one_privacy_safe_endpoint_record(monkeypatch):
     monkeypatch.setattr(server_module.filesystem, "list_directory", lambda path: {"path": path, "entries": []})
-    handler, writes = batch_handler({"requests": [{"id": "root", "type": "list", "path": "/repo"}]}, app=app)
+    handler, writes = batch_handler({
+        "client_revision": "1234-5678",
+        "client_scope": "browser",
+        "requests": [{"id": "root", "type": "list", "path": "/repo/credential.txt", "trigger": "watch-diff-fallback"}],
+    })
 
     Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
 
-    assert writes == [(HTTPStatus.OK, {"responses": [{"id": "root", "ok": True, "status": 200, "payload": {"path": "/repo", "entries": []}}]})]
-    assert len(records) == 1
-    args, kwargs = records[0]
-    assert args == ("fs-batch", "api")
-    assert kwargs["trigger"] == "POST /api/fs/batch"
-    assert kwargs["cache_key"] == {"kind": "fs-batch"}
-    assert kwargs["cache_status"] == "computed"
-    assert kwargs["owner_role"] == "client"
-    assert kwargs["count"] == 1
-    assert kwargs["details"]["ops"] == '{"list": 1}'
+    assert writes == [(HTTPStatus.OK, {"responses": [{"id": "root", "ok": True, "status": 200, "payload": {"path": "/repo/credential.txt", "entries": []}}]})]
+    assert handler._http_response_compute_ms >= 0
+    assert handler._http_response_performance_details == {
+        "fs_batch": True,
+        "fs_batch_size": 1,
+        "fs_batch_operations": '{"list": 1}',
+        "fs_batch_path_hashes": f'["{server_module.hashlib.sha256(b"/repo/credential.txt").hexdigest()[:16]}"]',
+        "fs_batch_triggers": '{"watch-diff-fallback": 1}',
+        "fs_batch_client_revision": "1234-5678",
+        "fs_batch_client_scope": "browser",
+    }
+    diagnostic_text = json.dumps(handler._http_response_performance_details, sort_keys=True)
+    assert "credential.txt" not in diagnostic_text
+    assert "/repo" not in diagnostic_text
+    records = []
+    handler.command = "POST"
+    handler.path = "/api/fs/batch"
+    handler.server = SimpleNamespace(app=SimpleNamespace(record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs))))
+    Handler.record_http_response_bytes(handler, HTTPStatus.OK, 123, "application/json")
+    assert records[0][0] == ("http-endpoint", "POST /api/fs/batch")
+    assert records[0][1]["payload_bytes"] == 123
+    assert records[0][1]["compute_ms"] == pytest.approx(handler._http_response_compute_ms)
+    assert records[0][1]["details"]["fs_batch_triggers"] == '{"watch-diff-fallback": 1}'
+    assert "credential.txt" not in json.dumps(records[0][1], sort_keys=True)
+
+
+def test_handle_fs_batch_rejects_arbitrary_trigger_without_recording_it(monkeypatch):
+    monkeypatch.setattr(server_module.filesystem, "list_directory", lambda path: {"path": path, "entries": []})
+    handler, writes = batch_handler({
+        "client_revision": "secret=do-not-log",
+        "password": "do-not-log-this-body",
+        "requests": [{"id": "root", "type": "list", "path": "/repo/private", "trigger": "secret=do-not-log"}],
+    })
+
+    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+
+    assert writes[0][1]["responses"][0]["status"] == HTTPStatus.BAD_REQUEST
+    details = handler._http_response_performance_details
+    assert details["fs_batch_triggers"] == '{"invalid": 1}'
+    diagnostic_text = json.dumps(details, sort_keys=True)
+    assert "secret" not in diagnostic_text
+    assert "password" not in diagnostic_text
+    assert "body" not in diagnostic_text
 
 
 def test_handle_fs_batch_rejects_invalid_shape():

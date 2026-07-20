@@ -32,7 +32,7 @@ async function openFileExplorerAt(path, options = {}) {
   } else if (options.syncSelection === true) {
     setFileExplorerSelectionPin(false);
   }
-  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
+  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true, trigger: options.trigger});
   if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
@@ -88,6 +88,9 @@ const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
+const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
+  'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation',
+]);
 let fileExplorerPushRefreshDepth = 0;
 const FILE_TREE_BASE_PAD_PX = 8;
 const FILE_TREE_COMPACT_PAD_PX = 4;
@@ -267,6 +270,21 @@ function scheduleFileExplorerFsBatchFlush() {
   fileExplorerFsBatchTimer = setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs);
 }
 
+function fileExplorerFsBatchTrigger(options = {}) {
+  const requested = String(options.trigger || '');
+  if (FILE_EXPLORER_FS_BATCH_TRIGGERS.has(requested)) return requested;
+  if (options.user === true) return 'explicit-user';
+  return options.fresh === true ? 'fresh-repair' : 'tree-render';
+}
+
+function fileExplorerFsBatchClientMetadata() {
+  const revision = String((typeof bootstrap === 'object' && bootstrap?.clientRevision) || '');
+  return {
+    client_revision: /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : '',
+    client_scope: shareViewMode ? 'share' : 'browser',
+  };
+}
+
 function fetchFilesystemBatchItem(type, path, options = {}) {
   const normalized = normalizeDirectoryPath(path);
   const key = fileExplorerFsBatchKey(type, normalized);
@@ -280,7 +298,7 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     resolve = ok;
     reject = fail;
   });
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, key, resolve, reject};
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, trigger: fileExplorerFsBatchTrigger(options), key, resolve, reject};
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
@@ -317,12 +335,12 @@ async function flushFileExplorerFsBatch() {
   fileExplorerFsBatchTimer = null;
   const items = fileExplorerFsBatchQueue.splice(0);
   if (!items.length) return;
-  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path}));
+  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path, trigger: item.trigger}));
   try {
     const payload = await apiFetchJson('/api/fs/batch', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({requests}),
+      body: JSON.stringify({requests, ...fileExplorerFsBatchClientMetadata()}),
     });
     const responses = new Map((payload.responses || []).map(response => [response.id, response]));
     for (const item of items) {
@@ -340,7 +358,7 @@ async function fetchDirectory(path, options = {}) {
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
       // in the same batch window.
-      const payload = await fetchFilesystemBatchItem('list', root);
+      const payload = await fetchFilesystemBatchItem('list', root, {trigger: fileExplorerFsBatchTrigger(options)});
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
@@ -430,8 +448,8 @@ async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
     await refreshFileExplorerFromPush(diffPayload);
   } catch (error) {
     console.warn('client fs watch diff refresh failed', error);
-    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-    else await refreshFileExplorerIfChanged();
+    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
+    else await refreshFileExplorerIfChanged({trigger: 'watch-diff-fallback'});
   }
 }
 
@@ -1780,7 +1798,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
   requestAnimationFrame(() => {
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
-    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true}).then(entriesByDir => {
+    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
       if (
         fileExplorerSyncPlanSignature(plan) !== signature
         || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
@@ -1962,7 +1980,7 @@ function deferFileExplorerRefresh() {
   fileExplorerRefreshDeferred = true;
   setTimeout(() => {
     fileExplorerRefreshDeferred = false;
-    refreshFileExplorerIfChanged().catch(error => console.warn('deferred file explorer refresh failed', error));
+    refreshFileExplorerIfChanged({trigger: 'deferred-interaction'}).catch(error => console.warn('deferred file explorer refresh failed', error));
   }, fileExplorerRefreshIdleMs);
 }
 

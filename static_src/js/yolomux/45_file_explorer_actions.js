@@ -40,7 +40,7 @@ async function fetchFilePathInfo(path, options = {}) {
     'info',
     normalized,
     options,
-    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true}),
+    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
     {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
   );
 }
@@ -956,7 +956,7 @@ async function refreshFileExplorerPanelTrees(options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
-async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot()) {
+async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
   const entriesByDir = new Map();
   const directories = new Set([normalizedRoot]);
@@ -965,7 +965,7 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   }
   const listings = await Promise.all(Array.from(directories).map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory),
+    entries: await fetchDirectory(directory, options),
   })));
   for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
@@ -977,7 +977,7 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   const root = normalizeDirectoryPath(options.root || currentFileExplorerRoot());
   const entriesByDir = options.entriesByDir instanceof Map
     ? options.entriesByDir
-    : await fileExplorerEntriesByWatchedDirectory(root);
+    : await fileExplorerEntriesByWatchedDirectory(root, options);
   const rootEntries = Array.isArray(options.entries) ? options.entries : entriesByDir.get(root);
   if (!rootEntries) return false;
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
@@ -2419,7 +2419,7 @@ function syncServerWatchRoots(options = {}) {
   }, delay);
 }
 
-async function refreshFileExplorerIfChanged() {
+async function refreshFileExplorerIfChanged(options = {}) {
   if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
   if (!directories.length) return;
@@ -2428,7 +2428,7 @@ async function refreshFileExplorerIfChanged() {
   const signaturesByDir = new Map();
   const listings = await Promise.all(directories.map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true}),
+    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true, trigger: options.trigger}),
   })));
   for (const {directory, entries} of listings) {
     if (!entries) continue;

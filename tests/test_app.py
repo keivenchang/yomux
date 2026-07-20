@@ -951,6 +951,49 @@ def test_runtime_python_profile_reports_named_native_threads():
     assert current["top_stacks"]
 
 
+def test_runtime_control_report_returns_only_safe_in_memory_filesystem_batch_attribution(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        webapp.record_performance_sample(
+            "http-endpoint",
+            "POST /api/fs/batch",
+            compute_ms=17.5,
+            payload_bytes=321,
+            count=1,
+            details={
+                "fs_batch": True,
+                "fs_batch_size": 2,
+                "fs_batch_operations": '{"info": 1, "list": 1}',
+                "fs_batch_path_hashes": '["0123456789abcdef"]',
+                "fs_batch_triggers": '{"watch-diff-fallback": 2}',
+                "fs_batch_client_revision": "1234-5678",
+                "fs_batch_client_scope": "browser",
+                "paths": "/private/credential.txt",
+            },
+        )
+        monkeypatch.setattr(webapp, "runtime_report_payload", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("control report must not build the full report")))
+        response = webapp.handle_control_request({"action": "runtime_report"})
+    finally:
+        webapp.control_server.stop()
+
+    assert response["ok"] is True
+    report = response["report"]
+    assert len(report["filesystem_batch"]) == 1
+    row = report["filesystem_batch"][0]
+    assert row["time"] > 0
+    assert {key: value for key, value in row.items() if key != "time"} == {
+        "compute_ms": 17.5,
+        "payload_bytes": 321,
+        "batch_size": 2,
+        "operations": '{"info": 1, "list": 1}',
+        "path_hashes": '["0123456789abcdef"]',
+        "triggers": '{"watch-diff-fallback": 2}',
+        "client_revision": "1234-5678",
+        "client_scope": "browser",
+    }
+    assert "credential.txt" not in json.dumps(report, sort_keys=True)
+
+
 def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcripts(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     monkeypatch.setattr(app_module, "TABBER_ACTIVITY_CACHE_DIR", tmp_path / "activity-cache")

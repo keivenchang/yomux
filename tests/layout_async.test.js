@@ -988,6 +988,17 @@ async function runLayoutAsyncSuite() {
     assert.equal(syncOwner.includes('preserveExpanded: false'), false, 'session switches no longer enter the destructive subtree teardown path');
   });
 
+  test('Finder filesystem batches carry bounded caller attribution without path metadata', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    assert.ok(source.includes('function fileExplorerFsBatchTrigger(options = {})'), 'the shared batch owner, not individual callers, normalizes its trigger enum');
+    assert.ok(source.includes('function fileExplorerFsBatchClientMetadata()'), 'batch requests carry an opaque client revision and scope');
+    assert.ok(source.includes("path, trigger: item.trigger") && source.includes('...fileExplorerFsBatchClientMetadata()'), 'each batch item carries one bounded trigger while the request carries browser scope');
+    assert.ok(/catch \(error\)[\s\S]{0,260}trigger: 'watch-diff-fallback'/.test(source), 'watch-diff failure repairs remain attributable');
+    assert.ok(source.includes("trigger: 'deferred-interaction'"), 'the deferred interaction repair is distinguishable from the watch fallback');
+    assert.ok(actionsSource.includes('async function refreshFileExplorerIfChanged(options = {})') && actionsSource.includes('trigger: options.trigger'), 'the fallback owner forwards its trigger to the shared batch request');
+  });
+
   await testAsync('Tabber activity cache treats direct snapshots as newer than in-flight HTTP work', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);

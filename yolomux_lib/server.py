@@ -221,6 +221,20 @@ SHARE_MIRROR_DEBUG_NAMES = {
 }
 SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 MAX_FS_BATCH_REQUESTS = 64
+FS_BATCH_TRIGGER_LEGACY = "legacy"
+FS_BATCH_ALLOWED_TRIGGERS = frozenset({
+    FS_BATCH_TRIGGER_LEGACY,
+    "tree-render",
+    "explicit-user",
+    "fresh-repair",
+    "watch-diff-fallback",
+    "deferred-interaction",
+    "sync-revalidation",
+})
+FS_BATCH_CLIENT_SCOPE_LEGACY = "legacy"
+FS_BATCH_ALLOWED_CLIENT_SCOPES = frozenset({"browser", "share"})
+FS_BATCH_PATH_FINGERPRINT_LIMIT = 8
+FS_BATCH_CLIENT_REVISION_MAX_LENGTH = 80
 TOKEN_LOG_RE = re.compile(r"([?&](?:token|client_id)=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
@@ -1660,9 +1674,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
+        raw_client_revision = payload.get("client_revision", "")
+        client_revision = str(raw_client_revision or "")
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,%d}" % FS_BATCH_CLIENT_REVISION_MAX_LENGTH, client_revision):
+            client_revision = ""
+        raw_client_scope = payload.get("client_scope", "")
+        client_scope = str(raw_client_scope or "")
+        if client_scope not in FS_BATCH_ALLOWED_CLIENT_SCOPES:
+            client_scope = FS_BATCH_CLIENT_SCOPE_LEGACY
         responses = []
         op_counts: dict[str, int] = {}
-        path_samples: list[str] = []
+        trigger_counts: dict[str, int] = {}
+        path_fingerprints: list[str] = []
         for index, item in enumerate(requests):
             request_id = item.get("id", index) if isinstance(item, dict) else index
             if not isinstance(item, dict):
@@ -1677,9 +1700,31 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 continue
             op = str(item.get("type", item.get("op", "")) or "")
             raw_path = str(item.get("path", "") or "")
-            op_counts[op] = op_counts.get(op, 0) + 1
-            if raw_path and len(path_samples) < 8:
-                path_samples.append(raw_path)
+            safe_op = op if op in {"list", "info"} else "invalid"
+            op_counts[safe_op] = op_counts.get(safe_op, 0) + 1
+            raw_trigger = item.get("trigger", FS_BATCH_TRIGGER_LEGACY)
+            trigger = str(raw_trigger or FS_BATCH_TRIGGER_LEGACY)
+            if trigger not in FS_BATCH_ALLOWED_TRIGGERS:
+                trigger_counts["invalid"] = trigger_counts.get("invalid", 0) + 1
+                responses.append(error_payload(
+                    "invalid fs batch trigger",
+                    message_key="request.error.unsupportedFsBatchOperation",
+                    message_params={"operation": "trigger"},
+                    id=request_id,
+                    ok=False,
+                    status=HTTPStatus.BAD_REQUEST,
+                    path=raw_path,
+                ))
+                continue
+            trigger_counts[trigger] = trigger_counts.get(trigger, 0) + 1
+            if raw_path and len(path_fingerprints) < FS_BATCH_PATH_FINGERPRINT_LIMIT:
+                try:
+                    normalized_path = str(Path(raw_path).expanduser().resolve(strict=False))
+                except OSError:
+                    normalized_path = raw_path
+                fingerprint = hashlib.sha256(normalized_path.encode("utf-8", errors="replace")).hexdigest()[:16]
+                if fingerprint not in path_fingerprints:
+                    path_fingerprints.append(fingerprint)
             if op not in {"list", "info"}:
                 responses.append(error_payload(
                     "unsupported fs batch operation",
@@ -1698,24 +1743,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 continue
             responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
         response_payload = {"responses": responses}
-        recorder = getattr(getattr(getattr(self, "server", None), "app", None), "record_performance_sample", None)
-        if callable(recorder):
-            measurement_scope = self.measurement_scope()
-            details = {"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)}
-            if measurement_scope:
-                details["measurement_scope"] = measurement_scope
-            recorder(
-                "fs-batch",
-                "api",
-                trigger="POST /api/fs/batch",
-                compute_ms=(time.perf_counter() - started) * 1000,
-                payload=response_payload,
-                cache_key={"kind": "fs-batch"},
-                cache_status="computed",
-                owner_role="client",
-                count=len(requests),
-                details=details,
-            )
+        # The shared HTTP response recorder owns one sample per request. Its diagnostics must
+        # never retain raw paths or request bodies; hashes identify repeated normalized paths.
+        self._http_response_compute_ms = (time.perf_counter() - started) * 1000
+        self._http_response_performance_details = {
+            "fs_batch": True,
+            "fs_batch_size": len(requests),
+            "fs_batch_operations": json.dumps(op_counts, sort_keys=True),
+            "fs_batch_path_hashes": json.dumps(path_fingerprints),
+            "fs_batch_triggers": json.dumps(trigger_counts, sort_keys=True),
+            "fs_batch_client_revision": client_revision or "unknown",
+            "fs_batch_client_scope": client_scope,
+        }
         self.write_json(response_payload)
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
