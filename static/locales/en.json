@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Graphs",
   "debug.tab.logs": "Logs",
-  "debug.tab.services": "Services",
+  "debug.tab.services": "Daemons",
   "debug.waitingForServerStats": "Waiting for server stats",
   "det.noActivity": "No AI agent activity is available yet.",
   "det.noBackend": "No AI backend is answering; showing the activity context. Set or log in a Claude/Codex backend in Preferences to chat.",

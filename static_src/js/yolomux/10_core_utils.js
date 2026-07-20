@@ -3891,6 +3891,24 @@ function normalizedExternalHttpUrl(value, options = {}) {
   }
 }
 
+function openExternalLinkFromEvent(event, root = document) {
+  const anchor = event?.target?.closest?.('a[href]');
+  if (!anchor || (root && !root.contains?.(anchor))) return false;
+  const url = normalizedExternalHttpUrl(anchor.href || anchor.getAttribute?.('href'));
+  if (!url) return false;
+  let target;
+  try {
+    target = new URL(url, window.location.href);
+  } catch (_) {
+    return false;
+  }
+  if (target.origin === window.location.origin) return false;
+  const opened = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!opened) return false;
+  event.preventDefault?.();
+  return true;
+}
+
 function triggerExternalUrlDownload(value) {
   const url = normalizedExternalHttpUrl(value);
   if (!url || !document.body) return false;

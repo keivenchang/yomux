@@ -387,7 +387,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "גרפים",
-  "debug.tab.services": "שירותים",
+  "debug.tab.services": "דמונים",
   "debug.tab.logs": "יומנים",
   "debug.waitingForServerStats": "ממתין לנתוני השרת",
   "det.noActivity": "אין עדיין פעילות זמינה של סוכן בינה מלאכותית.",

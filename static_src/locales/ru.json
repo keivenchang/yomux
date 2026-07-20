@@ -393,7 +393,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Графики",
-  "debug.tab.services": "Службы",
+  "debug.tab.services": "Демоны",
   "debug.tab.logs": "Журналы",
   "debug.waitingForServerStats": "Ожидание статистики сервера",
   "det.noActivity": "Активность ИИ-агента пока недоступна.",

@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafieken",
-  "debug.tab.services": "Diensten",
+  "debug.tab.services": "Systeemdaemons",
   "debug.tab.logs": "Logboeken",
   "debug.waitingForServerStats": "Wachten op serverstatistieken",
   "det.noActivity": "Er is nog geen AI-agentactiviteit.",

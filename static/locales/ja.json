@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "グラフ",
   "debug.tab.logs": "ログ",
-  "debug.tab.services": "サービス",
+  "debug.tab.services": "デーモン",
   "debug.waitingForServerStats": "サーバー統計を待機中",
   "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",
   "det.noBackend": "応答する AI バックエンドがありません。アクティビティの概要を表示しています。チャットするには設定で Claude/Codex バックエンドを設定するかログインしてください。",

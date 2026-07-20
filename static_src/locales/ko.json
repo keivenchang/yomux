@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "그래프",
-  "debug.tab.services": "서비스",
+  "debug.tab.services": "데몬",
   "debug.tab.logs": "로그",
   "debug.waitingForServerStats": "서버 통계를 기다리는 중",
   "det.noActivity": "아직 사용 가능한 AI 에이전트 활동이 없습니다.",

@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "กราฟ",
-  "debug.tab.services": "บริการ",
+  "debug.tab.services": "ดีมอน",
   "debug.tab.logs": "บันทึก",
   "debug.waitingForServerStats": "กำลังรอสถิติเซิร์ฟเวอร์",
   "det.noActivity": "ยังไม่มีกิจกรรม AI agent",

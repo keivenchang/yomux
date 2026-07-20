@@ -407,7 +407,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Gráficos",
   "debug.tab.logs": "Registros",
-  "debug.tab.services": "Servicios",
+  "debug.tab.services": "Demonios",
   "debug.waitingForServerStats": "Esperando estadísticas del servidor",
   "det.noActivity": "Aún no hay actividad del agente de IA disponible.",
   "det.noBackend": "Ningún backend de IA está respondiendo; mostrando el resumen de actividad. Configura o inicia sesión en un backend de Claude/Codex en Preferencias para chatear.",

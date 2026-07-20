@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "グラフ",
-  "debug.tab.services": "サービス",
+  "debug.tab.services": "デーモン",
   "debug.tab.logs": "ログ",
   "debug.waitingForServerStats": "サーバー統計を待機中",
   "det.noActivity": "利用可能な AI エージェントのアクティビティはまだありません。",

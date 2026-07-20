@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Diagramme",
-  "debug.tab.services": "Dienste",
+  "debug.tab.services": "System-Daemons",
   "debug.tab.logs": "Protokolle",
   "debug.waitingForServerStats": "Warte auf Serverstatistiken",
   "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",

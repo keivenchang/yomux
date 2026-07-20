@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafikler",
-  "debug.tab.services": "Hizmetler",
+  "debug.tab.services": "Daemon'lar",
   "debug.tab.logs": "Günlükler",
   "debug.waitingForServerStats": "Sunucu istatistikleri bekleniyor",
   "det.noActivity": "Henüz AI agent etkinliği yok.",

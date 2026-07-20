@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Diagramme",
   "debug.tab.logs": "Protokolle",
-  "debug.tab.services": "Dienste",
+  "debug.tab.services": "System-Daemons",
   "debug.waitingForServerStats": "Warte auf Serverstatistiken",
   "det.noActivity": "Noch keine KI-Agentenaktivität verfügbar.",
   "det.noBackend": "Kein KI-Backend antwortet; die Aktivitätsübersicht wird angezeigt. Lege in den Einstellungen ein Claude-/Codex-Backend fest oder melde dich an, um zu chatten.",

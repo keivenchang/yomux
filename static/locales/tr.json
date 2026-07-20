@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafikler",
   "debug.tab.logs": "Günlükler",
-  "debug.tab.services": "Hizmetler",
+  "debug.tab.services": "Daemon'lar",
   "debug.waitingForServerStats": "Sunucu istatistikleri bekleniyor",
   "det.noActivity": "Henüz AI agent etkinliği yok.",
   "det.noBackend": "Yanıt veren AI backend yok; etkinlik bağlamı gösteriliyor. Sohbet etmek için Preferences içinde Claude/Codex backend ayarla veya oturum aç.",

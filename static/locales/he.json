@@ -407,7 +407,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "גרפים",
   "debug.tab.logs": "יומנים",
-  "debug.tab.services": "שירותים",
+  "debug.tab.services": "דמונים",
   "debug.waitingForServerStats": "ממתין לנתוני השרת",
   "det.noActivity": "אין עדיין פעילות זמינה של סוכן בינה מלאכותית.",
   "det.noBackend": "אף מנגנון בינה מלאכותית אינו עונה; מוצג סיכום הפעילות. הגדר או התחבר למנגנון Claude/Codex בהעדפות כדי לשוחח.",

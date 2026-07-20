@@ -381,7 +381,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "图表",
-  "debug.tab.services": "服务",
+  "debug.tab.services": "守护进程",
   "debug.tab.logs": "日志",
   "debug.waitingForServerStats": "正在等待服务器统计数据",
   "det.noActivity": "目前尚无可用的 AI 代理活动。",

@@ -1160,6 +1160,7 @@
 
     function onClick(event) {
       const target = event?.target;
+      if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, element)) return;
       const visibilityButton = target?.closest?.('[data-stats-current-visibility]');
       if (visibilityButton && view === 'stats') {
         const definition = visibilityDefinitions.find(item => item.id === visibilityButton.dataset.statsCurrentVisibility);

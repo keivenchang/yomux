@@ -387,7 +387,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Gráficos",
-  "debug.tab.services": "Servicios",
+  "debug.tab.services": "Demonios",
   "debug.tab.logs": "Registros",
   "debug.waitingForServerStats": "Esperando estadísticas del servidor",
   "det.noActivity": "Aún no hay actividad del agente de IA disponible.",

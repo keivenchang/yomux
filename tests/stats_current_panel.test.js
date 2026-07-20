@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 
 const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8');
+const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
@@ -56,6 +57,30 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.match(source, /function debugLogsInnerHtml\(/);
   assert.doesNotMatch(source, /data-stats-current-view/);
   assert.equal(fs.existsSync('static_src/js/yolomux/83_stats_panel.js'), false);
+});
+
+test('pricing links use one synchronous external-open owner and keep in-app links untouched', () => {
+  const start = coreSource.indexOf('function normalizedExternalHttpUrl(');
+  const end = coreSource.indexOf('\nfunction triggerExternalUrlDownload(', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const helperSource = coreSource.slice(start, end);
+  const calls = [];
+  const external = {href: 'https://pricing.example.test/models', getAttribute: () => 'https://pricing.example.test/models'};
+  const internal = {href: 'https://app.example.test/#transcript', getAttribute: () => '#'};
+  const root = {contains: node => node === external || node === internal};
+  const context = {
+    URL,
+    String,
+    document: {},
+    window: {location: {href: 'https://app.example.test/cost', origin: 'https://app.example.test'}, open: (...args) => {calls.push(args); return {}; }},
+  };
+  vm.runInNewContext(`${helperSource}\nresult = openExternalLinkFromEvent(event, root);`, {...context, root, event: {target: {closest: () => external}, preventDefault: () => calls.push(['prevent'])}});
+  assert.deepEqual(calls, [['https://pricing.example.test/models', '_blank', 'noopener,noreferrer'], ['prevent']]);
+  const internalResult = vm.runInNewContext(`${helperSource}\nresult = openExternalLinkFromEvent(event, root);`, {...context, root, event: {target: {closest: () => internal}, preventDefault: () => calls.push(['unexpected'])}});
+  assert.equal(internalResult, false);
+  assert.match(source, /<a href="\$\{esc\(url\)\}" target="_blank" rel="noopener noreferrer"/);
+  assert.match(currentSource, /<a href="\$\{currentStatsEscape\(row\.source_url\)\}" target="_blank" rel="noopener noreferrer"/);
 });
 
 test('zero-valued CPU samples remain visibly inside the chart viewBox', () => {
@@ -117,11 +142,14 @@ test('macOS keeps Activity Monitor memory facts and pressure in one card', () =>
   assert.match(css, /@container \(max-width: 20rem\)/);
 });
 
-test('Agents keeps revision-gated live state and semantic paint', () => {
+test('Agents keeps per-session revision joins and semantic paint', () => {
   assert.match(source, /agent_window_snapshot_revision/);
   assert.match(source, /function debugGraphLiveAgentWindowDetailHtml\(groupKey = 'activity'\)/);
   assert.match(source, /Live status is waiting for the chart snapshot/);
   assert.match(source, /agentWindowPhysicalKey\(agent\)/);
+  assert.match(source, /status is stale \(rev/);
+  assert.match(source, /const currentRows = rows\.filter\(row => row\.revision >= chartRevision\)/);
+  assert.match(source, /const state = agentWindowStateKey\(agent\?\.state\)/);
   assert.match(source, /group\.key === 'activity' \? debugGraphLiveAgentWindowDetailHtml\(group\.key\) : ''/);
   assert.match(source, /cssKey: key/);
   assert.doesNotMatch(source, /activitySessions|Agent sessions|askSessionTotal/);
@@ -129,7 +157,7 @@ test('Agents keeps revision-gated live state and semantic paint', () => {
   assert.match(css, /\.js-debug-legend-swatch--workingAgents/);
 });
 
-test('Agent-window live detail rejects mixed revisions and recovers only on the accepted snapshot', () => {
+test('Agent-window live detail joins current sessions, diagnoses stale sessions, and recovers', () => {
   const detailStart = source.indexOf('function debugGraphLiveAgentWindowRows()');
   const detailEnd = source.indexOf('\nfunction debugGraphChartHtml(', detailStart);
   assert.notEqual(detailStart, -1, 'live detail owner exists');
@@ -148,16 +176,24 @@ test('Agent-window live detail rejects mixed revisions and recovers only on the 
     agentWindowPhysicalKey: agent => String(agent?.window_index ?? ''),
     agentWindowIndex: agent => Number(agent?.window_index),
     agentWindowCanonicalLabel: (_index, kind) => kind,
+    agentWindowStateKey: state => String(state || 'idle') === 'transition' ? 'cooldown' : String(state || 'idle'),
     esc: value => String(value),
     document: {querySelectorAll: () => []},
     result: null,
   };
-  vm.runInNewContext(`${detailSource}\nautoApproveStates.set('one', {agent_window_snapshot_revision: 8, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});\nautoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  vm.runInNewContext(`${detailSource}\nautoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});\nautoApproveStates.set('two', {agent_window_snapshot_revision: 6, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="stale"/);
+  assert.match(context.result, /one → claude → claude → working/);
+  assert.match(context.result, /two status is stale \(rev 6 vs 7\)/);
+  assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
+  context.autoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
+  assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="current"/);
+  assert.match(context.result, /two → codex → codex → idle/);
+  context.jsDebugStatsPollState.agentWindowSnapshotRevision = 0;
+  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
   assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="changed"/);
   assert.match(context.result, /waiting for the chart snapshot/);
-  context.autoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
-  vm.runInNewContext(`${detailSource}\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
-  assert.match(context.result, /Live breakdown/);
 });
 
 test('YO!stats puts Charts before Size, Range, and Resolution without changing YO!cost ordering', () => {
@@ -1131,6 +1167,52 @@ test('health observations retain measured latency and bytes as original browser 
   assert.equal(context.result.payload.kind, 'heartbeat');
   assert.equal(context.result.payload.latency_ms, 12.5);
   assert.equal(context.result.payload.bytes, 456);
+});
+
+test('the Cost summary card renders as a ruled table sharing the report cost-table style, basis stated once', () => {
+  const summaryFn = sourceFunction('debugGraphCostSummaryHtml', 'scheduleDebugCostPricingStatusRefresh');
+  // Shared report table style + scroll-wrap owner reused (no bespoke summary table style).
+  assert.match(summaryFn, /<div class="js-debug-system-table-wrap js-debug-cost-table-wrap">/);
+  assert.match(summaryFn, /<table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary"/);
+  // Header row: Usage / Tokens / Price.
+  assert.match(summaryFn, /<thead><tr><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.usage', 'Usage'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.modelTokens\.label', 'Tokens'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.priceColumn', 'Price'\)\)\}<\/th><\/tr><\/thead>/);
+  // Input/Cache/Output in tbody, Total in tfoot, via the shared row shape.
+  assert.match(summaryFn, /<tbody>\$\{compactRows\.slice\(0, 3\)\.map\(summaryRowHtml\)\.join\(''\)\}<\/tbody>/);
+  assert.match(summaryFn, /<tfoot>\$\{summaryRowHtml\(compactRows\[3\]\)\}<\/tfoot>/);
+  // Row shape: <th scope="row"> keeps the per-usage explain-attrs owner; prices stay concise
+  // (default-omit debugGraphCostPricePairHtml => amount only, basis is NOT repeated per row).
+  assert.match(summaryFn, /const summaryRowHtml = \(\[label, value, apiListValue, tokenCount\]\) => \{/);
+  assert.match(summaryFn, /<th scope="row"\$\{debugGraphCostUsageColumnHeaderAttrs\(key, rowLabel\)\}>/);
+  assert.match(summaryFn, /<td>\$\{value === null \? '—' : debugGraphCostPricePairHtml\(value, apiListValue\)\}<\/td>/);
+  // Basis "At API list prices" is stated once in the section heading, not in the table.
+  assert.match(summaryFn, /js-debug-cost-estimate">\(\$\{esc\(heading\)\}\)/);
+  assert.match(summaryFn, /debug\.cost\.atApiListPrices/);
+  // Surrounding chrome preserved: head, Refresh, close, range/backfill status, More Info.
+  assert.match(summaryFn, /class="js-debug-chart-head"/);
+  assert.match(summaryFn, /data-js-debug-cost-details/);
+  // Old compact definition-list structure is gone.
+  assert.doesNotMatch(summaryFn, /js-debug-cost-compact/);
+  assert.doesNotMatch(summaryFn, /<dl /);
+  assert.doesNotMatch(summaryFn, /js-debug-cost-token-count/);
+  // Dead compact-card CSS was removed with the DOM.
+  assert.doesNotMatch(css, /\.js-debug-cost-compact/);
+  assert.doesNotMatch(css, /\.js-debug-cost-token-count/);
+});
+
+test('the YO!stats Daemons subtab keeps the system key and every locale carries a non-empty label', () => {
+  const path = require('node:path');
+  // The subtab wiring keeps the internal `system` key; only the human label changed.
+  assert.match(source, /debugSubTabButtonHtml\('system', t\('debug\.tab\.services'\)\)/);
+  const built = path.join('static', 'locales');
+  const shipped = fs.readdirSync(built).filter(name => name.endsWith('.json'));
+  assert.ok(shipped.length >= 20, `expected all shipped locales, saw ${shipped.length}`);
+  for (const name of shipped) {
+    const catalog = JSON.parse(fs.readFileSync(path.join(built, name), 'utf8'));
+    const label = catalog['debug.tab.services'];
+    assert.ok(typeof label === 'string' && label.trim().length > 0, `${name} debug.tab.services present/non-empty`);
+    assert.doesNotMatch(label, /^Services$/, `${name} debug.tab.services no longer the old "Services" label`);
+  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(built, 'en.json'), 'utf8'))['debug.tab.services'], 'Daemons');
 });
 
 Promise.all(pending).then(() => {

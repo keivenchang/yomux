@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Grafieken",
   "debug.tab.logs": "Logboeken",
-  "debug.tab.services": "Diensten",
+  "debug.tab.services": "Systeemdaemons",
   "debug.waitingForServerStats": "Wachten op serverstatistieken",
   "det.noActivity": "Er is nog geen AI-agentactiviteit.",
   "det.noBackend": "Geen AI-backend antwoordt; de activiteitscontext wordt getoond. Stel een Claude/Codex-backend in of log in via Preferences om te chatten.",

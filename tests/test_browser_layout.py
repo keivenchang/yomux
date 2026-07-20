@@ -793,7 +793,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         )
     )
     assert metrics == {
-        "labels": ["Graphs", "API/SSE", "Services", "Logs"],
+        "labels": ["Graphs", "API/SSE", "Daemons", "Logs"],
         "keys": ["graph", "events", "system", "logs"],
         "primitive": False,
         "range": True,
@@ -992,7 +992,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
     assert metrics["order"] == [
         {"key": "graph", "label": "Graphs"},
         {"key": "events", "label": "API / SSE"},
-        {"key": "system", "label": "Services"},
+        {"key": "system", "label": "Daemons"},
         {"key": "logs", "label": "Logs"},
     ], metrics
     assert metrics["systemImmediatelyRightOfEvents"] is True, metrics
@@ -10557,6 +10557,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const pricedRow = {
             provider: 'openai', model: 'gpt-subscription', label: 'gpt-subscription',
             token_quantity: 1000, micro_usd: 0, api_list_micro_usd: 600000,
+            source_url: 'https://example.com/pricing',
             lower_micro_usd: 0, upper_micro_usd: 0, ...dimensions,
           };
           debugGraphApplyServerRecord({
@@ -10585,6 +10586,13 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
           const report = document.querySelector('.js-yocost-panel .js-debug-cost-report');
+          const pricingAnchor = report?.querySelector('a[href^="http"]');
+          const opened = [];
+          const priorOpen = window.open;
+          window.open = (...args) => { opened.push(args); return {}; };
+          const pricingEvent = new MouseEvent('click', {bubbles: true, cancelable: true});
+          pricingAnchor?.dispatchEvent(pricingEvent);
+          window.open = priorOpen;
           const agentWrap = report?.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap');
           agentWrap.scrollLeft = Math.min(37, Math.max(0, agentWrap.scrollWidth - agentWrap.clientWidth));
           const expectedScrollLeft = agentWrap.scrollLeft;
@@ -10595,6 +10603,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             reportText: report?.textContent?.replace(/\\s+/g, ' ').trim() || '',
             grandTotals: [...report?.querySelectorAll('tfoot th') || []].map(node => node.textContent.trim()),
             pairCount: report?.querySelectorAll('.js-debug-cost-price-pair').length || 0,
+            pricingOpen: opened,
+            pricingDefaultPrevented: pricingEvent.defaultPrevented,
             restoredScrollLeft: document.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap')?.scrollLeft || 0,
             expectedScrollLeft,
             errors: window.__bootErrors || [],
@@ -10614,6 +10624,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert result["restoredScrollLeft"] == result["expectedScrollLeft"], result
     assert set(result["grandTotals"]) == {"Grand total · marginal / API list prices"}, result
     assert result["pairCount"] >= 2, result
+    assert result["pricingOpen"] == [["https://example.com/pricing", "_blank", "noopener,noreferrer"]], result
+    assert result["pricingDefaultPrevented"] is True, result
     assert result["errors"] == [] and result["rejections"] == [], result
     for width in (260, 360, 720, 1200):
         browser.set_window_size(width, 720)
@@ -15206,15 +15218,17 @@ def test_needs_attention_pane_stays_red_when_focused_and_yolo_ready(browser, tmp
         assert ring.lower() == ui_pin("paneRingAttention"), f"{pid}: needs-attention pane must keep the red ring, got {ring}"
 
 
-def test_agent_status_card_holds_one_revision_coherent_live_state(browser, tmp_path):
+def test_agent_status_card_joins_current_sessions_and_names_stale_live_state(browser, tmp_path):
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
     mismatch = WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
             """
             if (typeof debugGraphLiveAgentWindowDetailHtml !== 'function' || typeof debugGraphAgentStatusSeriesDef !== 'function') return false;
             autoApproveStates.clear();
-            autoApproveStates.set('one', {agent_window_snapshot_revision: 8, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
+            autoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
             autoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});
+            autoApproveStates.set('three', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 2, kind: 'claude', state: 'idle'}]});
+            autoApproveStates.set('stale', {agent_window_snapshot_revision: 6, agent_windows: [{window_index: 3, kind: 'codex', state: 'idle'}]});
             jsDebugStatsPollState.agentWindowSnapshotRevision = 7;
             const keys = ['working', 'ask', 'transition', 'idle'];
             const swatches = keys.map(key => {
@@ -15235,16 +15249,21 @@ def test_agent_status_card_holds_one_revision_coherent_live_state(browser, tmp_p
             """
         )
     )
-    assert all(item["state"] == "changed" for item in mismatch["details"]), mismatch
-    assert all("waiting for the chart snapshot" in item["text"] for item in mismatch["details"]), mismatch
+    assert all(item["state"] == "stale" for item in mismatch["details"]), mismatch
+    assert all("stale status is stale (rev 6 vs 7)" in item["text"] for item in mismatch["details"]), mismatch
+    assert all("waiting for the chart snapshot" not in item["text"] for item in mismatch["details"]), mismatch
     assert all(color for theme in mismatch["colors"].values() for color in theme), mismatch
     recovery = browser.execute_script(
         """
-        autoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});
+        autoApproveStates.set('stale', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 3, kind: 'codex', state: 'idle'}]});
         const root = document.getElementById('agent-status-contract');
         root.querySelector('[data-js-debug-chart="activity"]').innerHTML = debugGraphLiveAgentWindowDetailHtml('activity');
         const activity = root.querySelector('[data-js-debug-chart="activity"] [data-js-debug-agent-window-detail]');
-        return {activity: activity?.textContent.trim() || ''};
+        jsDebugStatsPollState.agentWindowSnapshotRevision = 0;
+        const awaiting = debugGraphLiveAgentWindowDetailHtml('activity');
+        return {activity: activity?.textContent.trim() || '', awaiting};
         """
     )
     assert "Live breakdown" in recovery["activity"], recovery
+    assert "stale status is stale" not in recovery["activity"], recovery
+    assert "waiting for the chart snapshot" in recovery["awaiting"], recovery

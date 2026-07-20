@@ -405,7 +405,7 @@
   "debug.system.localServices.title": "Local services",
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "الرسوم البيانية",
-  "debug.tab.services": "الخدمات",
+  "debug.tab.services": "برامج الخلفية",
   "debug.tab.logs": "السجلات",
   "debug.waitingForServerStats": "في انتظار إحصاءات الخادم",
   "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",

@@ -425,7 +425,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "الرسوم البيانية",
   "debug.tab.logs": "السجلات",
-  "debug.tab.services": "الخدمات",
+  "debug.tab.services": "برامج الخلفية",
   "debug.waitingForServerStats": "في انتظار إحصاءات الخادم",
   "det.noActivity": "لا يوجد نشاط لوكيل الذكاء الاصطناعي متاح بعد.",
   "det.noBackend": "لا يوجد خادم ذكاء اصطناعي يستجيب؛ يتم عرض ملخص النشاط. عيّن أو سجّل الدخول إلى خادم Claude/Codex في التفضيلات للدردشة.",

@@ -350,6 +350,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
     """
     body = f"""
     <main id="stats-shell"><div id="stats-root"></div></main>
+    <script>window.openExternalLinkFromEvent = (event, root) => {{ const anchor = event.target?.closest?.('a[href]'); if (!anchor || !root.contains(anchor) || !/^https?:\\/\\//i.test(anchor.href)) return false; const opened = window.open(anchor.href, '_blank', 'noopener,noreferrer'); if (!opened) return false; event.preventDefault(); return true; }};</script>
     <script>eval({json.dumps(CURRENT_STATS_SOURCE)});</script>
     <script>window.__statsNetworkFetch = {str(network_fetch).lower()};</script>
     <script>{setup}</script>
@@ -886,7 +887,7 @@ def _retired_current_cost_summary_opens_an_internal_scroll_modal_and_dismisses_b
     )
     assert summary["detailsBefore"] is False, summary
     assert summary["buttonText"] == "More Info", summary
-    assert "Total estimate: $0.25" in summary["text"], summary
+    assert "Total: $0.25" in summary["text"], summary
     assert "Total tokens: 1.1K tokens" in summary["text"], summary
 
     browser.find_element(By.CSS_SELECTOR, "[data-stats-current-cost-more]").click()
@@ -896,10 +897,19 @@ def _retired_current_cost_summary_opens_an_internal_scroll_modal_and_dismisses_b
         const scroll = modal.querySelector('[data-stats-current-cost-modal-scroll]');
         const rect = modal.getBoundingClientRect();
         scroll.scrollTop = Math.min(120, scroll.scrollHeight - scroll.clientHeight);
+        const opened = [];
+        const priorOpen = window.open;
+        window.open = (...args) => { opened.push(args); return {}; };
+        const pricingLink = modal.querySelector('a[href^="http"]');
+        const pricingEvent = new MouseEvent('click', {bubbles: true, cancelable: true});
+        pricingLink?.dispatchEvent(pricingEvent);
+        window.open = priorOpen;
         return {
           title: modal.querySelector('h2').textContent,
           text: modal.textContent,
           link: modal.querySelector('a')?.href || '',
+          opened,
+          pricingDefaultPrevented: pricingEvent.defaultPrevented,
           top: rect.top,
           bottom: rect.bottom,
           right: rect.right,
@@ -941,3 +951,24 @@ def _retired_current_cost_summary_opens_an_internal_scroll_modal_and_dismisses_b
     browser.find_element(By.CSS_SELECTOR, "[data-stats-current-cost-more]").click()
     browser.execute_script("document.querySelector('[data-stats-current-cost-modal-backdrop]').click();")
     assert browser.execute_script("return document.querySelector('[role=dialog]') === null;") is True
+
+
+def test_current_cost_pricing_link_dispatches_external_open(browser, tmp_path):
+    _load_current_stats(browser, tmp_path, view="cost")
+    browser.find_element(By.CSS_SELECTOR, "[data-stats-current-cost-more]").click()
+    result = browser.execute_script(
+        """
+        const modal = document.querySelector('[role="dialog"]');
+        const opened = [];
+        const priorOpen = window.open;
+        window.open = (...args) => { opened.push(args); return {}; };
+        const link = modal.querySelector('a[href^="http"]');
+        const event = new MouseEvent('click', {bubbles: true, cancelable: true});
+        link.dispatchEvent(event);
+        window.open = priorOpen;
+        return {opened, defaultPrevented: event.defaultPrevented, location: location.href};
+        """
+    )
+    assert result["opened"] == [["https://example.com/pricing", "_blank", "noopener,noreferrer"]], result
+    assert result["defaultPrevented"] is True, result
+    assert result["location"].endswith("current-stats-cost.html"), result

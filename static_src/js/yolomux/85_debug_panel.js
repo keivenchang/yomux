@@ -4776,9 +4776,11 @@ function debugGraphLiveAgentWindowRows() {
   const rows = [];
   const seen = new Set();
   const revisions = new Set();
+  const sessionRevisions = new Map();
   for (const [session, payload] of autoApproveStates.entries()) {
     const revision = agentWindowSnapshotRevision(payload);
     if (revision > 0) revisions.add(revision);
+    sessionRevisions.set(String(session), revision);
     for (const agent of agentWindowPayloadRows(payload?.agent_windows)) {
       const kind = agentWindowKind(agent?.kind);
       const physical = agentWindowPhysicalKey(agent);
@@ -4786,29 +4788,42 @@ function debugGraphLiveAgentWindowRows() {
       const key = `${session}\u0000${physical}\u0000${kind}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      rows.push({session, agent, kind});
+      rows.push({session, agent, kind, revision});
     }
   }
   rows.sort((left, right) => String(left.session).localeCompare(String(right.session))
     || (agentWindowIndex(left.agent) ?? Number.MAX_SAFE_INTEGER) - (agentWindowIndex(right.agent) ?? Number.MAX_SAFE_INTEGER)
     || left.kind.localeCompare(right.kind));
-  return {rows, revisions};
+  return {rows, revisions, sessionRevisions};
 }
 
 function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
   const chartRevision = Number(jsDebugStatsPollState.agentWindowSnapshotRevision) || 0;
-  const {rows, revisions} = debugGraphLiveAgentWindowRows();
-  if (!chartRevision || revisions.size !== 1 || !revisions.has(chartRevision)) {
+  const {rows, revisions, sessionRevisions} = debugGraphLiveAgentWindowRows();
+  if (!chartRevision) {
     return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="changed">${esc('Live status is waiting for the chart snapshot')}</div>`;
   }
-  const sessions = new Set(rows.map(row => row.session));
-  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
-  const details = rows.map(({session, agent, kind}) => {
+  // A live status payload may advance after the chart's accepted snapshot while
+  // the next stats poll is in flight. Newer rows are still authoritative live
+  // truth; only rows older than the chart (or missing a revision) are stale.
+  const currentRows = rows.filter(row => row.revision >= chartRevision);
+  const staleSessions = [...new Set(rows
+    .filter(row => row.revision < chartRevision)
+    .map(row => String(row.session)))]
+    .sort((left, right) => left.localeCompare(right))
+    .map(session => ({session, revision: Number(sessionRevisions.get(session)) || 0}));
+  const sessions = new Set(currentRows.map(row => row.session));
+  const summary = `${currentRows.length} agent windows across ${sessions.size} sessions`;
+  const details = currentRows.map(({session, agent, kind}) => {
     const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
-    const state = String(agent?.state || 'idle') === 'transition' ? 'cooldown' : String(agent?.state || 'idle');
+    const state = agentWindowStateKey(agent?.state);
     return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
   }).join('');
-  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="current"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+  const staleText = staleSessions.length
+    ? ` ${staleSessions.map(item => `${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`).join('; ')}`
+    : '';
+  const state = staleSessions.length ? 'stale' : 'current';
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span>${staleText ? `<span class="js-debug-agent-window-detail-stale">${esc(staleText.trim())}</span>` : ''}<details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
 }
 
 function refreshDebugAgentWindowLiveDetails() {
@@ -5766,6 +5781,14 @@ function debugGraphCostSummaryHtml(buckets, domain) {
     ['Output', compact.output, compactApiList.output, tokens.output],
     ['Total', hasEstimatedUsage ? summary.totalMicroUsd : null, hasEstimatedUsage ? summary.apiListMicroUsd : null, tokens.total],
   ];
+  // One row shape shared by tbody (Input/Cache/Output) and tfoot (Total). The row-label cell
+  // carries the same per-usage explain-attrs the old <dl> <dt> used, and prices stay concise
+  // (basis stated once in the heading, so debugGraphCostPricePairHtml keeps its default omit).
+  const summaryRowHtml = ([label, value, apiListValue, tokenCount]) => {
+    const key = String(label).toLowerCase();
+    const rowLabel = debugGraphCostText(`debug.cost.${key}`, label);
+    return `<tr><th scope="row"${debugGraphCostUsageColumnHeaderAttrs(key, rowLabel)}>${esc(rowLabel)}</th><td>${esc(debugGraphTokensText(tokenCount))}</td><td>${value === null ? '—' : debugGraphCostPricePairHtml(value, apiListValue)}</td></tr>`;
+  };
   return `<section class="js-debug-chart js-debug-cost-summary" data-js-debug-summary-group="costSummary">
     <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
@@ -5778,9 +5801,13 @@ function debugGraphCostSummaryHtml(buckets, domain) {
       ${refreshStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(refreshStatus)}</div>` : ''}
       ${backfillStatus ? `<div class="js-debug-cost-refresh-status" role="status">${esc(backfillStatus)}</div>` : ''}
     </div>
-    <dl class="js-debug-cost-compact" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
-      ${compactRows.map(([label, value, apiListValue, tokenCount]) => `<div><dt${debugGraphCostUsageColumnHeaderAttrs(String(label).toLowerCase(), debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}>${esc(debugGraphCostText(`debug.cost.${String(label).toLowerCase()}`, label))}</dt><dd>${value === null ? '—' : debugGraphCostPricePairHtml(value, apiListValue)}<span class="js-debug-cost-token-count">${esc(debugGraphTokensText(tokenCount))}</span></dd></div>`).join('')}
-    </dl>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap">
+      <table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary" aria-label="${esc(debugGraphCostText('debug.cost.title', 'Cost summary'))}">
+        <thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.usage', 'Usage'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th><th scope="col">${esc(debugGraphCostText('debug.cost.priceColumn', 'Price'))}</th></tr></thead>
+        <tbody>${compactRows.slice(0, 3).map(summaryRowHtml).join('')}</tbody>
+        <tfoot>${summaryRowHtml(compactRows[3])}</tfoot>
+      </table>
+    </div>
     <span class="js-debug-cost-modal-host"><button type="button" class="js-debug-cost-details control-active-hover" data-js-debug-cost-details aria-label="${esc(accessible)}">${esc(moreInfo)}</button></span>
   </section>`;
 }
@@ -7360,6 +7387,7 @@ function bindYoCostPanel(panel) {
   panel.addEventListener('change', event => { handleDebugGraphControlEvent(event, panel); });
   panel.addEventListener('click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
+    if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
     if (handleYoCostTableSort(event, panel)) return;
     openYoCostTranscriptPreview(event);
   });

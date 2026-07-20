@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Đồ thị",
   "debug.tab.logs": "Nhật ký",
-  "debug.tab.services": "Dịch vụ",
+  "debug.tab.services": "Daemon",
   "debug.waitingForServerStats": "Đang chờ số liệu máy chủ",
   "det.noActivity": "Chưa có hoạt động AI agent.",
   "det.noBackend": "Không có backend AI nào phản hồi; đang hiển thị ngữ cảnh hoạt động. Hãy đặt hoặc đăng nhập backend Claude/Codex trong Preferences để chat.",

@@ -413,7 +413,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "Wykresy",
   "debug.tab.logs": "Dzienniki",
-  "debug.tab.services": "Usługi",
+  "debug.tab.services": "Demony",
   "debug.waitingForServerStats": "Oczekiwanie na statystyki serwera",
   "det.noActivity": "Brak jeszcze aktywności AI agent.",
   "det.noBackend": "Żaden backend AI nie odpowiada; pokazuję kontekst aktywności. Ustaw lub zaloguj backend Claude/Codex w Preferences, aby rozmawiać.",

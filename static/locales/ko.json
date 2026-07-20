@@ -401,7 +401,7 @@
   "debug.tab.events": "API/SSE",
   "debug.tab.graph": "그래프",
   "debug.tab.logs": "로그",
-  "debug.tab.services": "서비스",
+  "debug.tab.services": "데몬",
   "debug.waitingForServerStats": "서버 통계를 기다리는 중",
   "det.noActivity": "아직 사용 가능한 AI 에이전트 활동이 없습니다.",
   "det.noBackend": "응답하는 AI 백엔드가 없습니다. 활동 요약을 표시합니다. 채팅하려면 환경설정에서 Claude/Codex 백엔드를 설정하거나 로그인하세요.",
