@@ -481,6 +481,17 @@ function refreshChatRelativeTimes(panel = document.getElementById(panelDomId(cha
   return updated;
 }
 
+function chatRelativeTimesVisibleConsumer() {
+  return document.visibilityState !== 'hidden' && itemInLayout(chatItemId) && itemIsActivePaneTab(chatItemId);
+}
+
+function syncChatRelativeTimesRefresh() {
+  resetRuntimeInterval('chat-relative-times', () => {
+    if (!chatRelativeTimesVisibleConsumer()) return null;
+    return refreshChatRelativeTimes();
+  }, chatRelativeTimeRefreshMs);
+}
+
 function chatMediaItemFor(url) {
   const normalized = normalizedExternalHttpUrl(url, {maxLength: chatMediaMaxUrlLength});
   return normalized ? `${chatMediaItemPrefix}${encodeURIComponent(normalized)}` : '';
@@ -916,12 +927,8 @@ function loadChatEmojiCatalog() {
 }
 
 function chatRecentEmoji() {
-  try {
-    const stored = JSON.parse(storageGet(chatRecentEmojiStorageKey, '[]'));
-    return Array.isArray(stored) ? stored.map(String).slice(0, chatRecentEmojiLimit) : [];
-  } catch (_) {
-    return [];
-  }
+  const stored = safeJsonParse(storageGet(chatRecentEmojiStorageKey, '[]'), []);
+  return Array.isArray(stored) ? stored.map(String).slice(0, chatRecentEmojiLimit) : [];
 }
 
 function rememberChatEmoji(glyph) {
@@ -1285,7 +1292,7 @@ function mountChatPanel() {
     return installChatComposerResizeObserver(panel);
   };
   if (!installComposer()) requestAnimationFrame(installComposer);
-  resetRuntimeInterval('chat-relative-times', () => refreshChatRelativeTimes(), chatRelativeTimeRefreshMs);
+  syncChatRelativeTimesRefresh();
   loadChatDelta();
   return true;
 }
@@ -1344,10 +1351,12 @@ function clearChatLifecycle(options = {}) {
 
 function syncChatActiveLifecycle() {
   if (!itemIsActivePaneTab(chatItemId) && chatState.typingActive) setChatTyping(false, {keepalive: true});
+  syncChatRelativeTimesRefresh();
 }
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') clearChatLifecycle({keepalive: true});
   else if (chatState.loaded) loadChatDelta();
+  syncChatRelativeTimesRefresh();
 });
 window.addEventListener('pagehide', () => clearChatLifecycle({keepalive: true}));

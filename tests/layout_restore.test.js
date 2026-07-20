@@ -32,7 +32,7 @@ const {
   testAsync,
   runSuites,
   finishSuite,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 
 async function runLayoutRestoreSuite() {
   test('shared button builder owns attributes, accessibility state, dataset, and events', () => {
@@ -119,12 +119,12 @@ async function runLayoutRestoreSuite() {
     const fileActionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
     const panelSource = fs.readFileSync('static_src/js/yolomux/78_panel_shell.js', 'utf8');
     const agentSource = fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8');
-    const markdownSource = fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8');
-    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_popout.js', 'utf8');
-    const panePopoutSource = fs.readFileSync('static_src/js/yolomux/96_pane_popout.js', 'utf8');
-    const shareStateSource = fs.readFileSync('static_src/js/yolomux/96_share_state.js', 'utf8');
-    const shareReplaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
-    const shareAdminSource = fs.readFileSync('static_src/js/yolomux/98_share_admin.js', 'utf8');
+    const markdownSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/91_preview_popout.js', 'utf8');
+    const panePopoutSource = fs.readFileSync('static_src/js/yolomux/90_pane_popout.js', 'utf8');
+    const shareStateSource = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
+    const shareReplaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
+    const shareAdminSource = fs.readFileSync('static_src/js/yolomux/95_share_admin.js', 'utf8');
     const terminalBootSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 
     for (const key of ['hidden', 'minimized', 'expanded', 'autoClosed', 'swapped']) {
@@ -148,13 +148,13 @@ async function runLayoutRestoreSuite() {
     assert.ok(fileActionsSource.includes("tPlural('editor.status.selections', selections)") && fileActionsSource.includes("tPlural('editor.status.selectedChars', selectedChars)"), 'cursor selection counts use plural-aware locale families');
     assert.ok(fileActionsSource.includes("tPlural('editor.status.characters', count)"), 'text-file status uses the shared plural character family');
     assert.ok(/function codeMirrorPhraseValues\(\)[\s\S]*Find: t\('common\.find'\)[\s\S]*'replace all': t\('editor\.search\.replaceAll'\)[\s\S]*function codeMirrorLocaleExtensions[\s\S]*EditorState\.phrases\.of\(codeMirrorPhraseValues\(\)\)/.test(fileActionsSource), 'CodeMirror search chrome resolves through one phrase-map parent');
-    const codeMirrorEditorSource = fs.readFileSync('static_src/js/yolomux/95_codemirror_editor.js', 'utf8');
+    const codeMirrorEditorSource = fs.readFileSync('static_src/js/yolomux/92_codemirror_editor.js', 'utf8');
     assert.ok(/_cmLocaleCompartment[\s\S]*reconfigureCodeMirrorPanelLocale/.test(codeMirrorEditorSource), 'mounted CodeMirror editors reconfigure localized phrases without rebuilding the editor');
     assert.ok(/function trackCodeMirrorViews\(panel, api, views\)[\s\S]*panel\._cmViews = views\.filter\(Boolean\)/.test(codeMirrorEditorSource)
       && (codeMirrorEditorSource.match(/Array\.isArray\(panel\?\._cmViews\)/g) || []).length === 3
       && !/_cm(?:Theme|EditorOption|Locale)Views/.test(codeMirrorEditorSource), 'theme, editor-option, and locale compartments consume one shared live CodeMirror view list');
     assert.ok(/function updateCodeMirrorViewPreservingState[\s\S]*requestMeasure[\s\S]*requestAnimationFrame[\s\S]*function syncCodeMirrorDocument[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*function reconfigureCodeMirrorPanelLocale[\s\S]*updateCodeMirrorViewPreservingState/.test(codeMirrorEditorSource), 'document sync and locale compartment refresh share one selection/scroll preservation parent');
-    const changesEditorSource = fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8');
+    const changesEditorSource = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
     assert.ok(/function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true[\s\S]*view\.hasFocus[\s\S]*captureFileEditorPanelViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep the focused live selection/scroll authoritative through the shared restore parent');
     assert.equal((fileActionsSource.match(/restoreFileEditorPanelViewState\(item, panel, \{restoreFocused: true\}\)/g) || []).length, 2, 'explicit disk replacement alone opts into restoring the captured focused editor snapshot');
     assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url: script.src})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
@@ -888,22 +888,22 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.previewRendererForPath('/repo/photo.tiff').id, 'unsupported-image', 'recognized image fallbacks are registry-owned');
     assert.equal(api.previewRendererForPath('/repo/archive.zip').id, 'unsupported-archive', 'recognized archive fallbacks are registry-owned');
     const previewRendererSamples = {
-      'docs/preview-samples/10-markdown.md': 'markdown',
-      'docs/preview-samples/11-html.html': 'html',
-      'docs/preview-samples/12-image.svg': 'image',
-      'docs/preview-samples/14-mermaid.mmd': 'mermaid',
-      'docs/preview-samples/15-structured.json': 'structured',
-      'docs/preview-samples/16-structured.jsonl': 'json-lines-table',
-      'docs/preview-samples/17-notebook.ipynb': 'structured',
-      'docs/preview-samples/18-structured.yaml': 'structured',
-      'docs/preview-samples/19-structured.toml': 'structured',
-      'docs/preview-samples/20-structured.drawio': 'structured',
-      'docs/preview-samples/21-config.properties': 'structured',
-      'docs/preview-samples/22-table.csv': 'table',
-      'docs/preview-samples/23-table.tsv': 'table',
+      'tests/fixtures/preview-samples/10-markdown.md': 'markdown',
+      'tests/fixtures/preview-samples/11-html.html': 'html',
+      'tests/fixtures/preview-samples/12-image.svg': 'image',
+      'tests/fixtures/preview-samples/14-mermaid.mmd': 'mermaid',
+      'tests/fixtures/preview-samples/15-structured.json': 'structured',
+      'tests/fixtures/preview-samples/16-structured.jsonl': 'json-lines-table',
+      'tests/fixtures/preview-samples/17-notebook.ipynb': 'structured',
+      'tests/fixtures/preview-samples/18-structured.yaml': 'structured',
+      'tests/fixtures/preview-samples/19-structured.toml': 'structured',
+      'tests/fixtures/preview-samples/20-structured.drawio': 'structured',
+      'tests/fixtures/preview-samples/21-config.properties': 'structured',
+      'tests/fixtures/preview-samples/22-table.csv': 'table',
+      'tests/fixtures/preview-samples/23-table.tsv': 'table',
     };
     for (const [samplePath, rendererId] of Object.entries(previewRendererSamples)) {
-      assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a docs/preview-samples fixture`);
+      assert.equal(fs.existsSync(samplePath), true, `${rendererId} renderer has a preview-samples fixture`);
       assert.equal(api.previewRendererForPath(`/repo/${samplePath}`).id, rendererId, `${samplePath} routes to ${rendererId}`);
     }
     const transcriptPreview = api.jsonLinesTablePreview('/repo/transcript.jsonl', [
@@ -929,18 +929,18 @@ async function runLayoutRestoreSuite() {
     assert.equal(wideJsonl.columns.length, 40, 'JSONL column count is capped');
     assert.equal(wideJsonl.overflowColumns.length, 4, 'JSONL retains overflow keys behind one affordance');
     [
-      'docs/preview-samples/13-pdf.pdf',
-      'docs/preview-samples/24-audio.wav',
-      'docs/preview-samples/25-video.mp4',
-      'docs/preview-samples/26-text.log',
-      'docs/preview-samples/27-diff.patch',
-      'docs/preview-samples/28-diagram.dot',
-      'docs/preview-samples/29-plantuml.puml',
-      'docs/preview-samples/30-unsupported-image.tiff',
-      'docs/preview-samples/31-unsupported-document.xlsx',
-      'docs/preview-samples/32-unsupported-data.parquet',
-      'docs/preview-samples/33-unsupported-archive.zip',
-      'docs/preview-samples/34-unsupported.unknown',
+      'tests/fixtures/preview-samples/13-pdf.pdf',
+      'tests/fixtures/preview-samples/24-audio.wav',
+      'tests/fixtures/preview-samples/25-video.mp4',
+      'tests/fixtures/preview-samples/26-text.log',
+      'tests/fixtures/preview-samples/27-diff.patch',
+      'tests/fixtures/preview-samples/28-diagram.dot',
+      'tests/fixtures/preview-samples/29-plantuml.puml',
+      'tests/fixtures/preview-samples/30-unsupported-image.tiff',
+      'tests/fixtures/preview-samples/31-unsupported-document.xlsx',
+      'tests/fixtures/preview-samples/32-unsupported-data.parquet',
+      'tests/fixtures/preview-samples/33-unsupported-archive.zip',
+      'tests/fixtures/preview-samples/34-unsupported.unknown',
     ].forEach(samplePath => {
       assert.equal(fs.existsSync(samplePath), false, `${samplePath} stays out of the curated preview sample set`);
     });
@@ -982,13 +982,13 @@ async function runLayoutRestoreSuite() {
       assert.equal(blockedTag.test(stringSanitized), false, `string SVG sanitizer removes ${tagName}`);
       assert.equal(stringSanitized.includes('href="#local"'), true, `string SVG sanitizer preserves local fragments while removing ${tagName}`);
     });
-    const standaloneSvgSanitizerSource = fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8');
+    const standaloneSvgSanitizerSource = fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8');
     assert.ok(/STANDALONE_SVG_BLOCKED_TAG_SET = new Set\(STANDALONE_SVG_BLOCKED_TAGS\)/.test(standaloneSvgSanitizerSource), 'DOM SVG sanitizer consumes the shared blocked-tag owner');
     assert.ok(/STANDALONE_SVG_BLOCKED_TAG_PATTERN = STANDALONE_SVG_BLOCKED_TAGS\.map\(escapeRegExpLiteral\)\.join\('\|'\)/.test(standaloneSvgSanitizerSource), 'string SVG sanitizer derives its regex source from the shared blocked-tag owner');
     assert.equal(/\(\?:script\|foreignObject\|iframe\|object\|embed\|audio\|video\|canvas\|link\|meta\)/.test(standaloneSvgSanitizerSource), false, 'SVG sanitizer has no copied blocked-tag regex alternation');
-    assert.ok(/function mermaidPreviewConfig[\s\S]*htmlLabels:\s*true[\s\S]*flowchart:\s*\{[\s\S]*htmlLabels:\s*true/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid HTML labels are allowed only as sanitizer input');
-    assert.ok(/function svgForeignObjectTextNode[\s\S]*createElementNS\('http:\/\/www\.w3\.org\/2000\/svg', 'text'\)[\s\S]*node\.textContent = text/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid foreignObject labels convert to safe SVG text in browser runtime');
-    assert.ok(/tagName === 'foreignobject'[\s\S]*svgForeignObjectTextNode\(child\)[\s\S]*child\.replaceWith\(textNode\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid foreignObject labels are converted before foreignObject stripping');
+    assert.ok(/function mermaidPreviewConfig[\s\S]*htmlLabels:\s*false[\s\S]*flowchart:\s*\{[\s\S]*htmlLabels:\s*false/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Mermaid emits native SVG labels so strict sanitization never rewrites its layout output');
+    assert.ok(/function svgForeignObjectTextNode[\s\S]*createElementNS\('http:\/\/www\.w3\.org\/2000\/svg', 'text'\)[\s\S]*node\.textContent = text/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Standalone foreignObject input still converts to safe SVG text in browser runtime');
+    assert.ok(/tagName === 'foreignobject'[\s\S]*svgForeignObjectTextNode\(child\)[\s\S]*child\.replaceWith\(textNode\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Standalone foreignObject input is converted before stripping');
     assert.equal(api.markdownPreviewBlockedTagsForTest().includes('input'), false, 'Markdown sanitizer preserves checkbox inputs for task-list Preview controls');
     assert.ok(/bindMarkdownTaskCheckboxes\(container, text, markdownPath\)/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown Preview wires rendered task checkboxes after parsing');
     assert.ok(/tagName === 'input'[\s\S]*getAttribute\('type'\)[\s\S]*checkbox/.test(fs.readFileSync('static/yolomux.js', 'utf8')), 'Markdown sanitizer removes non-checkbox inputs while allowing task checkboxes');
@@ -1084,8 +1084,8 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}, contentAttributes: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), true, 'CodeMirror API validation accepts critical editor/search exports');
     assert.equal(api.codeMirrorApiIsUsable({Compartment: class {}, EditorState: {create() {}, readOnly: {of() {}}}, EditorView: {theme() {}, editable: {of() {}}}, keymap: {of() {}}, drawSelection() {}, highlightActiveLine() {}, search() {}, openSearchPanel() {}}), false, 'CodeMirror API validation rejects bundles without line-wrapping support');
     assert.equal(api.codeMirrorApiIsUsable({EditorState: {create() {}}, EditorView: {theme() {}}}), false, 'CodeMirror API validation rejects partial bundles');
-    const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package.json', 'utf8'));
-    const codeMirrorBundleLock = JSON.parse(fs.readFileSync('prototypes/codemirror-bundle/package-lock.json', 'utf8'));
+    const codeMirrorBundlePackage = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package.json', 'utf8'));
+    const codeMirrorBundleLock = JSON.parse(fs.readFileSync('tools/codemirror-bundle/package-lock.json', 'utf8'));
     const codeMirrorDirectVersions = {
       '@codemirror/commands': '6.10.3',
       '@codemirror/lang-css': '6.3.1',
@@ -1113,7 +1113,7 @@ async function runLayoutRestoreSuite() {
     assert.equal(codeMirrorBundleLock.packages['node_modules/@lezer/highlight'].version, '1.2.3', 'Lezer highlight version is recorded');
     assert.equal(codeMirrorBundleLock.packages['node_modules/style-mod'].version, '4.1.3', 'style-mod version is recorded');
     assert.equal(codeMirrorBundleLock.packages['node_modules/w3c-keyname'].version, '2.2.8', 'w3c-keyname version is recorded');
-    assert.ok(fs.readFileSync('prototypes/codemirror-entry.js', 'utf8').includes('cd prototypes/codemirror-bundle'), 'CodeMirror rebuild instructions use the checked-in bundle manifest');
+    assert.ok(fs.readFileSync('tools/codemirror-bundle/codemirror-entry.js', 'utf8').includes('cd tools/codemirror-bundle'), 'CodeMirror rebuild instructions use the checked-in bundle manifest');
     const parserCrashApi = {
       EditorState: {
         create(config) {
@@ -1375,6 +1375,30 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.runtimeIntervalDelay(0), 1);
   });
 
+  test('every production runtime interval has one source-of-truth classification', () => {
+    const api = loadYolomux('', ['1']);
+    const source = fs.readFileSync('static/yolomux.js', 'utf8');
+    const names = Array.from(source.matchAll(/resetRuntimeInterval\('([^']+)'/g), match => match[1]);
+    const expected = [
+      'latency', 'events-fallback', 'auto-approve', 'tabber-activity-fallback', 'file-index-refresh',
+      'file-index-building', 'debug-stats', 'debug-system', 'debug-logs',
+      'share-geometry-digest', 'chat-relative-times', 'share-status',
+    ].sort();
+    assert.deepStrictEqual([...new Set(names)].sort(), expected, 'the source audit must name every production resetRuntimeInterval owner');
+    for (const name of expected) {
+      const entry = canonical(api.runtimeIntervalCatalogForTest(name));
+      assert.ok(entry, `${name} has an explicit timer classification`);
+      assert.ok(Array.isArray(entry.classes) && entry.classes.length > 0, `${name} names at least one reason`);
+      for (const timerClass of entry.classes) assert.ok(api.runtimeTimerClassCatalogForTest()[timerClass], `${name} uses a named timer class`);
+      assert.equal(typeof entry.source, 'string');
+      assert.ok(entry.source.length > 20, `${name} records its source of truth`);
+    }
+    for (const timerClass of ['poll:no-change', 'sample', 'lease', 'external-reconcile', 'repair', 'fallback', 'local-display']) {
+      assert.equal(typeof api.runtimeTimerClassCatalogForTest()[timerClass], 'string', `${timerClass} remains a distinct timer class`);
+    }
+    assert.deepStrictEqual(canonical(api.runtimeIntervalCatalogForTest('events')), null, 'the normal event-log discovery loop remains retired');
+  });
+
   await testAsync('named runtime intervals wait for async work before scheduling the next run', async () => {
     const scheduled = [];
     const cleared = new Set();
@@ -1411,6 +1435,37 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.clearRuntimeIntervalForTest('unit-runtime-loop'), true);
     assert.equal(api.runtimeIntervalActiveForTest('unit-runtime-loop'), false);
     assert.equal(cleared.has(afterSettle[1].timer), true, 'clearing the named loop cancels its pending timer');
+  });
+
+  await testAsync('runtime interval diagnostics distinguish useful work from no-change work', async () => {
+    const scheduled = [];
+    let nextTimer = 1;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const timer = nextTimer++;
+        scheduled.push({timer, callback, delay});
+        return timer;
+      },
+      clearTimeout() {},
+    });
+    api.resetRuntimeIntervalForTest('latency', () => null, 10);
+    const first = scheduled.filter(item => item.delay === 10);
+    assert.equal(first.length, 1);
+    first[0].callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    let diagnostic = canonical(api.runtimeIntervalDiagnosticsForTest('latency')[0]);
+    assert.equal(diagnostic.lastResult, 'no-change');
+    assert.equal(diagnostic.lastUsefulAtMs, 0);
+    api.resetRuntimeIntervalForTest('latency', () => ({latencyMs: 3}), 10);
+    const second = scheduled.filter(item => item.delay === 10);
+    assert.equal(second.length, 2);
+    second[1].callback();
+    await flushAsyncWork();
+    await flushAsyncWork();
+    diagnostic = canonical(api.runtimeIntervalDiagnosticsForTest('latency')[0]);
+    assert.equal(diagnostic.lastResult, 'useful');
+    assert.ok(diagnostic.lastUsefulAtMs > 0);
   });
 
   test('CodeMirror search supports literal and regexp options', () => {
@@ -1460,7 +1515,15 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
     assert.ok(source.includes('const sessionStatusRecords = new Map();'), 'session status, notification throttle, working tone, and badge pulse state share one session-keyed owner');
     assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, sentAt, notificationLastSentLimit);'), 'per-session notification signatures use the shared bounded-map helper');
-    assert.ok(source.includes('setLimitedMapEntry(watchedPrNotificationLastSent, signature, now, notificationLastSentLimit);'), 'global watched-PR notification signatures use the same bounded-map helper without pretending to be session state');
+    assert.ok(source.includes('const watchedPrRecords = new Map();'), 'watched-PR status and notification throttles share one PR-keyed owner');
+    assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, now, notificationLastSentLimit);'), 'watched-PR notification transition keys use the shared bounded-map helper');
+    assert.equal(/\b(?:openFiles|fileIdentityByPath|openFilePathByIdentity|fileOpenPromisesByPath)\b/.test(source), false, 'open-file content, identity, and in-flight state have no parallel legacy maps or aliases');
+    assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*function apiFetch\(url, options = \{\}\)[\s\S]*applyShareTokenHeaders\(requestOptions\)[\s\S]*function apiFetchJsonQuiet[\s\S]*applyShareTokenHeaders\(requestOptions\)/.test(source), 'normal and quiet API fetches share one share-token header owner');
+    assert.ok(/function readNotificationDelivery\(\)[\s\S]*safeJsonParse\(/.test(source) && /function clientEventEnvelope\(event\)[\s\S]*safeJsonParse\(/.test(source), 'stored notification and client-event JSON reads reuse the safe parser');
+    assert.ok(/function chatRelativeTimesVisibleConsumer\(\)[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemInLayout\(chatItemId\)[\s\S]*itemIsActivePaneTab\(chatItemId\)/.test(source), 'chat relative-time refresh has one foreground active-panel consumer predicate');
+    assert.ok(/function syncChatRelativeTimesRefresh\(\)[\s\S]*resetRuntimeInterval\('chat-relative-times',[\s\S]*!chatRelativeTimesVisibleConsumer\(\)\) return null;[\s\S]*refreshChatRelativeTimes\(\)/.test(source), 'chat relative-time timer skips the DOM query without a visible consumer');
+    assert.ok(/function latencyVisibleConsumer\(\)[\s\S]*topbar-pack-hide-latency[\s\S]*jsDebugStatsPanelVisible[\s\S]*document\.visibilityState !== 'hidden'/.test(source), 'latency work has one topbar-or-stats visible-consumer predicate');
+    assert.ok(/resetRuntimeInterval\('latency',[\s\S]*!latencyVisibleConsumer\(\)\) return null;[\s\S]*return updateLatency\(\)/.test(source), 'latency timer skips ping, JSON sizing, and DOM rendering without a visible consumer');
     assert.equal(/const (?:sessionStateKeys|notificationLastSent|workingAgentNotificationTones|workingAgentTransitionNotificationPending|metadataBadgePulseUntil) = new Map\(\)/.test(source), false, 'parallel session status maps cannot return');
     assert.ok(source.includes('const toastRecords = new Map();'), 'toast nodes and numeric-ID timers share one record owner');
     assert.equal(/const attentionAlertTimers = new Map\(\)|function replaceSessionMetadata[\s\S]*?toastRecords,/.test(source), false, 'toast records are not split into a parallel timer map or passed through session-key rekeying');
@@ -1628,7 +1691,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function createTopbarSearch[\s\S]*openFileQuickOpen\(\)/.test(source), 'the topbar universal search opens the unified quick-open/command palette (no forked logic)');
     assert.ok(/function createTopbarCenterTools\(\)[\s\S]*createTopbarSearch\(\)/.test(source) && /renderSessionButtons[\s\S]*appendChild\(createTopbarCenterTools\(\)\)/.test(source), 'the topbar search is mounted in the shared menubar middle group');
     assert.ok(/refreshFileIndexStatus[\s\S]{0,400}\/api\/fs\/index-status\?root=/.test(source), '#30/#31: the client warms the backend index and tracks build status via /api/fs/index-status');
-    assert.ok(source.includes("status === 'too_large' ? '!' : t('finder.index.indexed')"), 'the indexed badge uses a readable localized label while preserving partial coverage');
+    assert.ok(source.includes("status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed'))"), 'the indexed badge distinguishes partial coverage and terminal index errors');
     assert.equal(/function fileExplorerIndexBadgeText\(path\) \{[\s\S]*?fileExplorerTreeDateMode !== 'none'[\s\S]*?return ''/.test(source), false, '#31: Date/Ago rows retain the readable index status beside the date');
     assert.ok(/function fileExplorerIndexBadgeTitle\(path\)[\s\S]*?status === 'too_large'[\s\S]*?finder\.index\.partial/.test(source), 'the indexed badge title reports partial coverage');
     assert.ok(/function fileIndexStatusFromPayload\(payload\)[\s\S]*payload\.too_large === true[\s\S]*payload\.ready === true[\s\S]*payload\.ready_elsewhere === true/.test(source), 'partial coverage wins over the generic ready state');
@@ -2078,8 +2141,9 @@ async function runLayoutRestoreSuite() {
     assert.equal(summary.last.target, '1:1', 'tmux signal latency names the removed window key');
     assert.equal(summary.last.origin, 'pane-exited', 'tmux signal latency starts at the pane-exit event');
     assert.ok(summary.last.durationMs >= 0, 'tmux signal latency records elapsed time to client removal');
-    const text = api.jsDebugTextForClipboardForTest();
-    assert.ok(text.includes('removals=1') && text.includes('terminal_removal') && text.includes('window 1:1 removed'), 'YO!stats debug text surfaces removal latency');
+    const removalEvents = api.jsDebugEventsForTest().filter(event => event.type === 'terminal_removal');
+    assert.equal(removalEvents.length, 1, 'the current browser-observation source retains one removal event for private upload');
+    assert.equal(removalEvents[0].target, '1:1', 'the private removal observation names the removed window key');
 
     api.clearJsDebugEventsForTest();
     api.setTmuxSignalStateForTest({
@@ -2640,10 +2704,10 @@ async function runLayoutRestoreSuite() {
 
   test('image preview uses delayed shared hover timing', () => {
     const api = loadYolomux('', ['1']);
-    assert.equal(api.fileImagePreviewMinShowDelayMs, 800);
     const source = fs.readFileSync('static/yolomux.js', 'utf8');
     const css = fs.readFileSync('static/yolomux.css', 'utf8');
-    assert.ok(source.includes('Math.max(fileImagePreviewMinShowDelayMs, tabPopoverShowDelayMs)'), 'image previews share the tab-style delayed hover threshold');
+    assert.ok(source.includes('Math.max(Number(popoverShowDelayMs)'), 'image previews use the shared hover-open delay');
+    assert.equal(source.includes('fileImagePreviewMinShowDelayMs'), false, 'image previews do not keep a separate hover threshold');
     assert.ok(css.includes('--file-image-preview-max-size: 320px'), 'Finder image preview default max size is tokenized');
     assert.ok(/\.file-image-preview-popover[\s\S]*pointer-events:\s*none/.test(css), 'Finder image previews cannot keep themselves hovered over terminals');
     assert.ok(source.includes('function installPreviewZoomSurface'), 'visual previews share one zoom installer');

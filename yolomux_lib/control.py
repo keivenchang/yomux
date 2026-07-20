@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
-from .common import CONTROL_SOCKET_DIR
+from .infra.common import CONTROL_SOCKET_DIR
 from .local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
 from .local_services.rpc import LocalRpcError
 from .local_services.rpc import LocalRpcEnvelope

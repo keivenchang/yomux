@@ -33,7 +33,7 @@ const {
   testAsync,
   runSuites,
   finishSuite,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 const {spawn} = require('node:child_process');
 const {runSuite} = require('./layout_url.test.js');
 
@@ -91,6 +91,50 @@ async function runLayoutAsyncSuite() {
     await fourth;
     assert.ok(api.backgroundOwnerStatusStateForTest().error, 'the current request records its failure');
     assert.equal(api.backgroundOwnerStatusStateForTest().request, null, 'current failure releases the request handle');
+  });
+
+  test('search-index lifecycle generations reject a delayed older status response', () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 4}), true);
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'ready', generation: 3}), false, 'an older HTTP status cannot overwrite the newer lifecycle transition');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'error', generation: 4, error: 'walk failed'}), true, 'the matching lifecycle generation exposes its terminal error');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'error', error: 'walk failed'}), 'error');
+  });
+
+  test('search-index completion pushes its lifecycle snapshot without rereading the root', () => {
+    const api = loadYolomux();
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({state: 'ready'}));
+    });
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.setDocumentVisibilityForTest('hidden');
+    assert.equal(api.handleClientPushEventForTest('background_refresh_done', {role: 'search-index', root: '/repo', state: 'ready', generation: 7}, {epoch: 'index-owner-b', resource: 'background:search-index:repo', resource_revision: 7}), true);
+    assert.deepStrictEqual(requests, [], 'a complete index lifecycle payload is readable state, not a reason to re-poll its root');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 6}), false, 'the event-owned generation fences a stale later HTTP response');
+  });
+
+  await testAsync('background-owner takeover revalidates visible indexed roots once', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({state: 'ready', generation: 8}));
+    });
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', '');
+    assert.equal(api.handleClientPushEventForTest('background_owner_changed', {marker: 'takeover'}, {epoch: 'owner-b', resource: 'background-owner', resource_revision: 2}), true);
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, ['/api/fs/index-status?root=%2Frepo'], 'a takeover revalidates each visible indexed root exactly once');
+
+    requests.length = 0;
+    api.setDocumentVisibilityForTest('hidden');
+    assert.equal(api.handleClientPushEventForTest('background_owner_changed', {marker: 'hidden-takeover'}, {epoch: 'owner-b', resource: 'background-owner', resource_revision: 3}), true);
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, [], 'a hidden Finder does not pay for a takeover revalidation');
   });
 
   await testAsync('auto-approve startup snapshots share one in-flight request', async () => {
@@ -325,6 +369,107 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.clientEventTransportStateForTest().resyncTimer, secondReconnectTimer.id, 'the record owns the replacement reconnect timer');
     secondReconnectTimer.callback();
     assert.equal(api.clientEventTransportStateForTest().resyncTimer, null, 'firing consumes the reconnect timer');
+    await flushAsyncWork();
+  });
+
+  test('client-event resource revisions reject stale events without rejecting a newer server epoch', () => {
+    const api = loadYolomux('', ['1']);
+    assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'new'}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 2}), true);
+    assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'old'}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 1}), false, 'a delayed resource update cannot replace the latest state');
+    assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'restart'}, {epoch: 'server-b', resource: 'fs_changed', resource_revision: 1}), true, 'a re-exec server epoch starts an independent sequence');
+    assert.deepStrictEqual(canonical(api.clientEventTransportStateForTest().resourceRevisions), {fs_changed: 1});
+  });
+
+  test('client-event ready is a reconnect fence and does not discard an unread resource revision', () => {
+    const api = loadYolomux('', ['1']);
+    assert.equal(api.applyClientEventReadyEnvelopeForTest({epoch: 'server-a', resource_revisions: {fs_changed: 9}}), true);
+    assert.deepStrictEqual(canonical(api.clientEventTransportStateForTest().resourceRevisions), {}, 'ready does not pretend a resource fetch happened');
+    assert.equal(api.handleClientPushEventForTest('fs_changed', {marker: 'queued'}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 9}), true, 'a frame at the ready fence remains deliverable');
+  });
+
+  test('client-event ready repairs only same-epoch resource gaps', () => {
+    const api = loadYolomux('', ['1']);
+    api.handleClientPushEventForTest('fs_changed', {}, {epoch: 'server-a', resource: 'fs_changed', resource_revision: 4});
+    assert.deepStrictEqual(canonical(api.clientEventReadyGapResourcesForTest({resource_revisions: {fs_changed: 4, 'event_log_changed:1': 3}})), ['event_log_changed:1']);
+  });
+
+  test('client-event queue overflow maps every dropped resource to a scoped repair owner', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
+    assert.ok(/function clientEventRepairChannels\(resources = \[\]\)[\s\S]*fs_changed[\s\S]*channels\.add\('files'\)[\s\S]*event_log_changed[\s\S]*channels\.add\('events'\)[\s\S]*return channels/.test(source), 'overflow maps files/event logs to their own repair channels');
+    assert.ok(/function handleClientPushEvent\(type, payload = \{\}, envelope = \{\}\) \{\s*repairClientEventResources\(envelope\.repair_resources\)/.test(source), 'the delivered overflow metadata is consumed before stale-frame filtering');
+  });
+
+  await testAsync('open event logs demand and refresh only through their SSE invalidation', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({events: []}));
+    });
+    const slots = api.layoutSlotsForTest();
+    const sessionSlot = Object.keys(slots).find(key => slots[key]?.tabs?.includes('1'));
+    slots[sessionSlot].active = '1';
+    api.setLayoutSlotsForTest(slots);
+    api.setEventLogTabActiveForTest('1');
+    api.setEventLogScrollTopForTest('1', 57);
+    const demand = api.clientEventDemandDescriptorForTest();
+    assert.ok(demand.channels.includes('events'), `an active event-log pane alone creates the event-log SSE demand: ${JSON.stringify(demand)}`);
+    api.refreshEventLogsFromPushForTest({session: '1'});
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, ['/api/events?session=1&limit=120'], 'one session invalidation fetches only its open event log');
+    assert.equal(api.eventLogScrollTopForTest('1'), 57, 'a log invalidation preserves the reader position in the bounded event page');
+    const runtimeSource = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    assert.ok(!runtimeSource.includes("resetRuntimeInterval('events', refreshOpenEventLogs"), 'the normal event-log browser interval is retired');
+    assert.ok(/resetRuntimeInterval\('events-fallback',[\s\S]*clientEventTransportState\.connected === true[\s\S]*refreshOpenEventLogs/.test(runtimeSource), 'event logs retain a disconnected-only repair path');
+  });
+
+  await testAsync('event-log SSE reconnect repairs the active bounded reader once', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => {
+      requests.push(String(url));
+      return Promise.resolve(jsonResponse({events: []}));
+    });
+    const slots = api.layoutSlotsForTest();
+    const sessionSlot = Object.keys(slots).find(key => slots[key]?.tabs?.includes('1'));
+    slots[sessionSlot].active = '1';
+    api.setLayoutSlotsForTest(slots);
+    api.setEventLogTabActiveForTest('1');
+    assert.equal(api.handleClientPushEventForTest('event_log_changed', {session: '1'}, {epoch: 'event-log-server', resource: 'event_log_changed:1', resource_revision: 3}), true);
+    await flushAsyncWork();
+    requests.length = 0;
+    api.installClientEventStreamForTest();
+    const source = api.clientEventTransportStateForTest().source;
+    source.listeners.get('ready')[0]({data: JSON.stringify({epoch: 'event-log-server', resource_revisions: {'event_log_changed:1': 4}}), type: 'ready', lastEventId: ''});
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests, ['/api/events?session=1&limit=120'], 'a same-epoch event-log revision gap repairs only the demanded log without reviving a polling loop');
+    source.listeners.get('ready')[0]({data: JSON.stringify({epoch: 'event-log-server', resource_revisions: {'event_log_changed:1': 4}}), type: 'ready', lastEventId: ''});
+    await flushAsyncWork();
+    assert.equal(requests.length, 1, 'a same-epoch ready frame with no revision gap does not reread the log');
+  });
+
+  await testAsync('event-log SSE bursts coalesce to one in-flight repair plus one current follow-up', async () => {
+    const api = loadYolomux('', ['1']);
+    const pending = [];
+    api.setFetchForTest(url => {
+      assert.equal(String(url), '/api/events?session=1&limit=120');
+      const request = deferredFetch();
+      pending.push(request);
+      return request.promise;
+    });
+    const slots = api.layoutSlotsForTest();
+    const sessionSlot = Object.keys(slots).find(key => slots[key]?.tabs?.includes('1'));
+    slots[sessionSlot].active = '1';
+    api.setLayoutSlotsForTest(slots);
+    api.setEventLogTabActiveForTest('1');
+    api.refreshEventLogsFromPushForTest({session: '1'});
+    api.refreshEventLogsFromPushForTest({session: '1'});
+    api.refreshEventLogsFromPushForTest({session: '1'});
+    assert.equal(pending.length, 1, 'a burst joins the one current event-log repair');
+    pending[0].resolve(jsonResponse({events: []}));
+    await flushAsyncWork();
+    assert.equal(pending.length, 2, 'the burst produces one bounded follow-up for data written during the first fetch');
+    pending[1].resolve(jsonResponse({events: []}));
     await flushAsyncWork();
   });
 
@@ -872,6 +1017,31 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.tabberActivityPayloadForTest().marker, 'push', 'a failed refresh preserves the last good snapshot');
   });
 
+  await testAsync('Tabber SSE completion refreshes only a visible Tabber', async () => {
+    const visible = loadYolomux('', ['1']);
+    visible.setLayoutSlotsForTest({left: visible.paneStateWithTabs([visible.tabberItemId], visible.tabberItemId)});
+    visible.setFileExplorerModeForTest('tabber');
+    const visibleCalls = [];
+    visible.setFetchForTest(url => {
+      visibleCalls.push(String(url));
+      return Promise.resolve(jsonResponse({activity: {}, agents: []}));
+    });
+    visible.handleClientPushEventNowForTest('background_refresh_done', {role: 'tabber-activity'});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(visibleCalls.filter(url => url.startsWith('/api/activity?')).length, 1, 'a completed shared cache generation refreshes the visible Tabber once');
+
+    const hidden = loadYolomux('', ['1']);
+    hidden.setLayoutSlotsForTest({left: hidden.paneStateWithTabs(['1'], '1')});
+    const hiddenCalls = [];
+    hidden.setFetchForTest(url => {
+      hiddenCalls.push(String(url));
+      return Promise.resolve(jsonResponse({activity: {}, agents: []}));
+    });
+    hidden.handleClientPushEventNowForTest('background_refresh_done', {role: 'tabber-activity'});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hiddenCalls.length, 0, 'a hidden Tabber does not fetch for another client\'s completion');
+  });
+
   await testAsync('Quick Open record aborts path listings and rejects close-reopen stale completions', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
@@ -1217,7 +1387,7 @@ async function runLayoutAsyncSuite() {
       assert.equal(watchCalls[0].method, 'POST', 'watch-root sync still sends the server registration');
     }
 
-    await testAsync('watch-root synchronization record owns debounce, renewal, and fetch state', async () => {
+    await testAsync('watch-root synchronization is SSE-identity scoped and reconnect-forced, not browser-renewed', async () => {
       const timers = [];
       const cleared = [];
       let resolveFetch = null;
@@ -1237,9 +1407,9 @@ async function runLayoutAsyncSuite() {
         return new Promise(resolve => { resolveFetch = resolve; });
       });
 
-      api.syncServerWatchRootsForTest({renew: true});
+      api.syncServerWatchRootsForTest();
       api.syncServerWatchRootsForTest({immediate: true});
-      assert.deepStrictEqual(canonical(api.serverWatchRootsStateForTest().pendingOptions), {immediate: true, renew: true}, 'adjacent options merge into one record');
+      assert.deepStrictEqual(canonical(api.serverWatchRootsStateForTest().pendingOptions), {immediate: true, force: false}, 'adjacent watch state changes coalesce into one record');
       assert.deepStrictEqual(cleared, [1], 'replacement debounce clears the prior record timer');
       timers[1].callback();
       assert.equal(api.serverWatchRootsStateForTest().timer, null, 'firing consumes the record timer');
@@ -1251,18 +1421,18 @@ async function runLayoutAsyncSuite() {
       await flushAsyncWork();
       await flushAsyncWork();
       assert.equal(api.serverWatchRootsStateForTest().inFlight, false, 'completion clears in-flight state');
-      assert.ok(api.serverWatchRootsStateForTest().syncedAt > 0, 'success records the renewal timestamp');
+      const firstBody = JSON.parse(calls[0].options.body);
+      assert.ok(firstBody.client_id, 'the private watch registration carries the existing SSE client identity in its POST body');
 
-      api.syncServerWatchRootsNowForTest({renew: true});
-      assert.equal(calls.length, 1, 'a fresh identical registration does not renew early');
-      api.setServerWatchRootsSyncedAtForTest(Date.now() - 240001);
+      api.syncServerWatchRootsNowForTest();
+      assert.equal(calls.length, 1, 'a stable descriptor performs no browser-side renewal request');
       api.setFetchForTest((url, options = {}) => {
         calls.push({url: String(url), options});
         return Promise.resolve(jsonResponse({ok: true}));
       });
-      api.syncServerWatchRootsNowForTest({renew: true});
+      api.syncServerWatchRootsNowForTest({force: true});
       await flushAsyncWork();
-      assert.equal(calls.length, 2, 'an expired identical registration renews through the same record');
+      assert.equal(calls.length, 2, 'an SSE ready/reconnect can explicitly restore the same descriptor');
 
       api.setFileExplorerRootForTest('/repo-failed');
       api.setFetchForTest(() => Promise.reject(new Error('offline')));
@@ -1279,6 +1449,7 @@ async function runLayoutAsyncSuite() {
         assert.equal(src.includes(name), false, `${name} remains retired`);
       }
       assert.ok(src.includes('const serverWatchRootsState = {'), 'one watch-root synchronization owner remains');
+      assert.equal(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8').includes("'server-watch-renew'"), false, 'the browser renewal interval is retired in favor of SSE lifecycle cleanup');
     });
 
     await testAsync('hidden Finder/Differ refresh work is skipped', async () => {
@@ -3048,7 +3219,7 @@ async function runLayoutAsyncSuite() {
     {
       const api = loadYolomux('', ['1']);
       api.setTranscriptInfoForTest('1', {selected_pane: {current_path: '/home/test/yolomux.dev3'}});
-      const lines = [terminalLine('• Documented it in docs/specs/SHARE_TEST_INVENTORY.md:123')];
+      const lines = [terminalLine('• Documented it in tests/SHARE_TEST_INVENTORY.md:123')];
       const term = {cols: 80, rows: 10, buffer: {active: {viewportY: 0, getLine: index => lines[index] || null}}};
       const fileRef = api.terminalWrappedLineReferences(term, 1).find(ref => ref.type === 'file');
       const calls = [];
@@ -3068,14 +3239,14 @@ async function runLayoutAsyncSuite() {
       const target = await targetPromise;
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md', type: 'info'}],
+        requests: [{id: 1, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', type: 'info'}],
         url: '/api/fs/batch',
       }], 'terminal file refs confirm existence through the shared fs info batch path');
       assert.deepStrictEqual(canonical(target), {
-        info: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md'},
+        info: {kind: 'file', name: 'SHARE_TEST_INVENTORY.md', path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md'},
         line: 123,
-        path: '/home/test/yolomux.dev3/docs/specs/SHARE_TEST_INVENTORY.md',
-        text: 'docs/specs/SHARE_TEST_INVENTORY.md:123',
+        path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md',
+        text: 'tests/SHARE_TEST_INVENTORY.md:123',
       }, 'confirmed terminal file refs carry the absolute path and line for the Open file menu action');
     }
 
@@ -3679,15 +3850,17 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.terminalMobileAccessoryRepeatsForTest('tab'), false, 'Tab remains a one-shot key');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher opens the palette without sending terminal bytes');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'palette visibility belongs to the same per-session accessory record');
-      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'mobile keyboard launcher toggles the existing palette closed');
-      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'open'), true, 'a repeated launcher-open action leaves the existing palette open');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, true, 'only the dedicated close action closes the palette');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'interrupt'), true, 'mobile Ctrl-C sends through the shared terminal transport');
       assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'backspace'), true, 'visible mobile Backspace sends through the shared terminal transport');
       assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}], 'mobile Ctrl-C and Backspace preserve their terminal control bytes');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), true, 'mobile Ctrl latch turns on for the next OS-keyboard character');
       assert.equal(api.handleTerminalDataForTest('1', 'c'), true, 'a character following the Ctrl latch uses the normal xterm input path');
       assert.deepStrictEqual(canonical(frames), [{type: 'input', data: '\x03'}, {type: 'input', data: '\x7f'}, {type: 'input', data: '\x03'}], 'Ctrl plus the phone keyboard C becomes the same interrupt byte');
-      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: false, palettePlacement: null, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key without opening the palette');
+      assert.deepStrictEqual(canonical(api.terminalMobileAccessoryStateForTest('1')), {ctrl: false, alt: false, shift: false, cmd: false, ctrlLocked: false, altLocked: false, shiftLocked: false, cmdLocked: false, more: false, open: true, palettePlacement: null, x: null, y: null, palettePress: null, launcherPress: null, suppressLauncherClick: false}, 'one-shot modifier state clears after the next key while the palette stays open');
+      assert.equal(api.sendTerminalMobileAccessoryInputForTest('1', 'close'), true, 'the dedicated X action closes the palette');
+      assert.equal(api.terminalMobileAccessoryStateForTest('1').open, false, 'closing the palette leaves the terminal untouched');
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'alt'), true, 'mobile Alt latch turns on independently');
       assert.equal(api.handleTerminalDataForTest('1', 'x'), true, 'Alt-modified phone input follows the existing terminal data path');
       assert.equal(frames.at(-1).data, '\x1bx', 'Alt prefixes the next key with Escape');
@@ -3710,7 +3883,15 @@ async function runLayoutAsyncSuite() {
       assert.equal(api.toggleTerminalMobileAccessoryStateForTest('1', 'ctrl'), false, 'tapping a locked modifier turns it off');
       assert.equal(api.terminalMobileAccessoryStateForTest('1').ctrlLocked, false, 'turning off a locked modifier clears the lock bit');
       const keyboardHtml = api.terminalMobileAccessoryHtmlForTest('1');
-      assert.ok(/data-terminal-mobile-key="escape"[\s\S]*mobile-terminal-key-side[\s\S]*data-terminal-mobile-key="ctrl"[\s\S]*data-terminal-mobile-key="shift"[\s\S]*mobile-terminal-keyrow-bottom[\s\S]*data-terminal-mobile-key="interrupt"[\s\S]*data-terminal-mobile-key="alt"[\s\S]*data-terminal-mobile-key="cmd"/.test(keyboardHtml) && !/mobile-terminal-keyrow--more[\s\S]*data-terminal-mobile-key="interrupt"/.test(keyboardHtml), 'the touch palette puts Esc alone in the top-left corner, Ctrl/Shift in the left side column, and direct Ctrl-C/Alt/Cmd in its primary bottom row');
+      const keyboardActions = ['escape', 'ctrl', 'interrupt', 'tab', 'tmux-prefix', 'backspace', 'copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down', 'shift', 'alt', 'cmd', 'command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r'];
+      assert.equal(keyboardActions.every(action => keyboardHtml.includes(`data-terminal-mobile-key="${action}"`)), true, 'the touch palette exposes every primary and extra key in one surface');
+      const handleIndex = keyboardHtml.indexOf('mobile-terminal-key-grabber');
+      const closeIndex = keyboardHtml.indexOf('data-terminal-mobile-close="1"');
+      const contentIndex = keyboardHtml.indexOf('mobile-terminal-key-content');
+      assert.ok(/mobile-terminal-key-launcher"[\s\S]*aria-expanded="false"[\s\S]*>⌨<\/button>/.test(keyboardHtml) && handleIndex < closeIndex && closeIndex < contentIndex, `the closed launcher stays a keyboard button while the open keybar owns a first-child handle and top-right X (${handleIndex}/${closeIndex}/${contentIndex})`);
+      assert.ok(keyboardHtml.includes('data-terminal-mobile-page="primary"') && keyboardHtml.includes('data-terminal-mobile-page="more" hidden'), 'mobile keyboard renders one primary page and one initially hidden More page');
+      assert.equal((keyboardHtml.match(/data-terminal-mobile-key="interrupt"/g) || []).length, 2, 'both pages reuse the shared Ctrl-C definition');
+      assert.equal((keyboardHtml.match(/data-terminal-mobile-key="more"/g) || []).length, 2, 'both pages retain the More page toggle');
       assert.ok(keyboardHtml.includes('⌘P') && keyboardHtml.includes('⌘V'), 'the touch palette exposes Command-P quick-open and Command-V paste without a physical keyboard');
     }
 
@@ -3943,6 +4124,70 @@ async function runLayoutAsyncSuite() {
       assert.ok(src.includes('updateDryRun'), 'dryrun url flag wired');
       assert.ok(src.includes('data-update-badge'), 'topbar update badge selector wired');
       assert.ok(src.includes("'update_available'"), 'subscribes to the update_available client event');
+    });
+
+    test('YO!stats exact ranges offer only the server-supported resolution cells', () => {
+      const api = loadYolomux('', ['1']);
+      const expected = new Map([
+        [300, [1, 10]],
+        [900, [10, 60]],
+        [1800, [10, 60]],
+        [3600, [10, 60, 300]],
+        [7200, [60, 300]],
+        [14400, [60, 300]],
+        [28800, [60, 300]],
+        [57600, [300]],
+        [86400, [300]],
+      ]);
+      for (const [range, resolutions] of expected) {
+        assert.deepStrictEqual(
+          [...api.debugGraphExactResolutionChoicesForTest(range)],
+          resolutions,
+          `${range}s exposes its exact server cells`,
+        );
+      }
+    });
+
+    test('YO!stats source gaps do not overpaint exact family data', () => {
+      const api = loadYolomux('', ['1']);
+      const seriesValue = value => ({value, source_count: 1, first_timestamp: 0, last_timestamp: 0});
+      const snapshot = {
+        window_start: 0,
+        window_end: 40,
+        resolution_seconds: 10,
+        buckets: [
+          {start: 0, duration: 10, series: {'cpu_percent:retired': seriesValue(1)}},
+          {start: 10, duration: 10, series: {}},
+          {start: 20, duration: 10, series: {'cpu_percent:current': seriesValue(2)}},
+          {start: 30, duration: 10, series: {}},
+        ],
+        no_data: [
+          {family: 'cpu', start: 0, end: 10},
+          {family: 'cpu', start: 10, end: 20},
+          {family: 'cpu', start: 20, end: 30},
+        ],
+      };
+      assert.deepStrictEqual(
+        canonical(api.jsDebugCurrentCoverageIntervalsForTest(snapshot, 'cpu')),
+        [
+          {startSeconds: 0, endSeconds: 10, resolutionSeconds: 10, sourceResolutionSeconds: 10},
+          {startSeconds: 20, endSeconds: 40, resolutionSeconds: 10, sourceResolutionSeconds: 10},
+        ],
+        'only a source gap with no exact family value becomes a family-wide red band',
+      );
+    });
+
+    test('YO!stats exact server buckets are never re-aggregated by legacy tiers', () => {
+      const api = loadYolomux('', ['1']);
+      const now = Date.now();
+      api.clearJsDebugGraphDataForTest();
+      api.debugGraphApplyServerRecordForTest({start: (now - 16 * 60 * 60 * 1000) / 1000, duration: 300});
+      api.compactJsDebugGraphBucketsForTest(now);
+      assert.deepStrictEqual(
+        [...api.jsDebugGraphBucketDurationsForTest()],
+        [300],
+        'a 300s exact server cell stays 300s even in the old 600s age tier',
+      );
     });
 }
 

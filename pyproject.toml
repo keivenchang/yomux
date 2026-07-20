@@ -35,10 +35,10 @@ dev = [
 yolomux = "yolomux_lib.cli:main"
 
 [tool.setuptools]
-py-modules = ["auto_approve_tmux", "tmux_wall", "yolomux"]
+py-modules = ["yolomux"]
 
 [tool.setuptools.packages.find]
-include = ["yolomux_lib*"]
+include = ["tools*", "yolomux_lib*"]
 
 [tool.setuptools.package-data]
 yolomux_lib = ["data/*.json"]

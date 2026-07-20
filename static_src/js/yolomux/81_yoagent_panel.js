@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// YO!agent panel rendering, conversation controls, and activity summary refresh split from 80_panes_preferences.js.
+// YO!agent panel rendering, conversation controls, and activity summary refresh.
 
 function sessionActivitySummary(session) {
   return activitySummaryState.payload?.sessions?.[session] || null;

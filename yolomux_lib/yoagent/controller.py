@@ -21,16 +21,16 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-from ..agent_tui import classify_agent_pane
-from ..agent_tui import clear_composer
-from ..agent_tui import composer_text_is_idle_placeholder
-from ..agent_tui import text_still_in_composer
-from ..agent_tui import visible_composer_source
-from ..agent_tui import visible_composer_text
-from ..activity_summary import deterministic_yoagent_reply
-from ..activity_summary import yoagent_context_lines
-from ..activity_summary import yoagent_question_requests_session_list
-from ..activity_summary import yoagent_question_requests_work_next
+from ..tmux.agent_tui import classify_agent_pane
+from ..tmux.agent_tui import clear_composer
+from ..tmux.agent_tui import composer_text_is_idle_placeholder
+from ..tmux.agent_tui import text_still_in_composer
+from ..tmux.agent_tui import visible_composer_source
+from ..tmux.agent_tui import visible_composer_text
+from ..observability.activity_summary import deterministic_yoagent_reply
+from ..observability.activity_summary import yoagent_context_lines
+from ..observability.activity_summary import yoagent_question_requests_session_list
+from ..observability.activity_summary import yoagent_question_requests_work_next
 from ..common import SessionInfo
 from ..common import start_thread_with_rollback
 from ..common import truncate_text
@@ -41,14 +41,15 @@ from ..locales import user_message_payload
 from ..session_files import classify_change
 from ..session_files import scan_claude_transcript
 from ..session_files import scan_codex_transcript
-from ..prompt_detector import selected_prompt_option
-from ..tmux_utils import tmux_move_to_option
-from ..tmux_utils import tmux_run
-from ..tmux_utils import tmux_send_enter
-from ..tmux_utils import tmux_session_target
-from ..transcripts import codex_event_text
-from ..transcripts import compact_transcript_items
-from ..transcripts import transcript_delta_result_state
+from ..approval.prompt_detector import selected_prompt_option
+from ..tmux.tmux_utils import cmd_error
+from ..tmux.tmux_utils import tmux_move_to_option
+from ..tmux.tmux_utils import tmux_run
+from ..tmux.tmux_utils import tmux_send_enter
+from ..tmux.tmux_utils import tmux_session_target
+from ..observability.transcripts import codex_event_text
+from ..observability.transcripts import compact_transcript_items
+from ..observability.transcripts import transcript_delta_result_state
 from . import conversation as yoagent_conversation
 from .actions import parse_yoagent_action_intent
 from .actions import parse_yoagent_job_intent
@@ -1242,7 +1243,6 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             jobs = [copy.deepcopy(job) for job in self.yoagent_jobs.values() if job.get("status") == "queued"]
         for job in jobs:
             job_id = str(job.get("id") or "")
-            locale = normalize_locale(job.get("locale"))
             if self.float_value(job.get("timeout_ts"), 0.0) and now >= self.float_value(job.get("timeout_ts"), 0.0):
                 timed_out = self.complete_yoagent_job(job_id, "timed_out", {"reason": "timeout"})
                 if timed_out:
@@ -1647,7 +1647,7 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
         if key == "Escape":
             result = tmux_run("send-keys", "-t", pane_target, "Escape", check=False, timeout=5.0)
             if result.returncode != 0:
-                diagnostic = (result.stderr or result.stdout or "tmux send-keys failed").strip()
+                diagnostic = cmd_error(result, "tmux send-keys failed")
                 return {
                     "preview_id": preview_id,
                     "session": session,
@@ -2321,15 +2321,12 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
             return current, status
         target = preview.get("target") if isinstance(preview.get("target"), dict) else {}
         stale_keys = ["pane_target", "agent_kind", "agent_session_id"]
-        if any(str(current.get(key) or "") != str(target.get(key) or "") for key in stale_keys):
-            diagnostic = "action target changed; create a fresh preview"
-            return {
-                "preview_id": preview_id,
-                "session": preview.get("session"),
-                "reason_code": "stale-target",
-                **user_message_payload("yoagent.error.actionTargetChanged", diagnostic),
-            }, HTTPStatus.CONFLICT
-        if normalize_yoagent_transport_id(str(current.get("transport") or "")) != normalize_yoagent_transport_id(str(target.get("transport") or "")):
+        target_changed = any(str(current.get(key) or "") != str(target.get(key) or "") for key in stale_keys)
+        transport_changed = (
+            normalize_yoagent_transport_id(str(current.get("transport") or ""))
+            != normalize_yoagent_transport_id(str(target.get("transport") or ""))
+        )
+        if target_changed or transport_changed:
             diagnostic = "action target changed; create a fresh preview"
             return {
                 "preview_id": preview_id,

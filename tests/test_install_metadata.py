@@ -16,11 +16,10 @@ def test_python_preflight_rejects_unsupported_interpreter():
 
 def test_install_metadata_owns_python_floor_and_watchfiles_dependency():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 
     assert 'requires-python = ">=3.10"' in pyproject
     assert '"watchfiles>=1.2.0"' in pyproject
-    assert "watchfiles>=1.2.0" in requirements
+    assert not any(ROOT.glob("requirements*.txt"))
     assert "setup: check-python" in makefile
     assert "dev: check-python" in makefile

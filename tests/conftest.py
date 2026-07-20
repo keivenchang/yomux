@@ -71,6 +71,24 @@ def no_control_socket(monkeypatch):
 
 
 @pytest.fixture
+def make_tmux_webterm_app(monkeypatch):
+    """Build full apps with their background/control resources torn down after the test."""
+    created = []
+
+    def factory(sessions=("1",), *, dangerously_yolo=False):
+        monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+        app = app_module.TmuxWebtermApp(list(sessions), dangerously_yolo=dangerously_yolo)
+        created.append(app)
+        return app
+
+    yield factory
+
+    for app in created:
+        app.background_owner.stop()
+        app.control_server.stop()
+
+
+@pytest.fixture
 def isolated_yoagent_conversation_state(monkeypatch, tmp_path):
     state_dir = tmp_path / "yoagent-state"
     monkeypatch.setattr(app_module.yoagent_conversation, "YOAGENT_CONVERSATION_PATH", state_dir / "conversation.jsonl")

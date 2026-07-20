@@ -20,6 +20,7 @@ from yolomux_lib import server_auth
 from yolomux_lib import web
 from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
+from tests.browser_helpers.share_test_helpers import verify_share_token as build_verify_share_token
 
 pytestmark = pytest.mark.socket
 
@@ -883,8 +884,7 @@ def test_share_view_websocket_rejects_missing_key_before_registering(monkeypatch
         "viewers": 0,
     }
 
-    def verify_share_token(token):
-        return record | {"token": token} if token == "valid-share-token" else None
+    verify_share_token = build_verify_share_token(record, include_token=True)
 
     def register_share_viewer(token, session="", viewer_id="", ip="", user_agent=""):
         calls.append(("register", token, session, viewer_id, ip, user_agent))
@@ -924,9 +924,7 @@ def test_share_host_websocket_is_admin_only_and_verifies_share(monkeypatch, tmp_
         "viewers": 0,
     }
 
-    def verify_share_token(token):
-        calls.append(token)
-        return record | {"token": token} if token == "valid-share-token" else None
+    verify_share_token = build_verify_share_token(record, calls, include_token=True)
 
     app = SimpleNamespace(
         sessions=["6"],

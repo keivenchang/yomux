@@ -1,2 +1,0 @@
-pyyaml
-watchfiles>=1.2.0

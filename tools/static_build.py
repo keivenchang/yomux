@@ -55,7 +55,7 @@ NOVEL_COMPONENT_COLOR_ALLOWLIST: dict[str, tuple[frozenset[str], str]] = {
     ),
     "static_src/css/yolomux/30_preferences_changes.css": (
         frozenset({
-            "#081205", "#a6e35f", "rgb(174 184 199 / 0.62)",
+            "#081205", "#a6e35f",
             "rgb(255 255 255 / 0.18)", "rgb(48 57 72 / 0.45)",
             "rgb(82 95 116 / 0.42)",
         }),
@@ -130,7 +130,7 @@ UNUSED_CSS_TOKEN_ALLOWLIST: dict[str, str] = {
         "--editor-text-padding-inline", "--editor-ui-font-size", "--editor-ui-font-size-sm",
         "--file-explorer-open-inline-size", "--inactive-gray", "--inactive-gray-hover",
         "--inactive-tab-bg", "--inactive-tab-border", "--info-tree-border",
-        "--info-tree-group-bg", "--js-debug-agent-token-pattern-ink-rgb", "--left",
+        "--info-tree-group-bg", "--left",
         "--pane-detail-bg", "--pane-tab-active-accent", "--pane-tab-panel-detail-bg",
         "--pane-tab-panel-head-bg", "--pane-tab-panel-ring-shadow", "--pane-tab-zoom-bg",
         "--pane-tab-zoom-border", "--pane-tab-zoom-hover-bg", "--pane-tab-zoom-hover-border",
@@ -139,6 +139,9 @@ UNUSED_CSS_TOKEN_ALLOWLIST: dict[str, str] = {
         "--yolo-reminder-duration", "--z-finder-quick-access", "--z-tab-popover",
     )
 }
+UNUSED_CSS_TOKEN_ALLOWLIST["--js-debug-agent-token-pattern-ink-rgb"] = (
+    "established YO!stats theme token retained for renderer compatibility"
+)
 SEMANTIC_CONTRAST_PAIRS: tuple[tuple[str, str], ...] = (
     ("--text", "--bg"),
     ("--pane-tab-text", "--pane-tab-control-bg"),
@@ -151,11 +154,16 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/20_layout_state.js": (
         ("editor state", "function applyEditorStateFields", "applyEditorStateFields("),
     ),
-    "static_src/js/yolomux/97_share_replay.js": (
+    "static_src/js/yolomux/94_share_replay.js": (
         ("shared editor replay", "applyEditorStateFields("),
     ),
-    "static_src/js/yolomux/83_debug_panel.js": (
-        ("graph series descriptor", "function debugGraphSeriesData", ".value(", ".hasData("),
+    "static_src/js/yolomux/84_stats_current.js": (
+        (
+            "current plot-ready series owner",
+            "function currentStatsGroups",
+            "function currentStatsSeriesGroup",
+            "function currentStatsChartHtml",
+        ),
     ),
     # Finder, Tabber, and Differ deliberately have distinct product-specific callbacks, but their
     # selection, expansion, click, and keyboard mechanics must all flow through this one parent.
@@ -175,7 +183,7 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
     "static_src/js/yolomux/45_file_explorer_actions.js": (
         ("Finder tree controller registration", "const finderTreeInteractionController = createSharedTreeInteractionController({"),
     ),
-    "static_src/js/yolomux/90_changes_editor.js": (
+    "static_src/js/yolomux/86_changes_editor.js": (
         ("Differ tree controller registration", "const differTreeInteractionController = createSharedTreeInteractionController({"),
     ),
     # Socket and queue state are one token-keyed record.  A second map lets reconnect, close, and
@@ -186,7 +194,7 @@ SHARED_UI_OWNERSHIP_REQUIREMENTS = {
             "const shareSenderRecords = new Map()",
         ),
     ),
-    "static_src/js/yolomux/96_share_state.js": (
+    "static_src/js/yolomux/93_share_state.js": (
         (
             "share host connection-record operations",
             "function shareHostConnectionRecord",
@@ -212,8 +220,8 @@ NORMALIZED_PRODUCTION_CLONE_ALLOWLIST: dict[str, str] = {
     # what remains is the lazy-init skeleton wrapping two deliberately separate schemas (chat's
     # multi-step FTS ladder vs the throttle's single bucket table), each raising its own
     # migration-error type. Collapsing further would couple two unrelated schemas.
-    "yolomux_lib/chat_store.py, yolomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
-    "yolomux_lib/chat_store.py, yolomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
+    "yolomux_lib/chat/chat_store.py, yolomux_lib/login_rate_limit.py:2e5bfc1edef9": "shared lazy-init guard; schemas deliberately separate",
+    "yolomux_lib/chat/chat_store.py, yolomux_lib/login_rate_limit.py:e53fcf7e7da8": "shared lazy-init guard; schemas deliberately separate",
 }
 CSS_COLOR_LITERAL_PATTERN = r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]+\)"
 CSS_COLOR_LITERAL_RE = re.compile(CSS_COLOR_LITERAL_PATTERN)
@@ -619,12 +627,17 @@ I18N_ALLOWED_IDENTICAL_KEYS = frozenset({
     "debug.graph.series.systemMemory",
     "debug.system.localServices.exitedAgo",
     "debug.system.localServices.field.activeTask",
+    "debug.system.localServices.field.cache",
     "debug.system.localServices.field.clients",
+    "debug.system.localServices.field.generation",
     "debug.system.localServices.field.lastFailure",
     "debug.system.localServices.field.lastRan",
+    "debug.system.localServices.field.lastSuccess",
     "debug.system.localServices.field.memory",
     "debug.system.localServices.field.pid",
+    "debug.system.localServices.field.products",
     "debug.system.localServices.field.queues",
+    "debug.system.localServices.field.runtime",
     "debug.system.localServices.field.started",
     "debug.system.localServices.field.status",
     "debug.system.localServices.field.uptime",
@@ -670,8 +683,10 @@ I18N_TRANSLATABLE_CODE_KEYS = frozenset({"yoagent.prompt.format"})
 I18N_REQUIRED_YO_MARKERS = {"zh-Hans": "优", "zh-Hant": "優"}
 I18N_ALLOWED_DUPLICATE_KEY_GROUPS: dict[frozenset[str], str] = {
     frozenset({"debug.summary", "searchHistory.summary", "transcript.role.summary"}): "view labels and a transcript role need different grammar",
+    frozenset({"debug.system.localServices.field.lastSuccess", "debug.system.sampler.header.lastOk.full"}): "daemon diagnostic field and sampler-family table header are different display contexts",
     frozenset({"dialog.delete.kindFile", "popover.kind.file", "yolo.rule.source.file"}): "file kind, popover metadata, and rule source need different grammar",
     frozenset({"branch.current", "summary.state.active"}): "current branch and active work are different states",
+    frozenset({"debug.cost.cache", "debug.system.localServices.field.cache"}): "token-cost cache row and local-service record cache are different concepts",
     frozenset({"finder.dateMode.none", "info.group.none"}): "no date and no grouping are different choices",
     frozenset({"git.status.copied", "status.copied"}): "git copied status and clipboard completion are different events",
     frozenset({"legend.icon.share.label", "share.create"}): "share legend noun and create-share action are different parts of speech",
@@ -730,32 +745,33 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/10_core_utils.js",
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
+        "static_src/js/yolomux/35_agent_window_activity.js",
         "static_src/js/yolomux/40_file_explorer_files.js",
-        "static_src/js/yolomux/45_agent_window_activity.js",
         "static_src/js/yolomux/45_file_explorer_actions.js",
         "static_src/js/yolomux/46_file_drop_actions.js",
         "static_src/js/yolomux/50_editor_settings_runtime.js",
         "static_src/js/yolomux/60_popovers_tabs.js",
         "static_src/js/yolomux/70_layout_actions.js",
         "static_src/js/yolomux/75_dockview_layout.js",
-        "static_src/js/yolomux/78_panel_dom_actions.js",
+        "static_src/js/yolomux/76_panel_dom_actions.js",
         "static_src/js/yolomux/78_panel_shell.js",
         "static_src/js/yolomux/79_conversation_shared.js",
         "static_src/js/yolomux/80_info_panel.js",
         "static_src/js/yolomux/81_yoagent_panel.js",
         "static_src/js/yolomux/82_chat_panel.js",
-        "static_src/js/yolomux/82_preferences_panel.js",
-        "static_src/js/yolomux/83_debug_panel.js",
-        "static_src/js/yolomux/90_changes_editor.js",
-        "static_src/js/yolomux/92_editor_nav.js",
-        "static_src/js/yolomux/93_markdown_preview.js",
-        "static_src/js/yolomux/94_preview_renderers.js",
-        "static_src/js/yolomux/96_pane_popout.js",
-        "static_src/js/yolomux/94_preview_popout.js",
-        "static_src/js/yolomux/95_codemirror_editor.js",
-        "static_src/js/yolomux/96_share_state.js",
-        "static_src/js/yolomux/97_share_replay.js",
-        "static_src/js/yolomux/98_share_admin.js",
+        "static_src/js/yolomux/83_preferences_panel.js",
+        "static_src/js/yolomux/84_stats_current.js",
+        "static_src/js/yolomux/85_debug_panel.js",
+        "static_src/js/yolomux/86_changes_editor.js",
+        "static_src/js/yolomux/87_editor_nav.js",
+        "static_src/js/yolomux/88_markdown_preview.js",
+        "static_src/js/yolomux/89_preview_renderers.js",
+        "static_src/js/yolomux/90_pane_popout.js",
+        "static_src/js/yolomux/91_preview_popout.js",
+        "static_src/js/yolomux/92_codemirror_editor.js",
+        "static_src/js/yolomux/93_share_state.js",
+        "static_src/js/yolomux/94_share_replay.js",
+        "static_src/js/yolomux/95_share_admin.js",
         "static_src/js/yolomux/99_terminal_boot.js",
     ],
     "yolomux.css": [
@@ -772,11 +788,7 @@ ASSETS: dict[str, list[str]] = {
 # Source partials intentionally kept on disk but no longer concatenated into a served asset. A
 # reviewed marker distinguishes retirement from the much more dangerous "forgot to register it"
 # state that lint_asset_source_completeness() rejects.
-RETIRED_ASSET_PARTS: dict[str, str] = {
-    "static_src/js/yolomux/80_panes_preferences.js": (
-        "superseded by 80_info_panel.js and 82_preferences_panel.js; retained during migration"
-    ),
-}
+RETIRED_ASSET_PARTS: dict[str, str] = {}
 
 
 def repo_path(path: str | Path) -> Path:

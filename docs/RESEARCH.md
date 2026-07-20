@@ -170,6 +170,8 @@ RMUX Web Share keeps the PTY local, supports separate operator and spectator rol
 
 ## Transparent model pricing and estimated cost — 2026-07-11
 
+Implemented 2026-07-19. This section records the durable pricing, attribution, and uncertainty constraints behind the current displayed-range Cost summary; delivery sequencing is archived in `docs/DONE.md` rather than remaining as a proposal.
+
 ### What current telemetry can and cannot prove
 
 YOLOmux currently retains model-attributed generated-token rates for the Model tokens/min chart. That is useful for comparing model activity, but it is not a bill: providers commonly price uncached input, cache reads, cache writes, and output differently; some apply long-context, batch, priority, regional, or tool-use modifiers. A chart must never multiply a combined token total by one headline rate and present the result as an actual charge.

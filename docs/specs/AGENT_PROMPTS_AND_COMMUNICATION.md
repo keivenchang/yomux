@@ -10,13 +10,13 @@ This file records the working knowledge YOLOmux uses to detect Claude and Codex 
 
 ## Implementation Owners
 
-- Visible Claude/Codex tmux pane control: `yolomux_lib/agent_tui.py`. This is the public API for capture, cursor facts, composer state, prompt/screen classification, clearing, paste-submit, and send verification.
-- Pure visible screen state classification: `yolomux_lib/prompt_detector.py::agent_screen_state`.
-- Pure approval prompt classification: `yolomux_lib/prompt_detector.py::approval_prompt_state`.
-- Claude AskUserQuestion text: `yolomux_lib/prompt_detector.py::ask_user_question_prompt_text`.
-- Generic visible user-choice question text: `yolomux_lib/prompt_detector.py::visible_choice_prompt_text`.
-- Transcript activity state: `yolomux_lib/transcripts.py::transcript_activity_state_from_text`.
-- Hybrid approval source order: `yolomux_lib/approvals.py::hybrid_approval_prompt_state`.
+- Visible Claude/Codex tmux pane control: `yolomux_lib/tmux/agent_tui.py`. This is the public API for capture, cursor facts, composer state, prompt/screen classification, clearing, paste-submit, and send verification.
+- Pure visible screen state classification: `yolomux_lib/approval/prompt_detector.py::agent_screen_state`.
+- Pure approval prompt classification: `yolomux_lib/approval/prompt_detector.py::approval_prompt_state`.
+- Claude AskUserQuestion text: `yolomux_lib/approval/prompt_detector.py::ask_user_question_prompt_text`.
+- Generic visible user-choice question text: `yolomux_lib/approval/prompt_detector.py::visible_choice_prompt_text`.
+- Transcript activity state: `yolomux_lib/observability/transcripts.py::transcript_activity_state_from_text`.
+- Hybrid approval source order: `yolomux_lib/approval/approvals.py::hybrid_approval_prompt_state`.
 - App status fan-out from pane text, approval state, and transcript state: `yolomux_lib/app.py::TmuxWebtermApp.prompt_and_screen_status`, routed through `agent_tui.classify_agent_pane`.
 - Claude/Codex structured stream normalization for YO!agent and text clients: `yolomux_lib/agent_comms/stream_events.py`. Current Claude CLI stream-json can emit Anthropic-style partials either directly or wrapped as `{"type":"stream_event","event":{...}}`; normalizers must unwrap those events, preserve outer `session_id` metadata, separate assistant-visible text from thinking/tool-call auxiliary rows, and dedupe snapshot tool-use echoes without dropping the later tool output.
 - Regression fixtures: `tests/test_auto_approve_detector.py` and `tests/test_transcripts.py`.
@@ -242,7 +242,7 @@ Codex can show a working row above an input-looking composer and model line. The
 gpt-5.5 xhigh   <dev-worktree>
 ```
 
-The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
+The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/agent_clients/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
 
 Codex working examples embedded in explanatory text are not live state when a bottom composer follows them as part of an old response.
 
@@ -327,27 +327,9 @@ Use these examples to test the difference between prompts the agent presents to 
 | Old `❯ Where are the DOIT files?` above a current bare `❯ ` prompt | `idle` | The bottom prompt proves the old question is scrollback. |
 | Text explaining `• Working (10s • esc to interrupt)` followed by the bottom Codex composer | `idle` | The working row is an example in conversation, not live chrome. |
 
-## Agent-To-Agent Communication Methods
+## Product Coordination
 
-| Method | Pros | Cons | Recommendation |
-| --- | --- | --- | --- |
-| Structured Claude permission hooks, such as a `PreToolUse` hook | Gives machine-readable approval events before the TUI prompt path, avoids guessing from scrollback, can preserve command metadata. | Requires user config and hook install; failures must fall back to visible prompt detection. | Recommended primary path for Claude permission decisions. |
-| Codex app-server / JSON-RPC supervisor approval handling | Gives structured command approval requests such as `item/commandExecution/requestApproval`, can answer without scraping terminal text. | More integration work; exact protocol and launch mode can change across Codex versions. | Recommended primary path for Codex command approvals when available. |
-| Transcript tailing | Good read-only source for recent activity, pending tool calls, history, and state recovery; does not disturb the pane. | Can lag, can be stale, and may omit the current TUI selector; needs recency gates and visible confirmation for approvals. | Use as passive state enrichment and fallback activity detection. |
-| YOLOmux HTTP/SSE/WebSocket APIs | Good for browser/server coordination, rosters, pane state, and internal UI events. | Not an external agent protocol unless authenticated, scoped, and versioned; can couple unrelated features if used as a general bus. | Use for YOLOmux internal state, not as the first agent-control channel. |
-| File or JSONL mailbox in the workspace | Simple, durable, inspectable by humans, and works across tools with no TUI dependency. | Not realtime; needs locking, schema, ownership, and cleanup; easy to create ambiguous half-written records. | Use for durable task handoff, DOIT-style queues, and cross-agent notes. Prefer JSONL for machine state and Markdown for human work queues. |
-| Local MCP/tool server | Structured bidirectional actions, typed tools, and clearer capability boundaries. | Setup overhead, versioning, auth, and lifecycle management are real costs. | Recommended for richer cross-agent workflows once the tool boundary is known. |
-| Tmux text injection and visible-screen scraping | Universal, easy to debug, and works when no structured channel exists. | Brittle against TUI wording/layout changes, can hit the wrong pane, can type during a live turn if state is wrong. | Fallback only. Keep fixtures current and gate injection on `idle`, `needs-input`, or `approval`. |
-| Shared tmux sub-windows with labeled panes | Human-readable and useful for manual handoff or emergency recovery. | Weak structured state, naming collisions, no reliable acknowledgement by itself. | Use as a human-facing coordination surface, not as the only state source. |
-| OSC 52 clipboard bridge | Useful for copy/paste flows when terminal selection is unreliable. | Clipboard is global-ish user state, not a command/control channel; can overwrite user clipboard. | Use only for explicit copy bridge features, not agent orchestration. |
-
-## Recommended Channel Order
-
-1. Use structured permission/event APIs for approvals and high-risk actions: Claude hooks for Claude, Codex JSON-RPC/app-server paths for Codex.
-2. Use transcripts and event streams for passive activity detection, pending-tool context, and history.
-3. Use a file/JSONL mailbox or Markdown work queue for durable agent-to-agent task handoff.
-4. Use YOLOmux internal HTTP/SSE/WebSocket paths for YOLOmux UI/server state.
-5. Use tmux scraping/injection as the compatibility fallback and emergency path.
+YO!agent transport choice, cross-agent handoffs, artifact/queue contracts, and the reliability ladder are specified in [`../YOAGENT.md#transport-reliability-ladder`](../YOAGENT.md#transport-reliability-ladder). This detector spec intentionally retains only prompt-state, approval, transcript, and fixture behavior.
 
 ## Test Guidance
 

@@ -14,13 +14,14 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 - Build, test, restart, and CPS commands live in [`DEVELOPMENT.md`](DEVELOPMENT.md). The local gate is `python3 tools/check.py`.
 - AI-agent behavior rules and repo lessons live in [`../AGENTS.md`](../AGENTS.md). Do not re-inline those rules here.
-- Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state and tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/sessions.py`; repo/PR/CI metadata `yolomux_lib/metadata.py`; file ops `yolomux_lib/filesystem.py`; shared helpers and paths `yolomux_lib/common.py`; HTML shell `yolomux_lib/web.py`; frontend partials `static_src/js/yolomux/*.js` and `static_src/css/yolomux/*.css` generate `static/yolomux.js` and `static/yolomux.css`.
+- Code map: entry `yolomux.py` -> `yolomux_lib/cli.py`; HTTP routing `yolomux_lib/server.py`; app state and tmux actions `yolomux_lib/app.py`; session/agent discovery `yolomux_lib/tmux/sessions.py`; repo/PR/CI metadata `yolomux_lib/workspace/metadata.py`; file ops `yolomux_lib/filesystem/`; shared helpers and paths `yolomux_lib/infra/common.py`; HTML shell `yolomux_lib/web.py`; frontend partials `static_src/js/yolomux/*.js` and `static_src/css/yolomux/*.css` generate `static/yolomux.js` and `static/yolomux.css`.
 - State lives in `~/.config/yolomux/state.json`; events live in `~/.local/state/yolomux/events.jsonl`; YO!agent skill files live under `~/.config/yolomux/skills.d/` and context under `~/.config/yolomux/context.d/`.
 - Line numbers drift. Search by symbol, route, CSS class, setting key, or test name before editing.
 - `DOIT*.md` files are active work queues. When a queue is fully implemented and validated, archive the result in [`DONE.md`](DONE.md) and remove the queue file.
 
 ## Active Queue Follow-Ups
 
+- [ ] [L] Capture the client, method, and complete request line for observed `414 Request-URI Too Long` responses whose request lines looked like JSON fragments (`":0,"`, `":1,"`). `jsDebugStatsSampleQuery()` is fixed-length (seven scalar parameters, about 160 characters), so do not attribute this to `/api/stats-sample` or change HTTP parsing without the live framing evidence.
 - [ ] [M] Background-owner live fleet verification. When it is OK to restart or drive Linux `7770`, `7771`, `7772`, and `7773`, verify startup ownership order, `7771` takeover after restart, multi-port Tabber/Finder cache writes, shared-root Quick Open/search indexing, follower worker thread absence, and UI responsiveness during a large index rebuild. The implementation and isolated `8004`-`8007` verification are already complete; this was moved out of `DOIT.single_owner_background_indexing.md` because it is live fleet validation, not unfinished source work.
 - [ ] [M] License history remote finalization. Only after explicit force-push authorization, push the rewritten PolyForm Noncommercial history with `--force-with-lease`, then verify a fresh clone against the key license searches. The current-tree migration, local history rewrite, and local verification are already complete.
 
@@ -71,7 +72,6 @@ Borrow from other tools only when the feature improves the local control loop: k
 - [ ] [M] Add a peek/reply action for a session when it needs only a short response and the user does not need to attach to the full terminal.
 - [ ] [M] Add worktree cleanup guardrails: never delete a worktree with uncommitted changes; show the path and stop.
 - [ ] [M] Add per-session token/cost/context metrics only if they can be read reliably from Claude/Codex metadata without scraping fragile terminal text.
-- [x] [L] Added an opt-in displayed-range Cost summary with source-linked API list-price evidence, exact `Σ displayed` range reuse, text/image input/output/cache, model and source breakdowns, retained-history migration, effective revisions, and opaque/unknown/partial lower-bound labeling; see [`DONE.md`](DONE.md) and [`RESEARCH.md`](RESEARCH.md#transparent-model-pricing-and-estimated-cost--2026-07-11).
 - [ ] [M] Add lightweight CPU/memory/load probes and per-session process trees. Add optional `nv-smi` GPU status when available, but do not make GPU support required.
 
 ## Global Summaries

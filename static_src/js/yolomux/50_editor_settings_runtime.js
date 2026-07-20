@@ -7,7 +7,7 @@ function editorViewModeFor(path, item = null) {
   const mode = modes.get(editorViewModeKey(path, item)) || modes.get(path);
   if (mode === 'diff') return 'diff';
   if (!editorPreviewModeAvailable(path)) return 'edit';
-  const state = openFiles.get(path);
+  const state = fileState.get(path);
   if (state?.kind && state.kind !== 'text') return 'preview';
   if (editorViewModes.has(mode)) return mode;
   return 'edit';
@@ -18,7 +18,7 @@ function setFileEditorViewMode(path, mode, item = null) {
   if (mode !== 'edit' && mode !== 'diff' && !editorPreviewModeAvailable(path)) mode = 'edit';
   const previousMode = editorViewModeFor(path, item);
   if ((mode === 'preview' || mode === 'split') && typeof closeFilePreviewPopout === 'function') closeFilePreviewPopout(path);
-  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, openFiles.get(path)))) {
+  if (mode === 'split' && previousMode !== 'split' && ['markdown', 'mermaid'].includes(previewKindForPath(path, fileState.get(path)))) {
     resetFileEditorPreviewZoomStateForPath(path, 'split:mermaid');
   }
   fileEditorViewModesForPath(path, true).set(editorViewModeKey(path, item), mode);
@@ -210,8 +210,8 @@ function refreshOpenEditorThemePanels() {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    if (!path || openFiles.get(path)?.kind !== 'text') return;
-    const state = openFiles.get(path);
+    if (!path || fileState.get(path)?.kind !== 'text') return;
+    const state = fileState.get(path);
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
     renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
@@ -573,7 +573,7 @@ async function openEditorFindShortcut(host = null) {
 
 async function focusFileEditorSearch(panel = null) {
   const opened = await openEditorFindShortcut(panel);
-  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), openFiles.get(fileEditorPanelPath(panel)), panel);
+  if (panel) updateEditorFindButton(panel.querySelector('.file-editor-find-panel'), fileState.get(fileEditorPanelPath(panel)), panel);
   return opened;
 }
 
@@ -584,7 +584,7 @@ function applyEditorWrapPreference() {
     updateEditorWrapButton(panel.querySelector('.file-editor-wrap-panel'));
     updateEditorGutterButton(panel.querySelector('.file-editor-gutter-panel'));
     const path = panel.dataset.filePath;
-    const state = openFiles.get(path);
+    const state = fileState.get(path);
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (liveText !== null && state.content !== liveText) state.content = liveText;
@@ -613,7 +613,7 @@ async function applyEditorBlamePreference() {
   for (const panel of document.querySelectorAll('.file-editor-panel')) {
     const blameButton = panel.querySelector('.file-editor-blame-panel');
     const path = panel.dataset.filePath;
-    const state = openFiles.get(path);
+    const state = fileState.get(path);
     const item = panel.dataset.layoutItem || fileEditorItemFor(path);
     updateFileEditorBlameButton(blameButton, path, state, item);
     if (!path || state?.kind !== 'text') continue;
@@ -647,17 +647,13 @@ function setDiffExpandUnchanged(enabled) {
   document.querySelectorAll('.file-editor-panel').forEach(panel => {
     const item = panel.dataset.layoutItem || fileEditorItemFor(panel.dataset.filePath || '');
     const path = fileItemPath(item);
-    const state = openFiles.get(path);
+    const state = fileState.get(path);
     updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
     if (path && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
       renderFileEditorPanel(panel, item);
     }
   });
   scheduleShareUiStatePublish();
-}
-
-function toggleDiffExpandUnchanged() {
-  setDiffExpandUnchanged(!diffExpandUnchanged);
 }
 
 function fileEditorDiffExpandUnchangedForItem(item = null) {
@@ -669,7 +665,7 @@ function setFileEditorDiffExpandUnchangedForItem(path, item, enabled) {
   if (!isFileEditorItem(item)) return;
   fileEditorDiffExpandOverrides.set(item, enabled === true);
   const panel = panelNodes.get(item);
-  const state = openFiles.get(path);
+  const state = fileState.get(path);
   if (panel) updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
   if (panel && state?.kind === 'text' && editorViewModeFor(path, item) === 'diff' && openFileDiffAvailable(state)) {
     renderFileEditorPanel(panel, item);
@@ -1081,12 +1077,7 @@ function applySettingsPayload(payload, options = {}) {
   workflowTransitionGlowSeconds = numberSetting('performance.workflow_transition_glow_seconds');
   toastDurationMs = numberSetting('notifications.toast_duration_ms');
   popoverShowDelayMs = numberSetting('performance.popover_show_delay_ms');
-  hoverCloseDelayMs = numberSetting('performance.popover_hide_delay_ms');
-  popoverHideDelayMs = hoverCloseDelayMs;
-  menuHoverOpenDelayMs = numberSetting('performance.menu_hover_open_delay_ms');
-  menuHoverCloseDelayMs = hoverCloseDelayMs;
-  tabPopoverShowDelayMs = numberSetting('performance.tab_popover_show_delay_ms');
-  tabPopoverFollowDelayMs = numberSetting('performance.tab_popover_follow_delay_ms');
+  popoverHideDelayMs = numberSetting('performance.popover_hide_delay_ms');
   fileExplorerIndexRefreshSeconds = numberSetting('file_explorer.index_refresh_seconds');
   fileExplorerNewEntryHighlightMs = numberSetting('file_explorer.new_entry_highlight_ms');
   fileExplorerImagePreviewMaxPx = numberSetting('file_explorer.image_preview_max_px');
@@ -1195,9 +1186,62 @@ async function refreshSettings(options = {}) {
 
 const runtimeIntervals = new Map();
 
+// One catalog names the truth source for every recurring browser callback. An entry is
+// deliberately a reason, not a scheduling policy: callers still own their visibility,
+// demand, and socket-health guards. Keep this in source (rather than a docs-only list) so
+// a future "remove polling" cleanup has to classify a new callback before treating it as
+// redundant discovery work.
+const runtimeTimerClassCatalog = Object.freeze({
+  'poll:no-change': 'A bounded reconciliation that can report no changed state.',
+  sample: 'A request or local observation that creates a new measurement.',
+  lease: 'A bounded liveness or ownership renewal.',
+  'external-reconcile': 'A bounded check against a system without an event source.',
+  repair: 'A bounded recovery action after a detected gap or divergence.',
+  fallback: 'A reduced-cadence recovery path while the primary event source is unavailable.',
+  'local-display': 'A local repaint that does not discover remote state.',
+});
+
+const runtimeIntervalCatalog = Object.freeze({
+  latency: Object.freeze({classes: Object.freeze(['sample']), source: 'A fresh /api/ping round trip is the latency measurement.'}),
+  'events-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'event_log_changed SSE is authoritative while connected; HTTP repairs an open log after transport loss.'}),
+  'auto-approve': Object.freeze({classes: Object.freeze(['fallback']), source: 'auto-approve SSE/status revisions are authoritative while connected; visible pages repair after transport loss.'}),
+  'tabber-activity-fallback': Object.freeze({classes: Object.freeze(['fallback']), source: 'Tabber cache completion normally arrives through the shared SSE stream; this repairs an active Tabber only while that stream is disconnected.'}),
+  'file-index-refresh': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'The index service owns staleness/rebuild state; a visible Finder/search periodically asks for that external state.'}),
+  'file-index-building': Object.freeze({classes: Object.freeze(['fallback']), source: 'Search-index lifecycle invalidations are authoritative while SSE is connected; a building root is repaired only after transport loss.'}),
+  'debug-stats': Object.freeze({classes: Object.freeze(['fallback']), source: 'Exact YO!stats SSE owns a live short range; HTTP supplies initial, legacy, coarse, and disconnected repair data.'}),
+  'debug-system': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'System diagnostics aggregate independently changing local-service state without a producer revision.'}),
+  'debug-logs': Object.freeze({classes: Object.freeze(['poll:no-change']), source: 'Debug log retention has no push revision; the visible Logs tab reconciles its bounded server snapshot.'}),
+  'share-geometry-digest': Object.freeze({classes: Object.freeze(['repair']), source: 'Host/viewer geometry comparison detects replay divergence; it is not state discovery.'}),
+  'chat-relative-times': Object.freeze({classes: Object.freeze(['local-display']), source: 'Existing message timestamps are repainted locally; no request is made.'}),
+  'share-status': Object.freeze({classes: Object.freeze(['local-display', 'fallback']), source: 'The share socket pushes status while healthy; the loop repaints local countdowns and repairs status only after socket loss.'}),
+});
+
+function runtimeIntervalCatalogEntry(name) {
+  return runtimeIntervalCatalog[name] || null;
+}
+
 function runtimeIntervalDelay(baseDelay) {
   const base = Math.max(1, Math.round(Number(baseDelay) || 1));
   return base;
+}
+
+function runtimeIntervalDiagnostics(name = '') {
+  const names = name ? [name] : [...runtimeIntervals.keys()].sort();
+  return names.map(intervalName => {
+    const state = runtimeIntervals.get(intervalName);
+    if (!state) return null;
+    const catalog = runtimeIntervalCatalogEntry(intervalName);
+    return {
+      name: intervalName,
+      classes: catalog?.classes || [],
+      source: catalog?.source || '',
+      active: state.active === true,
+      delay: state.delay,
+      lastStartedAtMs: state.lastStartedAtMs,
+      lastUsefulAtMs: state.lastUsefulAtMs,
+      lastResult: state.lastResult,
+    };
+  }).filter(Boolean);
 }
 
 function resetRuntimeInterval(name, callback, delay) {
@@ -1211,15 +1255,28 @@ function resetRuntimeInterval(name, callback, delay) {
     existing.active = false;
     clearTimeout(existing.timer);
   }
-  const state = {active: true, timer: null, delay: normalizedDelay, callback};
+  const state = {
+    active: true,
+    timer: null,
+    delay: normalizedDelay,
+    callback,
+    lastStartedAtMs: 0,
+    lastUsefulAtMs: 0,
+    lastResult: 'never',
+  };
   const scheduleNext = () => {
     if (!state.active) return;
     state.timer = setTimeout(run, runtimeIntervalDelay(state.delay));
   };
   const run = () => {
     if (!state.active) return;
+    state.lastStartedAtMs = Date.now();
     try {
       Promise.resolve(state.callback())
+        .then(result => {
+          state.lastResult = result === null ? 'no-change' : 'useful';
+          if (result !== null) state.lastUsefulAtMs = Date.now();
+        })
         .catch(error => console.warn('runtime interval failed', name, error))
         .finally(scheduleNext);
     } catch (error) {
@@ -1245,25 +1302,37 @@ function runtimeIntervalActive(name) {
   return runtimeIntervals.get(name)?.active === true;
 }
 
-function renewServerWatchRootsFromRuntime() {
-  if (clientPushCanSupplyData() && typeof syncServerWatchRoots === 'function') {
-    syncServerWatchRoots({renew: true});
-  }
+function latencyVisibleConsumer() {
+  const topbarLatencyVisible = Boolean(latencyMeter) && !document.body?.classList?.contains('topbar-pack-hide-latency');
+  const statsLatencyVisible = typeof jsDebugStatsPanelVisible === 'function' && jsDebugStatsPanelVisible();
+  return document.visibilityState !== 'hidden' && (topbarLatencyVisible || statsLatencyVisible);
 }
 
 function installRuntimeIntervals() {
-  resetRuntimeInterval('latency', updateLatency, latencyRefreshMs);
-  resetRuntimeInterval('events', refreshOpenEventLogs, eventLogRefreshMs);
+  resetRuntimeInterval('latency', () => {
+    if (!latencyVisibleConsumer()) return null;
+    return updateLatency();
+  }, latencyRefreshMs);
+  // Event-log writes publish `event_log_changed` over the shared SSE stream. Retain this
+  // interval solely as an outage repair path so an EventSource failure cannot leave an open Log
+  // pane permanently stale.
+  resetRuntimeInterval('events-fallback', () => {
+    if (clientEventTransportState.connected === true) return null;
+    return refreshOpenEventLogs();
+  }, eventLogRefreshMs);
+  clearRuntimeInterval('events');
   resetRuntimeInterval('auto-approve', () => {
     if (document.visibilityState === 'hidden') return null;
     if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();
   }, autoApproveDisconnectedPollMs);
-  resetRuntimeInterval('server-watch-renew', renewServerWatchRootsFromRuntime, serverWatchRenewMs);
   if (itemInLayout(tabberItemId)) {
-    resetRuntimeInterval('tabber-activity', () => { if (itemInLayout(tabberItemId)) fetchTabberActivity(); }, tabberActivityRefreshMs);
+    resetRuntimeInterval('tabber-activity-fallback', () => {
+      if (clientEventTransportState.connected === true || !tabberActivityVisibleConsumer()) return null;
+      return fetchTabberActivity();
+    }, tabberActivityRefreshMs);
   } else {
-    clearRuntimeInterval('tabber-activity');
+    clearRuntimeInterval('tabber-activity-fallback');
   }
   if (fileExplorerIndexRefreshSeconds > 0) {
     resetRuntimeInterval('file-index-refresh', refreshAllIndexedDirsStatus, fileExplorerIndexRefreshSeconds * 1000);

@@ -4,7 +4,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
-const {makeCatalogT} = require('./layout_test_helper');
+const {makeCatalogT} = require('./browser_helpers/layout_test_helper');
 
 const source = fs.readFileSync('static_src/js/yolomux/46_file_drop_actions.js', 'utf8');
 const templates = {

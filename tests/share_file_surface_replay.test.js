@@ -14,8 +14,8 @@ function test(label, fn) {
   }
 }
 
-const stateSource = fs.readFileSync('static_src/js/yolomux/96_share_state.js', 'utf8');
-const replaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
+const stateSource = fs.readFileSync('static_src/js/yolomux/93_share_state.js', 'utf8');
+const replaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
 const finderSeed = stateSource.slice(stateSource.indexOf('function shareFinderSeed()'), stateSource.indexOf('function shareSessionsFromLayout()'));
 const finderApply = replaySource.slice(replaySource.indexOf('async function applyShareFinderState'), replaySource.indexOf('function applySharePreferencesState'));
 const legacyApply = replaySource.slice(replaySource.indexOf('function applyLegacyShareFinderMode'), replaySource.indexOf('function applySharePreferencesState'));

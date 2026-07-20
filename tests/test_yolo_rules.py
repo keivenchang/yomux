@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 
-import auto_approve_tmux
+from tools import auto_approve_tmux
 from yolomux_lib import yolo_rules
 
 

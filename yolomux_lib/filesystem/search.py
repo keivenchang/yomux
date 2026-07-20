@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from fnmatch import fnmatchcase
@@ -12,11 +13,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .. import file_index
+from ..search import file_index
 from ..common import is_generated_upload_name
 from ..settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from ..settings import settings_payload
 from . import paths
+from .errors import FilesystemError
 from .errors import raise_os_error
 from .git_ops import git_root_for_path
 from .listing import _directory_is_repo
@@ -28,6 +30,8 @@ INDEX_EXCLUDE_REGEX_PREFIX = "regex:"
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
+LOGGER = logging.getLogger(__name__)
+_LOGGED_BLOCKED_REINDEX_PATHS: set[str] = set()
 
 
 def _configured_search_skip_dirs(settings: dict[str, Any] | None = None) -> set[str]:
@@ -658,9 +662,12 @@ def index_status(raw_root: str) -> dict[str, Any]:
         ignored_entries = int(index.ignored_entries)
         write_bytes = int(index.write_bytes)
         dirty_subtrees = len(index.dirty_paths)
+        build_generation = int(index.active_generation)
+        completed_generation = int(index.completed_generation)
+        last_error = str(index.last_error)
     # C11: report the real state so the Finder badge shows indexing/indexed honestly instead of guessing
     # (which made the badge flicker). `state` is the single field the UI keys on.
-    state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else "missing"))
+    state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else ("error" if last_error else "missing")))
     if not ready and not building and not file_index.background_owner_can_build():
         state = "follower"
     return {
@@ -684,6 +691,9 @@ def index_status(raw_root: str) -> dict[str, Any]:
         "ignored_entries": ignored_entries,
         "write_bytes": write_bytes,
         "dirty_subtrees": dirty_subtrees,
+        "generation": build_generation,
+        "completed_generation": completed_generation,
+        "error": last_error,
         "refresh_seconds": policy["refresh_seconds"],
         "max_files": policy["max_files"],
         "persist_max_files": policy["persist_max_files"],
@@ -719,7 +729,17 @@ def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> 
 
 def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-change") -> list[str]:
     """Coalesce changed subtrees and hand one incremental refresh to the owner."""
-    normalized_paths = [paths._normalized_scope_path(paths._validated_path(raw_path)) for raw_path in raw_paths]
+    normalized_paths: list[Path] = []
+    for raw_path in raw_paths:
+        try:
+            normalized_paths.append(paths._normalized_scope_path(paths._validated_path(raw_path)))
+        except FilesystemError as error:
+            if error.message_key != "fs.error.credentialBlocked":
+                raise
+            blocked = str(raw_path)
+            if blocked not in _LOGGED_BLOCKED_REINDEX_PATHS:
+                _LOGGED_BLOCKED_REINDEX_PATHS.add(blocked)
+                LOGGER.warning("Skipping blocked filesystem watch path: %s", blocked)
     roots_by_path: dict[Path, set[Path]] = {}
     policies: dict[Path, dict[str, Any]] = {}
 

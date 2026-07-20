@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from tests.source_inventory import parsed_python_source
+from tests.source_inventory import python_source_paths
 from yolomux_lib import agent_tui
 from yolomux_lib import app
 from yolomux_lib import common
@@ -26,15 +28,14 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
             "start_tabber_activity_cache_warmer",
             "warm_metadata_cache_async",
         },
-        "yolomux_lib/file_index.py": {"_start_build"},
+        "yolomux_lib/search/file_index.py": {"_start_build"},
         "yolomux_lib/yoagent/controller.py": {
             "start_yoagent_action_result_watcher",
             "start_yoagent_backend_prewarm",
         },
     }
     for relative, names in owners.items():
-        source = (root / relative).read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=relative)
+        source, tree = parsed_python_source(root / relative)
         functions = {
             node.name: ast.get_source_segment(source, node) or ""
             for node in ast.walk(tree)
@@ -59,8 +60,7 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
 def test_main_process_cpu_work_has_named_allowlist():
     root = Path(common.PROJECT_ROOT)
     app_path = root / "yolomux_lib" / "app.py"
-    source = app_path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(app_path))
+    source, tree = parsed_python_source(app_path)
     parents = {
         child: parent
         for parent in ast.walk(tree)
@@ -94,22 +94,19 @@ def test_main_process_cpu_work_has_named_allowlist():
     assert thread_owners == {
         "chat_yoagent",
         "indexed_repo_roots_snapshot",
-        "start_auto_approve_cache_refresh",
         "start_client_directory_poll",
         "start_client_event_watcher",
         "start_client_watch_snapshot_publish",
         "start_input_heartbeat_worker",
         "start_native_filesystem_watcher",
-        "start_session_files_cache_refresh",
-        "start_stats_agent_token_work",
-        "start_stats_metric_scheduler",
-        "start_tabber_activity_cache_refresh",
+            "start_session_files_cache_refresh",
+            "start_status_generation_watcher",
+            "start_tabber_activity_cache_refresh",
         "start_tabber_activity_cache_warmer",
         "start_transcripts_payload_refresh",
         "start_update_check_thread",
         "warm_metadata_cache_async",
         "request_session_files_disk_cache_prune",
-        "stats_cached_gpu_metrics",
     }
 
     retired_patterns = (
@@ -125,9 +122,10 @@ def test_main_process_cpu_work_has_named_allowlist():
     for pattern in retired_patterns:
         assert pattern not in source
 
-    jobd_source = (root / "yolomux_lib" / "jobd.py").read_text(encoding="utf-8")
+    jobd_source = (root / "yolomux_lib" / "infra" / "jobd.py").read_text(encoding="utf-8")
     assert '"transcript_view": _transcript_view' in jobd_source
-    assert "write_json_bytes(encoded)" in (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    routes_source = (root / "yolomux_lib" / "http_routes.py").read_text(encoding="utf-8")
+    assert routes_source.count("write_json_bytes(result.body, status=result.status)") == 2
 
 
 def test_positive_finite_number_normalizes_counter_inputs():
@@ -163,8 +161,8 @@ def test_backend_primitive_consumers_share_the_canonical_owners():
 def test_backend_primitive_implementation_bodies_have_one_owner():
     root = Path(common.PROJECT_ROOT) / "yolomux_lib"
     functions = []
-    for path in root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for path in python_source_paths(str(root)):
+        _source, tree = parsed_python_source(path)
         functions.extend((path, node) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))
 
     owner_names = {

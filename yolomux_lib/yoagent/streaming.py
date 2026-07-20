@@ -335,13 +335,16 @@ class YoagentStreamPublisher:
             item["text"] = next_text
             return item
 
+        def reset_hidden_work() -> None:
+            state["hidden_work_active"] = False
+            state["hidden_work_descriptor"] = ""
+            state["hidden_work_text"] = ""
+
         def callback(event: dict[str, Any]) -> None:
             normalized = normalize_yoagent_stream_event(event, backend=backend)
             event_type = str(normalized.get("kind") or normalized.get("event") or "")
             if event_type == ASSISTANT_DELTA:
-                state["hidden_work_active"] = False
-                state["hidden_work_descriptor"] = ""
-                state["hidden_work_text"] = ""
+                reset_hidden_work()
                 incoming_text = str(normalized.get("text") or "")
                 if normalized.get("snapshot"):
                     state["raw_content"] = incoming_text
@@ -371,18 +374,14 @@ class YoagentStreamPublisher:
                 return
             if event_type in {TOOL_CALL_STARTED, TOOL_CALL_DELTA}:
                 if event_type == TOOL_CALL_STARTED:
-                    state["hidden_work_active"] = False
-                    state["hidden_work_descriptor"] = ""
-                    state["hidden_work_text"] = ""
+                    reset_hidden_work()
                 state["tool_active"] = True
                 state["auxiliary_done"] = False
                 append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
                 publish([normalized], phase="tool")
                 return
             if event_type == APPROVAL_REQUESTED:
-                state["hidden_work_active"] = False
-                state["hidden_work_descriptor"] = ""
-                state["hidden_work_text"] = ""
+                reset_hidden_work()
                 state["tool_active"] = False
                 state["auxiliary_done"] = False
                 append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
@@ -392,12 +391,8 @@ class YoagentStreamPublisher:
                 if event_type == TOOL_CALL_FINISHED:
                     state["tool_active"] = False
                 if event_type == HIDDEN_WORK_DONE:
-                    state["hidden_work_active"] = False
-                    state["hidden_work_descriptor"] = ""
-                    state["hidden_work_text"] = ""
-                if event_type == TOOL_CALL_FINISHED:
-                    append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
-                elif event_type == HIDDEN_WORK_DONE:
+                    reset_hidden_work()
+                if event_type in {TOOL_CALL_FINISHED, HIDDEN_WORK_DONE}:
                     append_stream_item(yoagent_stream_event_auxiliary_item(normalized), merge=False)
                 publish([normalized], phase="tool" if event_type == TOOL_CALL_FINISHED else "thinking")
                 return
@@ -406,9 +401,7 @@ class YoagentStreamPublisher:
                 publish([normalized], phase="usage")
                 return
             if event_type in {TURN_DONE, ERROR}:
-                state["hidden_work_active"] = False
-                state["hidden_work_descriptor"] = ""
-                state["hidden_work_text"] = ""
+                reset_hidden_work()
                 state["tool_active"] = False
                 state["auxiliary_done"] = True
                 if event_type == ERROR:

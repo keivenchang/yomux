@@ -31,9 +31,30 @@ const {
   test,
   runSuites,
   finishSuite,
-} = require('./layout_test_helper');
+} = require('./browser_helpers/layout_test_helper');
 
 async function runShareThemeSuite() {
+  test('hover surfaces share the 1300ms open and 120ms close/follow pair', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/60_popovers_tabs.js', 'utf8')
+      + fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
+    assert.ok(source.includes("popoverShowDelayMs = initialSetting('performance.popover_show_delay_ms')"), 'one JS owner reads the shared hover-open setting');
+    assert.ok(source.includes("popoverHideDelayMs = initialSetting('performance.popover_hide_delay_ms')"), 'one JS owner reads the shared hover-close/follow setting');
+    for (const retiredName of ['hoverCloseDelayMs', 'menuHoverOpenDelayMs', 'menuHoverCloseDelayMs', 'tabPopoverShowDelayMs', 'tabPopoverFollowDelayMs', 'fileImagePreviewMinShowDelayMs']) {
+      assert.equal(source.includes(retiredName), false, `${retiredName} cannot reintroduce a per-surface hover delay`);
+    }
+    const css = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
+    assert.ok(css.includes('--popover-show-delay: 1300ms;'), 'CSS defaults to the shared open delay');
+    assert.ok(css.includes('--popover-hide-delay: 120ms;'), 'CSS defaults to the shared close/follow delay');
+    const runtime = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
+    assert.ok(runtime.includes("root.setProperty('--popover-show-delay', `${popoverShowDelayMs}ms`);"), 'settings keep the CSS open-delay token synchronized');
+    assert.ok(runtime.includes("root.setProperty('--popover-hide-delay', `${popoverHideDelayMs}ms`);"), 'settings keep the CSS close-delay token synchronized');
+    const popoverCss = fs.readFileSync('static_src/css/yolomux/20_sessions_popovers.css', 'utf8') + fs.readFileSync('static_src/css/yolomux/40_layout_panes_tabs.css', 'utf8');
+    assert.equal(popoverCss.includes('ease var(--popover-show-delay)'), false, 'CSS does not add a second hover-open wait');
+    assert.equal(popoverCss.includes('ease var(--popover-hide-delay)'), false, 'CSS does not add a second hover-close wait');
+  });
   // Keep independent fresh-runtime scenarios below. Shared-state behavior is split into named
   // checkpoints so one assertion cannot conceal later cross-surface contracts.
   test('cross-surface host state survives layout, share, and terminal transitions', () => {
@@ -230,7 +251,7 @@ async function runShareThemeSuite() {
     const cachedSwitchHtml = api.fileExplorerChangesPanelHtml();
     assert.equal(cachedSwitchHtml.includes('changes-loading'), false, 'cached Differ switch keeps rendered rows instead of showing the loading state');
     assert.ok(cachedSwitchHtml.includes('cached-visible.py'), 'cached Differ switch renders the cached changed-file rows immediately');
-    assert.ok(cachedRefreshUrl.includes('/api/session-files?') && cachedRefreshUrl.includes('session=2') && cachedRefreshUrl.includes('force=1'), 'cached Differ switch still starts a forced background refresh');
+    assert.ok(cachedRefreshUrl.includes('/api/session-files?') && cachedRefreshUrl.includes('session=2') && !cachedRefreshUrl.includes('force=1'), 'cached Differ switch lets the server serve last-known-good and coalesce any stale refresh');
     api.setFileExplorerModeForTest('files');
     api.setFileExplorerChangesSelectedSessionForTest('1');
     api.setSessionFilesPayloadForTest({session: '1', loaded: true, errors: [], refs_by_repo: {}, repos: [{repo: '/repo/current'}], files: []});
@@ -256,7 +277,7 @@ async function runShareThemeSuite() {
     assert.equal(cachedFinderPayload.session, '2', 'cached Finder switch applies the target session payload immediately');
     assert.equal(cachedFinderPayload.repos[0].repo, '/repo/cached-finder', 'cached Finder switch uses the cached target repo before the fresh fetch resolves');
     assert.ok(api.fileExplorerChangesPanelHtml().includes('cached-finder-visible.py'), 'cached Finder switch renders the embedded Differ rows immediately');
-    assert.ok(cachedFinderRefreshUrl.includes('/api/session-files?') && cachedFinderRefreshUrl.includes('session=2') && cachedFinderRefreshUrl.includes('force=1'), 'cached Finder switch still starts a forced background refresh');
+    assert.ok(cachedFinderRefreshUrl.includes('/api/session-files?') && cachedFinderRefreshUrl.includes('session=2') && !cachedFinderRefreshUrl.includes('force=1'), 'cached Finder switch lets the server serve last-known-good and coalesce any stale refresh');
     api.setSessionFilesPayloadForTest({session: '2', loaded: false, errors: [], refs_by_repo: {}, repos: [], files: []});
     api.setSessionFilesLoadingForTest(true);
     const loadingEmbeddedDifferHtml = api.fileExplorerChangesPanelHtml({view: 'finder'});
@@ -449,7 +470,7 @@ async function runShareThemeSuite() {
     for (const listener of api.documentListenersForTest('scroll')) listener({target: new TestElement('outside')});
     assert.equal(api.diffRefPopoverStateForTest().input, null, 'scroll cleanup drops a detached owning input');
     for (const name of ['diffRefPopoverInput', 'diffRefPopoverItemsCurrent', 'diffRefPopoverActiveIndex', 'diffRefPopoverListenersInstalled']) {
-      assert.equal(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
+      assert.equal(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8').includes(name), false, `${name} remains retired`);
     }
     assert.equal(changedFilesSource.includes('.showPicker('), false, 'diff refs do not use the browser-native popup API');
     api.setFileExplorerSessionFilesPayloadForTest({
@@ -498,7 +519,7 @@ async function runShareThemeSuite() {
     assert.ok(/file-tree-name[^>]*>README\.md<\/span>[\s\S]*file-tree-agent[\s\S]*changes-file-agent[\s\S]*file-tree-diff[\s\S]*changes-diff-add[^>]*>\+2<\/span>[\s\S]*changes-diff-remove[^>]*>-1<\/span>[\s\S]*file-tree-dir-count[\s\S]*file-tree-git-status[^>]*>M<\/span>[\s\S]*file-tree-date/.test(compactChangeHtml), 'compact changed-file row order is file, AI icon, diff counts, file count, status, date');
     assert.ok(/file-tree-git-status[^>]*title="M: modified"[^>]*aria-label="M: modified"[^>]*>M<\/span>/.test(compactChangeHtml), 'compact changed-file M badge explains itself on hover');
     const missingChangeHtml = api.changesGroupsSnapshotHtmlForTest([
-      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'docs/GUI_SPECS.md', abs_path: '/repo/app/docs/GUI_SPECS.md', mtime: 0, added: 1, removed: 0, missing: true},
+      {session: '1', agent: 'codex', status: 'M', repo: '/repo/app', path: 'docs/specs/GUI.md', abs_path: '/repo/app/docs/specs/GUI.md', mtime: 0, added: 1, removed: 0, missing: true},
     ], {compact: true});
     assert.ok(/file-tree-git-status[^>]*title="D: deleted"[^>]*aria-label="D: deleted"[^>]*>D<\/span>/.test(missingChangeHtml), 'stat-less changed-file rows display as missing/deleted instead of ordinary modified');
     assert.ok(/file-tree-date[^>]*>—<\/span>/.test(missingChangeHtml), 'stat-less changed-file rows keep the date column visible with a placeholder');
@@ -609,24 +630,33 @@ async function runShareThemeSuite() {
     assert.notEqual(firstDiffCacheKey, secondDiffCacheKey, 'Differ cache key changes when repo FROM/TO refs change for the same session');
     api.setDiffRefsByRepoForTest('/repo/app', null);
     api.setFileExplorerModeForTest('files');
-    test('Finder explicit session interaction updates its committed target', () => {
+    test('Finder and Differ keep explicitly selected sessions scoped to their own surfaces', () => {
       const stickyApi = loadYolomux('', ['1', '2']);
+      stickyApi.setFileExplorerFinderSelectedSessionForTest('1');
       stickyApi.setFileExplorerChangesSelectedSessionForTest('1');
-      assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '1', 'Finder Modified-files target starts from the committed session');
+      assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '1', 'Finder starts from its committed session');
+      assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '1', 'Differ starts from its committed session');
+      stickyApi.switchFileExplorerFinderSessionForTest('2');
+      assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '2', 'Finder selector changes Finder only');
+      assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '1', 'Finder selector does not retarget Differ');
       stickyApi.noteFileExplorerChangesSessionInteractionForTest('2');
-      assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit session interaction updates the Finder Modified-files target');
+      assert.equal(stickyApi.fileExplorerFinderTargetSessionForTest(), '2', 'Differ interaction leaves Finder selected session intact');
+      assert.equal(stickyApi.fileExplorerSessionFilesTargetSessionForTest(), '2', 'explicit Differ interaction updates Differ only');
     });
     test('read-only shares accept only host-pinned Finder state', () => {
       const shareApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
-        share: {view: true, id: 'share-finder', mode: 'ro', session: '5', sessions: ['5', '6'], finder: {session: '5', mode: 'diff'}},
+        share: {view: true, id: 'share-finder', mode: 'ro', session: '5', sessions: ['5', '6'], finder: {session: '5', differSession: '5', mode: 'diff'}},
       });
       assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'read-only share Finder target starts from the host-pinned Finder session');
       assert.equal(shareApi.noteFileExplorerChangesSessionInteractionForTest('6'), false, 'read-only share local session interactions cannot retarget Finder');
       assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'read-only share local interaction leaves Finder on the host-pinned session');
       shareApi.setSessionFilesPayloadForTest({session: '6', loaded: true, files: [], repos: [], errors: []});
       assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'read-only share background session-files payloads do not retarget Finder');
-      shareApi.applyShareUiStateForTest({finder: {session: '6', mode: 'diff'}});
-      assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'read-only share follows the host-authored Finder session frame');
+      shareApi.applyShareUiStateForTest({finder: {session: '6', mode: 'files'}});
+      assert.equal(shareApi.fileExplorerFinderTargetSessionForTest(), '6', 'read-only share follows the host-authored Finder session frame');
+      assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '5', 'host Finder frames do not retarget Differ');
+      shareApi.applyShareUiStateForTest({finder: {session: '6', differSession: '6', mode: 'diff'}});
+      assert.equal(shareApi.fileExplorerSessionFilesTargetSessionForTest(), '6', 'read-only share applies the host-authored Differ session separately');
 
       const unpinnedShareApi = loadYolomux('?shareReplay=0', ['5', '6'], 'https:', 'Linux x86_64', 'readonly', {
         share: {view: true, id: 'share-unpinned-finder', mode: 'ro', session: '5', sessions: ['5', '6']},
@@ -971,12 +1001,19 @@ async function runShareThemeSuite() {
     assert.ok(c9Src.includes('function showRepoChipMenu('), 'C9: the repo count opens a popover');
     assert.ok(/showRepoChipMenu\([\s\S]*?sessionRepoDisplayRoot\.set\(session, root\)/.test(c9Src), 'C9: clicking a repo row switches the Info Bar to that repo (the <N/M> display)');
     assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-cycle"'), 'CSS-2: repo arrow buttons use the shared button reset');
-    assert.ok(multiMetaHtml.includes('class="btn-base meta-repo-chip"'), 'CSS-2: repo count button uses the shared button reset');
+    assert.ok(multiMetaHtml.includes('class="btn-base chip-base meta-repo-chip"'), 'CSS-2: repo count button uses shared button reset and chip geometry');
     assert.ok(/\.btn-base,[\s\S]*?\{[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;[\s\S]*border:\s*0;[\s\S]*background:\s*transparent;[\s\S]*cursor:\s*pointer;[\s\S]*font:\s*inherit;/.test(c9Css), 'CSS-2: shared btn-base owns the button reset cluster');
     assert.ok(/\.control-active-hover:hover,\s*\.control-active-hover:focus-visible\s*\{[\s\S]*outline:\s*0;[\s\S]*color:\s*var\(--active-control-text\);[\s\S]*background:\s*var\(--active-control-bg\);/.test(c9Css), 'CSS-3: shared control-active-hover owns the active hover/focus recolor');
     assert.ok(/\.meta-repo-chip\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo position button has at most 2px horizontal padding');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*width:\s*auto/.test(c9Css), 'C9: the repo arrow buttons are content-sized, not fixed-width');
     assert.ok(/\.meta-repo-cycle\s*\{[\s\S]*padding:\s*0 var\(--space-1\)/.test(c9Css), 'C9: the repo arrow buttons have at most 2px horizontal padding');
+    assert.ok(/\.badge-base,\s*\.chip-base\s*\{[\s\S]*flex:\s*0 0 auto;[\s\S]*display:\s*inline-flex;[\s\S]*align-items:\s*center;/.test(c9Css), 'D7: badge-base and chip-base own compact inline geometry');
+    assert.ok(/\.badge-base\s*\{[\s\S]*justify-content:\s*center;/.test(c9Css), 'D7: badge-base owns centered badge content');
+    assert.ok(c9Src.includes("className: 'chip-base share-status-pill'"), 'D7: share status uses the shared chip base');
+    assert.ok(c9Src.includes('badge-base app-menu-button-badge'), 'D7: menu count badge uses the shared badge base');
+    assert.ok(c9Src.includes("['badge-base', 'session-state-badge', 'tab-symbol'"), 'D7: session-state badges use the shared badge base');
+    assert.ok(c9Src.includes('chip-base command-palette-view-chip'), 'D7: command-palette view chips use the shared chip base');
+    assert.ok(c9Src.includes('btn-base chip-base meta-repo-chip'), 'D7: repository switcher chips use the shared chip base');
     // C10: Finder delete shortcut — Command-Delete on Mac, plain Delete on PC, gated to the Finder surface
     // and taking precedence over the global Mod+Delete tab-close.
     assert.ok(c9Src.includes('function handleFileExplorerDeleteShortcut('), 'C10: a Finder delete-shortcut handler exists');
@@ -1505,7 +1542,7 @@ async function runShareThemeSuite() {
     assert.equal(appSource.includes('sessionFilesTargetSession({followActive: true})'), false, 'Finder Modified-files session selection never follows passive hover/autofocus');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)/.test(appSource), 'explicit session interactions can commit the Finder Modified-files target');
     assert.ok(/function noteFileExplorerChangesSessionInteraction\(session\)[\s\S]*shareViewMode && !shareWriteMode && !applyingShareRemoteUiState[\s\S]*return false/.test(appSource), 'read-only share clients cannot locally commit a Finder/Differ session');
-    assert.ok(/function fileExplorerSessionFilesTargetSession\(\)[\s\S]*shareViewMode && !shareWriteMode[\s\S]*fileExplorerChangesSelectedSession[\s\S]*fileExplorerExplicitSyncSessionTarget\(\)[\s\S]*return ''/.test(appSource), 'read-only share Finder/Differ target resolves only from the shared explicit pane state');
+    assert.ok(/function fileExplorerSelectedSessionForView\(view\)[\s\S]*surface === 'finder' \? fileExplorerFinderSelectedSession : fileExplorerChangesSelectedSession[\s\S]*function fileExplorerFinderTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('finder'\)[\s\S]*function fileExplorerSessionFilesTargetSession\(\)[\s\S]*fileExplorerSelectedSessionForView\('differ'\)/.test(appSource), 'read-only share resolves Finder and Differ only from separately host-owned explicit state');
     const dockviewActivePanelStart = appSource.indexOf('api.onDidActivePanelChange(panel => {');
     assert.ok(dockviewActivePanelStart > 0, 'Dockview active-panel listener is locatable');
     const dockviewActivePanelBody = appSource.slice(dockviewActivePanelStart, appSource.indexOf('api.onWillShowOverlay', dockviewActivePanelStart));
@@ -1548,8 +1585,8 @@ async function runShareThemeSuite() {
     const terminalContainerBindingBody = appSource.slice(terminalContainerBindingStart, terminalContainerBindingEnd);
     const terminalDataHandlerStart = appSource.indexOf('function handleTerminalData(');
     const terminalDataHandlerBody = appSource.slice(terminalDataHandlerStart, appSource.indexOf('function shellQuote(', terminalDataHandlerStart));
-    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal keydown both dismisses the touch key palette and commits the Finder Modified-files target');
-    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*dismissTerminalMobileAccessory\(session\);[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody), 'terminal paste both dismisses the touch key palette and commits the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('keydown', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/container\.addEventListener\('keydown'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal keydown keeps the touch key palette open while committing the Finder Modified-files target');
+    assert.ok(/container\.addEventListener\('paste', \(\) => \{[\s\S]*noteTerminalExplicitInput\(session\);[\s\S]*\}, \{capture: true\}\);/.test(terminalContainerBindingBody) && !/container\.addEventListener\('paste'[\s\S]{0,180}dismissTerminalMobileAccessory/.test(terminalContainerBindingBody), 'terminal paste keeps the touch key palette open while committing the Finder Modified-files target');
     assert.ok(terminalInputBody.includes('bindTerminalContainerForSession(session, term, container);'), 'startTerminal uses the shared terminal container binding path');
     assert.ok(terminalInputBody.includes('term.onData(data => handleTerminalData(session, data));'), 'startTerminal routes terminal bytes through the shared terminal data handler');
     assert.ok(/allowProposedApi:\s*true/.test(terminalInputBody), 'xterm opts into the unicode service needed by the Unicode11 addon');
@@ -1560,10 +1597,10 @@ async function runShareThemeSuite() {
     assert.equal(terminalDataHandlerBody.includes('noteTerminalExplicitInput'), false, 'terminal byte handling still avoids the explicit-input helper that commits Finder targets');
     assert.ok(/function terminalDataShouldAcknowledgeAttention\(data\)[\s\S]*terminalDataWithoutPassiveReports\(data\)\.length > 0/.test(appSource), 'terminal byte handling filters passive xterm reports before acknowledging attention');
     assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*acknowledgeTerminalAttentionFromTransportInput\(session, filtered, options\)/.test(appSource), 'terminal byte handling acknowledges red/yellow attention from real typed xterm input');
-    assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: true, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'explicit session changes force a fresh Finder modified-files fetch even if an older request is in flight');
+    assert.ok(/fetchSessionFiles\(\{destination: 'finder', session, silent: true, force: !cachedPayloadIsLoaded, background: cachedPayloadIsLoaded\}\)/.test(appSource), 'a cached Finder session switch preserves last-known-good rows and lets the server coalesce stale refreshes');
     assert.ok(/function sessionFilesCacheKey\(session\)[\s\S]*sessionFilesRequestQueryString\(\)/.test(appSource), 'Differ cached payloads are keyed by session plus effective FROM/TO/refs query');
     assert.ok(/const cached = fileExplorerSessionFilesCache\.get\(sessionFilesCacheKey\(session\)\)/.test(appSource), 'Differ session switches do not reuse payloads from a different ref pair');
-    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('finder', cached\.payload\)/.test(appSource), 'Finder session switches apply cached target payloads immediately before the forced refresh');
+    assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*if \(cachedPayloadIsLoaded\) \{[\s\S]*setSessionFilesPayloadForDestination\('finder', cached\.payload\)/.test(appSource), 'Finder session switches apply cached target payloads immediately before a coalesced refresh');
     assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleFileExplorerActiveTabSync\(session, \{explicit: true\}\);[\s\S]*if \(itemInLayout\(tabberItemId\) && focusedPanelItem === tabberItemId\)/.test(appSource), 'Finder session switches sync the root from tmux metadata before choosing the lightweight Tabber or session-files path');
     assert.ok(/fileExplorerSessionFilesCache\.set\(sessionFilesCacheKey\(session\), \{payload: nextPayload, signature\}\)/.test(appSource), 'Differ stores cached payloads under the same ref-aware key it reads');
     assert.ok(/function applySessionFilesPayloadFromPush\([\s\S]*sessionFilesPushRequestMatchesCurrent\(request, session\)/.test(appSource), 'SSE session-files payloads cannot overwrite the active Differ refs with a stale request');
@@ -1948,7 +1985,7 @@ async function runShareThemeSuite() {
     assert.equal(finderPanelSource.includes('file-explorer-diff-row'), false, 'Differ title is folded into the shared primary row');
     assert.equal(finderPanelSource.includes('file-explorer-panel-title'), false, 'Finder panel no longer prints redundant Finder/Differ title text');
     assert.equal(finderPanelSource.includes('fileExplorerModeSwitcherHtml()'), false, 'Finder panel uses the shared pane tabs instead of a second in-panel mode switcher');
-    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerSessionFilesTargetSession\(\)\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*reloadButtonHtml/.test(finderPanelSource), 'Finder panel primary row renders Session, spacer, and Reload');
+    assert.ok(/file-explorer-toolbar-row file-explorer-primary-row[\s\S]*fileExplorerDiffSessionControlHtml\(fileExplorerFinderTargetSession\(\), 'finder'\)[\s\S]*file-explorer-toolbar-spacer[\s\S]*reloadButtonHtml/.test(finderPanelSource), 'Finder panel primary row renders its own Session, spacer, and Reload');
     assert.equal(finderPanelSource.includes('fileExplorerChangesCollapseToggleHtml()'), false, 'Finder panel primary row no longer renders a redundant Differ collapse/expand button next to close');
     assert.ok(/file-explorer-toolbar-row file-explorer-path-row[\s\S]*file-explorer-root-mode-toggle file-explorer-root-mode-toggle-panel[\s\S]*<input class="file-explorer-path-inline"[\s\S]*file-explorer-path-copy-panel/.test(finderPanelSource), 'Finder path row renders Sync, path, then Copy');
     assert.ok(/function fileExplorerDiffSessionControlHtml[\s\S]*file-explorer-diff-session-control file-explorer-mode-files-diff-only changes-control[\s\S]*common\.sessionLabel[\s\S]*sessionFilesSessionSelectHtml\(session/.test(finderPanelBundle), 'Finder and Differ keep the Session dropdown in the shared top row');
@@ -2034,7 +2071,7 @@ async function runShareThemeSuite() {
     assert.ok(preferencesCss.includes('--pane-tab-panel-head-text: var(--pane-tab-text)'), 'light mode status text inherits the shared dark tab foreground');
     assert.ok(/\.tabs \.pane-actions,\s*\n\.tabs \.panel-tab-overflow\s*\{[\s\S]*color:\s*var\(--pc-control-fg\)/.test(preferencesCss), 'pane actions use the shared platform-control foreground');
     assert.ok(/\.meta-path\s*\{[\s\S]*color:\s*var\(--pane-meta-path\)/.test(preferencesCss), 'status path color is theme-tokenized');
-    assert.ok(/body\.editor-theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(preferencesCss), 'light editor panes switch drop-target outlines to readable blue');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--drop-outline:\s*var\(--drop-outline-light\)/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light editor panes switch drop-target outlines to readable blue through root theme tokens');
     assert.ok(/\.file-editor-popout-preview-panel,[\s\S]*?\.file-editor-save-panel\s*\{[^}]*height:\s*20px/.test(preferencesCss), 'pop-out preview button shares the compact editor toolbar button sizing rule');
     assert.ok(/\.file-editor-panel-actions\s*\{[\s\S]*background:\s*color-mix\(in srgb, var\(--panel2\)/.test(preferencesCss), 'editor actions render as one compact gray toolbar');
     assert.ok(/\.file-editor-gutter-panel,\s*\n\.file-editor-wrap-panel,\s*\n\.file-editor-find-panel,\s*\n\.file-editor-diff-panel/.test(preferencesCss), 'diff button shares the compact editor toolbar sizing');
@@ -2113,8 +2150,8 @@ async function runShareThemeSuite() {
     assert.equal(/\.panel:hover \.terminal \.xterm-viewport[\s\S]*?\{[\s\S]*?scrollbar-color:/.test(preferencesCss), false, 'terminal no longer has a local hover scrollbar color rule');
     assert.ok(/--diff-add-line-bg:\s*#2b5d16/.test(preferencesCss), '#250: diff added lines use the sampled opaque green fill over the dark bg');
     assert.ok(/\.file-editor-diff-codemirror \.cm-content \.cm-activeLine\s*\{[^}]*background:\s*var\(--diff-full-line-bg,\s*transparent\)/.test(preferencesCss), 'diff active lines keep the same red/green fill as their neighboring changed lines');
-    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(preferencesCss), 'light diff added lines use a more visible green fill');
-    assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(preferencesCss), 'light diff removed lines use a more visible red fill');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-add-line-bg:\s*#bfeac8/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light diff added lines use a more visible green fill through root theme tokens');
+    assert.ok(/body\.theme-light\s*\{[\s\S]*--diff-remove-line-bg:\s*#f3b7b7/.test(fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8')), 'light diff removed lines use a more visible red fill through root theme tokens');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedLine,[\s\S]*?\.cm-deletedLine \*\s*\{[\s\S]*color:\s*#3b0a0a/.test(preferencesCss), 'light diff removed lines and descendants share one dark-red text rule on the stronger red fill');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-a \.cm-changedText,[\s\S]*?\.cm-deletedChunk \.cm-deletedText\s*\{[\s\S]*color:\s*var\(--danger-light-text\)[\s\S]*background:\s*#f4b7b7/.test(preferencesCss), 'light diff removed inline text uses the danger text token on a distinct red fill (image 055)');
     assert.ok(/body\.editor-theme-light \.file-editor-diff-codemirror \.cm-merge-b \.cm-changedText\s*\{[\s\S]*color:\s*var\(--success-text-strong\)[\s\S]*background:\s*#b9e7c2/.test(preferencesCss), 'light diff added inline text uses dark green on a distinct green fill');
@@ -2209,10 +2246,9 @@ async function runShareThemeSuite() {
     assert.ok(/data-setting-path="performance\.workflow_transition_glow_seconds"[\s\S]*?value="60"[\s\S]*?min="0"[\s\S]*?max="300"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'notification pulse duration defaults to 60 seconds in Preferences');
     assert.ok(/data-setting-path="performance\.latency_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'latency refresh displays seconds instead of raw milliseconds');
     assert.ok(/data-setting-path="performance\.event_log_refresh_ms"[\s\S]*?preferences-setting-suffix">s</.test(preferencesHtml), 'event-log refresh displays seconds instead of raw milliseconds');
-    assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'hover popover timing remains in milliseconds');
-    assert.ok(/data-setting-path="performance\.menu_hover_open_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'menu hover timing remains in milliseconds');
-    assert.ok(/data-setting-path="performance\.tab_popover_show_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover timing remains in milliseconds');
-    assert.ok(/data-setting-path="performance\.tab_popover_follow_delay_ms"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'tab hover follow timing remains in milliseconds');
+    assert.ok(/data-setting-path="performance\.popover_show_delay_ms"[\s\S]*?value="1300"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'shared hover-open timing defaults to 1300ms in Preferences');
+    assert.ok(/data-setting-path="performance\.popover_hide_delay_ms"[\s\S]*?value="120"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'shared hover-close/follow timing defaults to 120ms in Preferences');
+    for (const retiredPath of ['performance.menu_hover_open_delay_ms', 'performance.tab_popover_show_delay_ms', 'performance.tab_popover_follow_delay_ms']) assert.equal(preferencesHtml.includes(`data-setting-path="${retiredPath}"`), false, `${retiredPath} is not a divergent Preferences control`);
     assert.ok(/data-setting-path="performance\.remote_resize_delay_ms"[\s\S]*?value="220"[\s\S]*?min="50"[\s\S]*?max="2000"[\s\S]*?step="10"[\s\S]*?preferences-setting-suffix">ms</.test(preferencesHtml), 'remote resize client/server debounce displays milliseconds');
     const performanceHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="performance"'), preferencesHtml.indexOf('data-preference-section="github"'));
     const notificationsHtml = preferencesHtml.slice(preferencesHtml.indexOf('data-preference-section="notifications"'), preferencesHtml.indexOf('data-preference-section="file_explorer"'));
@@ -2658,12 +2694,13 @@ async function runShareThemeSuite() {
     assert.equal(popoverLeft, 10);
     assert.equal(popoverForPosition.style.left, '10px', 'session tab popovers align to the owning pane gutter instead of the narrow tab label');
     assert.equal(popoverForPosition.style.top, '71px', 'tab popovers carry replayable inline top instead of relying only on document CSS variables');
-    assert.equal(popoverForPosition.style.width, '490px', 'session tab popovers use their owning pane width minus the shared edge gutter');
-    assert.equal(popoverForPosition.style.maxWidth, '490px', 'owning-pane width overrides the generic desktop popover cap');
+    assert.equal(popoverForPosition.style.width, '520px', 'session tab popovers may use a small amount beyond the owning pane when content needs it');
+    assert.equal(popoverForPosition.style.maxWidth, '520px', 'the bounded session width remains the replayable inline maximum');
     assert.equal(popoverForPosition.style.height, '300px', 'tab popovers carry replayable inline height so share viewers do not recompute wrapped popover height');
     assert.equal(popoverStyle.getPropertyValue('--pane-tab-popover-width'), '');
     assert.ok(popoverLeft + popoverForPosition.getBoundingClientRect().width <= 1200);
-    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width);
+    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) > panelForPopover.getBoundingClientRect().width);
+    assert.ok(Number.parseInt(popoverForPosition.style.width, 10) <= panelForPopover.getBoundingClientRect().width + 64);
     const tabberPaneForPopover = {
       getBoundingClientRect() {
         return {left: 80, right: 780, top: 0, bottom: 500, width: 700, height: 500};
@@ -2680,8 +2717,18 @@ async function runShareThemeSuite() {
     };
     api.positionPaneTabPopover(tabberTab, tabberPopover);
     assert.equal(tabberPopover.style.left, '80px', 'Tabber session popovers align to the owning pane instead of the indented tree row');
-    assert.equal(tabberPopover.style.width, '700px', 'Tabber session popovers span the owning pane width');
-    assert.equal(tabberPopover.style.maxWidth, '700px', 'Tabber pane width overrides the generic tab-popover cap');
+    assert.equal(tabberPopover.style.width, '520px', 'Tabber session popovers use the same measured content width as pane tabs');
+    assert.equal(tabberPopover.style.maxWidth, '520px', 'Tabber session popovers keep the shared viewport-capped content width');
+    const filePopover = new TestElement('file-popover');
+    filePopover.classList.add('file-popover');
+    filePopover.rect = {left: 0, right: 340, top: 0, bottom: 220, width: 340, height: 220};
+    api.positionPaneTabPopover({
+      getBoundingClientRect() { return {left: 34, right: 274, top: 40, bottom: 68, width: 240, height: 28}; },
+      querySelector() { return filePopover; },
+      closest() { return panelForPopover; },
+    }, filePopover);
+    assert.equal(filePopover.style.width, '340px', 'file preview popovers retain their measured content width');
+    assert.equal(filePopover.style.maxWidth, '', 'file preview popovers retain their CSS maximum instead of the session inline cap');
     api.positionPaneTabPopover({
       getBoundingClientRect() {
         return {left: 1080, right: 1160, top: 40, bottom: 68, width: 80, height: 28};
@@ -2760,7 +2807,9 @@ async function runShareThemeSuite() {
     assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'right'}), false, 'mobile edge drops cannot create a split');
     assert.equal(mobileApi.dropIntentAllowsSession('old', {targetSlot: 'left', zone: 'middle'}), true, 'mobile middle drops remain ordinary tab moves');
     const mobileViewMenu = mobileApi.appMenuTree().find(menu => menu.id === 'view');
-    assert.equal(mobileViewMenu.items.some(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout')), false, 'mobile removes the multi-pane Layout menu');
+    const mobileLayoutMenu = mobileViewMenu.items.find(item => item.type === 'submenu' && item.label === mobileApi.t('menu.view.layout'));
+    assert.ok(mobileLayoutMenu, 'mobile keeps View > Layout visible so the one-column policy is explained rather than silently hiding split controls');
+    assert.ok(mobileLayoutMenu.items.every(item => item.disabled === true && item.detail === mobileApi.t('menu.view.layout.narrow.detail')), 'mobile disables every layout command with the shared localized width hint');
     assert.ok(/function dispatchTouchContextMenu[\s\S]*touchContextMenuSyntheticEvents[\s\S]*function installTouchContextMenuOwner\([\s\S]*pointerType !== 'touch'[\s\S]*TOUCH_CONTEXT_MENU_DELAY_MS/.test(coreSource), 'a stationary touch routes through the existing custom context-menu handlers without duplicating their menus');
     const baseCss = fs.readFileSync('static_src/css/yolomux/00_tokens_base.css', 'utf8');
     assert.ok(/@media \(pointer: coarse\)\s*\{[\s\S]*--pane-resizer-hit-inset:\s*20px[\s\S]*:where\(input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), textarea, select, \[contenteditable="true"\], \.xterm \.xterm-helper-textarea\)\s*\{\s*font-size:\s*var\(--touch-editable-font-size\)/.test(baseCss), 'coarse-pointer editable controls and xterm focus input share the 16px Safari zoom guard');
@@ -3072,12 +3121,13 @@ async function runShareThemeSuite() {
     }
     {
       const shareSource = fs.readFileSync('static/yolomux.js', 'utf8');
-      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
+      const shareReplaySource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
       const timingSource = fs.readFileSync('static_src/js/yolomux/02_timing.js', 'utf8');
       const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
       const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
       assert.ok(/const uiDelayMs = Object\.freeze\(\{[\s\S]*shareViewerStatusBackupRefresh:\s*30001[\s\S]*shareHostStatusBackupRefresh:\s*3001[\s\S]*shareRemoteResizeAfterSocketOpen:\s*50/.test(timingSource), 'R10/MV-3: backend-facing backup polls use odd cadences through the shared timing partial');
-      assert.ok(/serverWatchRenew:\s*60001[\s\S]*serverWatchDebounce:\s*300[\s\S]*shareGeometryDigestPublish:\s*2001/.test(timingSource), 'MV-3: backend-facing renew and geometry publish cadences stay odd while UI delays stay round');
+      assert.equal(/serverWatchRenew/.test(timingSource), false, 'MV-3: SSE subscriber lifecycle owns watch-root retention, so the retired browser renewal cadence cannot return');
+      assert.ok(/serverWatchDebounce:\s*300[\s\S]*shareGeometryDigestPublish:\s*2001/.test(timingSource), 'MV-3: geometry repair stays on its odd publish cadence while UI delays stay round');
       assert.ok(/fileExplorerFilesystemKeyframeMs = 60001/.test(bootstrapSource), 'MV-3: filesystem watch keyframes use an odd cadence');
       assert.ok(/shareDebugProfileUploadMinIntervalMs:\s*5000/.test(timingSource) && /autoApproveDisconnectedPollMs:\s*5003/.test(timingSource), 'R10: hardcoded debug upload and odd fallback poll timings are owned by the shared timing partial');
       assert.equal(/const shareDebugProfileUploadMinIntervalMs = 5000|const autoApproveDisconnectedPollMs = 5003/.test(bootstrapSource), false, 'R10: bootstrap no longer owns hardcoded timing literals');
@@ -3142,7 +3192,7 @@ async function runShareThemeSuite() {
       assert.ok(/function normalizeSharePayload\(payload\)[\s\S]*viewerDetails:\s*normalizeShareViewerDetails\(payload\)/.test(shareSource), 'YO!share payload normalization preserves active viewer details for the manage modal');
       assert.ok(/<button type="button" class="danger share-stop-inline" data-share-stop>/.test(shareSource), 'YO!share manage rows place Stop inline with mode/protocol metadata');
       assert.ok(/async function stopActiveShare\(tokenOrShortId = ''\)[\s\S]*JSON\.stringify\(\{token: target\}\)/.test(shareSource), 'YO!share stop is scoped to a selected token when a row is stopped');
-      assert.ok(/function apiFetch\(url, options = \{\}\)[\s\S]*X-Share-Token/.test(shareSource), 'share-view API calls attach the fragment token as X-Share-Token');
+      assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*X-Share-Token/.test(shareSource) && (shareSource.match(/applyShareTokenHeaders\(requestOptions\)/g) || []).length === 3, 'share-view API calls attach the fragment token through the one shared request-header helper');
       assert.ok(/const shareWriteMode = shareViewMode && shareBootstrap\?\.mode === 'rw'/.test(shareSource), 'share-view write mode is explicit and token-driven');
       assert.ok(/disableStdin:\s*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view terminals are created with stdin enabled');
       assert.ok(/function insertIntoTerminal\(session, text\)[\s\S]*readOnlyMode && !shareWriteMode/.test(shareSource), 'rw share-view can send terminal insertions while ro share-view stays blocked');
@@ -3160,12 +3210,24 @@ async function runShareThemeSuite() {
       assert.ok(/function sendOrQueueShareHostMessage\(token, message\)[\s\S]*ensureShareHostSocket\(token\)[\s\S]*enqueueShareHostMessage\(token, message\)/.test(shareSource), 'host and replay publication share one send-or-queue path');
       assert.ok(/function ensureShareHostSockets\(\)[\s\S]*shareSenderRecordEntries\('connection'\)[\s\S]*record\.socket\?\.close\?\.\(\)[\s\S]*deleteShareSenderRecord\(token\)/.test(shareSource), 'inactive share pruning closes and deletes the complete token record');
       assert.ok(/function startShareStatusRefresh\(\)[\s\S]*if \(shareViewMode\)[\s\S]*ensureShareHostSockets\(\)/.test(shareSource), 'read-only share viewers also open the UI socket so editor/Finder-only layouts receive mirror frames');
-      assert.ok(/function startShareStatusRefresh\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
+      assert.ok(/function syncShareRuntimeIntervals\(\)[\s\S]*shareViewMode \|\| shareHasActiveShare\(\)[\s\S]*!shareRuntimeActive[\s\S]*clearRuntimeInterval\('share-status'\)[\s\S]*clearRuntimeInterval\('share-geometry-digest'\)[\s\S]*if \(!shareViewMode\) installShareGeometryDigestLoop\(\)/.test(shareSource), 'T1: share timers start only for active hosts or viewers and both clear on host deactivation');
+      assert.ok(/function syncShareRuntimeIntervals\(\)[\s\S]*resetRuntimeInterval\('share-status', \(\) => \{[\s\S]*if \(shareStatusSurfaceVisible\(\)\) \{[\s\S]*renderShareStatusPill\(\)[\s\S]*updateShareViewerBanner\(\)[\s\S]*renderShareCountdowns\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource), 'YO!share status loop skips DOM countdown/status rendering when share surfaces are hidden while keeping backup API refreshes alive');
+      assert.ok(/function shareStatusSocketHealthy\(\)[\s\S]*WebSocket\.OPEN/.test(shareSource) && /shareViewMode && !shareStatusSocketHealthy\(\)[\s\S]*shareViewerStatusBackupRefreshMs/.test(shareSource) && /function shareHostStatusBackupPollDue[\s\S]*!shareStatusSocketHealthy\(\)/.test(shareSource), 'YO!share uses pushed share-socket status while healthy and reserves host/viewer HTTP status refreshes for a disconnected repair path');
       assert.ok(/shareViewerStatusBackupRefreshMs:\s*uiDelayMs\.shareViewerStatusBackupRefresh/.test(timingSource), 'read-only share viewers use push for live state and keep /api/share status polling as a low-frequency backup through the shared timing owner');
       assert.ok(/function shareCanPublishUi\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*shareReplayViewerModeEnabled\(\)[\s\S]*shareViewMode[\s\S]*shareWriteMode[\s\S]*shareToken[\s\S]*shareHasActiveShare/.test(shareSource), 'DOIT.72 P5.3: share UI publication is allowed for hosts with shares and legacy rw viewers, but replay viewers cannot publish semantic UI frames');
       assert.ok(/function beginShareRemoteUiApply\(\)[\s\S]*applyingShareRemoteUiState[\s\S]*\+ 1[\s\S]*return \(\) => \{[\s\S]*applyingShareRemoteUiState[\s\S]*- 1/.test(shareSource), 'remote UI apply uses a depth counter so overlapping async/sync mirror applies cannot leave rw viewers non-publishable');
       assert.ok(/function sharePublish\(type, payload = \{\}, options = \{\}\)[\s\S]*shareBuildUiMessage\(type, payload, \{\.\.\.options, commitSequence: false\}\)[\s\S]*const serialized = JSON\.stringify\(message\)[\s\S]*shareCommitBuiltUiMessage\(message\)[\s\S]*sendOrQueueShareHostMessage\(token, serialized\)/.test(shareSource), 'sharePublish fans host and rw-viewer UI-state publication through one serialized send-or-queue path');
       const connectionApi = loadYolomux('', ['1'], 'https:');
+      connectionApi.setActiveSharesForTest([]);
+      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), false, 'T1: a non-sharing host page keeps neither share timer active');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-status'), false, 'T1: inactive host has no share-status timer');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-geometry-digest'), false, 'T1: inactive host has no share geometry timer');
+      connectionApi.setActiveSharesForTest([{token: 'timer-share'}]);
+      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), true, 'T1: active host starts share lifecycle timers');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-status'), true, 'T1: active host starts status timer');
+      assert.equal(connectionApi.runtimeIntervalActiveForTest('share-geometry-digest'), true, 'T1: active host starts geometry timer');
+      connectionApi.setActiveSharesForTest([]);
+      assert.equal(connectionApi.syncShareRuntimeIntervalsForTest(), false, 'T1: stopped host clears share lifecycle timers');
       connectionApi.setActiveSharesForTest([{token: 'closed-share'}]);
       const closedSocket = connectionApi.ensureShareHostSocketForTest('closed-share');
       assert.equal(connectionApi.enqueueShareHostMessageForTest('closed-share', {type: 'queued-before-close'}), true);
@@ -3271,6 +3333,7 @@ async function runShareThemeSuite() {
       assert.ok(/function shareGeometryFirstDifference\(host = \{\}, local = \{\}\)[\s\S]*'textWraps'/.test(shareSource), 'M9: digest comparison names wrapped text/control drift separately');
       assert.ok(/function shareHostConnectedViewerCount\(\)[\s\S]*share\?\.viewers[\s\S]*share\?\.viewerDetails/.test(shareSource), 'YO!share host perf gates count active viewers from status payloads');
       assert.ok(/function publishShareGeometryDigest\(\)[\s\S]*!shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('geometryDigest'\)[\s\S]*shareGeometryDigestFrame\(\)/.test(shareSource), 'YO!share skips expensive geometry digest snapshots when an active share has no connected viewers');
+      assert.ok(/const shareGeometryDigestDirtyState = \{[\s\S]*revision:[\s\S]*publishedRevision:[\s\S]*function installShareGeometryDigestDirtyTracking\(\)[\s\S]*MutationObserver[\s\S]*ResizeObserver[\s\S]*function publishShareGeometryDigest\(\)[\s\S]*revision === shareGeometryDigestDirtyState\.publishedRevision[\s\S]*shareReplayRecordHostPerfUnchanged\('geometryDigest'\)/.test(shareSource), 'YO!share dirty-tracks layout and skips forced geometry snapshots when the layout has not changed');
     assert.ok(/function shareReplayEnqueueMutationRecords\(records = \[\], options = \{\}\)[\s\S]*options\.requireViewers === true && !shareHostHasConnectedViewers\(\)[\s\S]*shareReplayRecordHostPerfSkip\('mutationRecords'\)[\s\S]*shareReplayRecordHostPerf\('mutationRecords'/.test(shareSource), 'YO!share mutation replay batches record cost while observer-driven mutation publishing stops when no viewers are connected');
       assert.ok(/function shareReplayRecordHostPerfEvent\(kind = '', payload = \{\}, durationMs = null\)[\s\S]*recordJsDebugEvent\('share-replay-perf'/.test(shareSource), 'YO!share replay performance samples reuse the JS debug event stream');
       assert.ok(/async function boot\(\)[\s\S]*waitForYolomuxFontsReady\(\{timeoutMs: 0\}\)\.catch\(\(\) => \{\}\)[\s\S]*paintInitialAppShell\(\)[\s\S]*installYolomuxFontMetricRefresh\(\)/.test(shareSource), 'M9: first app render starts bundled font loading and corrects wrapped widgets after metrics settle');
@@ -3311,6 +3374,10 @@ async function runShareThemeSuite() {
       assert.equal(digestPerf.geometryDigest.lastViewerCount, 2, 'YO!share geometry digest samples record viewer count');
       assert.ok(digestFrames.some(frame => JSON.parse(frame).type === 'geometry-digest'), 'YO!share publishes the geometry digest once viewers are connected');
       assert.ok(digestApi.jsDebugEventsForTest().some(event => event.type === 'share-replay-perf' && event.kind === 'geometryDigest'), 'YO!share geometry digest timings are visible in the existing JS debug event stream');
+      digestApi.publishShareGeometryDigestForTest();
+      digestPerf = digestApi.shareReplayHostPerformanceForTest();
+      assert.equal(digestPerf.geometryDigest.count, 1, 'an unchanged share layout skips the expensive geometry snapshot on the next cadence');
+      assert.equal(digestPerf.geometryDigest.skippedUnchanged, 1, 'the geometry digest diagnostics count unchanged-layout skips');
       assert.ok(/const shareSenderRecords = new Map\(\)/.test(shareSource), 'share pointer DOM and hide timer state have one sender-keyed record owner');
       assert.equal(/sharePointerGhosts|sharePointerHideTimers|let sharePointerGhost\b|let sharePointerHideTimer\b/.test(shareSource), false, 'parallel and scalar share pointer state owners are removed');
       assert.equal(/const (?:IMAGE|PDF|MERMAID)_EXTENSIONS\b/.test(shareSource), false, 'dead preview extension-set mirrors are removed');
@@ -3431,8 +3498,8 @@ async function runShareThemeSuite() {
   	    assert.ok(/function applyLayoutSlots\(nextSlots, options = \{\}\)[\s\S]*sharePublishLayout\(\)[\s\S]*scheduleShareTopologySnapshot\(options\.shareReason \|\| 'layout'\)/.test(shareSource), 'layout commits publish share layout updates and schedule a full UI-state snapshot through the topology scheduler');
       assert.ok(/function activatePaneTab\(side, session, options = \{\}\)[\s\S]*sharePublish\('active-tab', \{slot: side, item: session\}\)[\s\S]*scheduleShareTopologySnapshot\('tab-activation'\)/.test(fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8')), 'tab activation schedules a full topology snapshot behind the narrow active-tab frame');
       assert.ok(/async function openFileExplorerAt\(path, options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('finder-root'\)/.test(fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8')), 'Finder root changes schedule a full topology snapshot');
-      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
-      assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/90_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
+      assert.ok(/function setFileExplorerMode\(mode\)[\s\S]*fileExplorerItemForView\(mode\)[\s\S]*openFileSurface\(item\)/.test(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8')), 'legacy Finder/Differ/Tabber mode frames route through the layout owner, which publishes the topology snapshot');
+      assert.ok(/function switchFileExplorerChangesSession\(session\)[\s\S]*scheduleShareTopologySnapshot\('finder-session'\)/.test(fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8')), 'Finder/Differ/Tabber session changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorViewMode\(path, mode, item = null\)[\s\S]*scheduleShareTopologySnapshot\('editor-mode'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor mode changes schedule a full topology snapshot');
       assert.ok(/function setFileEditorThemeMode\(mode\)[\s\S]*scheduleShareTopologySnapshot\('editor-theme'\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'editor theme changes schedule a full topology snapshot');
       assert.ok(/function applyGlobalThemeMode\(options = \{\}\)[\s\S]*scheduleShareTopologySnapshot\('theme'\)[\s\S]*scheduleShareAppearancePublish\(\{reason: options\.reason \|\| 'theme', topology: false\}\)/.test(fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8')), 'all host theme applications publish appearance frames through the shared apply parent');
@@ -4407,9 +4474,9 @@ async function runShareThemeSuite() {
     assert.ok(source.includes('let fileExplorerOpenGeneration = 0;'), 'Finder root opens have a dedicated generation for async race cancellation');
     assert.ok(/async function openFileExplorerAt\([\s\S]*const openGeneration = \+\+fileExplorerOpenGeneration;[\s\S]*const openStillCurrent = \(\) => openGeneration === fileExplorerOpenGeneration;[\s\S]*const entries = await fetchDirectory\(root,[\s\S]*if \(!openStillCurrent\(\)\) return false;/.test(source), 'stale Finder root fetches are dropped before they can render');
     assert.ok(source.slice(openFileExplorerAtStart, openFileExplorerAtEnd).includes("if (options.syncSelection !== true) cancelPendingFileExplorerActiveSync({invalidateOpen: false});"), 'completed manual Finder opens cancel pending sync without invalidating their own open generation');
-    assert.ok(/const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*if \(showPendingRoot\) \{[\s\S]*fileExplorerManualSelectionActive = options\.manualSelection === true;[\s\S]*renderFileExplorerTreeSearching\(root\);/.test(source), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
+    assert.ok(/const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*if \(showPendingRoot\) \{[\s\S]*setFileExplorerSelectionPin\(options\.manualSelection === true\);[\s\S]*renderFileExplorerTreeSearching\(root\);/.test(source), 'manual and explicit Sync opens claim the Finder UI with a searching row before listing resolves');
     assert.equal(source.slice(source.indexOf('async function syncFileExplorerRootToPlan('), source.indexOf('async function syncFileExplorerToActiveTab(')).includes('openFileExplorerAt('), false, 'cache-first Finder Sync never tears down the root through the manual-open transaction');
-    assert.ok(/async function openFileExplorerAt\([\s\S]*if \(options\.manualSelection === true\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*fileExplorerManualSelectionActive = options\.manualSelection === true;[\s\S]*setFileExplorerPathDisplay\(root\);[\s\S]*renderFileExplorerRootModeControls\(\);[\s\S]*renderFileExplorerTreeSearching\(root\);[\s\S]*const entries = await fetchDirectory\(root,/.test(source), 'typed/manual Finder opens disable Sync, clears stale rows, and shows searching before slow directory listing resolves');
+    assert.ok(/async function openFileExplorerAt\([\s\S]*if \(options\.manualSelection === true\) \{[\s\S]*cancelPendingFileExplorerActiveSync\(\);[\s\S]*const showPendingRoot = options\.manualSelection === true \|\| options\.showPending === true;[\s\S]*setFileExplorerSelectionPin\(options\.manualSelection === true\);[\s\S]*setFileExplorerPathDisplay\(root\);[\s\S]*renderFileExplorerRootModeControls\(\);[\s\S]*renderFileExplorerTreeSearching\(root\);[\s\S]*const entries = await fetchDirectory\(root,/.test(source), 'typed/manual Finder opens disable Sync, clears stale rows, and shows searching before slow directory listing resolves');
     assert.ok(source.includes("textWithMovingEllipsisHtml('searching...', 'file-tree-searching-dots')"), 'Finder searching row reuses the shared moving ellipsis helper');
     assert.ok(/\.file-tree-status-row\s*\{[\s\S]*cursor:\s*default/.test(css), 'Finder searching row is styled as passive status, not an interactive path');
     assert.equal(finderSyncBody.includes('syncFileExplorerToActiveTab(preferredItem'), false, 'fixed Finder mode never follows explicit tmux/editor clicks');
@@ -4523,12 +4590,12 @@ async function runShareThemeSuite() {
     api.clearBrowserSelectionForTest();
     const terminalContextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
     const urlReference = {type: 'url', href: 'https://github.com/ai-vortex/vortex/pull/172'};
-    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, null, urlReference.href, urlReference);
+    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {presetSelection: urlReference.href, reference: urlReference});
     let terminalUrlMenu = terminalContextMenuNode();
     let terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu puts the link action first and drops the redundant generic Copy row when the selection already equals the href');
     assert.equal(terminalUrlLabels.includes('Copy'), false, 'terminal URL menu does not show the ambiguous generic Copy row when it would duplicate Copy URL');
-    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, null, 'YOLOmux PR 172', urlReference);
+    api.showTerminalContextMenuForTest('1', {getSelection: () => ''}, 10, 10, {presetSelection: 'YOLOmux PR 172', reference: urlReference});
     terminalUrlMenu = terminalContextMenuNode();
     terminalUrlLabels = Array.from(terminalUrlMenu.children).map(child => child.textContent).filter(Boolean);
     assert.deepStrictEqual(canonical(terminalUrlLabels), ['Open URL in a new tab', 'Copy URL', 'Copy selected text', 'Copy tmux selection', 'Copy without indent'], 'terminal URL menu labels the selected-text copy path explicitly when the visible text differs from the href');
@@ -4567,6 +4634,7 @@ async function runShareThemeSuite() {
     terminalCopyApi.installTerminalCopyShortcutForTest('1', {
       getSelection: () => '',
       clearSelection: () => { clearSelectionCount += 1; },
+      scrollLines() {},
       attachCustomKeyEventHandler(handler) { domCopyShortcutHandler = handler; },
     }, {
       addEventListener(type, handler, options) {
@@ -4613,7 +4681,7 @@ async function runShareThemeSuite() {
         stopPropagation() {},
         stopImmediatePropagation() {},
       };
-      assert.equal(domCopyShortcutHandler(xtermEvent), true, `${key} remains available to the foreground terminal application`);
+      assert.equal(domCopyShortcutHandler(xtermEvent), false, `${key} is claimed by the xterm handler for normal-screen tmux history`);
       const terminalEvent = {
         type: 'keydown',
         code: key,
@@ -4627,9 +4695,9 @@ async function runShareThemeSuite() {
         stopImmediatePropagation() { stoppedImmediate += 1; },
       };
       domKeydownHandler(terminalEvent);
-      assert.equal(prevented, 0, `${key} is not claimed by the tmux history shortcut`);
-      assert.equal(stopped, 0, `${key} reaches xterm and the foreground terminal application`);
-      assert.equal(stoppedImmediate, 0, `${key} does not stop sibling terminal handlers`);
+      assert.equal(prevented, 1, `${key} is claimed by the capture-phase tmux history shortcut`);
+      assert.equal(stopped, 1, `${key} does not reach xterm on a normal-screen pane`);
+      assert.equal(stoppedImmediate, 1, `${key} stops sibling terminal handlers on a normal-screen pane`);
     }
     const pcPageApi = loadYolomux('', ['1'], 'https:', 'Win32');
     for (const [name, api] of [['Mac', terminalCopyApi], ['PC', pcPageApi]]) {
@@ -4882,7 +4950,7 @@ async function runShareThemeSuite() {
     assert.equal(stoppedImmediate, 1, 'focused terminal Cmd-Left stops sibling handlers');
     assert.equal(terminalNavApi.currentSessionActionTarget(), '1', 'Mac Cmd-Left moves back to the previous visible pane tab');
     const screenshotNavApi = loadYolomux('?platform=mac', ['8001', '8002', '8003'], 'https:', 'MacIntel');
-    const screenshotEditor = screenshotNavApi.fileEditorItemFor('/home/keivenc/yolomux.dev2/docs/specs/SHARE_TEST_INVENTORY.md');
+    const screenshotEditor = screenshotNavApi.fileEditorItemFor('/home/keivenc/yolomux.dev2/tests/SHARE_TEST_INVENTORY.md');
     const screenshotNavSlots = screenshotNavApi.emptyLayoutSlots();
     screenshotNavSlots[screenshotNavApi.layoutTreeKey] = screenshotNavApi.splitNode(
       'row',
@@ -5059,9 +5127,9 @@ async function runShareThemeSuite() {
     assert.equal(stableId, 'created-id', 'shared ID helper creates a missing session ID');
     assert.equal(api.sessionScopedIdForTest('test.stable-id', () => 'other-id'), 'created-id', 'shared ID helper preserves the existing ID');
     assert.equal(api.sessionStorageValueForTest('test.stable-id'), 'created-id', 'shared ID helper persists the created ID');
-    const previewSource = fs.readFileSync('static_src/js/yolomux/94_preview_renderers.js', 'utf8');
+    const previewSource = fs.readFileSync('static_src/js/yolomux/89_preview_renderers.js', 'utf8');
     assert.ok(/function previewFileActionLinks\(path,[\s\S]*rawFileUrl\(path\)[\s\S]*noopener noreferrer[\s\S]*rawFileDownloadUrl\(path\)/.test(previewSource), 'one preview-link helper owns safe Open and Download URLs');
-    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/93_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
+    assert.ok(/previewFileActionLinks\(path, \{leadingSeparator: detailText \? ' · ' : ''\}\)/.test(previewSource) && /previewFileActionLinks\(path, \{leadingSeparator: ' '\}\)/.test(fs.readFileSync('static_src/js/yolomux/88_markdown_preview.js', 'utf8')), 'general and Markdown preview fallbacks reuse the shared link helper');
     assert.ok(api.fuzzyHighlightHtml('10144', '#10144').includes('<mark class="fuzzy-match">10144</mark>'), 'contiguous fuzzy matches render as one box');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xy'), true, 'command palette uses fuzzy matching');
     assert.equal(api.commandPaletteMatches({group: 'Tabs', label: 'helloXandYyy', detail: ''}, 'xz'), false, 'command palette rejects non-matches');
@@ -5369,6 +5437,36 @@ async function runShareThemeSuite() {
     const indexedItem = priorityItems.find(item => item.key === 'file:/home/test/vortex/notes/target.md');
     assert.ok(contextItem && indexedItem, 'file quick-open renders both context and external indexed matches');
     assert.ok(api.commandPaletteItemScore(contextItem, 'target') > api.commandPaletteItemScore(indexedItem, 'target'), 'file quick-open prioritizes the active context over external indexed roots');
+    test('quick-open does not claim a warming indexed search has no matches', () => {
+      const warmingApi = loadYolomux('', ['1']);
+      warmingApi.setFileExplorerIndexedDirsForTest(['/home/test/vortex']);
+      warmingApi.setCommandPaletteQueryForTest('2026.md');
+      const warming = warmingApi.fileQuickOpenSearchPayloadResultForTest({
+        root: '/home/test/vortex',
+        files: [],
+        index_state: 'warming',
+        index_coverage: 'pending',
+      }, '/home/test/vortex');
+      assert.equal(warming.indexWarming, true, 'a backend warming response stays pending rather than becoming an empty completed search');
+      warmingApi.setFileQuickOpenCandidatesForTest(warming.root, warming.files);
+      warmingApi.setFileQuickOpenIndexWarmingForTest(warming.indexWarming);
+      assert.equal(warmingApi.commandPaletteEmptyTextForTest(), 'Indexing…', 'the palette reports indexing instead of a false No matches result');
+      const ready = warmingApi.fileQuickOpenSearchPayloadResultForTest({
+        root: '/home/test/vortex',
+        files: [{
+          name: '2026.md',
+          path: '/home/test/vortex/notes/w5k/2026.md',
+          relative_path: 'notes/w5k/2026.md',
+          kind: 'file',
+        }],
+        index_state: 'ready',
+        index_coverage: 'full',
+      }, '/home/test/vortex');
+      assert.equal(ready.indexWarming, false, 'a completed response clears the warming state');
+      warmingApi.setFileQuickOpenCandidatesForTest(ready.root, ready.files);
+      warmingApi.setFileQuickOpenIndexWarmingForTest(ready.indexWarming);
+      assert.ok(warmingApi.fileQuickOpenItems().some(item => item.path === '/home/test/vortex/notes/w5k/2026.md'), 'the indexed file appears after its snapshot is ready');
+    });
     api.setFileExplorerIndexedDirsForTest(['/home/test/vortex']);
     assert.deepStrictEqual(canonical(api.fileQuickOpenRootsForSearch('/home/test')), ['/home/test/vortex'], 'an indexed child under the default root replaces the broad live parent search');
     assert.equal(api.fileQuickOpenRootMatchesPathAlias('/home/test/yolomux.dev', 'yolo/TODO.md'), true, 'bare yolo/... queries match the YOLOmux repo basename as a narrow root alias');
@@ -5495,6 +5593,9 @@ async function runShareThemeSuite() {
     assert.equal(sessionActions.some(item => item.disabled), false);
     assert.equal(sessionActions.find(item => item.label === "Rename tmux session '1'").detail, '');
     const contextMenuNode = () => api.testElementForId('appOverlayRoot').children.find(child => child.classList?.contains('terminal-context-menu'));
+    const tabContextMenuStart = source.indexOf('function showTabContextMenu(');
+    const tabContextMenuEnd = source.indexOf('function showSessionContextMenu(', tabContextMenuStart);
+    assert.ok(source.slice(tabContextMenuStart, tabContextMenuEnd).includes('sessionTabDescription(item, info)'), 'tab action descriptions reuse the metadata-safe tab description instead of showing Loading for an interactive terminal');
     api.showSessionContextMenu('1', 10, 10);
     const contextMenu = contextMenuNode();
     const pinTabRow = Array.from(contextMenu.children).find(child => child.getAttribute('aria-label') === 'Pin Tab');

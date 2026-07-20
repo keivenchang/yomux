@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS_DIR = ROOT / "tools"
+TOOLS_DIR = ROOT / "tools" / "agent_clients"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
@@ -72,7 +72,7 @@ def parser_startup_flags(module_path: Path, flag_constants: dict[str, str]) -> s
 
 
 def documented_startup_flags(client: str) -> set[str]:
-    docs = (ROOT / "tools" / "CLIENTS.md").read_text()
+    docs = (ROOT / "tools" / "agent_clients" / "CLIENTS.md").read_text()
     heading = f"## {client.title()} Flags And Settings"
     stop = f"Useful {client.title()}"
     start_index = docs.index(heading)
@@ -543,20 +543,20 @@ def test_terminology_markdown_rows_are_valid_table_rows():
 
 
 def test_clients_doc_uses_shared_terminology_table():
-    docs = (ROOT / "tools" / "CLIENTS.md").read_text()
+    docs = (ROOT / "tools" / "agent_clients" / "CLIENTS.md").read_text()
     assert "\n".join(client_intent_markdown_rows()) in docs
 
 
 def test_documented_startup_flags_match_wrapper_parsers():
     codex_flags = parser_startup_flags(
-        ROOT / "tools" / "codex.py",
+        ROOT / "tools" / "agent_clients" / "codex.py",
         {
             "CODEX_BYPASS_APPROVALS_FLAG": codex.CODEX_BYPASS_APPROVALS_FLAG,
             "CODEX_BYPASS_HOOK_TRUST_FLAG": codex.CODEX_BYPASS_HOOK_TRUST_FLAG,
         },
     )
     claude_flags = parser_startup_flags(
-        ROOT / "tools" / "claude.py",
+        ROOT / "tools" / "agent_clients" / "claude.py",
         {"CLAUDE_SKIP_PERMISSIONS_FLAG": claude.CLAUDE_SKIP_PERMISSIONS_FLAG},
     )
     assert codex_flags == documented_startup_flags("codex")

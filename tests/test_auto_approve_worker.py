@@ -138,6 +138,25 @@ def test_quiet_polling_requires_static_non_working_screen_and_caps_at_four_secon
     assert auto_approve_quiet_poll_interval(0.5, 60, 0.5) == pytest.approx(4.5)
 
 
+def test_recurring_work_status_counts_action_no_change_and_failure_without_target_details():
+    worker = auto_approve_worker.AutoApproveWorker("6", interval=0.5)
+
+    worker.note_recurring_work(useful=True)
+    worker.note_recurring_work(useful=False)
+    worker.note_recurring_work(useful=False, failed=True)
+
+    recurring = worker.status()["recurring_work"]
+    assert recurring["class"] == "sample"
+    assert recurring["cadence_seconds"] == 0.5
+    assert recurring["attempts"] == 3
+    assert recurring["useful"] == 1
+    assert recurring["no_change"] == 1
+    assert recurring["failures"] == 1
+    assert recurring["last_attempt_at"] > 0
+    assert recurring["last_useful_at"] > 0
+    assert "target" not in recurring
+
+
 def test_send_action_confirms_after_reverifying_the_walked_highlight():
     # walk to the target, re-verify it landed there, THEN press Enter.
     worker = auto_approve_worker.AutoApproveWorker("6", interval=0.01)

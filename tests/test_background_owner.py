@@ -1,6 +1,7 @@
 from http import HTTPStatus
 
 import json
+import os
 from pathlib import Path
 import queue
 import threading
@@ -13,6 +14,7 @@ from yolomux_lib import background_owner as background_owner_module
 from yolomux_lib import control as control_module
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
+from yolomux_lib import metadata as metadata_module
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SESSION_FILES
 from yolomux_lib.background_owner import BACKGROUND_ROLE_SEARCH_INDEX
 from yolomux_lib.background_owner import BACKGROUND_ROLE_STATS_SAMPLER
@@ -28,13 +30,25 @@ from _git_helpers import git
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _warm_index_load_latency_budget_seconds(*, cpu_count: int | None = None) -> float:
+    """Scale the scheduling allowance below the 32-core Linux reference host."""
+
+    cores = max(1, int(cpu_count if cpu_count is not None else (os.cpu_count() or 1)))
+    return 0.5 * max(1.0, 32 / cores)
+
+
+def test_warm_index_load_latency_budget_scales_below_linux_baseline_cores():
+    assert _warm_index_load_latency_budget_seconds(cpu_count=64) == 0.5
+    assert _warm_index_load_latency_budget_seconds(cpu_count=32) == 0.5
+    assert _warm_index_load_latency_budget_seconds(cpu_count=10) == pytest.approx(1.6)
+
+
 @pytest.fixture(autouse=True)
 def no_detached_local_services(monkeypatch):
     """Ownership unit tests must not leave five-minute service daemons behind."""
 
     monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
-    monkeypatch.setattr(app_module.StatsClient, "ensure_started", lambda self: True)
-    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: True)
+    monkeypatch.setattr(app_module.StatsCurrentRuntime, "start", lambda self: True)
 
 
 class FollowerOwner:
@@ -216,6 +230,78 @@ def test_lower_priority_server_cannot_release_preferred_owner(monkeypatch, tmp_p
     assert payload["owner"] is True
     assert owner.is_owner() is True
     owner.release_owner("test-cleanup")
+
+
+def test_newer_stats_writer_takes_over_incompatible_preferred_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    owner = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=100,
+        priority=100,
+        capabilities={"stats_writer_build": 2},
+        clock=lambda: 100.0,
+    )
+    follower = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=101,
+        priority=0,
+        capabilities={"stats_writer_build": 3},
+        clock=lambda: 100.0,
+    )
+    owner.started_at_ns = 10
+    follower.started_at_ns = 20
+    owner.publish_generation()
+    follower.publish_generation()
+    assert owner.attempt_takeover() is True
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.background_owner = owner
+    webapp.log_event = lambda *args, **kwargs: None
+
+    def release_owner(_current, request, timeout=2.0):
+        assert timeout == background_owner_module.BACKGROUND_RELEASE_TIMEOUT_SECONDS
+        return webapp.background_release_owner(request["requester"])
+
+    monkeypatch.setattr(background_owner_module, "send_yolomux_control_request", release_owner)
+
+    assert follower.attempt_required_capability_takeover("stats_writer_build", 3) is True
+    assert follower.is_owner() is True
+    assert follower.priority == 100
+    assert follower.read_owner_record()["capabilities"]["stats_writer_build"] == 3
+
+    owner.heartbeat_once()
+    assert owner.is_owner() is False
+    follower.release_owner("test-cleanup")
+
+
+def test_capable_owner_survives_incompatible_preferred_generation_heartbeat(monkeypatch, tmp_path):
+    monkeypatch.setattr("yolomux_lib.background_owner.pid_is_alive", lambda _pid: True)
+    capable = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=101,
+        priority=0,
+        capabilities={"stats_writer_build": 3},
+        clock=lambda: 100.0,
+    )
+    preferred = BackgroundOwnerRegistry(
+        owner_dir=tmp_path / "owner",
+        pid=100,
+        priority=100,
+        capabilities={"stats_writer_build": 2},
+        clock=lambda: 100.0,
+    )
+    capable.started_at_ns = 20
+    preferred.started_at_ns = 10
+    capable.publish_generation()
+    assert capable.attempt_takeover() is True
+    preferred.publish_generation()
+
+    capable.heartbeat_once()
+
+    assert capable.is_owner() is True
+    assert capable.priority == 100
+    assert capable.is_latest_live_generation() is True
+    capable.release_owner("test-cleanup")
 
 
 def test_background_owner_reports_blocked_unreachable_owner(monkeypatch, tmp_path):
@@ -412,8 +498,69 @@ def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypat
     assert delivered[0]["payload"]["role"] == BACKGROUND_ROLE_SESSION_FILES
     assert delivered[0]["payload"]["session"] == "1"
     manifest = json.loads((tmp_path / "background-events.json").read_text(encoding="utf-8"))
-    assert manifest["events"][-1]["type"] == "background_refresh_done"
-    assert manifest["events"][-1]["payload"]["role"] == BACKGROUND_ROLE_SESSION_FILES
+    refresh_records = [record for record in manifest["events"] if record["type"] == "background_refresh_done"]
+    assert refresh_records
+    assert refresh_records[-1]["payload"]["role"] == BACKGROUND_ROLE_SESSION_FILES
+
+
+def test_background_client_event_manifest_replays_latest_scoped_state_to_returning_follower(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-events.json")
+    first = app_module.TmuxWebtermApp(["1"])
+    second = app_module.TmuxWebtermApp(["1"])
+    subscriber_id, subscriber_queue = second.client_events.subscribe(channels={"core"})
+    try:
+        monkeypatch.setattr(first, "notify_background_client_event_followers", lambda *args: None)
+        first.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": "1", "cache_key": "old"})
+        first.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": "1", "cache_key": "current"})
+        first.publish_background_refresh_done(BACKGROUND_ROLE_SEARCH_INDEX, {"root": "/repo"})
+
+        assert second.replay_shared_background_client_events() == 2
+        delivered = [subscriber_queue.get_nowait(), subscriber_queue.get_nowait()]
+        assert second.replay_shared_background_client_events() == 0
+    finally:
+        second.client_events.unsubscribe(subscriber_id)
+        first.control_server.stop()
+        second.control_server.stop()
+
+    session_event = next(event for event in delivered if event["payload"].get("role") == BACKGROUND_ROLE_SESSION_FILES)
+    assert session_event["payload"]["cache_key"] == "current"
+    assert {event["payload"].get("role") for event in delivered} == {BACKGROUND_ROLE_SESSION_FILES, BACKGROUND_ROLE_SEARCH_INDEX}
+
+
+def test_follower_start_replays_background_manifest(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-events.json")
+    producer = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(producer, "notify_background_client_event_followers", lambda *args: None)
+    producer.publish_background_refresh_done(BACKGROUND_ROLE_SESSION_FILES, {"session": "1", "cache_key": "offline-current"})
+
+    class OfflineFollowerRegistry:
+        status = "follower"
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            return False
+
+        def attempt_required_capability_takeover(self, *_args):
+            return False
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(app_module, "BackgroundOwnerRegistry", OfflineFollowerRegistry)
+    follower = app_module.TmuxWebtermApp(["1"])
+    subscriber_id, subscriber_queue = follower.client_events.subscribe(channels={"core"})
+    try:
+        assert follower.start_background_owner(port=9901) is False
+        delivered = subscriber_queue.get(timeout=1.0)
+    finally:
+        follower.client_events.unsubscribe(subscriber_id)
+        producer.control_server.stop()
+        follower.control_server.stop()
+
+    assert delivered["type"] == "background_refresh_done"
+    assert delivered["payload"]["cache_key"] == "offline-current"
 
 
 def test_background_owner_startup_order_latest_port_wins(monkeypatch, tmp_path):
@@ -504,7 +651,6 @@ def test_follower_has_no_expensive_worker_threads_after_takeover(monkeypatch, tm
         monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not start file-index workers")))
         filesystem.index_status(str(tmp_path))
 
-        names = {thread.name for thread in threading.enumerate()}
     finally:
         file_index.set_background_owner_checker(None)
         first.background_owner.stop()
@@ -512,12 +658,11 @@ def test_follower_has_no_expensive_worker_threads_after_takeover(monkeypatch, tm
         first.control_server.stop()
         second.control_server.stop()
 
-    assert "tabber-activity-cache" not in names
-    assert "session-files-warm" not in names
-    assert all(not name.startswith("file-index-") for name in names)
+    assert first.activity_transcript_service.tabber_warmer_record.running is False
 
 
 def test_background_release_owner_stops_background_worker_state(no_control_socket, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "BACKGROUND_CLIENT_EVENTS_PATH", tmp_path / "background-events.json")
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", on_demote=webapp.demote_background_owner, clock=lambda: 100.0)
     owner.owner = True
@@ -528,10 +673,12 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     webapp.session_files_service.work_records[("payload", "1")] = app_module.SessionFilesWorkRecord()
     cleared_indexes = []
     monkeypatch.setattr(file_index, "clear_memory_indexes", lambda: cleared_indexes.append(True))
+    subscriber_id, subscriber_queue = webapp.client_events.subscribe(channels={"core"})
     try:
         response = webapp.background_release_owner({"generation_id": "newer"})
         events = webapp.event_log.tail(limit=5)
     finally:
+        webapp.client_events.unsubscribe(subscriber_id)
         webapp.control_server.stop()
 
     assert response["ok"] is True
@@ -542,6 +689,9 @@ def test_background_release_owner_stops_background_worker_state(no_control_socke
     assert webapp.session_files_service.work_records == {}
     assert cleared_indexes == [True]
     assert "background_owner_released" in {event["type"] for event in events}
+    changed = subscriber_queue.get_nowait()
+    assert changed["type"] == "background_owner_changed"
+    assert changed["payload"]["status"] == "follower"
 
 
 def test_background_owner_required_log_event_names_have_emitters():
@@ -755,7 +905,32 @@ def test_metadata_warmer_stops_between_sessions_after_owner_demotion(monkeypatch
             second_release.wait(timeout=2.0)
         return {}
 
+    # The network/git warm itself now runs inside a jobd `metadata_warm_view` task (one
+    # submission per session, so a demotion between sessions still stops here before the NEXT
+    # session's job is ever submitted). `metadata.session_work_graph` is the name that task calls;
+    # `app_module.session_work_graph` is only the (unrelated) allow_network=False comparison call.
     monkeypatch.setattr(app_module, "session_work_graph", graph)
+    monkeypatch.setattr(metadata_module, "session_work_graph", graph)
+    coalesce_keys = set()
+    payloads_by_key = {}
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "metadata_warm_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        payloads_by_key[coalesce_key] = payload
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        result = metadata_module.metadata_warm_view_result(payloads_by_key[coalesce_key], max_bytes=512 * 1024)
+        return {"ok": True, "state": "ready", "generation": 2**62}, json.dumps(result).encode("utf-8")
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
     sessions = {
         name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
         for name in ("first", "second")
@@ -870,18 +1045,26 @@ def test_follower_batch_session_files_does_not_spawn_warm_threads(monkeypatch, n
 
 
 def test_follower_missing_session_files_uses_bounded_fallback_when_owner_unresponsive(monkeypatch, no_control_socket, tmp_path):
+    # The bounded fallback compute now routes through the jobd session_files_view
+    # product (checkbox 4/9), not an inline session_files call; mock the jobd
+    # submit/product RPCs instead of the retired direct compute function.
     monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = UnresponsiveFollowerOwner()
     webapp.background_owner = owner
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
-    compute_calls = []
+    submit_calls = []
 
-    def compute_payload(*_args, **_kwargs):
-        compute_calls.append(True)
-        return {"files": [{"path": "fallback.py"}], "repos": [], "errors": []}
+    def fake_submit(task, payload, **_kwargs):
+        submit_calls.append(task)
+        return {"ok": True, "job": {"job_id": "fake"}}
 
-    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", compute_payload)
+    def fake_product(_coalesce_key, timeout=0.5):
+        body = json.dumps({"payload": {"files": [{"path": "fallback.py"}], "repos": [], "errors": []}, "status": 200}).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
     try:
         payload = webapp.cached_session_files_payload_for_info(info)
         events = webapp.event_log.tail(limit=5)
@@ -890,7 +1073,7 @@ def test_follower_missing_session_files_uses_bounded_fallback_when_owner_unrespo
         webapp.control_server.stop()
 
     assert payload["files"] == [{"path": "fallback.py"}]
-    assert compute_calls == [True]
+    assert submit_calls == ["session_files_view"]
     assert owner.refresh_requests == [BACKGROUND_ROLE_SESSION_FILES]
     assert owner.fallbacks == [BACKGROUND_ROLE_SESSION_FILES]
     assert "background_refresh_fallback" in {event["type"] for event in events}
@@ -1179,6 +1362,61 @@ def test_search_index_build_publishes_background_refresh_done(monkeypatch, tmp_p
     assert payload["entries"] >= 1
 
 
+def test_search_index_start_publishes_building_before_worker_runs(monkeypatch, tmp_path):
+    index = file_index.RootIndex(tmp_path)
+    events = []
+    file_index.set_background_owner_done_notifier(lambda role, payload: events.append((role, payload)))
+    monkeypatch.setattr(file_index, "start_thread_with_rollback", lambda _thread, _rollback: None)
+    try:
+        file_index._start_build(index, set())
+    finally:
+        file_index.set_background_owner_done_notifier(None)
+
+    assert events == [(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "state": "building", "generation": 1})]
+    assert index.building is True
+
+
+def test_search_index_unindex_fences_a_stale_build_completion(monkeypatch, tmp_path):
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.RootIndex(tmp_path)
+    index.building = True
+    index.build_generation = 1
+    index.active_generation = 1
+    events = []
+    file_index.set_background_owner_done_notifier(lambda role, payload: events.append((role, payload)))
+    with file_index._REGISTRY_LOCK:
+        file_index._REGISTRY[str(tmp_path)] = index
+    try:
+        file_index.unindex(tmp_path)
+        file_index._run_build(index, set(), generation=1)
+    finally:
+        file_index.set_background_owner_done_notifier(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
+
+    assert events == []
+    assert file_index._tombstone_path(tmp_path).exists()
+
+
+def test_search_index_build_error_clears_building_and_publishes_terminal_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.RootIndex(tmp_path)
+    index.building = True
+    index.build_generation = 1
+    index.active_generation = 1
+    events = []
+    file_index.set_background_owner_done_notifier(lambda role, payload: events.append((role, payload)))
+    monkeypatch.setattr(file_index, "_walk_root_with_metrics", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
+    try:
+        file_index._run_build(index, set(), generation=1)
+    finally:
+        file_index.set_background_owner_done_notifier(None)
+
+    assert index.building is False
+    assert index.last_error == "disk unavailable"
+    assert events == [(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "state": "error", "generation": 1, "error": "disk unavailable"})]
+
+
 def test_directory_rename_invalidates_and_rebuilds_search_index(monkeypatch, tmp_path):
     root = tmp_path / "root"
     old_dir = root / "migration-tools"
@@ -1362,7 +1600,7 @@ def test_search_index_warm_takeover_loads_disk_without_rebuild_timing_regression
 
     assert index.ready is True
     assert any(entry[2] == "target.py" for entry in index.entries)
-    assert elapsed < 0.5
+    assert elapsed < _warm_index_load_latency_budget_seconds()
 
 
 def test_search_index_follower_status_uses_manifest_without_full_json_timing_regression(monkeypatch, tmp_path):
@@ -1605,12 +1843,7 @@ def test_many_search_index_events_and_queries_schedule_one_refresh(monkeypatch, 
     assert len(index.dirty_paths) == 1
 
 
-def test_owner_acquisition_starts_sampler_scheduler_even_when_statsd_is_down(no_control_socket, monkeypatch, tmp_path):
-    """Never-hard-gate regression (2026-07-15): a stale statsd daemon held the socket at
-    boot, ensure_started() failed once at owner acquisition, and the old one-shot gate
-    skipped start_stats_metric_scheduler forever — YO!stats stayed blank until the next
-    owner handoff. The scheduler must start regardless; its family loops already survive
-    per-cycle statsd failures and self-heal when the daemon returns."""
+def test_owner_acquisition_starts_current_stats_runtime(no_control_socket, monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", clock=lambda: 100.0)
     owner.owner = True
@@ -1619,14 +1852,11 @@ def test_owner_acquisition_starts_sampler_scheduler_even_when_statsd_is_down(no_
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
     monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_tabber_activity_cache", lambda self: None)
     monkeypatch.setattr(webapp.pricing_refresh_coordinator, "start_periodic", lambda: None)
-    monkeypatch.setattr(app_module.StatsClient, "ensure_started", lambda self: False)
-    scheduler_starts = []
-    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: scheduler_starts.append(True) or True)
+    runtime_starts = []
+    monkeypatch.setattr(webapp.stats_current_runtime, "start", lambda: runtime_starts.append(True) or True)
     try:
         webapp.handle_background_owner_acquired({"last_transition": "acquired"})
-        events = webapp.event_log.tail(limit=10)
     finally:
         webapp.control_server.stop()
 
-    assert scheduler_starts == [True], "statsd being down must not gate the sampler scheduler"
-    assert "statsd_sampler_unavailable" in {event["type"] for event in events}
+    assert runtime_starts == [True]

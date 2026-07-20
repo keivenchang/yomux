@@ -8,15 +8,18 @@ copy subtly different permissions, cleanup, or rolling-RPC behavior.
 from __future__ import annotations
 
 import fcntl
+import multiprocessing
 import os
 import signal
 import socket
 import struct
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
+from ..background_owner import pid_is_alive
 from .rpc import LocalRpcEnvelope
 from .rpc import LocalRpcError
 from .rpc import read_message
@@ -29,6 +32,32 @@ SignalHandlers = list[tuple[int, signal.Handlers]]
 LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS = 0.5
 LOCAL_SERVICE_MAX_CLIENT_LEASES = 64
 LOCAL_SERVICE_SECRET_MARKERS = ("token", "secret", "password", "cookie", "authorization", "api_key", "apikey", "bearer")
+
+
+class LocalRpcServiceState:
+    """Shared singleton-service lifecycle state; semantics stay with each daemon."""
+
+    def __init__(self, socket_path: Path, *, prefix: str, idle_seconds: float):
+        self.socket_path = safe_socket_path(socket_path, prefix=prefix)
+        self.lock_path = self.socket_path.with_suffix(".lock")
+        self.stop_event = multiprocessing.get_context("spawn").Event()
+        self.idle_seconds = max(1.0, float(idle_seconds))
+        self.started_at = time.time()
+        self.last_client_at = time.monotonic()
+        self.leases: dict[str, int] = {}
+
+
+def reap_dead_client_leases(leases: dict[str, int]) -> int:
+    """Discard leases whose owning local process no longer exists."""
+
+    dead = tuple(
+        lease_id
+        for lease_id, pid in leases.items()
+        if pid <= 0 or not pid_is_alive(pid)
+    )
+    for lease_id in dead:
+        leases.pop(lease_id, None)
+    return len(dead)
 
 
 def apply_service_process_priority(increment: int = 5) -> bool:
@@ -79,14 +108,22 @@ def redact_local_service_text(value: object) -> str:
     return text[:256]
 
 
-def acquire_client_lease(leases: dict[str, int], client_pid: object) -> dict[str, object]:
+def acquire_client_lease(
+    leases: dict[str, int],
+    client_pid: object,
+    existing_lease_id: object = None,
+) -> dict[str, object]:
     """Bound the shared local-service lease table for every daemon."""
-    if len(leases) >= LOCAL_SERVICE_MAX_CLIENT_LEASES:
-        return {"ok": False, "error": "too many clients", "leases": len(leases)}
     try:
         pid = max(0, int(client_pid or 0))
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid client pid", "leases": len(leases)}
+    reap_dead_client_leases(leases)
+    lease_id = str(existing_lease_id or "")
+    if lease_id and leases.get(lease_id) == pid:
+        return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}
+    if len(leases) >= LOCAL_SERVICE_MAX_CLIENT_LEASES:
+        return {"ok": False, "error": "too many clients", "leases": len(leases)}
     lease_id = f"{os.getpid()}-{time.time_ns()}-{len(leases)}"
     leases[lease_id] = pid
     return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}
@@ -123,13 +160,16 @@ def run_local_rpc_service(
     on_client: Callable[[], None],
     on_start: Callable[[], None] | None = None,
     on_shutdown: Callable[[], None] | None = None,
+    concurrent_handlers: int = 0,
 ) -> int:
     """Run one bounded local service socket until stopped or idle.
 
     ``handle`` owns typed service semantics.  The common listener owns only
     Unix-domain socket permissions, singleton locking, framing, response
     correlation, and cleanup.  Returning ``True`` from ``on_idle`` requests a
-    bounded idle shutdown after the listener timeout.
+    bounded idle shutdown after the listener timeout. ``concurrent_handlers``
+    is opt-in for services whose handler contract is explicitly lock-safe;
+    most local daemons remain serial by default.
     """
     previous_handlers = install_stop_signal_handlers(stop_event)
     requested_socket_path = socket_path
@@ -175,20 +215,19 @@ def run_local_rpc_service(
                 # listener publication.  A losing contender must never open or
                 # migrate the winner's database before discovering the lock.
                 on_start()
-            try:
-                while not stop_event.is_set():
-                    try:
-                        connection, _address = server.accept()
-                    except TimeoutError:
-                        if on_idle():
-                            stop_event.set()
-                        continue
+            handler_limit = max(0, int(concurrent_handlers))
+            handler_slots = threading.BoundedSemaphore(handler_limit) if handler_limit else None
+            handler_threads: set[threading.Thread] = set()
+            handler_threads_lock = threading.Lock()
+
+            def serve_connection(connection: socket.socket) -> None:
+                try:
                     with connection:
                         connection.settimeout(LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS)
                         uid = peer_uid(connection)
                         if uid is not None and uid != os.getuid():
                             write_message(connection, None, {"ok": False, "error": "peer uid mismatch"}, legacy=True)
-                            continue
+                            return
                         on_client()
                         try:
                             envelope, payload, _binary, legacy = read_message(connection)
@@ -217,11 +256,43 @@ def run_local_rpc_service(
                                     write_message(connection, None, {"ok": False, "error": "response too large"}, legacy=True)
                                 except OSError:
                                     pass
+                finally:
+                    if handler_slots is not None:
+                        handler_slots.release()
+                    with handler_threads_lock:
+                        handler_threads.discard(threading.current_thread())
+
+            try:
+                while not stop_event.is_set():
+                    try:
+                        connection, _address = server.accept()
+                    except TimeoutError:
+                        if on_idle():
+                            stop_event.set()
+                        continue
+                    if handler_slots is None:
+                        serve_connection(connection)
+                    elif not handler_slots.acquire(blocking=False):
+                        with connection:
+                            try:
+                                write_message(connection, None, {"ok": False, "error": "service busy"}, legacy=True)
+                            except OSError:
+                                pass
+                    else:
+                        worker = threading.Thread(target=serve_connection, args=(connection,), name=f"{service_name}-rpc", daemon=True)
+                        with handler_threads_lock:
+                            handler_threads.add(worker)
+                        worker.start()
                     # A completed request may have more clients queued behind it.
                     # Maintenance runs only after an actual accept timeout so
                     # background work cannot jump ahead of interactive RPCs.
             except KeyboardInterrupt:
                 stop_event.set()
+            finally:
+                with handler_threads_lock:
+                    workers = tuple(handler_threads)
+                for worker in workers:
+                    worker.join(timeout=0.1)
         finally:
             server.close()
     finally:

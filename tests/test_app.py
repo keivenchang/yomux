@@ -15,12 +15,12 @@ from urllib.parse import urlparse
 import pytest
 import yaml
 
+from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
 from yolomux_lib import common
+from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
-from yolomux_lib import statsd
-from yolomux_lib.statsd import StatsClient
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
 from yolomux_lib.common import AgentInfo
@@ -28,15 +28,131 @@ from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
 from yolomux_lib import server_logs
-from yolomux_lib.local_services import stats_store
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
 from yolomux_lib.yoagent import transports as transport_module
+
+from _git_helpers import git
+from _git_helpers import init_repo
 
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
+
+
+def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch):
+    counters = app_module.DarwinVmStatistics64()
+    counters.internal_page_count = 30
+    counters.wire_count = 10
+    counters.compressor_page_count = 20
+    counters.external_page_count = 40
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
+    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: SimpleNamespace(used_bytes=25))
+    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: 80 if name == "kern.memorystatus_level" else None)
+
+    assert app_module.current_darwin_system_memory_details() == app_module.DarwinSystemMemoryDetails(
+        physical_memory_bytes=1000,
+        memory_used_bytes=600,
+        cached_files_bytes=400,
+        app_memory_bytes=300,
+        wired_memory_bytes=100,
+        compressed_memory_bytes=200,
+        swap_used_bytes=25,
+        pressure_percent=20.0,
+    )
+
+
+def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeypatch):
+    counters = app_module.DarwinVmStatistics64()
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
+    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: None)
+    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: None)
+
+    details = app_module.current_darwin_system_memory_details()
+
+    assert details is not None
+    assert details.swap_used_bytes is None
+    assert details.pressure_percent is None
+
+
+def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+    responses = iter([
+        ({"ok": True, "state": "pending", "generation": 1}, None),
+        ({"ok": True, "state": "ready", "generation": 2}, b"ready"),
+    ])
+
+    class Client:
+        def product(self, key):
+            assert key == "product-key"
+            return next(responses)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+
+    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
+
+    assert (meta["generation"], body, state) == (2, b"ready", "ready")
+    assert sleeps == [app_module.JOBD_PRODUCT_POLL_INITIAL_SECONDS]
+
+
+def test_wait_for_jobd_product_caps_its_final_sleep_at_deadline(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+
+    class Client:
+        def product(self, key):
+            return {"ok": True, "state": "pending", "generation": 1}, None
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+    monkeypatch.setattr(app_module, "JOBD_PRODUCT_POLL_INITIAL_SECONDS", 0.25)
+
+    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 0.3)
+
+    assert (meta, body, state) == (None, None, "pending")
+    assert sleeps == [0.25, pytest.approx(0.05)]
+    assert sum(sleeps) == pytest.approx(0.3)
+
+
+def test_wait_for_jobd_product_backs_off_to_a_bounded_broker_cadence(monkeypatch):
+    clock = [100.0]
+    sleeps = []
+
+    class Client:
+        def product(self, key):
+            return ({"ok": True, "state": "ready", "generation": 2}, b"ready") if len(sleeps) == 3 else ({"ok": True, "state": "pending", "generation": 1}, None)
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_module.time, "sleep", fake_sleep)
+    meta, body, state = app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
+    assert (meta["generation"], body, state) == (2, b"ready", "ready")
+    assert sleeps == [0.25, 0.5, 1.0]
+
+
+def test_wait_for_jobd_product_keeps_broker_failure_distinct():
+    class Client:
+        def product(self, key):
+            return {"ok": False}, None
+
+    with pytest.raises(app_module.JobdProductRpcUnavailable, match="rpc unavailable"):
+        app_module.wait_for_jobd_product(Client(), "product-key", 2, 20.0)
 
 
 class StatsRoleOwner:
@@ -63,7 +179,11 @@ class StatsRoleOwner:
 def test_record_owned_direct_image_usage_preserves_structured_image_token_classes():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
+    webapp.settings_payload = lambda: {"settings": {"cost": {"openai_pricing_profile": "subscription"}}}
 
     assert webapp.record_owned_usage_atoms(
         provider="openai",
@@ -76,11 +196,17 @@ def test_record_owned_direct_image_usage_preserves_structured_image_token_classe
         timestamp=1_000,
     ) is True
 
-    atoms = submitted[0]["usage_atoms"]
-    assert {(atom["direction"], atom["modality"], atom["quantity"]) for atom in atoms} == {
+    atoms = submitted
+    assert {(atom.direction, atom.modality, atom.payload["quantity"]) for atom in atoms} == {
         ("input", "text", 11.0), ("input", "image", 22.0), ("output", "image", 33.0),
     }
-    assert all(atom["model"] == "gpt-image-2" and atom["endpoint"] == "images" and atom["root_thread_id"] == "root-thread" for atom in atoms)
+    assert all(
+        atom.payload["model"] == "gpt-image-2"
+        and atom.payload["execution_source"] == "images"
+        and atom.payload["thread_id"] == "root-thread"
+        and atom.payload["pricing_profile"] == "default"
+        for atom in atoms
+    )
 
 
 def test_stats_agent_token_rows_preserve_tmux_window_identity_for_cost_attribution():
@@ -106,10 +232,56 @@ def test_stats_agent_token_rows_preserve_tmux_window_identity_for_cost_attributi
     }]
 
 
+def test_stats_agent_token_rows_do_not_collapse_distinct_panes_in_one_window():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+
+    rows = webapp.stats_agent_token_rows([
+        {"session": "s", "window_index": 2, "pane_target": "%10", "kind": "codex", "transcript": "/tmp/one.jsonl"},
+        {"session": "s", "window_index": 2, "pane_target": "%11", "kind": "codex", "transcript": "/tmp/two.jsonl"},
+    ])
+
+    assert [row["key"] for row in rows] == ["s|2|%10|codex", "s|2|%11|codex"]
+
+
+def test_stats_agent_token_rows_enriches_only_the_token_path_when_statusd_omits_transcripts(monkeypatch, tmp_path):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["s"]
+    pane = PaneInfo("s", "3", "0", "%3", "s:3.0", str(tmp_path), "codex", True, True, "codex", 9)
+    agent = AgentInfo("s", "codex", 9, "%3", "codex", str(tmp_path), None, "thread", str(tmp_path / "rollout.jsonl"), None)
+    info = SessionInfo("s", [pane], pane, [agent])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"s": info}, []))
+
+    rows = webapp.stats_agent_token_rows([{"session": "s", "kind": "codex", "transcript": ""}])
+
+    assert rows == [{
+        "key": "s|3|codex", "label": "s:3:codex", "transcript": str(tmp_path / "rollout.jsonl"),
+        "kind": "codex", "session": "s", "window": "3", "window_label": "3:codex",
+    }]
+
+
+def test_stats_agent_token_rows_keeps_existing_transcript_rows_when_enriching_missing_ones(monkeypatch, tmp_path):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["s"]
+    pane = PaneInfo("s", "3", "0", "%3", "s:3.0", str(tmp_path), "claude", True, True, "claude", 9)
+    agent = AgentInfo("s", "claude", 9, "%3", "claude", str(tmp_path), None, "thread", str(tmp_path / "claude.jsonl"), None)
+    info = SessionInfo("s", [pane], pane, [agent])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"s": info}, []))
+
+    rows = webapp.stats_agent_token_rows([
+        {"session": "s", "window_index": 1, "kind": "codex", "transcript": "/tmp/codex.jsonl"},
+        {"session": "s", "window_index": 3, "kind": "claude", "transcript": ""},
+    ])
+
+    assert {row["key"] for row in rows} == {"s|1|codex", "s|3|claude"}
+
+
 def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_usage():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
 
     # A partial image stream result carries no completed provider usage.  It
     # cannot be priced from image bytes, a provisional total, or prose.
@@ -123,7 +295,7 @@ def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_
         usage={"input_tokens_details": {"text_tokens": 3, "image_tokens": 7}, "output_tokens": 11},
         source="Image stream", event_id="request-2", endpoint="images", timestamp=1_001,
     ) is True
-    assert {(atom["direction"], atom["modality"], atom["quantity"]) for atom in submitted[0]["usage_atoms"]} == {
+    assert {(atom.direction, atom.modality, atom.payload["quantity"]) for atom in submitted} == {
         ("input", "text", 3.0), ("input", "image", 7.0), ("output", "image", 11.0),
     }
 
@@ -131,19 +303,24 @@ def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_
 def test_record_owned_responses_image_tool_keeps_mainline_and_opaque_child_separate():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.stats_client = SimpleNamespace(merge_server_records=lambda records, **_kwargs: submitted.extend(records) or {"ok": True})
+    webapp.stats_current_client = SimpleNamespace(
+        ensure_started=lambda: True,
+        append=lambda *, usage_atoms: submitted.extend(usage_atoms) or {"ok": True},
+    )
+    webapp.settings_payload = lambda: {"settings": {"cost": {"openai_pricing_profile": "subscription"}}}
 
     assert webapp.record_owned_usage_atoms(
         provider="openai", model="gpt-5.6", usage={"input_tokens": 10, "output_tokens": 5}, source="Responses",
-        event_id="response-1", endpoint="responses", opaque_image_tool=True, timestamp=1_000,
+        event_id="response-1", endpoint="responses", opaque_image_tool=True, pricing_profile="subscription", timestamp=1_000,
     ) is True
 
-    atoms = submitted[0]["usage_atoms"]
-    assert {(atom["model"], atom["modality"], atom["unit"], atom["quantity"]) for atom in atoms} == {
+    atoms = submitted
+    assert {(atom.payload["model"], atom.modality, atom.unit, atom.payload["quantity"]) for atom in atoms} == {
         ("gpt-5.6", "text", "tokens", 10.0), ("gpt-5.6", "text", "tokens", 5.0), ("unknown", "image", "requests", 1.0),
     }
-    opaque = next(atom for atom in atoms if atom["model"] == "unknown")
-    assert opaque["tool_name"] == "image_generation_call" and opaque["telemetry_complete"] is False
+    assert {atom.payload["pricing_profile"] for atom in atoms} == {"default"}
+    opaque = next(atom for atom in atoms if atom.payload["model"] == "unknown")
+    assert opaque.payload["telemetry_complete"] is False
 
 
 def test_state_services_own_independent_cache_and_watcher_records_without_app():
@@ -152,30 +329,53 @@ def test_state_services_own_independent_cache_and_watcher_records_without_app():
     second, second_owner = session_files.claim_work(("session", "1"), 11)
     activity = state_services.ActivityTranscriptService()
     activity.activity_summary_cache[("configured", "en")] = {"sessions": []}
-    watch = state_services.ClientWatchService(context_items=[{"id": "context"}], session_files=[{"session": "1"}], activity_summary={"ok": True})
-    stats = state_services.StatsHistoryService()
+    watch = state_services.ClientWatchService(descriptors={
+        "client-1": state_services.ClientWatchDescriptor(
+            expires_at=time.monotonic() + 60.0,
+            context_items=[{"session": "1", "messages": 1, "id": "context"}],
+            session_files=[{"session": "1"}],
+            activity_summary={"visible": True, "ok": True},
+        ),
+    })
+    stats = state_services.StatsCollectionState()
 
     assert first_owner is True and second_owner is False and second is first
     assert activity.activity_summary_cache[("configured", "en")]["sessions"] == []
-    assert watch.snapshot() == ([{"id": "context"}], [{"session": "1"}], {"ok": True})
+    assert watch.snapshot() == ([{"session": "1", "messages": 1, "id": "context"}], [{"session": "1"}], {"visible": True, "ok": True})
     assert stats.sample_record.cached_payload is None
-    assert stats.agent_token_state == {} and stats.agent_activity_state == {}
+    assert stats.agent_activity_state == {}
+
+
+def test_session_files_owner_demotion_fences_reserved_work():
+    session_files = state_services.SessionFilesService()
+    record = session_files.reserve_work(("payload", "old"), "stable-view")
+
+    assert record is not None
+    assert session_files.stable_generation_is_current(record) is True
+    session_files.cancel_all_work()
+
+    assert session_files.work_records == {}
+    assert session_files.latest_stable_generations == {}
+    assert session_files.stable_generation_is_current(record) is False
 
 
 def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "leased": False,
+            "families": {},
+            "service": {"ok": True, "version": 23, "pid": 0, "migration": {"state": "ready"}},
+        })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.status_client, "runtime_status", lambda: {"service": "statusd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()
     finally:
         webapp.control_server.stop()
 
-    # stats-reader retired: history encodes run in-process in the web server,
-    # so the honest roster is exactly the four spawned local services.
-    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "approvald"]
+    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "statusd", "approvald"]
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
@@ -185,7 +385,10 @@ def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch)
         now = time.time()
         # A running service reports a started_at; an idle one has no pid.
         monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "started_at": now - 42.0, "resources": {"cpu_percent": 1.0, "rss_bytes": 2048}})
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 0, "started_at": 0.0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "service": {"ok": True, "pid": 0, "started_at": 0.0, "migration": {"state": "ready"}},
+            "families": {},
+        })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()["services"]
@@ -200,36 +403,157 @@ def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch)
     assert by_name["statsd"]["uptime_seconds"] is None
 
 
-def test_record_service_load_records_every_known_service_including_idle(monkeypatch):
+def test_runtime_local_services_jobd_row_exposes_product_counters_and_cache(monkeypatch):
+    # The System view's "Cache" and "Products" diagnostic rows read service.cache /
+    # service.product_counters directly off the jobd runtime_status row; prove the
+    # checkbox-3 jobd product-layer counters actually reach that surface.
     webapp = app_module.TmuxWebtermApp([])
     try:
-        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 4321, "resources": {"cpu_percent": 12.0, "rss_bytes": 2048}})
-        # A running service whose first-sample CPU delta is not yet known.
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"service": "statsd", "pid": 4322, "resources": {"cpu_percent": None, "rss_bytes": 4096}})
-        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "service": {"ok": True, "pid": 0, "started_at": 0.0, "migration": {"state": "ready"}},
+            "families": {},
+        })
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
+            "service": "jobd", "pid": 4242, "resources": {},
+            "cache": {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2, "products_stale": 1},
+            "product_counters": {"transcript_view": {"accepted": 5, "coalesced": 2, "completed": 4, "failed": 0, "superseded": 1}},
+            "product_runtime_ms": {"transcript_view": {"count": 4, "total_ms": 240.0, "max_ms": 90.0, "avg_ms": 60.0}},
+            "product_phase_runtime_ms": {"session_files_view": {"git-snapshot": {"count": 2, "total_ms": 30.0, "max_ms": 20.0, "avg_ms": 15.0}}},
+            "product_work_totals": {"session_files_view": {"sessions": 2, "repositories": 1, "files": 4, "git_snapshots": 1, "result_bytes": 512}},
+            "source_change_counters": {"initial": 1},
+            "last_success": 1784386100.0,
+        })
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
-        monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {"time": 100.0, "pid": 999, "cpu_percent": 5.0, "rss_bytes": 8192})
-        monkeypatch.setattr(webapp, "stats_metric_scheduled_time", lambda: 100.0)
-        captured = {}
-        monkeypatch.setattr(webapp, "merge_stats_family_record", lambda family, record, sample: captured.update(family=family, record=record))
-        webapp.record_stats_service_load_sample()
+        services = webapp.runtime_local_services()["services"]
     finally:
         webapp.control_server.stop()
 
-    assert captured["family"] == "service_load"
-    services = captured["record"]["host_metrics"]["service_load"]
-    # Every known service — running or idle — plus the web process is present so
-    # the Servers Load chart shows all series instead of only web. stats-reader
-    # is retired (merged into the web process), so it is no longer a known series.
-    assert set(services) == {"indexd", "statsd", "jobd", "approvald", "web"}
-    # Idle spawn-on-demand services read as an honest zero with no RSS series.
-    assert services["jobd"]["cpu_total_percent"] == 0.0 and "rss_total_bytes" not in services["jobd"]
-    # A running service contributes real CPU%/RSS.
-    assert services["indexd"]["cpu_total_percent"] == 12.0 and services["indexd"]["rss_total_bytes"] == 2048.0
-    # First-sample-unknown CPU still yields a present series (0) with real RSS.
-    assert services["statsd"]["cpu_total_percent"] == 0.0 and services["statsd"]["rss_total_bytes"] == 4096.0
-    # The web process is always recorded from the primary sample.
-    assert services["web"]["cpu_total_percent"] == 5.0 and services["web"]["rss_total_bytes"] == 8192.0
+    jobd_row = next(row for row in services if row["service"] == "jobd")
+    assert jobd_row["cache"] == {"records": 3, "coalesced": 1, "record_limit": 256, "products": 2, "products_stale": 1}
+    assert jobd_row["last_success"] == 1784386100.0
+    assert jobd_row["product_counters"]["transcript_view"]["completed"] == 4
+    assert jobd_row["product_counters"]["transcript_view"]["accepted"] == 5
+    # Checkbox 10: per-product runtime totals/maxima reach the same diagnostics surface.
+    assert jobd_row["product_runtime_ms"]["transcript_view"]["max_ms"] == 90.0
+    assert jobd_row["product_runtime_ms"]["transcript_view"]["avg_ms"] == 60.0
+    assert jobd_row["product_phase_runtime_ms"]["session_files_view"]["git-snapshot"]["max_ms"] == 20.0
+    assert jobd_row["product_work_totals"]["session_files_view"]["git_snapshots"] == 1
+    assert jobd_row["source_change_counters"] == {"initial": 1}
+
+
+def test_stats_usage_health_warns_only_for_committed_growth_without_fresh_atoms():
+    warning = app_module.stats_current_usage_health(
+        {"last_accepted_at": 800.0},
+        {"last_visible_append_at": 995.0},
+        10.0,
+        now=1000.0,
+    )
+    resumed = app_module.stats_current_usage_health(
+        {"last_accepted_at": 999.0},
+        {"last_visible_append_at": 995.0},
+        10.0,
+        now=1000.0,
+    )
+    idle = app_module.stats_current_usage_health(
+        {"last_accepted_at": 800.0},
+        {"last_visible_append_at": 700.0},
+        10.0,
+        now=1000.0,
+    )
+
+    assert warning["state"] == "warning"
+    assert warning["stale_bound_seconds"] == 120.0
+    assert resumed["state"] == "ok"
+    assert idle["state"] == "idle"
+
+
+def test_stats_usage_health_warns_for_a_sustained_sampler_failure_loop():
+    warning = app_module.stats_current_usage_health(
+        {"last_accepted_at": 999.0},
+        {"last_visible_append_at": 995.0},
+        10.0,
+        sampler_families={
+            "cpu": {
+                "cadence_seconds": 1.0,
+                "attempts": 12,
+                "failures": 12,
+                "last_attempt_at": 999.5,
+                "last_success_at": 800.0,
+                "last_failure": "FileNotFoundError: statsd.sock missing",
+            },
+        },
+        now=1000.0,
+    )
+    healthy = app_module.stats_current_usage_health(
+        {"last_accepted_at": 999.0},
+        {"last_visible_append_at": 995.0},
+        10.0,
+        sampler_families={
+            "cpu": {
+                "cadence_seconds": 1.0,
+                "attempts": 12,
+                "failures": 2,
+                "last_attempt_at": 999.5,
+                "last_success_at": 998.0,
+                "last_failure": "FileNotFoundError: statsd.sock missing",
+            },
+        },
+        now=1000.0,
+    )
+
+    assert warning["state"] == "warning"
+    assert "sustained sampler failure loop in cpu" in warning["reason"]
+    assert warning["sampler_warning"]["family"] == "cpu"
+    assert healthy["state"] == "ok"
+    assert healthy["sampler_warning"] is None
+
+
+def test_runtime_local_services_exposes_bounded_stats_usage_health(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "families": {
+                "agent_tokens": {"cadence_seconds": 10},
+                "cpu": {
+                    "cadence_seconds": 1,
+                    "attempts": 9,
+                    "failures": 9,
+                    "last_attempt_at": time.time(),
+                    "last_success_at": 1.0,
+                    "last_failure": "FileNotFoundError: statsd.sock missing",
+                },
+            },
+            "service": {
+                "ok": True,
+                "pid": 0,
+                "migration": {"state": "ready"},
+                "usage": {"last_accepted_at": 1.0, "quarantined_conflict_count": 2},
+            },
+        })
+        monkeypatch.setattr(webapp.stats_current_transcript_usage, "status", lambda: {
+            "committed_appended_bytes": 14,
+            "last_visible_append_at": time.time(),
+            "visible_append_age_seconds": 0.0,
+            "legacy_fork_repair": {"active": True, "remaining_files": 2},
+        })
+        monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+        monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+        statsd = next(row for row in webapp.runtime_local_services()["services"] if row["service"] == "statsd")
+    finally:
+        webapp.control_server.stop()
+
+    assert statsd["usage"]["health"]["state"] == "warning"
+    assert "sustained sampler failure loop in cpu" in statsd["usage"]["health"]["reason"]
+    assert statsd["usage"]["health"]["sampler_warning"]["family"] == "cpu"
+    assert statsd["usage"]["quarantined_conflict_count"] == 2
+    assert set(statsd["usage"]["transcripts"]) == {
+        "committed_appended_bytes",
+        "last_visible_append_at",
+        "visible_append_age_seconds",
+        "legacy_fork_repair",
+    }
 
 
 def test_session_http_guards_use_shared_decorator():
@@ -263,106 +587,6 @@ def test_yoagent_controller_facade_allows_only_declared_dependencies(monkeypatch
     assert "self.poll_yoagent_jobs_once()" not in app_source
     assert "request.server.app.yoagent_chat(" not in route_source
     assert "request.server.app.yoagent_controller.yoagent_chat(" in route_source
-
-
-def test_stats_sample_payload_reports_portable_process_cpu(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0, 1002.0])
-    monotonic_times = iter([50.0, 52.0])
-    process_times = iter([10.0, 10.5])
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    try:
-        webapp.record_stats_cpu_sample()
-        first = webapp.stats_sample_payload()
-        webapp.record_stats_cpu_sample()
-        second = webapp.stats_sample_payload()
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["ok"] is True
-    assert first["cpu_percent"] == 0.0
-    assert first["system_cpu_percent"] == 0.0
-    assert first["uptime_seconds"] == 10.0
-    assert second["time"] == 1002.0
-    assert second["pid"] == os.getpid()
-    assert second["cpu_percent"] == 25.0
-    assert second["system_cpu_percent"] == 50.0
-    assert second["uptime_seconds"] == 12.0
-    assert second["rss_bytes"] == 123456
-    assert second["history"]["sequence"] >= 2
-    assert second["history"]["records"]
-    assert any(record["system_cpu_count"] for record in second["history"]["records"])
-    assert {
-        "statsd_history_prepare_ms",
-        "stats_token_consumer_ms",
-        "stats_sample_ms",
-        "stats_history_compact_ms",
-        "stats_history_encode_ms",
-        "stats_app_build_ms",
-    } <= set(second["_endpoint_profile"])
-
-
-def test_stats_host_resource_metrics_uses_only_aggregate_host_data(monkeypatch):
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (1024 * 1024, 512 * 1024))
-    monkeypatch.setattr(app_module, "stats_cached_gpu_metrics", lambda *_args: {"devices": {"gpu:0": {"label": "GPU 0", "util_percent": 0, "memory_used_bytes": 0, "memory_capacity_bytes": 1024}}})
-
-    metrics = app_module.stats_host_resource_metrics()
-
-    assert metrics["system_memory_used_bytes"] == 512 * 1024
-    assert metrics["system_memory_capacity_bytes"] == 1024 * 1024
-    assert metrics["cpu_processes"] == {}
-    assert metrics["memory_processes"] == {}
-    assert metrics["gpu_util_processes"] == {}
-    assert metrics["gpu_memory_processes"] == {}
-
-
-def test_stats_host_resource_metrics_common_path_uses_cached_gpu_and_native_memory_without_subprocess(monkeypatch):
-    calls = []
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "stats_host_hardware_metadata", lambda: {"gpu_label": "Apple M4 Pro"})
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (16 * 1024, 8 * 1024))
-    monkeypatch.setattr(app_module, "stats_cached_gpu_metrics", lambda label: calls.append(label) or {"devices": {"gpu:0": {}}})
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("host sampler must not fork on its common path"))
-
-    metrics = app_module.stats_host_resource_metrics()
-
-    assert calls == ["Apple M4 Pro"]
-    assert metrics["system_memory_capacity_bytes"] == 16 * 1024
-    assert metrics["gpu_devices"] == {"gpu:0": {}}
-
-
-def test_stats_cached_gpu_metrics_starts_only_one_cadence_limited_background_refresh(monkeypatch):
-    starts = []
-
-    class DeferredThread:
-        def __init__(self, *, target, args, **_kwargs):
-            self.target = target
-            self.args = args
-
-        def start(self):
-            starts.append((self.target, self.args))
-
-    monkeypatch.setattr(app_module.threading, "Thread", DeferredThread)
-    monkeypatch.setattr(app_module.time, "perf_counter", lambda: 100.0)
-    monkeypatch.setattr(app_module, "_stats_gpu_metrics_cache", {"devices": {"gpu:0": {"util_percent": 21}}})
-    monkeypatch.setattr(app_module, "_stats_gpu_metrics_refreshed_monotonic", 90.0)
-    monkeypatch.setattr(app_module, "_stats_gpu_metrics_refreshing", False)
-
-    first = app_module.stats_cached_gpu_metrics("GPU")
-    second = app_module.stats_cached_gpu_metrics("GPU")
-
-    assert first == second == {"devices": {"gpu:0": {"util_percent": 21}}}
-    assert len(starts) == 1
-    assert starts[0][1] == ("GPU",)
 
 
 def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
@@ -415,6 +639,30 @@ def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypa
     assert metrics == {"devices": metrics["devices"]}
 
 
+def test_stats_macos_gpu_metrics_reads_current_device_utilization_key(monkeypatch):
+    payload = app_module.plistlib.dumps([{
+        "PerformanceStatistics": {"Device Utilization %": 8, "In use system memory": 2 * 1024 * 1024},
+    }])
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+
+    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
+
+    assert metrics["devices"]["gpu:0"]["util_percent"] == 8.0
+
+
+def test_stats_macos_gpu_metrics_drops_records_without_utilization(monkeypatch):
+    payload = app_module.plistlib.dumps([{
+        "PerformanceStatistics": {"In use system memory": 2 * 1024 * 1024},
+    }])
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+
+    assert app_module.stats_macos_gpu_metrics("Apple M4 Pro") == {}
+
+
 def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
     payload = json.dumps({
         "SPHardwareDataType": [{"chip_type": "Apple M4 Pro", "number_processors": "proc 14:10:4:0"}],
@@ -428,43 +676,6 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
         "gpu_label": "Apple M4 Pro",
         "system_memory_label": "LPDDR5 unified memory",
     }
-
-
-def test_stats_sample_payload_reuses_short_window_sample(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    # Isolate the history cursor from the intentionally independent live
-    # samplers running in other gate lanes.
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0, 1000.2, 1002.0])
-    monotonic_times = iter([50.0, 50.2, 52.0])
-    process_times = iter([10.0, 10.5])
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    try:
-        webapp.record_stats_cpu_sample()
-        first = webapp.stats_sample_payload()
-        webapp.record_stats_cpu_sample()
-        duplicate = webapp.stats_sample_payload()
-        webapp.record_stats_cpu_sample()
-        third = webapp.stats_sample_payload()
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert duplicate["time"] == first["time"]
-    assert duplicate["cpu_percent"] == first["cpu_percent"]
-    assert duplicate["system_cpu_percent"] == first["system_cpu_percent"]
-    assert duplicate["history"]["sequence"] == first["history"]["sequence"]
-    assert third["time"] == 1002.0
-    assert third["cpu_percent"] == 25.0
-    assert third["system_cpu_percent"] == 50.0
-    assert third["history"]["sequence"] > duplicate["history"]["sequence"]
 
 
 def test_stats_sample_parallel_scalars_are_retired():
@@ -490,778 +701,10 @@ def test_stats_history_sampler_parallel_state_is_retired():
     assert "def start_stats_history_sampler" not in source
 
 
-def test_stats_history_payload_limits_records_to_requested_visible_range(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    try:
-        for sample_time in (900.0, 960.0, 1000.0):
-            assert stats_client.merge_server_records(
-                [{
-                    "time": sample_time,
-                    "cpu_total_percent": 1.0,
-                    "cpu_count": 1.0,
-                }],
-                now=1000.0,
-            )["ok"] is True
-        history = stats_client.history(start=950)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    assert [record["start"] for record in history["records"]] == [960, 1000]
-
-
 def test_system_cpu_percent_from_times_clamps_to_single_100_percent_scale():
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 22.0)) == 50.0
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (104.0, 200.0)) == 100.0
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (100.0, 21.0)) == 0.0
-
-
-def test_stats_history_remembers_browser_deltas_and_rolls_old_buckets(monkeypatch, tmp_path):
-    # This test owns only browser-upload fields; an asynchronously elected
-    # sampler would add legitimate server CPU rows while time.time is frozen.
-    monkeypatch.setattr(app_module.TmuxWebtermApp, "start_stats_metric_scheduler", lambda self: False)
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    monkeypatch.setattr(app_module.time, "time", lambda: now)
-    records = [{
-        "start": age_start + i,
-        "duration": 1,
-        "api_count": 1,
-        "sse_count": 1 if i % 2 == 0 else 0,
-        "latency_total_ms": 10 + i,
-        "latency_count": 1,
-        "bandwidth_bytes": 100 + i,
-        "system_cpu_total_percent": 5,
-        "system_cpu_count": 1,
-    } for age_start in (
-        now - (90 * 60),
-        now - (3 * 60 * 60),
-        now - (6 * 60 * 60),
-        now - (10 * 60 * 60),
-        now - (18 * 60 * 60),
-    ) for i in range(20)]
-    try:
-        payload, status = webapp.record_stats_history_payload({"records": records})
-        incremental, _status = webapp.record_stats_history_payload({"since": payload["history"]["sequence"], "records": []})
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["history"]["raw_window_seconds"] == app_module.STATS_HISTORY_RAW_WINDOW_SECONDS
-    assert payload["history"]["middle_window_seconds"] == app_module.STATS_HISTORY_MIDDLE_WINDOW_SECONDS
-    assert payload["history"]["middle_bucket_seconds"] == app_module.STATS_HISTORY_MIDDLE_BUCKET_SECONDS
-    assert payload["history"]["rollup_bucket_seconds"] == app_module.STATS_HISTORY_ROLLUP_BUCKET_SECONDS
-    assert payload["history"]["tiers"] == [
-        {"max_age_seconds": 30 * 60, "bucket_seconds": 1},
-        {"max_age_seconds": 2 * 60 * 60, "bucket_seconds": 10},
-        {"max_age_seconds": 4 * 60 * 60, "bucket_seconds": 60},
-        {"max_age_seconds": 8 * 60 * 60, "bucket_seconds": 2 * 60},
-        {"max_age_seconds": 12 * 60 * 60, "bucket_seconds": 5 * 60},
-        {"max_age_seconds": 24 * 60 * 60, "bucket_seconds": 10 * 60},
-    ]
-    assert sum(
-        (tier["max_age_seconds"] - (payload["history"]["tiers"][index - 1]["max_age_seconds"] if index else 0))
-        // tier["bucket_seconds"]
-        for index, tier in enumerate(payload["history"]["tiers"])
-    ) == 2700
-    assert len(payload["history"]["records"]) <= 10
-    assert sum(record["api_count"] for record in payload["history"]["records"]) == 100
-    assert sum(record["system_cpu_count"] for record in payload["history"]["records"]) == 0
-    assert sum(record["agent_activity_samples"] for record in payload["history"]["records"]) == 0
-    assert {record["duration"] for record in payload["history"]["records"]} == {600}
-    assert incremental["history"]["records"] == []
-
-
-def test_stats_history_ack_only_post_avoids_echoing_the_full_history():
-    webapp = app_module.TmuxWebtermApp([])
-    now = time.time()
-    records = [{"start": now + index, "api_count": 1} for index in range(20)]
-    webapp.stats_client.merge_and_history = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ack-only upload queried history"))
-    try:
-        payload, status = webapp.record_stats_history_payload({"ack_only": True, "records": records})
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["history"]["records"] == []
-    assert payload["history"]["sequence"] >= 20
-
-
-def test_stats_history_empty_legacy_post_uses_bounded_cursor_acknowledgement():
-    webapp = app_module.TmuxWebtermApp([])
-    calls = []
-    webapp.stats_client = SimpleNamespace(
-        history=lambda **kwargs: calls.append(kwargs) or {"ok": True, "sequence": 7, "latest_sequence": 9, "records": []},
-        merge_and_history=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("empty legacy acknowledgement must not serialize retained history")),
-    )
-    try:
-        payload, status = webapp.record_stats_history_payload({"client_id": "triage", "since": 0, "records": []})
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert calls == [{"include_history": False, "since": 0, "client_id": "triage"}]
-    assert payload == {"ok": True, "history": {"records": [], "sequence": 9}}
-
-
-def test_stats_history_wide_token_history_is_server_aggregated(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    try:
-        for offset in range(0, 60 * 60, 60):
-            assert stats_client.merge_server_records(
-                [{
-                    "start": now - (2 * 60 * 60) + offset,
-                    "tokens_per_agent_total": 10,
-                    "agent_token_samples": 1,
-                    "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 10, "samples": 1, "tokens": 100, "seconds": 60, "source": "transcript"}],
-                }],
-                now=now,
-            )["ok"] is True
-        history = stats_client.history(token_since=0, token_resolution_seconds=300)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    token_history = history["agent_token_history"]
-    assert token_history["snapshot"] is True
-    assert token_history["resolution_seconds"] == 300
-    assert len(token_history["records"]) < 20
-    assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 6000
-    assert all(record["duration"] == 300 for record in token_history["records"])
-
-
-def test_stats_history_bounded_older_window_returns_only_missing_records_with_safe_cursor(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    start = int(now) - 30
-    try:
-        for offset in range(30):
-            assert stats_client.merge_records(
-                [
-                    {"start": start + offset, "api_count": 1},
-                ],
-                client_id="client-a",
-                now=now,
-            )["ok"] is True
-        latest_sequence = stats_client.history()["latest_sequence"]
-        older = stats_client.history(
-            since=0,
-            client_id="client-a",
-            token_since=0,
-            token_resolution_seconds=60,
-            start=start,
-            end=start + 15,
-        )
-        live = stats_client.history(since=0, client_id="client-a", start=start + 15)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    assert len(older["records"]) == 15
-    assert all(start <= record["start"] < start + 15 for record in older["records"])
-    assert older["sequence"] == 0
-    # The independent sampler may append a bucket between these reads.  A
-    # bounded older response must keep its replay cursor at zero while
-    # reporting the writer generation observed by that response.
-    assert older["latest_sequence"] >= latest_sequence
-    coverage = dict(older["coverage"])
-    intervals = coverage.pop("intervals")
-    stores = coverage.pop("stores")
-    store_intervals = coverage.pop("store_intervals")
-    epochs = coverage.pop("epochs")
-    assert coverage.pop("epochs_truncated") is False
-    assert coverage == {
-        "mode": "older",
-        "requested_start": start,
-        "requested_end": start + 15,
-        "available_start": start,
-        "available_end": start + 15,
-        "covered_start": start,
-        "covered_end": start + 15,
-        "complete": True,
-        "has_more_older": False,
-        "next_older_end": 0,
-        "resolution_seconds": 1,
-        "source_resolution_seconds": 1,
-        "max_points": 0,
-        "source_records": 15,
-        "returned_records": 15,
-        "cursor": 0,
-        "latest_cursor": older["latest_sequence"],
-    }
-    assert [(item["start"], item["end"]) for item in intervals] == [(start, start + 15)]
-    assert store_intervals["raw"] == intervals
-    assert stores["raw"]["interval_count"] == 1
-    assert epochs
-    assert older["agent_token_history"]["sequence"] == 0
-    assert older["agent_token_history"]["snapshot"] is False
-    assert len(live["records"]) == 15
-    assert live["sequence"] == live["latest_sequence"]
-    assert live["sequence"] >= older["latest_sequence"]
-
-
-def test_stats_history_compact_tokens_ignore_a_bounded_normal_history_window(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    start = int(now) - 30
-    try:
-        for offset in range(30):
-            assert stats_client.merge_server_records(
-                [
-                    {
-                        "start": start + offset,
-                        "tokens_per_agent_total": 1,
-                        "agent_token_samples": 1,
-                        "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 1, "samples": 1, "tokens": 1, "seconds": 1, "source": "transcript"}],
-                    },
-                ],
-                now=now,
-            )["ok"] is True
-        payload = stats_client.history(
-            since=0,
-            client_id="client-a",
-            token_since=0,
-            token_resolution_seconds=60,
-            token_history_start=start,
-            token_history_end=0,
-            start=start,
-            end=start + 15,
-        )
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    assert len(payload["records"]) == 15
-    token_history = payload["agent_token_history"]
-    assert token_history["snapshot"] is True
-    assert token_history["coverage"]["mode"] == "live"
-    assert sum(item["tokens"] for record in token_history["records"] for item in record["agent_token_rates"]) == 30
-
-
-def test_stats_history_display_encoder_honors_point_budget_and_preserves_metric_semantics(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200003.0
-    start = int(now) - 120
-    try:
-        for offset in range(120):
-            sample_time = start + offset
-            assert stats_client.merge_server_records(
-                [
-                    {
-                        "start": sample_time,
-                        "cpu_total_percent": 20,
-                        "cpu_count": 1,
-                        "system_cpu_total_percent": 30,
-                        "system_cpu_count": 1,
-                        "run_agent_total": 1,
-                        "active_agent_total": 1,
-                        "agent_activity_samples": 1,
-                        "tokens_per_agent_total": 2,
-                        "agent_token_samples": 1,
-                        "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "tokens": 2, "seconds": 1, "samples": 1}],
-                        "process": {
-                            "id": "port:9101",
-                            "label": "yolomux.py :9101",
-                            "port": 9101,
-                            "cpu_percent": 25,
-                            "cpu_count": 1,
-                        },
-                    },
-                ],
-                now=now,
-            )["ok"] is True
-            assert stats_client.merge_records(
-                [
-                    {
-                        "start": sample_time,
-                        "api_count": 1,
-                        "sse_count": 2,
-                        "latency_total_ms": 10,
-                        "latency_count": 1,
-                        "bandwidth_bytes": 100,
-                    },
-                ],
-                    client_id="client-a",
-                    now=now,
-            )["ok"] is True
-        history = stats_client.history(
-            since=0,
-            client_id="client-a",
-            token_resolution_seconds=60,
-            start=start,
-            end=start + 120,
-            resolution_seconds=5,
-            max_points=6,
-        )
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    records = history["records"]
-    assert len(records) <= 6
-    assert history["coverage"]["resolution_seconds"] == 20
-    assert all(record["duration"] == 20 for record in records)
-    assert sum(record["api_count"] for record in records) == 120
-    assert sum(record["sse_count"] for record in records) == 240
-    assert sum(record["latency_total_ms"] for record in records) == 1200
-    assert sum(record["latency_count"] for record in records) == 120
-    assert sum(record["bandwidth_bytes"] for record in records) == 12000
-    assert sum(record["cpu_total_percent"] for record in records) == 2400
-    assert sum(record["cpu_count"] for record in records) == 120
-    assert sum(record["run_agent_total"] for record in records) == 120
-    assert sum(record["agent_activity_samples"] for record in records) == 120
-    assert sum(record["clients"]["client-a"]["api_count"] for record in records) == 120
-    assert sum(record["servers"]["port:9101"]["cpu_total_percent"] for record in records) == 3000
-    assert all("tokens_per_agent_total" not in record and "agent_token_rates" not in record for record in records)
-    token_records = history["agent_token_history"]["records"]
-    assert sum(item["tokens"] for record in token_records for item in record["agent_token_rates"]) == 240
-
-
-def test_stats_history_display_encoder_sends_wide_mixed_duration_input_at_the_coarsest_retained_resolution(tmp_path):
-    end = 1_036_800
-    start = end - (24 * 60 * 60)
-    tier_specs = (
-        (start, 1320, 60),
-        (start + (22 * 60 * 60), 360, 10),
-        (start + (23 * 60 * 60), 3600, 1),
-    )
-    sequence = 0
-    buckets = []
-    try:
-        for tier_start, count, duration in tier_specs:
-            for index in range(count):
-                sequence += 1
-                bucket_start = tier_start + (index * duration)
-                bucket = stats_store.empty_bucket(bucket_start, duration)
-                bucket.update({
-                    "sequence": sequence,
-                    "server_sequence": sequence,
-                    "cpu_total_percent": 20.0,
-                    "cpu_count": 1.0,
-                    "system_cpu_total_percent": 30.0,
-                    "system_cpu_count": 1.0,
-                    "run_agent_total": 1.0,
-                    "active_agent_total": 1.0,
-                    "agent_activity_samples": 1.0,
-                    "tokens_per_agent_total": 2.0,
-                    "agent_token_samples": 1.0,
-                    "agent_token_rates": {"1|0|codex": {"label": "1:0:codex", "total": 2.0, "samples": 1.0, "tokens": 2.0, "seconds": float(duration), "source": "transcript"}},
-                })
-                client = stats_store.empty_client_bucket()
-                client.update({"sequence": sequence, "api_count": 1.0, "sse_count": 2.0, "latency_total_ms": 10.0, "latency_count": 1.0, "bandwidth_bytes": 100.0})
-                bucket["clients"]["client-a"] = client
-                process = stats_store.empty_process_bucket()
-                process.update({"sequence": sequence, "label": "yolomux.py :9101", "port": 9101, "cpu_total_percent": 25.0, "cpu_count": 1.0})
-                bucket["servers"]["port:9101"] = process
-                buckets.append(bucket)
-        service = statsd.PersistentStatsService(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-        service.store.replace_buckets(buckets)
-        preserved = service.handle({
-            "action": "history",
-            "client_id": "client-a",
-            "start": start,
-            "end": end,
-            "resolution_seconds": 1,
-            "max_points": 6000,
-        })
-        coarsened = service.handle({
-            "action": "history",
-            "client_id": "client-a",
-            "start": start,
-            "end": end,
-            "resolution_seconds": 1,
-            "max_points": 500,
-        })
-    finally:
-        service.store.close()
-
-    assert len(preserved["records"]) == 1440
-    assert preserved["coverage"]["resolution_seconds"] == 60
-    assert preserved["coverage"]["returned_records"] == 1440
-    assert {record["duration"] for record in preserved["records"]} == {60}
-    records = coarsened["records"]
-    assert len(records) <= 500
-    assert coarsened["coverage"]["resolution_seconds"] > 60
-    assert sum(record["api_count"] for record in records) == 5280
-    assert sum(record["sse_count"] for record in records) == 10560
-    assert sum(record["latency_total_ms"] for record in records) == 52800
-    assert sum(record["latency_count"] for record in records) == 5280
-    assert sum(record["bandwidth_bytes"] for record in records) == 528000
-    assert sum(record["cpu_total_percent"] for record in records) == 105600
-    assert sum(record["cpu_count"] for record in records) == 5280
-    assert sum(record["run_agent_total"] for record in records) == 5280
-    assert sum(record["agent_activity_samples"] for record in records) == 5280
-    assert sum(record["clients"]["client-a"]["api_count"] for record in records) == 5280
-    assert sum(record["servers"]["port:9101"]["cpu_total_percent"] for record in records) == 132000
-    assert sum(item["tokens"] for record in records for item in record["agent_token_rates"]) == 10560
-
-
-def test_stats_history_keeps_browser_deltas_per_client_and_global_samples_shared(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    now = 200000.0
-    monkeypatch.setattr(app_module.time, "time", lambda: now)
-    try:
-        webapp.stats_client.merge_server_records([{
-            "time": now,
-            "cpu_total_percent": 25,
-            "cpu_count": 1,
-            "system_cpu_total_percent": 40,
-            "system_cpu_count": 1,
-            "ask_agent_total": 1,
-            "run_agent_total": 1,
-            "idle_agent_total": 2,
-            "active_agent_total": 2,
-            "inactive_agent_total": 2,
-            "agent_activity_samples": 1,
-        }], now=now)
-        client_a, status_a = webapp.record_stats_history_payload({
-            "client_id": "client-a",
-            "records": [{"start": now, "api_count": 2, "latency_total_ms": 30, "latency_count": 2, "bandwidth_bytes": 1000, "heartbeat_count": 1}],
-        })
-        client_b, status_b = webapp.record_stats_history_payload({
-            "client_id": "client-b",
-            "records": [{"start": now, "api_count": 7, "sse_count": 3, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
-        })
-        history_a = webapp.stats_client.history(client_id="client-a")
-        history_b = webapp.stats_client.history(client_id="client-b")
-        history_a_after_b = webapp.stats_client.history(since=client_a["history"]["sequence"], client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert status_a == HTTPStatus.OK
-    assert status_b == HTTPStatus.OK
-    assert sum(record["api_count"] for record in history_a["records"]) == 2
-    assert sum(record["sse_count"] for record in history_a["records"]) == 0
-    assert sum(record["latency_count"] for record in history_a["records"]) == 2
-    assert sum(record["bandwidth_bytes"] for record in history_a["records"]) == 1000
-    assert sum(record["heartbeat_count"] for record in history_a["records"]) == 1
-    assert sum(record["api_count"] for record in history_b["records"]) == 7
-    assert sum(record["sse_count"] for record in history_b["records"]) == 3
-    assert sum(record["latency_count"] for record in history_b["records"]) == 3
-    assert sum(record["bandwidth_bytes"] for record in history_b["records"]) == 3000
-    assert sum(record["cpu_count"] for record in history_a["records"]) == 1
-    assert sum(record["cpu_count"] for record in history_b["records"]) == 1
-    assert sum(record["agent_activity_samples"] for record in history_a["records"]) == 1
-    assert sum(record["agent_activity_samples"] for record in history_b["records"]) == 1
-    clients = history_a["records"][0]["clients"]
-    assert clients["client-a"]["api_count"] == 2
-    assert clients["client-a"]["heartbeat_count"] == 1
-    assert clients["client-b"]["api_count"] == 7
-    assert clients["client-b"]["bandwidth_bytes"] == 3000
-    assert history_a_after_b["sequence"] == client_b["history"]["sequence"]
-    assert len(history_a_after_b["records"]) == 1
-    assert history_a_after_b["records"][0]["api_count"] == 2
-    assert history_a_after_b["records"][0]["clients"]["client-b"]["api_count"] == 7
-
-
-def test_record_stats_global_sample_fills_history_without_browser_poll(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    clock = {"wall": 1000.0, "monotonic": 50.0, "process": 10.0}
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: clock["wall"])
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: clock["monotonic"])
-    monkeypatch.setattr(app_module.time, "process_time", lambda: clock["process"])
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    try:
-        first = webapp.record_stats_global_sample()
-        clock.update({"wall": 1002.0, "monotonic": 52.0, "process": 10.5})
-        second = webapp.record_stats_global_sample()
-        history = webapp.stats_client.history(client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["cpu_percent"] == 0.0
-    assert second["cpu_percent"] == 25.0
-    assert history["ok"] is True
-    assert sum(record["cpu_count"] for record in history["records"]) == 2
-    assert sum(record["system_cpu_count"] for record in history["records"]) == 2
-    assert sum(record["api_count"] for record in history["records"]) == 0
-    with webapp.performance_record_lock:
-        samples = [record for record in webapp.performance_records if record["role"] == app_module.BACKGROUND_ROLE_STATS_SAMPLER]
-    assert samples
-    assert {"sample_ms", "agent_activity_ms", "history_merge_ms"} <= set(samples[-1]["details"])
-
-
-def test_statsd_sample_pushes_its_durable_one_second_delta_to_stats_sse(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.background_owner = StatsRoleOwner(owner=True, port=9991)
-    sample = {
-        "time": 1_000.25,
-        "pid": 123,
-        "started_at": 900.0,
-        "uptime_seconds": 100.25,
-        "cpu_percent": 12.5,
-        "system_cpu_percent": 33.0,
-        "rss_bytes": 456,
-    }
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: (dict(sample), True))
-    subscriber_id, subscriber_queue = webapp.client_events.subscribe(channels={"stats"})
-    try:
-        webapp.record_stats_cpu_sample()
-        event = subscriber_queue.get_nowait()
-    finally:
-        webapp.client_events.unsubscribe(subscriber_id)
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert event["type"] == "stats_sample"
-    payload = event["payload"]
-    assert payload["sample"] == sample
-    assert payload["record"]["start"] == 1_000
-    assert payload["record"]["duration"] == 1
-    assert payload["record"]["cpu_total_percent"] == 12.5
-    assert payload["record"]["system_cpu_total_percent"] == 33.0
-    assert "ask_agent_total" not in payload["record"]
-    assert "host_metrics" not in payload["record"]
-    assert payload["record"]["sequence"] == payload["sequence"] > 0
-
-
-def test_stats_family_publish_serialization_follows_aggregate_stats_demand(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(
-        webapp.stats_client,
-        "merge_server_records",
-        lambda *_args, **_kwargs: {"ok": True, "sequence": 7},
-    )
-    serialized = []
-    original_publish = webapp.publish_client_event
-    monkeypatch.setattr(
-        webapp,
-        "publish_client_event",
-        lambda event_type, payload, **kwargs: (
-            serialized.append((event_type, payload))
-            or original_publish(event_type, payload, **kwargs)
-        ),
-    )
-    sample = {"time": 1_000.25, "pid": 123, "cpu_percent": 12.5}
-    record = {"time": 1_000.25, "cpu_total_percent": 12.5, "cpu_count": 1}
-    coarse_id, _coarse_queue = webapp.client_events.subscribe(channels={"core"})
-    try:
-        webapp.merge_stats_family_record("cpu", record, sample)
-        assert serialized == [], "a sole coarse-range subscriber causes no stats JSON publication"
-        assert webapp.client_events.snapshot()["published_by_type"].get("stats_sample") is None
-
-        live_id, live_queue = webapp.client_events.subscribe(channels={"stats"})
-        try:
-            webapp.merge_stats_family_record("cpu", {**record, "time": 1_001.25}, {**sample, "time": 1_001.25})
-            event = live_queue.get_nowait()
-        finally:
-            webapp.client_events.unsubscribe(live_id)
-    finally:
-        webapp.client_events.unsubscribe(coarse_id)
-        webapp.control_server.stop()
-
-    assert [item[0] for item in serialized] == ["stats_sample"]
-    assert event["type"] == "stats_sample"
-    assert webapp.client_events.snapshot()["published_by_type"]["stats_sample"]["events"] == 1
-
-
-def test_cpu_durable_times_keep_one_second_phase_across_wall_clock_jitter(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    samples = iter((1000.9, 1002.0, 1002.99))
-    records = []
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({
-        "time": next(samples), "pid": 1, "started_at": 900.0,
-        "uptime_seconds": 100.0, "cpu_percent": 1.0,
-        "system_cpu_percent": 2.0, "rss_bytes": 3,
-    }, True))
-    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda _family, record, _sample: records.append(record) or {"ok": True})
-    scheduled_times = (1000.9, 1001.9, 1002.9)
-    try:
-        for scheduled_time in scheduled_times:
-            webapp.stats_metric_thread_context.scheduled_time = scheduled_time
-            webapp.record_stats_cpu_sample()
-    finally:
-        webapp.stats_metric_thread_context.scheduled_time = None
-        webapp.control_server.stop()
-
-    assert [record["time"] for record in records] == pytest.approx(scheduled_times)
-    assert [int(record["time"]) for record in records] == [1000, 1001, 1002]
-
-
-def test_cpu_scheduler_deadline_never_turns_into_cached_success(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    wall_times = iter((1000.0, 1000.2))
-    monotonic_times = iter((50.0, 50.2))
-    process_times = iter((10.0, 10.1))
-    records = []
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: (100.0, 20.0))
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 3)
-    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda _family, record, _sample: records.append(record) or {"ok": True})
-    try:
-        for scheduled_time in (1000.0, 1001.0):
-            webapp.stats_metric_thread_context.scheduled_time = scheduled_time
-            webapp.record_stats_cpu_sample()
-    finally:
-        webapp.stats_metric_thread_context.scheduled_time = None
-        webapp.control_server.stop()
-
-    assert [record["time"] for record in records] == [1000.0, 1001.0]
-
-
-def test_shared_stats_owner_writes_and_follower_reads_recent_global_history(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    owner = app_module.TmuxWebtermApp(["1"])
-    follower = app_module.TmuxWebtermApp(["1"])
-    owner.stats_client = stats_client
-    follower.stats_client = stats_client
-    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
-    sample_time = time.time()
-    sample = {
-        "time": sample_time,
-        "pid": 8003,
-        "started_at": sample_time - 20.0,
-        "uptime_seconds": 20.0,
-        "cpu_percent": 12.5,
-        "system_cpu_percent": 33.0,
-        "rss_bytes": 456789,
-    }
-    monkeypatch.setattr(owner, "current_stats_sample", lambda: (dict(sample), True))
-    monkeypatch.setattr(owner, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(owner, "stats_agent_activity_record_from_rows", lambda _rows, _sample_time, include_token_rates=False: {
-        "ask_agent_total": 1,
-        "run_agent_total": 2,
-        "transition_agent_total": 3,
-        "idle_agent_total": 4,
-        "active_agent_total": 6,
-        "inactive_agent_total": 4,
-        "agent_activity_samples": 1,
-    })
-    with follower.stats_history_service.sample_lock:
-        follower.stats_history_service.sample_record.cached_payload = {
-            "time": sample_time + 1, "pid": 8002, "started_at": sample_time - 5,
-            "uptime_seconds": 6.0, "cpu_percent": 1.0, "system_cpu_percent": 2.0, "rss_bytes": 123,
-        }
-    try:
-        owner.record_stats_cpu_sample()
-        owner.record_stats_agent_status_sample()
-        stats_client.update_sampler_family("cpu", {"last_success_at": sample_time, "alive": True})
-        payload = follower.stats_sample_payload(client_id="client-a")
-    finally:
-        stats_client.request({"action": "shutdown"})
-        owner.control_server.stop()
-        follower.control_server.stop()
-
-    assert payload["pid"] == 8002
-    assert payload["shared_stats"]["role"] == "statsd"
-    assert payload["shared_stats"]["fresh"] is True
-    records = payload["history"]["records"]
-    assert sum(record["cpu_count"] for record in records) == 1
-    assert sum(record["system_cpu_count"] for record in records) == 1
-    assert sum(record["ask_agent_total"] for record in records) == 1
-    assert sum(record["run_agent_total"] for record in records) == 2
-    assert sum(record["transition_agent_total"] for record in records) == 3
-    assert sum(record["idle_agent_total"] for record in records) == 4
-
-
-def test_statsd_history_survives_other_server_writes_and_restart(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    owner = app_module.TmuxWebtermApp([])
-    follower = app_module.TmuxWebtermApp([])
-    restarted = app_module.TmuxWebtermApp([])
-    owner.stats_client = stats_client
-    follower.stats_client = stats_client
-    restarted.stats_client = stats_client
-    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
-    restarted.background_owner = StatsRoleOwner(owner=False, port=8001)
-    sample_time = time.time()
-    sample = {"time": sample_time, "pid": 8003, "cpu_percent": 12.0, "system_cpu_percent": 24.0}
-    monkeypatch.setattr(owner, "current_stats_sample", lambda: (dict(sample), True))
-    monkeypatch.setattr(owner, "stats_agent_activity_record", lambda _sample_time, include_token_rates=True: None)
-    try:
-        owner.record_stats_cpu_sample()
-        follower.record_stats_history_payload({
-            "client_id": "client-b",
-            "records": [{"start": sample_time, "api_count": 7, "latency_total_ms": 90, "latency_count": 3, "bandwidth_bytes": 3000}],
-        })
-        owner.record_stats_cpu_sample()
-        payload = restarted.stats_sample_payload(client_id="client-a")
-    finally:
-        stats_client.request({"action": "shutdown"})
-        owner.control_server.stop()
-        follower.control_server.stop()
-        restarted.control_server.stop()
-
-    records = payload["history"]["records"]
-    clients = next(record["clients"] for record in records if "client-b" in record["clients"])
-    assert clients["client-b"]["api_count"] == 7
-    assert clients["client-b"]["latency_total_ms"] == 90
-    assert clients["client-b"]["bandwidth_bytes"] == 3000
-    process_key = f"port:{owner.background_owner.port}"
-    servers = next(record["servers"] for record in records if process_key in record["servers"])
-    assert servers[process_key]["cpu_total_percent"] == 24.0
-
-
-def test_shared_stats_token_consumer_interest_reaches_owner_sampler(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    owner = app_module.TmuxWebtermApp(["1"])
-    follower = app_module.TmuxWebtermApp(["1"])
-    owner.stats_client = stats_client
-    follower.stats_client = stats_client
-    owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    follower.background_owner = StatsRoleOwner(owner=False, port=8002)
-    sample_time = time.time() + 1.0
-    previous_time = sample_time - 60.0
-    monkeypatch.setattr(follower, "current_stats_sample", lambda: ({
-        "time": sample_time - 1.0,
-        "pid": 8002,
-        "started_at": sample_time - 10.0,
-        "uptime_seconds": 9.0,
-        "cpu_percent": 1.0,
-        "system_cpu_percent": 2.0,
-        "rss_bytes": 123,
-    }, True))
-    monkeypatch.setattr(owner, "current_stats_sample", lambda: ({
-        "time": sample_time,
-        "pid": 8003,
-        "started_at": sample_time - 20.0,
-        "uptime_seconds": 20.0,
-        "cpu_percent": 3.0,
-        "system_cpu_percent": 4.0,
-        "rss_bytes": 456,
-    }, True))
-    transcript = tmp_path / "codex.jsonl"
-    transcript.write_text(json.dumps({"timestamp": sample_time, "payload": {"info": {"total_token_usage": {"output_tokens": 250}}}}) + "\n", encoding="utf-8")
-    monkeypatch.setattr(owner, "stats_agent_window_rows", lambda: [{
-        "session": "1",
-        "kind": "codex",
-        "state": "working",
-        "window_index": 0,
-        "window_label": "0:codex",
-        "transcript": str(transcript),
-    }])
-    try:
-        follower.stats_sample_payload(token_consumer=True)
-        with owner.stats_history_service.agent_token_lock:
-            owner.stats_history_service.agent_token_state = {
-                "1|0|codex": {"tokens": 100.0, "time": previous_time, "label": "1:0:codex", "source": "transcript", "identity": app_module.session_files.transcript_usage_identity(transcript, "codex")}
-            }
-            owner.stats_history_service.agent_token_next_sample_at = 0.0
-        owner.record_stats_agent_token_sample()
-        history = stats_client.history(client_id="client-a")
-    finally:
-        stats_client.request({"action": "shutdown"})
-        owner.control_server.stop()
-        follower.control_server.stop()
-
-    token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
-    assert follower.background_owner.refresh_requests == [(
-        app_module.BACKGROUND_ROLE_STATS_SAMPLER,
-        {"family": "agent_tokens", "reason": "stats-token-consumer", "cache_key": "agent-tokens"},
-    )]
-    assert sum(item["tokens"] for item in token_records) >= 250.0
-    assert sum(record["agent_token_samples"] for record in history["records"]) >= 1
 
 
 def test_background_status_includes_performance_summary():
@@ -1374,6 +817,26 @@ def test_background_owner_claim_payload_reports_claim_noop_and_conflict():
     assert payload["diagnostic"] == "owner lock is held"
 
 
+def test_log_event_publishes_shared_event_log_invalidation_after_append(tmp_path):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.event_log = app_module.EventLog(tmp_path / "events.jsonl")
+    published = []
+    webapp.publish_background_client_event = lambda *args, **kwargs: published.append((args, kwargs))
+
+    saved = webapp.log_event("8001", "manual", "saved", {"source": "test"})
+
+    assert saved["session"] == "8001"
+    assert app_module.BACKGROUND_CLIENT_EVENT_POLICIES["event_log_changed"] == {"truth": "event log", "delivery": "push"}
+    assert "event_log_changed" in app_module.BACKGROUND_CLIENT_EVENT_TYPES
+    assert published == [
+        (
+            ("event_log_changed", {"session": "8001"}),
+            {"trigger": "event-log", "cache": "ready"},
+        ),
+    ]
+    assert webapp.event_log.tail(session="8001") == [saved]
+
+
 def test_sampled_background_event_forwards_one_shared_descriptor_parent():
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.background_refresh_event_log_lock = threading.Lock()
@@ -1423,6 +886,20 @@ def test_performance_metrics_payload_ranks_response_bytes():
     assert [row["surface"] for row in payload["top_payload_bytes"][:2]] == ["GET /api/large", "GET /api/small"]
     assert payload["top_payload_bytes"][0]["payload_bytes_total"] == 600
     assert payload["top_payload_bytes"][0]["count"] == 2
+
+
+def test_capture_measurement_metrics_exclude_other_browser_records():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        webapp.record_performance_sample("http-endpoint", "GET /api/ping", compute_ms=2.0, details={"measurement_scope": "capture"})
+        webapp.record_performance_sample("http-endpoint", "GET /api/fs/watch-diff", compute_ms=99.0)
+        response = webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "capture"})
+    finally:
+        webapp.control_server.stop()
+
+    assert response["ok"] is True
+    assert [(row["surface"], row["compute_ms_total"]) for row in response["performance"]["summary"]] == [("GET /api/ping", 2.0)]
+    assert webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "other"}) == {"ok": False, "error": "unsupported measurement scope"}
 
 
 def test_server_cpu_budget_warns_after_sustained_window_with_top_consumers(monkeypatch):
@@ -1551,8 +1028,9 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
             "record": {},
             "resources": {"cpu_percent": None, "rss_bytes": None},
         })
-        monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
-            "service": "statsd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: {
+            "service": {"ok": True, "pid": 0, "migration": {"state": "ready"}},
+            "families": {},
         })
         monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {
             "service": "jobd", "pid": 0, "resources": {"cpu_percent": None, "rss_bytes": None},
@@ -1566,6 +1044,10 @@ def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcr
 
     assert payload["owner"]["current_owner"] == {"port": 8002}
     assert payload["refresh"]["coalescing"]["recent_pending_count"] == 2
+    recurring = payload["refresh"]["recurring_work"]
+    assert {row["owner"] for row in recurring} == {*app_module.CLIENT_EVENT_RECURRING_WORK_SPECS, "sse_heartbeat", "update_check", "approvald_auto_approve"}
+    assert all(set(row) == {"owner", "class", "cadence_seconds", "demanded", "attempts", "useful", "no_change", "failures", "last_attempt_at", "last_useful_at", "next_due_in_seconds"} for row in recurring)
+    assert all(row["attempts"] == 0 and row["useful"] == 0 and row["no_change"] == 0 for row in recurring)
     assert payload["caches"]["session_files"]["files"] == 1
     assert payload["caches"]["session_files"]["bytes"] == 3
     assert payload["caches"]["activity"]["bytes"] == 5
@@ -1646,621 +1128,11 @@ def test_background_refresh_control_uses_nested_payload(monkeypatch):
     assert calls == [(app_module.BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same", "reason": "follower"})]
 
 
-def test_stats_sampler_records_shared_agent_activity_and_token_rates(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1", "2"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0, 1060.0])
-    monotonic_times = iter([50.0, 110.0])
-    process_times = iter([10.0, 10.5])
-    system_cpu_times = iter([(100.0, 20.0), (104.0, 22.0)])
-    claude_transcript = tmp_path / "claude.jsonl"
-    codex_transcript = tmp_path / "codex.jsonl"
-    previous_claude_tokens = [0]
-
-    def write_usage_transcripts(claude_tokens: int, codex_tokens: int, mtime: float) -> None:
-        claude_delta = claude_tokens - previous_claude_tokens[0]
-        previous_claude_tokens[0] = claude_tokens
-        with claude_transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "assistant", "message": {"id": f"msg-{claude_tokens}", "usage": {"output_tokens": claude_delta}, "content": []}}) + "\n")
-        with codex_transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "response_item", "payload": {"info": {"total_token_usage": {"output_tokens": codex_tokens}}}}) + "\n")
-        os.utime(claude_transcript, (mtime, mtime))
-        os.utime(codex_transcript, (mtime, mtime))
-
-    usage_samples = [(100, 200), (1600, 2600)]
-
-    def fake_agent_rows():
-        claude_tokens, codex_tokens = usage_samples.pop(0)
-        write_usage_transcripts(claude_tokens, codex_tokens, 1000.0 + len(usage_samples))
-        return [
-            {"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(claude_transcript)},
-            {"session": "1", "kind": "codex", "state": "idle", "window_index": 1, "window_label": "1:codex"},
-            {"session": "2", "kind": "codex", "state": "needs-input", "window_index": 0, "window_label": "0:codex", "transcript": str(codex_transcript)},
-        ]
-
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", fake_agent_rows)
-    try:
-        first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        history = webapp.stats_client.history(client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["time"] == 1000.0
-    assert second["time"] == 1060.0
-    records = history["records"]
-    assert sum(record["active_agent_total"] for record in records) == 4
-    assert sum(record["inactive_agent_total"] for record in records) == 2
-    assert sum(record["ask_agent_total"] for record in records) == 2
-    assert sum(record["run_agent_total"] for record in records) == 2
-    assert sum(record["transition_agent_total"] for record in records) == 0
-    assert sum(record["idle_agent_total"] for record in records) == 2
-    assert sum(record["ask_agent_total"] + record["run_agent_total"] + record["transition_agent_total"] + record["idle_agent_total"] for record in records) == 6
-    assert sum(record["agent_activity_samples"] for record in records) == 2
-    token_records = [item for record in records for item in record["agent_token_rates"]]
-    tokens_by_key: dict[str, float] = {}
-    labels_by_key: dict[str, str] = {}
-    sources_by_key: dict[str, set[str]] = {}
-    for record in token_records:
-        key = record["key"]
-        labels_by_key[key] = record["label"]
-        tokens_by_key[key] = tokens_by_key.get(key, 0.0) + float(record.get("tokens") or 0.0)
-        sources_by_key.setdefault(key, set()).add(record.get("source") or "")
-    assert labels_by_key["1|0|claude"] == "1:0:claude"
-    assert tokens_by_key["1|0|claude"] == pytest.approx(1500.0)
-    assert sources_by_key["1|0|claude"] == {"transcript"}
-    assert labels_by_key["2|0|codex"] == "2:0:codex"
-    assert tokens_by_key["2|0|codex"] == pytest.approx(2400.0)
-    assert sources_by_key["2|0|codex"] == {"transcript"}
-    assert sum(record["agent_token_samples"] for record in records) == 4
-
-
-def test_stats_agent_token_rate_tracks_claude_subagent_appends(monkeypatch, tmp_path):
-    app_module.session_files._TRANSCRIPT_SCAN_CACHE.clear()
-    webapp = app_module.TmuxWebtermApp(["1"])
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.stats_client = stats_client
-    transcript = tmp_path / "session-id.jsonl"
-    subagent = tmp_path / "session-id" / "subagents" / "agent-a.jsonl"
-    subagent.parent.mkdir(parents=True)
-
-    def line(message_id: str, output_tokens: int) -> str:
-        return json.dumps({
-            "type": "assistant",
-            "message": {"id": message_id, "usage": {"output_tokens": output_tokens}, "content": []},
-        }) + "\n"
-
-    transcript.write_text(line("parent", 100), encoding="utf-8")
-    subagent.write_text(line("child-first", 50), encoding="utf-8")
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{
-        "session": "1",
-        "kind": "claude",
-        "state": "working",
-        "window_index": 0,
-        "window_label": "0:claude",
-        "transcript": str(transcript),
-    }])
-    try:
-        first = webapp.stats_agent_activity_record(1000.0, include_token_rates=True)
-        with subagent.open("a", encoding="utf-8") as handle:
-            handle.write(line("child-second", 120))
-        second = webapp.stats_agent_activity_record(1060.0, include_token_rates=True)
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert "_agent_token_records" not in first
-    assert "_agent_token_records" not in second
-    assert sum(
-        rate["tokens"]
-        for record in history["agent_token_history"]["records"]
-        for rate in record["agent_token_rates"]
-        if rate["key"] == "1|0|claude"
-    ) == pytest.approx(120.0)
-
-
-def test_stats_sampler_bootstraps_token_scan_without_consumer(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    wall_times = iter([1000.0])
-    monotonic_times = iter([50.0])
-    process_times = iter([10.0])
-    system_cpu_times = iter([(100.0, 20.0)])
-    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", 990.0)
-    monkeypatch.setattr(app_module.time, "time", lambda: next(wall_times))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(monotonic_times))
-    monkeypatch.setattr(app_module.time, "process_time", lambda: next(process_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_times", lambda: next(system_cpu_times))
-    monkeypatch.setattr(app_module, "current_system_cpu_percent_from_ps", lambda: None)
-    monkeypatch.setattr(app_module, "current_process_rss_bytes", lambda: 123456)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/rollout.jsonl"}])
-    try:
-        payload = webapp.record_stats_global_sample(trigger="sampler")
-        history = webapp.stats_client.history(client_id="client-a")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert payload["time"] == 1000.0
-    assert sum(record["agent_activity_samples"] for record in history["records"]) == 1
-    assert sum(record["agent_token_samples"] for record in history["records"]) == 0
-
-
-def test_stats_token_sampling_uses_idle_cadence_and_accelerates_for_consumer():
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        with webapp.stats_history_service.agent_token_lock:
-            webapp.stats_history_service.agent_token_bootstrap_pending = False
-            webapp.stats_history_service.agent_token_next_sample_at = 0.0
-            webapp.stats_history_service.agent_token_consumer_until = 0.0
-        assert webapp.stats_agent_token_sampling_due(1000.0) is True
-        assert webapp.stats_history_service.agent_token_next_sample_at == 1000.0 + app_module.STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
-        assert webapp.stats_agent_token_sampling_due(1001.0) is False
-        assert webapp.stats_agent_token_sampling_due(1001.0, token_consumer=True) is True
-        assert webapp.stats_history_service.agent_token_next_sample_at == 1001.0 + app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS
-    finally:
-        webapp.control_server.stop()
-
-
-def test_stats_sample_payload_defers_cold_token_scan_until_sampler(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    calls = []
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": "/tmp/claude.jsonl"}])
-
-    def slow_claim(*_args, **_kwargs):
-        calls.append(time.monotonic())
-        time.sleep(0.15)
-        return {"ok": True, "records": [], "state": {}}
-
-    monkeypatch.setattr(webapp.stats_client, "claim_agent_token_deltas_from_rows", slow_claim)
-    try:
-        # Process launch has its own statsd coverage and is highly sensitive to
-        # concurrent browser/compiler lanes. Warm this isolated daemon so this
-        # timer measures only the request-path contract named by the test.
-        assert webapp.stats_client.ensure_started() is True
-        assert webapp.stats_client.healthy() is True
-        started = time.monotonic()
-        payload = webapp.stats_sample_payload(token_consumer=True)
-        response_elapsed = time.monotonic() - started
-        calls_before_sampler = len(calls)
-        webapp.stats_history_service.sample_record.cached_monotonic = None
-        webapp.record_stats_global_sample(trigger="sampler")
-    finally:
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert payload["pid"] == os.getpid()
-    assert payload["uptime_seconds"] >= 0
-    # The warmed request must defer the slow token claim until the sampler path.
-    # Cold daemon startup is intentionally outside this latency assertion.
-    assert response_elapsed < 1.25
-    assert calls_before_sampler == 0
-    assert len(calls) == 1
-
-
-def test_stats_token_sampling_bootstraps_rate_before_steady_consumer_cadence(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    sample_times = iter([1000.0, 1001.0])
-    claim_responses = iter([
-        {"ok": True, "records": [], "state": {"1|0|codex": {"tokens": 100.0, "time": 1000.0, "label": "1:0:codex", "source": "transcript", "identity": "stable"}}},
-        {"ok": True, "records": [{
-            "time": 960.0,
-            "tokens_per_agent_total": 400.0,
-            "agent_token_samples": 1.0,
-            "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 400.0, "samples": 1.0, "tokens": 400.0, "seconds": 1.0, "source": "transcript"}],
-        }], "state": {"1|0|codex": {"tokens": 500.0, "time": 1001.0, "label": "1:0:codex", "source": "transcript", "identity": "stable"}}},
-    ])
-
-    def current_sample():
-        sample_time = next(sample_times)
-        return {
-            "time": sample_time,
-            "pid": os.getpid(),
-            "started_at": 990.0,
-            "uptime_seconds": max(0.0, sample_time - 990.0),
-            "cpu_percent": 1.0,
-            "system_cpu_percent": 2.0,
-            "rss_bytes": 123456,
-        }, True
-
-    monkeypatch.setattr(webapp, "current_stats_sample", current_sample)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": "/tmp/rollout.jsonl"}])
-    monkeypatch.setattr(webapp.stats_client, "claim_agent_token_deltas_from_rows", lambda *_args, **_kwargs: next(claim_responses))
-    try:
-        first = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-        second = webapp.record_stats_global_sample(trigger="sampler", token_consumer=True)
-    finally:
-        history = webapp.stats_client.history(client_id="client-a")
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert first["time"] == 1000.0
-    assert second["time"] == 1001.0
-    assert webapp.stats_history_service.agent_token_next_sample_at == 1011.0
-    token_records = [item for record in history["records"] for item in record["agent_token_rates"]]
-    assert len(token_records) == 1
-    assert token_records[-1]["tokens"] == pytest.approx(400.0)
-    assert token_records[-1]["source"] == "transcript"
-
-
-def test_statsd_agent_token_delta_is_claimed_once_across_owner_handoff(monkeypatch, tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    first_owner = app_module.TmuxWebtermApp(["1"])
-    replacement_owner = app_module.TmuxWebtermApp(["1"])
-    first_owner.stats_client = stats_client
-    replacement_owner.stats_client = stats_client
-    first_owner.background_owner = StatsRoleOwner(owner=True, port=8003)
-    replacement_owner.background_owner = StatsRoleOwner(owner=True, port=8002)
-    transcript = tmp_path / "codex.jsonl"
-    transcript.write_text(json.dumps({"timestamp": 1000.0, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n", encoding="utf-8")
-
-    def rows():
-        return [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "transcript": str(transcript)}]
-
-    monkeypatch.setattr(first_owner, "stats_agent_window_rows", rows)
-    monkeypatch.setattr(replacement_owner, "stats_agent_window_rows", rows)
-    try:
-        baseline = first_owner.stats_agent_activity_record(1000.0, include_token_rates=True)
-        with transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"timestamp": 1060.0, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n")
-        claimed = replacement_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
-        duplicate = first_owner.stats_agent_activity_record(1060.0, include_token_rates=True)
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        first_owner.control_server.stop()
-        replacement_owner.control_server.stop()
-
-    assert baseline.get("_agent_token_records", []) == []
-    assert claimed.get("_agent_token_records", []) == []
-    assert duplicate.get("_agent_token_records", []) == []
-    assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
-    assert sum(
-        item["tokens"]
-        for record in history["agent_token_history"]["records"]
-        for item in record["agent_token_rates"]
-        if item["key"] == "1|0|codex"
-    ) >= 120.0
-
-
-def test_statsd_import_migrates_legacy_agent_token_intervals_without_dropping_history(tmp_path):
-    legacy_rates = {
-        "1|0|codex": {"label": "1:0:codex", "total": 1200.0, "samples": 4.0, "tokens": 1200.0, "seconds": 240.0, "source": "transcript"},
-    }
-    status = {"version": 1, "rev": 0, "stats_history": {
-        "agent_token_schema_version": 2,
-        "raw_buckets": [],
-        "rollup_buckets": [[
-            960,
-            60,
-            1,
-            1,
-            *(1200.0 if field == "tokens_per_agent_total" else 4.0 if field == "agent_token_samples" else 0.0 for field in stats_store.SERVER_FIELDS),
-            legacy_rates,
-            stats_store.empty_host_metrics(),
-        ]],
-    }}
-    (tmp_path / "tmux-AI-status.json").write_text(json.dumps(status), encoding="utf-8")
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    try:
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    item = next(item for record in history["agent_token_history"]["records"] for item in record["agent_token_rates"] if item["key"] == "1|0|codex")
-    assert history["agent_token_schema_version"] == app_module.STATS_AGENT_TOKEN_SCHEMA_VERSION
-    assert item["tokens"] == pytest.approx(300.0)
-    assert item["seconds"] == pytest.approx(60.0)
-    assert item["samples"] == pytest.approx(1.0)
-
-
-def test_statsd_recovers_missing_agent_token_history_from_transcript_without_overwriting_fresh_rows(tmp_path):
-    transcript = tmp_path / "rollout.jsonl"
-    now = 200_040.0
-    transcript.write_text(
-        json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-terra"}}) + "\n"
-        + json.dumps({"timestamp": now - 180, "payload": {"info": {"total_token_usage": {"output_tokens": 100}}}}) + "\n"
-        + json.dumps({"timestamp": now - 60, "payload": {"info": {"total_token_usage": {"output_tokens": 220}}}}) + "\n"
-        + json.dumps({"timestamp": now, "payload": {"info": {"total_token_usage": {"output_tokens": 340}}}}) + "\n",
-        encoding="utf-8",
-    )
-    webapp = app_module.TmuxWebtermApp(["1"])
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.stats_client = stats_client
-    webapp.background_owner = StatsRoleOwner(owner=True, port=8003)
-    fresh_start = int(now - 60)
-    rows = [{"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(transcript)}]
-    try:
-        assert stats_client.merge_server_records([{
-            "time": fresh_start,
-            "tokens_per_agent_total": 9.0,
-            "agent_token_samples": 1.0,
-            "agent_token_rates": [{"key": "1|0|codex", "label": "1:0:codex", "total": 9.0, "samples": 1.0, "tokens": 9.0, "seconds": 1.0, "source": "transcript"}],
-        }], now=now)["ok"] is True
-        assert webapp.statsd_recover_agent_token_history(rows, now) is True
-        recovered = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    raw = {
-        (record["start"], record["duration"]): record
-        for record in recovered["agent_token_history"]["records"]
-    }
-    fresh_rates = raw[(fresh_start, 60)]["agent_token_rates"]
-    assert fresh_rates[0]["tokens"] == pytest.approx(9.0)
-    assert fresh_rates[0]["model_rates"]["gpt-5.6-terra"]["tokens"] > 0
-    assert any(
-        item["tokens"] == pytest.approx(100.0)
-        for snapshot in raw.values()
-        for item in snapshot["agent_token_rates"]
-        if item["key"] == "1|0|codex"
-    )
-
-
-def test_statsd_recovery_waits_for_every_active_agent_transcript(tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    calls = []
-    webapp.stats_client = SimpleNamespace(
-        recover_agent_token_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True}
-    )
-    rows = [
-        {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
-        {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
-    ]
-    try:
-        assert webapp.statsd_recover_agent_token_history(rows, 1_000.0) is False
-        assert calls == []
-        rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
-        assert webapp.statsd_recover_agent_token_history(rows, 1_001.0) is True
-        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
-    finally:
-        webapp.control_server.stop()
-
-
-def test_statsd_usage_atom_migration_enriches_available_rows_without_claiming_a_complete_roster(tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    calls = []
-    webapp.stats_client = SimpleNamespace(
-        migrate_usage_atom_history_from_rows=lambda rows, now: calls.append((rows, now)) or {"ok": True, "changed": True, "complete": all(row.get("transcript") for row in rows)}
-    )
-    rows = [
-        {"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")},
-        {"session": "1", "kind": "claude", "window_index": 1, "window_label": "1:claude", "transcript": ""},
-    ]
-    try:
-        assert webapp.statsd_migrate_usage_atom_history(rows, 1_000.0) is True
-        assert {row["key"] for row in calls[0][0]} == {"1|0|codex", "1|1|claude"}
-        assert next(row for row in calls[0][0] if row["key"] == "1|1|claude")["transcript"] == ""
-        rows[1]["transcript"] = str(tmp_path / "claude.jsonl")
-        assert webapp.statsd_migrate_usage_atom_history(rows, 1_001.0) is True
-        assert {row["key"] for row in calls[1][0]} == {"1|0|codex", "1|1|claude"}
-    finally:
-        webapp.control_server.stop()
-
-
-def test_statsd_sampler_not_api_path_triggers_usage_atom_migration(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = [{"session": "1", "kind": "codex", "window_index": 0, "window_label": "0:codex", "transcript": str(tmp_path / "codex.jsonl")}]
-    migrated = []
-    try:
-        monkeypatch.setattr(webapp, "current_stats_sample", lambda: ({"time": 1_000.0, "pid": 1, "started_at": 1.0, "cpu_percent": 0.0, "system_cpu_percent": 0.0}, True))
-        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
-        monkeypatch.setattr(webapp, "stats_agent_token_sampling_due", lambda *_args, **_kwargs: True)
-        monkeypatch.setattr(
-            webapp,
-            "stats_agent_activity_record",
-            lambda *_args, **_kwargs: {"time": 1_000.0},
-        )
-        monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: rows)
-        monkeypatch.setattr(
-            webapp,
-            "stats_agent_activity_record_from_rows",
-            lambda *_args, **_kwargs: {"time": 1_000.0, "agent_activity_samples": 1},
-        )
-        monkeypatch.setattr(webapp, "record_performance_sample", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(app_module, "stats_host_resource_metrics", lambda: {})
-        webapp.stats_client = SimpleNamespace(
-            merge_server_records=lambda *_args, **_kwargs: {"ok": True},
-            migrate_usage_atom_history_from_rows=lambda records, now: migrated.append((records, now)) or {"ok": True},
-        )
-        monkeypatch.setattr(
-            webapp,
-            "start_stats_agent_token_work",
-            lambda records, now: webapp.statsd_migrate_usage_atom_history(records, now),
-        )
-
-        webapp.record_stats_global_sample(trigger="api", defer_token_scan=True)
-        assert migrated == []
-        webapp.record_stats_global_sample(trigger="statsd")
-
-        assert {row["key"] for row in migrated[0][0]} == {"1|0|codex"}
-        assert migrated[0][1] == 1_000.0
-    finally:
-        webapp.control_server.stop()
-
-
-def test_statsd_agent_token_delta_records_accumulate_actual_overlap_seconds(tmp_path):
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    try:
-        records = [
-            *statsd.PersistentStatsService._agent_token_delta_records("1|0|codex", "1:0:codex", 1000.0, 1010.0, 100.0),
-            *statsd.PersistentStatsService._agent_token_delta_records("1|0|codex", "1:0:codex", 1010.0, 1020.0, 100.0),
-        ]
-        assert stats_client.merge_server_records(records, now=1020.0)["ok"] is True
-        history = stats_client.history()
-    finally:
-        stats_client.request({"action": "shutdown"})
-
-    token_item = next(item for record in history["records"] for item in record["agent_token_rates"])
-    assert token_item["tokens"] == pytest.approx(200.0)
-    assert token_item["seconds"] == pytest.approx(20.0)
-    assert token_item["tokens"] / token_item["seconds"] * 60 == pytest.approx(600.0)
-
-
-def test_stats_agent_token_rates_ignore_visible_counter_changes(monkeypatch, tmp_path):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    webapp.stats_client = stats_client
-    transcript = tmp_path / "claude.jsonl"
-    transcript.write_text(json.dumps({"type": "assistant", "message": {"id": "first", "usage": {"output_tokens": 1000}, "content": []}}) + "\n", encoding="utf-8")
-    rows = iter([
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(transcript), "status_tokens": 80}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(transcript), "status_tokens": 8000}],
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude", "transcript": str(transcript), "status_tokens": 14000}],
-    ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    try:
-        first = webapp.stats_agent_activity_record(1020.0, include_token_rates=True)
-        unchanged = webapp.stats_agent_activity_record(1080.0, include_token_rates=True)
-        with transcript.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"type": "assistant", "message": {"id": "second", "usage": {"output_tokens": 60}, "content": []}}) + "\n")
-        transcript_delta = webapp.stats_agent_activity_record(1140.0, include_token_rates=True)
-        history = stats_client.history(token_resolution_seconds=60)
-    finally:
-        stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert "_agent_token_records" not in first
-    assert "_agent_token_records" not in unchanged
-    assert "_agent_token_records" not in transcript_delta
-    assert sum(
-        rate["tokens"]
-        for record in history["agent_token_history"]["records"]
-        for rate in record["agent_token_rates"]
-        if rate["key"] == "1|0|claude"
-    ) == pytest.approx(60.0)
-
-
-def test_stats_agent_activity_record_tracks_shared_transition_state(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = iter([
-        [{"session": "1", "kind": "claude", "state": "working", "window_index": 0, "window_label": "0:claude"}],
-        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
-        [{"session": "1", "kind": "claude", "state": "idle", "window_index": 0, "window_label": "0:claude"}],
-    ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
-    try:
-        running = webapp.stats_agent_activity_record(1000.0)
-        transition = webapp.stats_agent_activity_record(1010.0)
-        idle = webapp.stats_agent_activity_record(1071.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert running["run_agent_total"] == 1
-    assert running["transition_agent_total"] == 0
-    assert transition["run_agent_total"] == 0
-    assert transition["transition_agent_total"] == 1
-    assert transition["inactive_agent_total"] == 0
-    assert idle["transition_agent_total"] == 0
-    assert idle["idle_agent_total"] == 1
-    assert idle["inactive_agent_total"] == 1
-
-
-def test_stats_agent_activity_record_counts_each_logical_window_once(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["8001"])
-    monkeypatch.setattr(
-        webapp,
-        "stats_agent_window_rows",
-        lambda: [
-            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 101},
-            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 102},
-            {"session": "8001", "kind": "codex", "state": "working", "window_index": 0, "window_label": "0:codex", "pid": 103},
-        ],
-    )
-    try:
-        record = webapp.stats_agent_activity_record(1000.0, include_token_rates=False)
-    finally:
-        webapp.control_server.stop()
-
-    assert record["run_agent_total"] == 1
-    assert record["idle_agent_total"] == 0
-    assert record["active_agent_total"] == 1
-    assert sum(record[key] for key in ("ask_agent_total", "run_agent_total", "transition_agent_total", "idle_agent_total")) == 1
-
-
-def test_stats_agent_activity_record_counts_sticky_cooldown_as_transition(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    monkeypatch.setattr(
-        webapp,
-        "stats_agent_window_rows",
-        lambda: [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0}],
-    )
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
-    try:
-        record = webapp.stats_agent_activity_record(1000.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert record["transition_agent_total"] == 1
-    assert record["idle_agent_total"] == 0
-    assert record["inactive_agent_total"] == 0
-    assert record["active_agent_total"] == 1
-
-
-def test_stats_agent_activity_record_keeps_zero_timeout_run_to_idle_transition(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    rows = iter([
-        [{"session": "1", "kind": "codex", "state": "working", "window_index": 2, "window_label": "2:codex"}],
-        [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex"}],
-        [{"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex"}],
-    ])
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: next(rows))
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 0.0)
-    try:
-        running = webapp.stats_agent_activity_record(1000.0)
-        first_idle = webapp.stats_agent_activity_record(1010.0)
-        later_idle = webapp.stats_agent_activity_record(1120.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert running["run_agent_total"] == 1
-    assert first_idle["transition_agent_total"] == 1
-    assert first_idle["idle_agent_total"] == 0
-    assert later_idle["transition_agent_total"] == 1
-    assert later_idle["idle_agent_total"] == 0
-
-
-def test_stats_agent_activity_record_drops_acknowledged_attention_and_cooldown(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    monkeypatch.setattr(
-        webapp,
-        "stats_agent_window_rows",
-        lambda: [
-            {"session": "1", "kind": "claude", "state": "needs-input", "window_index": 1, "window_label": "1:claude", "attention_acknowledged": True},
-            {"session": "1", "kind": "codex", "state": "idle", "window_index": 2, "window_label": "2:codex", "working_stopped_ts": 900.0, "cooldown_acknowledged": True},
-        ],
-    )
-    monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 0.0)
-    try:
-        record = webapp.stats_agent_activity_record(1000.0)
-    finally:
-        webapp.control_server.stop()
-
-    assert record["ask_agent_total"] == 0
-    assert record["transition_agent_total"] == 0
-    assert record["idle_agent_total"] == 2
-    assert record["inactive_agent_total"] == 2
-    assert record["active_agent_total"] == 0
-
-
 def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     monkeypatch.setattr(webapp, "notification_transition_seconds", lambda: 60.0)
     try:
-        with webapp.stats_history_service.agent_token_lock:
+        with webapp.stats_collection_state.agent_activity_lock:
             active_kind = webapp.stats_agent_activity_kind_locked({"state": "active"}, "active-agent", 1000.0, 60.0)
             settled_kind = webapp.stats_agent_activity_kind_locked({"state": "settled"}, "settled-agent", 1000.0, 60.0)
             ask_kind = webapp.stats_agent_activity_kind_locked({"state": "needs-input"}, "ask-agent", 1000.0, 60.0)
@@ -2274,6 +1146,19 @@ def test_stats_agent_idle_means_not_ask_run_or_transition(monkeypatch):
     assert ask_kind == "ask"
     assert run_kind == "run"
     assert transition_kind == "transition"
+
+
+def test_stats_agent_old_completion_is_not_counted_as_an_indefinite_transition():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    try:
+        with webapp.stats_collection_state.agent_activity_lock:
+            recent = webapp.stats_agent_activity_kind_locked({"state": "idle", "working_stopped_ts": 950.0}, "recent", 1000.0, 60.0)
+            expired = webapp.stats_agent_activity_kind_locked({"state": "idle", "working_stopped_ts": 900.0}, "expired", 1000.0, 60.0)
+    finally:
+        webapp.control_server.stop()
+
+    assert recent == "transition"
+    assert expired == "idle"
 
 
 class FakeCodexAppServerStdin:
@@ -2328,39 +1213,13 @@ def test_auto_approve_status_refreshes_session_order(monkeypatch):
     monkeypatch.setattr(webapp, "auto_approve_session_status", lambda session, **_kwargs: {"target": session})
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     try:
-        payload, status = webapp.auto_approve_status()
+        payload, status = webapp.build_auto_approve_status()
     finally:
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
     assert payload["session_order"] == ["new"]
     assert payload["sessions"] == {"new": {"target": "new"}}
-
-
-def test_auto_approve_status_reuses_cached_roster(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    build_calls = []
-
-    def fake_build_auto_approve_status(session=None, timings=None):
-        build_calls.append(session)
-        if timings is not None:
-            timings["refresh_sessions"] = 1.0
-        return {"session_order": ["1"], "sessions": {"1": {"enabled": False}}, "errors": [], "rules": {}}, HTTPStatus.OK
-
-    monkeypatch.setattr(webapp, "build_auto_approve_status", fake_build_auto_approve_status)
-    try:
-        first, first_status = webapp.auto_approve_status()
-        second, second_status = webapp.auto_approve_status()
-    finally:
-        webapp.control_server.stop()
-
-    assert first_status == HTTPStatus.OK
-    assert second_status == HTTPStatus.OK
-    assert first["sessions"] == second["sessions"] == {"1": {"enabled": False}}
-    assert build_calls == [None]
-    assert second["cache"]["stale"] is False
-
-
 def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "ACTIVITY_PATH", tmp_path / "activity.json")
     monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", tmp_path / "activity-heartbeats.jsonl")
@@ -2414,166 +1273,7 @@ def test_agent_window_attention_key_uses_shared_per_window_hash_transitions(monk
     assert first_b == "command-b:2"
     assert returned_a == "command-a:3"
     assert after_idle_a == "command-a:4"
-
-
-def test_auto_approve_status_returns_stale_cache_while_refreshing(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    refreshes = []
-    stale_payload = {"session_order": ["1"], "sessions": {"1": {"enabled": True}}, "errors": [], "rules": {}}
-    with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache_record.payload = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "merge_shared_attention_acks", lambda: False)
-    monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append("refresh") or True)
-    try:
-        payload, status = webapp.auto_approve_status()
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["sessions"] == stale_payload["sessions"]
-    assert payload["cache"]["stale"] is True
-    assert refreshes == ["refresh"]
-
-
-def test_auto_approve_cache_rejects_retired_refresh_after_invalidation(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    old_started = threading.Event()
-    release_old = threading.Event()
-    old_publish_attempted = threading.Event()
-    stale_publish_results = []
-    calls = 0
-
-    def build_auto_approve_status(timings=None):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            old_started.set()
-            assert release_old.wait(timeout=3)
-            return {"marker": "old", "sessions": {}}, HTTPStatus.OK
-        return {"marker": "new", "sessions": {}}, HTTPStatus.OK
-
-    real_set_cache = webapp.set_auto_approve_cache
-
-    def tracked_set_cache(payload, status, generation, worker):
-        published = real_set_cache(payload, status, generation, worker)
-        if payload.get("marker") == "old":
-            stale_publish_results.append(published)
-            old_publish_attempted.set()
-        return published
-
-    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
-    monkeypatch.setattr(webapp, "set_auto_approve_cache", tracked_set_cache)
-    try:
-        assert webapp.start_auto_approve_cache_refresh() is True
-        assert old_started.wait(timeout=3)
-        webapp.invalidate_auto_approve_cache()
-        payload, status = webapp.refresh_auto_approve_cache_sync()
-        release_old.set()
-        assert old_publish_attempted.wait(timeout=3)
-        with webapp.auto_approve_cache_condition:
-            cached = webapp.auto_approve_cache_record.payload
-            assert cached is not None
-            cached_payload = cached[1][0]
-            worker = webapp.auto_approve_cache_record.worker
-    finally:
-        release_old.set()
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["marker"] == "new"
-    assert cached_payload["marker"] == "new"
-    assert worker is None
-    assert stale_publish_results == [False]
-
-
-def test_sync_auto_approve_cache_waits_for_current_async_refresh(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    build_started = threading.Event()
-    release_build = threading.Event()
-    build_calls = []
-
-    def build_auto_approve_status(timings=None):
-        build_calls.append(True)
-        build_started.set()
-        assert release_build.wait(timeout=3)
-        return {"marker": "shared", "sessions": {}}, HTTPStatus.OK
-
-    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
-    try:
-        assert webapp.start_auto_approve_cache_refresh() is True
-        assert build_started.wait(timeout=3)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            waiting = executor.submit(webapp.refresh_auto_approve_cache_sync)
-            assert waiting.done() is False
-            release_build.set()
-            payload, status = waiting.result(timeout=3)
-    finally:
-        release_build.set()
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["marker"] == "shared"
-    assert build_calls == [True]
-
-
-def test_sync_fresh_auto_approve_cache_waits_for_expired_async_refresh(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    build_started = threading.Event()
-    release_build = threading.Event()
-    build_calls = []
-    stale_payload = {"marker": "stale", "sessions": {}}
-
-    def build_auto_approve_status(timings=None):
-        build_calls.append(True)
-        build_started.set()
-        assert release_build.wait(timeout=3)
-        return {"marker": "fresh", "sessions": {}}, HTTPStatus.OK
-
-    with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache_record.payload = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (stale_payload, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
-    try:
-        assert webapp.start_auto_approve_cache_refresh() is True
-        assert build_started.wait(timeout=3)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            waiting = executor.submit(webapp.refresh_auto_approve_cache_sync, require_fresh=True)
-            assert waiting.done() is False
-            release_build.set()
-            payload, status = waiting.result(timeout=3)
-    finally:
-        release_build.set()
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload["marker"] == "fresh"
-    assert build_calls == [True]
-
-
-def test_auto_approve_cache_failure_cleanup_is_generation_guarded():
-    webapp = app_module.TmuxWebtermApp(["1"])
-    try:
-        with webapp.auto_approve_cache_condition:
-            record = webapp.auto_approve_cache_record
-            first_worker = object()
-            record.generation = 7
-            record.worker = first_worker
-        webapp.invalidate_auto_approve_cache()
-        with webapp.auto_approve_cache_condition:
-            current_worker = object()
-            webapp.auto_approve_cache_record.worker = current_worker
-            current_generation = webapp.auto_approve_cache_record.generation
-        assert webapp.finish_auto_approve_cache_refresh(7, first_worker) is False
-        assert webapp.auto_approve_cache_record.worker is current_worker
-        assert webapp.finish_auto_approve_cache_refresh(current_generation, current_worker) is True
-        assert webapp.auto_approve_cache_record.worker is None
-        assert not hasattr(webapp, "auto_approve_cache")
-        assert not hasattr(webapp, "auto_approve_cache_refreshing")
-        assert not hasattr(webapp, "auto_approve_cache_lock")
-    finally:
-        webapp.control_server.stop()
-
-
-def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
+def test_stats_agent_window_rows_uses_statusd_snapshot(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     cached_payload = {
         "session_order": ["1"],
@@ -2589,9 +1289,7 @@ def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
         "errors": [],
         "rules": {},
     }
-    with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache_record.payload = (time.monotonic(), (cached_payload, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats should use the fresh auto-approve cache")))
+    monkeypatch.setattr(webapp, "status_snapshot_payload", lambda: cached_payload)
     try:
         rows = webapp.stats_agent_window_rows()
     finally:
@@ -2603,324 +1301,121 @@ def test_stats_agent_window_rows_reuses_fresh_auto_approve_cache(monkeypatch):
     assert "session" not in cached_payload["sessions"]["1"]["agent_windows"][0]
 
 
-def test_stats_agent_window_rows_uses_briefly_stale_cache_while_refreshing(monkeypatch):
+def test_stats_agent_window_rows_does_not_refresh_web_cache(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     cached_payload = {
         "session_order": ["1"],
         "sessions": {"1": {"agent_windows": [{"kind": "codex", "state": "working", "window_index": 0}]}},
     }
-    refreshes = []
-    with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache_record.payload = (time.monotonic() - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 1.0, (cached_payload, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append(True) or True)
-    monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("stats should keep the briefly stale cache")))
+    monkeypatch.setattr(webapp, "status_snapshot_payload", lambda: cached_payload)
     try:
         rows = webapp.stats_agent_window_rows()
     finally:
         webapp.control_server.stop()
 
     assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "session": "1"}]
-    assert refreshes == [True]
 
 
-def test_stats_agent_window_rows_holds_very_stale_state_while_refreshing(monkeypatch):
+def test_stats_agent_window_rows_excludes_a_roster_marked_stale_pane(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     cached_payload = {
         "session_order": ["1"],
-        "sessions": {"1": {"agent_windows": [{"kind": "codex", "state": "working", "window_index": 0}]}},
+        "sessions": {"1": {"agent_windows": [
+            {"kind": "codex", "state": "working", "window_index": 0, "pane_target": "%1"},
+            {"kind": "codex", "state": "transition", "window_index": 1, "pane_target": "%2", "stale": True},
+        ]}},
     }
-    refreshes = []
-    with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache_record.payload = (time.monotonic() - 3600.0, (cached_payload, HTTPStatus.OK))
-    monkeypatch.setattr(webapp, "start_auto_approve_cache_refresh", lambda: refreshes.append(True) or True)
-    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stats must never synchronously refresh a held roster")))
+    monkeypatch.setattr(webapp, "status_snapshot_payload", lambda: cached_payload)
     try:
         rows = webapp.stats_agent_window_rows()
     finally:
         webapp.control_server.stop()
 
-    assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "session": "1"}]
-    assert refreshes == [True]
+    assert rows == [{"kind": "codex", "state": "working", "window_index": 0, "pane_target": "%1", "session": "1"}]
 
 
-def test_statsd_fast_status_samples_continue_while_one_token_worker_is_blocked(monkeypatch, tmp_path):
+def test_stats_agent_window_rows_returns_empty_when_statusd_is_unavailable(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
-    webapp.stats_client = StatsClient(tmp_path / "statsd.sock", tmp_path / "stats.sqlite3")
-    assert webapp.stats_client.ensure_started() is True
-    webapp.background_owner = StatsRoleOwner(owner=True, port=8881)
-    sample_index = {"value": 0}
-    token_started = threading.Event()
-    token_release = threading.Event()
-    token_calls = []
+    monkeypatch.setattr(webapp, "status_snapshot_payload", lambda: None)
+    try:
+        rows = webapp.stats_agent_window_rows()
+    finally:
+        webapp.control_server.stop()
 
-    def current_sample():
-        sample_time = 1000.0 + sample_index["value"]
-        sample_index["value"] += 1
-        return {
-            "time": sample_time,
-            "pid": 8881,
-            "started_at": 990.0,
-            "uptime_seconds": sample_time - 990.0,
-            "cpu_percent": 1.0,
-            "system_cpu_percent": 2.0,
-            "rss_bytes": 1234,
-        }, True
+    assert rows == []
 
-    def blocked_tokens(rows, sample_time):
-        token_calls.append((rows, sample_time))
-        token_started.set()
-        assert token_release.wait(2.0) is True
-        return []
 
-    monkeypatch.setattr(webapp, "current_stats_sample", current_sample)
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [{"session": "1", "kind": "codex", "state": "working", "window_index": 0, "transcript": "/tmp/rollout.jsonl"}])
-    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", blocked_tokens)
-    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(webapp, "stats_metric_family_specs", lambda: {
-        "cpu": (webapp.record_stats_cpu_sample, lambda: 0.1),
-        "agent_tokens": (webapp.record_stats_agent_token_sample, lambda: 0.1),
+def test_tabber_activity_keeps_statusd_roster_when_tmux_discovery_temporarily_has_no_agents(monkeypatch):
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({"1": info}, []))
+    monkeypatch.setattr(webapp, "tmux_recency_ordered_sessions", lambda session_names=None, payload=None: ["1"])
+    monkeypatch.setattr(webapp, "activity_snapshot_with_recency", lambda: {})
+    monkeypatch.setattr(webapp, "merge_shared_attention_acks", lambda: False)
+    monkeypatch.setattr(webapp, "status_snapshot_payload", lambda: {
+        "agent_window_snapshot_revision": 7,
+        "sessions": {"1": {"agent_windows": [{
+            "window_index": 2, "pane_target": "%9", "kind": "codex", "state": "working", "window_label": "2:codex",
+        }]}},
     })
     try:
-        assert webapp.start_stats_metric_scheduler() is True
-        assert token_started.wait(1.0) is True
-        deadline = time.monotonic() + 1.0
-        while sample_index["value"] < 4 and time.monotonic() < deadline:
-            time.sleep(0.02)
-        history = webapp.stats_client.history(client_id="client-a")
-        status = webapp.stats_client.runtime_status()
-    finally:
-        token_release.set()
-        webapp.stop_stats_metric_scheduler()
-        webapp.stats_client.request({"action": "shutdown"})
-        webapp.control_server.stop()
-
-    assert len(token_calls) == 1
-    assert sum(record["cpu_count"] for record in history["records"]) >= 4
-    assert status["sampler_families"]["cpu"]["successes"] >= 4
-
-
-def test_stats_metric_families_have_independent_named_cadences():
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        specs = webapp.stats_metric_family_specs()
-        assert specs["cpu"][1]() == 1.0
-        assert specs["service_load"][1]() == 10.0
-        assert specs["agent_status"][1]() == 10.0
-        assert specs["gpu"][1]() == 10.0
-        assert specs["system_memory"][1]() == 60.0
-        assert specs["agent_tokens"][1]() == 60.0
-        webapp.stats_history_service.agent_token_consumer_until = time.time() + 30.0
-        assert specs["agent_tokens"][1]() == 10.0
+        payload = webapp.build_activity_payload()
     finally:
         webapp.control_server.stop()
 
-
-def test_stats_sampler_wall_discontinuity_splits_forward_and_backward_epochs():
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=8 * 3600 + 1010, scheduled_at=1010, cadence=10, attempts=2
-    ) is True
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=900, scheduled_at=1010, cadence=10, attempts=2
-    ) is True
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=1011, scheduled_at=1010, cadence=10, attempts=2
-    ) is False
-    assert app_module.stats_sampler_wall_discontinuity(
-        attempt_at=8 * 3600 + 1010, scheduled_at=1010, cadence=10, attempts=1
-    ) is False
+    assert payload["agent_window_snapshot_revision"] == 7
+    assert payload["agent_windows"] == {"1": [{
+        "window_index": 2, "pane_target": "%9", "kind": "codex", "state": "working", "window_label": "2:codex",
+    }]}
+    assert [(row["session"], row["window"], row["pane_target"], row["agent_kind"], row["state"])
+            for row in payload["agents"]] == [("1", "2", "%9", "codex", "working")]
 
 
-def test_agent_token_scheduler_persists_zero_sample_with_epoch_coverage(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    submitted = []
-    webapp.stats_history_service.scheduler_generation = 4
-    webapp.stats_metric_thread_context.generation = 4
-    webapp.stats_metric_thread_context.scheduled_time = 1000.0
-    webapp.stats_metric_thread_context.coverage_family = "agent_tokens"
-    webapp.stats_metric_thread_context.coverage_epoch_id = "pid:4:agent_tokens:2"
-    webapp.stats_metric_thread_context.coverage_cadence_seconds = 60.0
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", lambda *_args: [])
-    monkeypatch.setattr(
-        webapp.stats_client,
-        "merge_server_records",
-        lambda records, **_kwargs: submitted.extend(records) or {"ok": True},
-    )
-    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args: None)
-    try:
-        webapp.record_stats_agent_token_sample()
-    finally:
-        webapp.control_server.stop()
-
-    assert submitted == [{
-        "time": 1000.0,
-        "_stats_coverage": {
-            "family": "agent_tokens",
-            "epoch_id": "pid:4:agent_tokens:2",
-            "cadence_seconds": 60.0,
-            "owner_generation": 4,
+def test_status_snapshot_payload_preserves_statusd_generation_for_agent_window_consumers(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    body = json.dumps({
+        "sessions": {
+            "1": {"agent_windows": [{"window_index": 0, "pane_target": "%1", "kind": "codex", "state": "idle"}]},
         },
-    }]
-
-
-def test_token_consumer_wakes_only_idle_token_family_while_cpu_keeps_ticking(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.background_owner = StatsRoleOwner(owner=True, port=8881)
-    token_attempts = []
-    cpu_attempts = []
-    first_token = threading.Event()
-    second_token = threading.Event()
-    second_token_release = threading.Event()
-    consumer = {"until": 0.0}
-
-    class StatsClientStub:
-        def runtime_status(self):
-            return {"agent_token_consumer_until": consumer["until"], "sampler_families": {}}
-
-        def set_token_consumer_until(self, until):
-            consumer["until"] = until
-            return {"ok": True}
-
-        def update_sampler_family(self, _family, _status):
-            return {"ok": True}
-
-    def token_collector():
-        token_attempts.append(time.monotonic())
-        (first_token if len(token_attempts) == 1 else second_token).set()
-        if len(token_attempts) == 2:
-            assert second_token_release.wait(1.0) is True
-
-    monkeypatch.setattr(webapp, "stats_client", StatsClientStub())
-    monkeypatch.setattr(webapp, "stats_metric_family_specs", lambda: {
-        "cpu": (lambda: cpu_attempts.append(time.monotonic()), lambda: 0.1),
-        "agent_tokens": (token_collector, webapp.stats_agent_token_scheduler_seconds),
-    })
+    }).encode("utf-8")
+    metadata = {
+        "ok": True,
+        "protocol_version": 1,
+        "generation": 17,
+        "status": 200,
+        "built_at": 1.0,
+    }
+    monkeypatch.setattr(webapp.status_client, "snapshot", lambda sessions, timeout: (metadata, body))
     try:
-        assert webapp.start_stats_metric_scheduler() is True
-        assert first_token.wait(1.0) is True
-        time.sleep(0.2)
-        assert len(token_attempts) == 1  # worker is holding its 60-second idle deadline
-        cpu_before_demand = len(cpu_attempts)
-        with webapp.stats_history_service.scheduler_lock:
-            webapp.stats_history_service.scheduler_diagnostics["agent_tokens"]["last_attempt_at"] = (
-                time.time() - app_module.STATS_AGENT_TOKEN_SAMPLE_SECONDS - 1.0
-            )
-
-        webapp.stats_sample_context(token_consumer=True)
-
-        assert second_token.wait(1.0) is True
-        cpu_during_token = len(cpu_attempts)
-        webapp.stats_sample_context(token_consumer=True)  # running scan already satisfies this wake
-        second_token_release.set()
-        deadline = time.monotonic() + 1.0
-        while webapp.stats_history_service.scheduler_diagnostics.get("agent_tokens", {}).get("running") and time.monotonic() < deadline:
-            time.sleep(0.01)
-        webapp.stats_sample_context(token_consumer=True)  # a completed scan still owns the next ten-second deadline
-        time.sleep(0.2)
-    finally:
-        second_token_release.set()
-        webapp.stop_stats_metric_scheduler()
-        webapp.control_server.stop()
-
-    assert token_attempts[1] - token_attempts[0] < 1.0
-    assert len(token_attempts) == 2
-    assert len(cpu_attempts) > cpu_before_demand
-    assert len(cpu_attempts) > cpu_during_token
-
-
-def test_agent_status_scheduler_persists_an_observed_empty_roster(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    records = []
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(webapp, "merge_stats_family_record", lambda family, record, sample: records.append((family, record)))
-    try:
-        webapp.record_stats_agent_status_sample()
+        payload = webapp.status_snapshot_payload()
     finally:
         webapp.control_server.stop()
 
-    assert records[0][0] == "agent_status"
-    assert records[0][1]["agent_activity_samples"] == 1
-    assert records[0][1]["active_agent_total"] == 0
+    assert payload is not None
+    revision, rows = webapp.agent_window_snapshot_rows_by_target(payload)
+    assert revision == 17
+    assert rows[("1", "0", "%1", "codex")]["state"] == "idle"
 
 
-def test_stats_metric_stale_generation_cannot_persist_partial_or_token_records(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    persisted = []
-    monkeypatch.setattr(webapp.stats_client, "merge_server_records", lambda *_args, **_kwargs: persisted.append("merge") or {"ok": True})
-    monkeypatch.setattr(webapp, "stats_agent_window_rows", lambda: [])
-    monkeypatch.setattr(webapp, "stats_agent_token_records_for_rows", lambda *_args: [])
-    monkeypatch.setattr(webapp, "statsd_migrate_usage_atom_history", lambda *_args: persisted.append("migrate"))
-    webapp.stats_history_service.scheduler_generation = 2
-    webapp.stats_metric_thread_context.generation = 1
+def test_tabber_activity_replaces_jobd_empty_rows_with_same_revision_status_roster(monkeypatch):
+    session = "1"
+    pane = PaneInfo(session, "0", "0", "%1", "1:0.0", "/repo", "codex", True, True, "codex", 101)
+    info = SessionInfo(session=session, panes=[pane], selected_pane=pane, agents=[AgentInfo(session, "codex", 101, "%1", "codex", "/repo", "running", "sid-1", None, None)])
+    webapp = app_module.TmuxWebtermApp([session])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({session: info}, []))
+    monkeypatch.setattr(webapp, "tmux_recency_ordered_sessions", lambda session_names=None, payload=None: [session])
+    monkeypatch.setattr(webapp, "cached_session_files_payloads_for_infos", lambda agent_infos, hours=24.0: {session: {}})
+    monkeypatch.setattr(webapp, "activity_snapshot_with_recency", lambda: {})
+    monkeypatch.setattr(webapp, "merge_shared_attention_acks", lambda: False)
+    monkeypatch.setattr(webapp, "agent_window_screen_state", lambda agent: {"key": "idle", "text": ""})
+    monkeypatch.setattr(webapp, "compute_tabber_activity_rows_via_jobd", lambda *args, **kwargs: {session: {"agents": [], "agent_windows": []}})
+    monkeypatch.setattr(webapp, "status_snapshot_payload", lambda: {"agent_window_snapshot_revision": 7, "sessions": {session: {"agent_windows": [{"window_index": 0, "pane_target": "%1", "kind": "codex", "state": "working"}]}}})
     try:
-        with pytest.raises(RuntimeError, match="generation ended"):
-            webapp.merge_stats_family_record("gpu", {"time": 1000.0}, webapp.latest_stats_sample())
-        with pytest.raises(RuntimeError, match="generation ended"):
-            webapp.record_stats_agent_token_sample()
+        payload = webapp.build_activity_payload()
     finally:
         webapp.control_server.stop()
-
-    assert persisted == []
-
-
-def test_stats_api_freshness_uses_cpu_family_not_newer_gpu_success(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    now = time.time()
-    monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {
-        "last_sampler_success_at": now,
-        "sampler_families": {
-            "cpu": {"last_success_at": now - 30.0},
-            "gpu": {"last_success_at": now},
-        },
-    })
-    try:
-        _sample, shared, _profile, _started = webapp.stats_sample_context()
-    finally:
-        webapp.control_server.stop()
-
-    assert shared["fresh"] is False
-    assert shared["updated_at"] == pytest.approx(now - 30.0)
-
-
-def test_stats_api_reads_cached_cpu_without_invoking_any_collector(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    with webapp.stats_history_service.sample_lock:
-        webapp.stats_history_service.sample_record.cached_payload = {
-            "time": 1000.0, "pid": 123, "started_at": 900.0, "uptime_seconds": 100.0,
-            "cpu_percent": 2.0, "system_cpu_percent": 3.0, "rss_bytes": 4,
-        }
-    monkeypatch.setattr(webapp, "current_stats_sample", lambda: pytest.fail("API must not sample CPU"))
-    monkeypatch.setattr(webapp, "record_stats_global_sample", lambda *_args, **_kwargs: pytest.fail("API must not run collectors"))
-    monkeypatch.setattr(webapp.stats_client, "runtime_status", lambda: {"sampler_families": {}})
-    try:
-        sample, _shared, _profile, _started = webapp.stats_sample_context()
-    finally:
-        webapp.control_server.stop()
-
-    assert sample["time"] == 1000.0
-    assert sample["cpu_percent"] == 2.0
-
-
-def test_auto_approve_session_status_skips_roster_cache(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["5"])
-    build_calls = []
-
-    def fake_build_auto_approve_status(session=None, timings=None):
-        build_calls.append(session)
-        return {"target": session, "enabled": False}, HTTPStatus.OK
-
-    monkeypatch.setattr(webapp, "build_auto_approve_status", fake_build_auto_approve_status)
-    try:
-        payload, status = webapp.auto_approve_status("5")
-    finally:
-        webapp.control_server.stop()
-
-    assert status == HTTPStatus.OK
-    assert payload == {"target": "5", "enabled": False}
-    assert build_calls == ["5"]
-    assert webapp.auto_approve_cache_record.payload is None
-
-
+    assert payload["agent_windows"][session][0]["state"] == "working"
+    assert [(row["session"], row["agent_kind"], row["state"]) for row in payload["agents"]] == [(session, "codex", "working")]
 def test_auto_approve_session_lock_owner_probes_agent_pane_targets(monkeypatch):
     # Regression: YO workers lock the agent PANE target (e.g. %7), NOT the bare session, so a server
     # without a local worker must probe the pane-target lock to notice another server's ownership.
@@ -3602,7 +2097,7 @@ def test_session_files_cache_key_ignores_transcript_append_mtime_and_size(tmp_pa
     assert second_path == first_path
 
 
-def test_client_status_poll_fallbacks_are_interactive_with_jitter(monkeypatch):
+def test_client_status_attention_fallback_is_interactive_with_jitter(monkeypatch):
     assert app_module.SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS == pytest.approx(1.5)
     assert app_module.SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS == pytest.approx(1.5)
     assert app_module.SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS == pytest.approx(0.5)
@@ -3610,10 +2105,10 @@ def test_client_status_poll_fallbacks_are_interactive_with_jitter(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
         monkeypatch.setattr(app_module.random, "uniform", lambda lower, upper: upper)
-        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(1.875)
+        assert webapp.server_attention_ack_event_poll_seconds() == pytest.approx(1.875)
         assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(1.875)
         monkeypatch.setattr(app_module.random, "uniform", lambda lower, upper: lower)
-        assert webapp.server_auto_approve_event_poll_seconds() == pytest.approx(1.125)
+        assert webapp.server_attention_ack_event_poll_seconds() == pytest.approx(1.125)
         assert webapp.server_tmux_signal_event_poll_seconds() == pytest.approx(1.125)
     finally:
         webapp.control_server.stop()
@@ -3638,7 +2133,6 @@ def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
     webapp.refresh_sessions = lambda maintenance=False: []
     try:
         failures = [
-            webapp.record_stats_history_payload("invalid"),
             webapp.client_event({"session": "missing", "type": "test", "message": "message"}),
             webapp.acknowledge_attention({}),
             webapp.build_auto_approve_status("missing"),
@@ -3650,11 +2144,6 @@ def test_user_facing_route_failures_keep_localizable_descriptors(monkeypatch):
 
     assert all(status != HTTPStatus.OK for _payload, status in failures)
     assert all(payload.get("user_message", {}).get("key") for payload, _status in failures)
-    assert failures[0][0]["user_message"] == {
-        "key": "request.error.object",
-        "params": {"field": "payload"},
-        "fallback": "payload must be an object",
-    }
     assert failures[-1][0]["diagnostic"] == "tmux discovery failed"
     command_failure = app_module.tmux_command_failure_payload("1", "raw tmux stderr")
     assert command_failure["diagnostic"] == "raw tmux stderr"
@@ -3687,12 +2176,15 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
         record.next_file_poll_at = 100.5
         record.next_background_file_poll_at = 100.75
         record.next_signature_poll_at = 100.25
-        record.next_auto_poll_at = 101.0
         record.next_attention_ack_poll_at = 100.6
         record.next_watched_pr_poll_at = 200.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(60.0)
         subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
+        record.filesystem_healthy = True
+        record.next_signature_poll_at = 101.25
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(1.25)
+        record.filesystem_healthy = False
         record.next_signature_poll_at = 0.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
     finally:
@@ -3701,134 +2193,219 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
         webapp.control_server.stop()
 
 
-def test_timer_client_event_polls_initialize_without_initial_push(monkeypatch):
+def test_client_event_watch_uses_native_events_without_visible_or_background_scans(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
+    record = webapp.client_watch_service.event_watcher_record
+
+    class StopAfterOneWait:
+        def clear(self):
+            return None
+
+        def wait(self, _timeout=None):
+            record.stop_event.set()
+            return True
+
+    record.filesystem_healthy = True
+    record.next_signature_poll_at = time.monotonic() + 60.0
+    record.wake_event = StopAfterOneWait()
+    monkeypatch.setattr(webapp, "poll_client_file_events_once", lambda: pytest.fail("healthy native watch must not scan visible files"))
+    monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: pytest.fail("healthy native watch must not scan background files"))
+    try:
+        webapp.client_event_watch_loop(record)
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+        webapp.control_server.stop()
+
+
+def test_client_event_watch_does_not_poll_tmux_while_control_watcher_is_healthy(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"status"})
+    record = webapp.client_watch_service.event_watcher_record
+
+    class StopAfterOneWait:
+        def clear(self):
+            return None
+
+        def wait(self, _timeout=None):
+            record.stop_event.set()
+            return True
+
+    now = time.monotonic()
+    record.next_attention_ack_poll_at = now + 60.0
+    record.next_tmux_signal_poll_at = 0.0
+    record.wake_event = StopAfterOneWait()
+    monkeypatch.setattr(webapp, "tmux_signal_event_watcher_healthy", lambda: True)
+    monkeypatch.setattr(webapp, "poll_tmux_signals_client_event_once", lambda: pytest.fail("healthy control watcher must not run fallback tmux poll"))
+    try:
+        webapp.client_event_watch_loop(record)
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+        webapp.control_server.stop()
+
+
+def test_client_event_watch_polls_tmux_when_control_watcher_is_unhealthy(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"status"})
+    record = webapp.client_watch_service.event_watcher_record
+
+    class StopAfterOneWait:
+        def clear(self):
+            return None
+
+        def wait(self, _timeout=None):
+            record.stop_event.set()
+            return True
+
+    now = time.monotonic()
+    calls = []
+    record.next_attention_ack_poll_at = now + 60.0
+    record.next_tmux_signal_poll_at = 0.0
+    record.wake_event = StopAfterOneWait()
+    monkeypatch.setattr(webapp, "tmux_signal_event_watcher_healthy", lambda: False)
+    monkeypatch.setattr(webapp, "poll_tmux_signals_client_event_once", lambda: calls.append(time.monotonic()) or [])
+    try:
+        webapp.client_event_watch_loop(record)
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+        webapp.control_server.stop()
+
+    assert len(calls) == 1
+    assert record.next_tmux_signal_poll_at > now
+
+
+def test_client_event_watch_does_not_poll_attention_acks_while_native_watcher_is_healthy(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"attention"})
+    record = webapp.client_watch_service.event_watcher_record
+
+    class StopAfterOneWait:
+        def clear(self):
+            return None
+
+        def wait(self, _timeout=None):
+            record.stop_event.set()
+            return True
+
+    now = time.monotonic()
+    record.filesystem_healthy = True
+    record.next_attention_ack_poll_at = 0.0
+    record.next_tmux_signal_poll_at = now + 60.0
+    record.wake_event = StopAfterOneWait()
+    monkeypatch.setattr(webapp, "poll_attention_acks_client_event_once", lambda: pytest.fail("healthy native watcher must not run attention-ack timer poll"))
+    monkeypatch.setattr(webapp, "tmux_signal_event_watcher_healthy", lambda: True)
+    try:
+        webapp.client_event_watch_loop(record)
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+        webapp.control_server.stop()
+
+
+def test_status_generation_waiter_publishes_once_per_advanced_generation(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     events = []
-    auto_payloads = [
-        ({"sessions": {}, "version": 1}, HTTPStatus.OK),
-        ({"sessions": {"1": {"enabled": True}}, "version": 2}, HTTPStatus.OK),
-    ]
-    tmux_payloads = [
-        {"ok": True, "window_count": 0, "windows": [], "generated_at": 1.0},
-        {"ok": True, "window_count": 1, "windows": [{"key": "1:0"}], "generated_at": 2.0},
-    ]
-    watched_payloads = [
-        {"items": []},
-        {"items": [{"repo": "owner/repo", "number": 1}]},
-    ]
-    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda **_kwargs: auto_payloads.pop(0))
-    monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: tmux_payloads.pop(0))
-    monkeypatch.setattr(webapp, "watched_prs_payload", lambda: watched_payloads.pop(0))
+    responses = iter([
+        {"ok": True, "changed": False, "generation": 7},
+        {"ok": True, "changed": True, "generation": 8},
+    ])
+    record = webapp.client_watch_service.event_watcher_record
+    record.status_generation = 7
+    monkeypatch.setattr(webapp.status_client, "wait_generation", lambda _generation, timeout: next(responses))
+    monkeypatch.setattr(
+        webapp.status_client,
+        "snapshot",
+        lambda _sessions, timeout: (
+            {"ok": True, "protocol_version": 1, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            b'{"session_order":[],"sessions":{}}',
+        ),
+    )
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    original_publish = webapp.publish_client_event
+    def publish_then_stop(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
+        record.status_generation_stop_event.set()
+        return result
+    monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
     try:
-        assert webapp.poll_auto_approve_client_event_once() == []
-        assert webapp.poll_tmux_signals_client_event_once() == []
-        assert webapp.poll_watched_prs_client_event_once() == []
-        assert events == []
-        assert webapp.poll_auto_approve_client_event_once() == ["auto_approve_changed"]
-        assert webapp.poll_tmux_signals_client_event_once() == ["tmux_signals_changed"]
-        assert webapp.poll_watched_prs_client_event_once() == ["watched_prs_changed"]
+        webapp.status_generation_wait_loop(record)
     finally:
         webapp.control_server.stop()
 
-    assert [event_type for event_type, _payload in events] == ["auto_approve_changed", "tmux_signals_changed", "watched_prs_changed"]
-    assert events[0][1]["refresh"] is True
-    assert "signature" in events[0][1]
-    assert "data" not in events[0][1]
-
-
-def test_timer_auto_approve_poll_refreshes_expired_cache_before_publishing(monkeypatch):
-    webapp = app_module.TmuxWebtermApp(["1"])
-    events = []
-    working_payload = {
-        "session_order": ["1"],
-        "sessions": {"1": {"enabled": True, "screen": {}, "agent_windows": [{"state": "working"}]}},
-        "errors": [],
-        "rules": {},
-    }
-    idle_payload = {
-        "session_order": ["1"],
-        "sessions": {"1": {"enabled": True, "screen": {}, "agent_windows": [{"state": "idle"}]}},
-        "errors": [],
-        "rules": {},
-    }
-    builds = []
-    with webapp.auto_approve_cache_condition:
-        webapp.auto_approve_cache_record.payload = (time.monotonic(), (working_payload, HTTPStatus.OK))
-
-    def build_auto_approve_status(timings=None):
-        builds.append(True)
-        return idle_payload, HTTPStatus.OK
-
-    monkeypatch.setattr(webapp, "build_auto_approve_status", build_auto_approve_status)
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        assert webapp.poll_auto_approve_client_event_once() == []
-        with webapp.auto_approve_cache_condition:
-            cached = webapp.auto_approve_cache_record.payload
-            assert cached is not None
-            webapp.auto_approve_cache_record.payload = (cached[0] - app_module.AUTO_APPROVE_CACHE_MAX_AGE_SECONDS - 0.1, cached[1])
-        assert webapp.poll_auto_approve_client_event_once() == ["auto_approve_changed"]
-        assert webapp.poll_auto_approve_client_event_once() == []
-    finally:
-        webapp.control_server.stop()
-
-    assert builds == [True]
     assert [event_type for event_type, _payload in events] == ["auto_approve_changed"]
-    assert events[0][1]["refresh"] is True
+    assert events[0][1]["generation"] == 8
+    assert events[0][1]["refresh"] is False
+    assert events[0][1]["data"] == {"session_order": [], "sessions": {}}
 
 
-def test_timer_client_event_polls_ignore_volatile_status_changes(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    events = []
-    auto_payloads = [
-        (
-            {
-                "sessions": {
-                    "1": {
-                        "enabled": False,
-                        "screen": {"status_elapsed_seconds": 1.0, "status_line": "working 1s", "status_marker": "a"},
-                        "agent_windows": [{"state": "working", "observed_ts": 1.0, "working_elapsed_seconds": 1.0, "status_tokens": 100, "last_active_ts": 1.0, "idle_since": 1.0}],
-                    }
-                }
-            },
-            HTTPStatus.OK,
-        ),
-        (
-            {
-                "sessions": {
-                    "1": {
-                        "enabled": False,
-                        "screen": {"status_elapsed_seconds": 2.0, "status_line": "working 2s", "status_marker": "b"},
-                        "agent_windows": [{"state": "working", "observed_ts": 2.0, "working_elapsed_seconds": 2.0, "status_tokens": 200, "last_active_ts": 2.0, "idle_since": 2.0}],
-                    }
-                }
-            },
-            HTTPStatus.OK,
-        ),
-        ({"sessions": {"1": {"enabled": True, "screen": {}, "agent_windows": [{"state": "working"}]}}}, HTTPStatus.OK),
-    ]
-    tmux_payloads = [
-        {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "activity_age_seconds": 1.0, "activity_ts": 10, "panes": [{"pane_id": "%1", "title": "a work", "history_bytes": 10, "history_size": 1}]}], "generated_at": 1.0},
-        {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "activity_age_seconds": 2.0, "activity_ts": 11, "panes": [{"pane_id": "%1", "title": "b work", "history_bytes": 20, "history_size": 2}]}], "generated_at": 2.0},
-        {"ok": True, "window_count": 1, "windows": [{"key": "1:0", "active": True, "activity_age_seconds": 3.0, "activity_ts": 12, "panes": [{"pane_id": "%1", "title": "c work", "history_bytes": 30, "history_size": 3}]}], "generated_at": 3.0},
-    ]
-    monkeypatch.setattr(webapp, "refresh_auto_approve_cache_sync", lambda **_kwargs: auto_payloads.pop(0))
-    monkeypatch.setattr(webapp, "tmux_signal_snapshot", lambda force=False: tmux_payloads.pop(0))
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    record = webapp.client_watch_service.event_watcher_record
+    wait_entered = threading.Event()
+    released = []
+    monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "lease-1"})
+    monkeypatch.setattr(webapp.status_client, "snapshot", lambda _sessions, timeout: ({"ok": True, "status": 200, "generation": 7}, b"{}"))
+
+    def wait_generation(_generation, timeout):
+        assert timeout == 30.0
+        wait_entered.set()
+        record.status_generation_stop_event.wait(timeout=1.0)
+        return {"ok": False, "error": "stopped"}
+
+    monkeypatch.setattr(webapp.status_client, "wait_generation", wait_generation)
+    monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda lease_id: released.append(lease_id) or {"ok": True})
     try:
-        assert webapp.poll_auto_approve_client_event_once() == []
-        assert webapp.poll_tmux_signals_client_event_once() == []
-        assert webapp.poll_auto_approve_client_event_once() == []
-        assert webapp.poll_tmux_signals_client_event_once() == []
-        assert webapp.poll_auto_approve_client_event_once() == ["auto_approve_changed"]
-        assert webapp.poll_tmux_signals_client_event_once() == ["tmux_signals_changed"]
+        assert webapp.start_status_generation_watcher(record) is True
+        assert wait_entered.wait(timeout=1.0)
+        webapp.stop_status_generation_watcher(record)
     finally:
         webapp.control_server.stop()
 
-    assert [event_type for event_type, _payload in events] == ["auto_approve_changed", "tmux_signals_changed"]
-    assert events[0][1]["refresh"] is True
-    assert "data" not in events[0][1]
+    assert released == ["lease-1"]
+    assert record.status_generation_worker is None
+
+
+def test_client_event_recurring_work_is_fixed_name_and_tracks_useful_vs_no_change():
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    try:
+        webapp.note_client_event_recurring_work(record, "watched_pr_reconcile", useful=False)
+        webapp.note_client_event_recurring_work(record, "watched_pr_reconcile", useful=True)
+        rows = {row["owner"]: row for row in webapp.client_event_recurring_work_snapshot(record, now=0.0)}
+    finally:
+        webapp.control_server.stop()
+
+    watched_pr = rows["watched_pr_reconcile"]
+    assert watched_pr["class"] == "external-reconcile"
+    assert watched_pr["cadence_seconds"] == 60.0
+    assert watched_pr["attempts"] == 2
+    assert watched_pr["useful"] == 1
+    assert watched_pr["no_change"] == 1
+    assert watched_pr["last_attempt_at"] > 0
+    assert watched_pr["last_useful_at"] > 0
+    assert set(rows) == set(app_module.CLIENT_EVENT_RECURRING_WORK_SPECS)
+
+
+def test_runtime_refresh_aggregates_approvald_recurring_work_without_target_identity():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        refresh = webapp.runtime_refresh_state({}, {"services": [{
+            "service": "approvald",
+            "recurring_work": {
+                "class": "sample", "cadence_seconds": 0.5, "demanded": True,
+                "attempts": 8, "useful": 2, "no_change": 5, "failures": 1,
+                "last_attempt_at": 40.0, "last_useful_at": 30.0,
+            },
+        }]})
+    finally:
+        webapp.control_server.stop()
+
+    row = next(item for item in refresh["recurring_work"] if item["owner"] == "approvald_auto_approve")
+    assert row == {
+        "owner": "approvald_auto_approve", "class": "sample", "cadence_seconds": 0.5, "demanded": True,
+        "attempts": 8, "useful": 2, "no_change": 5, "failures": 1,
+        "last_attempt_at": 40.0, "last_useful_at": 30.0, "next_due_in_seconds": 0.5,
+    }
+    assert "target" not in str(row)
 
 
 def test_stable_signature_payload_drops_volatile_keys_recursively():
@@ -3953,16 +2530,42 @@ def test_tmux_signal_event_does_not_force_auto_approve_poll():
     webapp = app_module.TmuxWebtermApp([])
     try:
         record = webapp.client_watch_service.event_watcher_record
-        record.next_auto_poll_at = 123.0
         record.next_tmux_signal_poll_at = 456.0
         webapp.tmux_signal_cache.set("snapshot", {"ok": True})
 
         webapp.handle_tmux_signal_event({"event": "pane_changed"})
 
-        assert record.next_auto_poll_at == pytest.approx(123.0)
-        assert record.next_tmux_signal_poll_at == pytest.approx(0.0)
+        assert record.next_tmux_signal_poll_at == pytest.approx(456.0)
+        assert record.tmux_signal_refresh_at > 0
         assert webapp.tmux_signal_cache.get_or_miss("snapshot") is app_module.CACHE_MISS
         assert record.wake_event.is_set()
+    finally:
+        webapp.control_server.stop()
+
+
+def test_tmux_topology_event_invalidates_the_retained_statusd_roster(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    invalidations = []
+    monkeypatch.setattr(webapp.status_client, "invalidate", lambda reason: invalidations.append(reason))
+    try:
+        webapp.handle_tmux_signal_event({"event": "pane-died", "time": 1.0})
+        webapp.handle_tmux_signal_event({"event": "output"})
+    finally:
+        webapp.control_server.stop()
+    assert invalidations == ["tmux-topology"]
+
+
+def test_status_discovery_prunes_dead_agent_window_transition_identity():
+    pane = PaneInfo("1", "0", "0", "%1", "1:0.0", "/repo", "codex", True, True, "codex", 1)
+    info = SessionInfo("1", [pane], pane, [AgentInfo("1", "codex", 1, "%1", "codex", "/repo", "running", "sid", None, None)])
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        live_key = "1\x1f0\x1f%1\x1fcodex"
+        dead_key = "1\x1f0\x1f%2\x1fcodex"
+        other_session = "2\x1f0\x1f%3\x1fcodex"
+        webapp.agent_window_transition_state = {live_key: {"state": "working"}, dead_key: {"state": "idle"}, other_session: {"state": "idle"}}
+        webapp.prune_absent_agent_window_transition_state({"1": info})
+        assert set(webapp.agent_window_transition_state) == {live_key, other_session}
     finally:
         webapp.control_server.stop()
 
@@ -3979,7 +2582,8 @@ def test_tmux_output_events_share_one_debounced_metadata_refresh(monkeypatch):
         webapp.handle_tmux_signal_event({"type": "output"})
 
         scheduled_at = 100.0 + app_module.TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS
-        assert record.next_tmux_signal_poll_at == pytest.approx(scheduled_at)
+        assert record.next_tmux_signal_poll_at == pytest.approx(456.0)
+        assert record.tmux_signal_refresh_at == pytest.approx(scheduled_at)
         assert webapp.tmux_signal_cache.get_or_miss("snapshot") is app_module.CACHE_MISS
         assert record.wake_event.is_set()
 
@@ -3988,7 +2592,7 @@ def test_tmux_output_events_share_one_debounced_metadata_refresh(monkeypatch):
         clock[0] = 100.1
         webapp.handle_tmux_signal_event({"type": "extended-output"})
 
-        assert record.next_tmux_signal_poll_at == pytest.approx(scheduled_at)
+        assert record.tmux_signal_refresh_at == pytest.approx(scheduled_at)
         assert webapp.tmux_signal_cache.get_or_miss("snapshot") == {"ok": True}
         assert record.wake_event.is_set() is False
     finally:
@@ -4290,7 +2894,6 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
 
     monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
     monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
-    monkeypatch.setattr(webapp, "server_auto_approve_event_poll_seconds", lambda: 10.0)
     monkeypatch.setattr(webapp, "server_attention_ack_event_poll_seconds", lambda: 12.0)
     monkeypatch.setattr(webapp, "server_tmux_signal_event_poll_seconds", lambda: 15.0)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
@@ -4299,7 +2902,6 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
         webapp.start_client_event_watcher()
         assert started == ["client-event-watch"]
         record = webapp.client_watch_service.event_watcher_record
-        assert record.next_auto_poll_at == pytest.approx(110.0)
         assert record.next_attention_ack_poll_at == pytest.approx(112.0)
         assert record.next_tmux_signal_poll_at == pytest.approx(115.0)
     finally:
@@ -4332,7 +2934,6 @@ def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(m
 
     monkeypatch.setattr(webapp, "poll_client_file_events_once", poll_files)
     monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: None)
-    monkeypatch.setattr(webapp, "poll_auto_approve_client_event_once", lambda: None)
     monkeypatch.setattr(webapp, "poll_attention_acks_client_event_once", lambda: None)
     monkeypatch.setattr(webapp, "poll_tmux_signals_client_event_once", lambda: None)
     monkeypatch.setattr(webapp, "poll_watched_prs_client_event_once", lambda: None)
@@ -4390,7 +2991,6 @@ def test_client_event_watcher_parallel_lifecycle_attributes_are_retired():
         "client_event_next_signature_poll_at",
         "client_event_next_file_poll_at",
         "client_event_next_background_file_poll_at",
-        "client_event_next_auto_poll_at",
         "client_event_next_attention_ack_poll_at",
         "client_event_next_tmux_signal_poll_at",
         "client_event_next_watched_pr_poll_at",
@@ -4430,7 +3030,7 @@ def test_client_directory_poll_old_generation_cannot_clear_replacement(monkeypat
         webapp.control_server.stop()
 
 
-@pytest.mark.parametrize("method_name", ["events_payload", "search_payload", "auto_approve_status"])
+@pytest.mark.parametrize("method_name", ["events_payload", "search_payload", "build_auto_approve_status"])
 def test_session_scoped_endpoints_refresh_before_unknown_session_guard(monkeypatch, method_name):
     webapp = app_module.TmuxWebtermApp(["old"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["new"], None))
@@ -4445,7 +3045,7 @@ def test_session_scoped_endpoints_refresh_before_unknown_session_guard(monkeypat
         webapp.control_server.stop()
 
     assert status == HTTPStatus.OK
-    assert payload["session" if method_name != "auto_approve_status" else "target"] == "new"
+    assert payload["session" if method_name != "build_auto_approve_status" else "target"] == "new"
 
 
 def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
@@ -4502,7 +3102,7 @@ def test_auto_approve_roster_uses_live_pane_working_signal(monkeypatch):
     capture_calls.clear()
     screen_calls.clear()
     try:
-        payload, status = webapp.auto_approve_status()
+        payload, status = webapp.build_auto_approve_status()
     finally:
         webapp.control_server.stop()
 
@@ -4606,7 +3206,7 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     monkeypatch.setattr(webapp, "auto_approve_capture_allowed_for_target", lambda _target: True)
     capture_calls.clear()
     try:
-        payload, status = webapp.auto_approve_status()
+        payload, status = webapp.build_auto_approve_status()
     finally:
         webapp.control_server.stop()
 
@@ -4634,6 +3234,40 @@ def test_auto_approve_payload_includes_agent_window_statuses(monkeypatch, tmp_pa
     assert by_kind["codex"]["git"] is None
     assert capture_calls == [("%10", True), ("%11", True)]
     assert git_calls == []
+
+
+def test_cached_agent_window_git_inventory_skips_spawn_on_unchanged_watcher_generation(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["mock"])
+    try:
+        calls: list[str] = []
+
+        def fake_inventory(root):
+            calls.append(root)
+            return {"root": root, "branch": "main"}
+
+        monkeypatch.setattr(app_module, "git_inventory", fake_inventory)
+        monkeypatch.setattr(webapp, "watcher_covers_repo", lambda repo: True)
+        generation = {"value": 5}
+        monkeypatch.setattr(webapp, "repo_dirty_generation", lambda root: generation["value"])
+
+        first = webapp.cached_agent_window_git_inventory("/repo")
+        second = webapp.cached_agent_window_git_inventory("/repo")
+        assert first == second == {"root": "/repo", "branch": "main"}
+        # A warm refresh over an unchanged dirty generation reuses the cached inventory (no git spawn).
+        assert calls == ["/repo"]
+
+        generation["value"] = 6
+        webapp.cached_agent_window_git_inventory("/repo")
+        # A dirty-generation bump re-spawns git_inventory.
+        assert calls == ["/repo", "/repo"]
+
+        monkeypatch.setattr(webapp, "watcher_covers_repo", lambda repo: False)
+        webapp.cached_agent_window_git_inventory("/repo")
+        webapp.cached_agent_window_git_inventory("/repo")
+        # An uncovered repo is never cached and always re-spawns, preserving always-fresh behavior.
+        assert len(calls) == 4
+    finally:
+        webapp.control_server.stop()
 
 
 def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(monkeypatch, tmp_path):
@@ -4676,8 +3310,8 @@ def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(
         panes=[pane0, pane1],
         selected_pane=pane0,
         agents=[
-            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
-            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/agent_clients/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/agent_clients/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
         ],
     )
     captures = {"%claude": claude_capture, "%codex": codex_capture}
@@ -5138,6 +3772,7 @@ def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monke
         return {session: {"files": [], "repos": []} for session in infos}
 
     webapp.cached_session_files_payloads_for_infos = fake_cached_session_files_payloads
+    _install_fake_tabber_activity_jobd(monkeypatch, webapp)
     try:
         activity = webapp.build_activity_payload()
         updated = []
@@ -5198,6 +3833,7 @@ def test_activity_payload_all_scope_uses_visible_tmux_sessions(monkeypatch):
         return {session: {"files": [], "repos": []} for session in infos}
 
     webapp.cached_session_files_payloads_for_infos = fake_cached_session_files_payloads_for_infos
+    _install_fake_tabber_activity_jobd(monkeypatch, webapp)
     try:
         configured = webapp.build_activity_payload()
         all_sessions = webapp.build_activity_payload(session_scope="all", hours=0.5)
@@ -5226,28 +3862,18 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     }
     current_infos = dict(infos)
     screens = {"%1": {"key": "idle", "text": ""}, "%2": {"key": "idle", "text": ""}}
-    row_builds = []
-    recent_builds = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({session: current_infos[session] for session in sessions if session in current_infos}, []))
-    monkeypatch.setattr(
-        app_module,
-        "build_recent_agents_payload",
-        lambda sessions, ordered, session_files_by_session=None, **_kwargs: recent_builds.append(tuple(ordered)) or [{"session": ordered[0]}],
-    )
     webapp = app_module.TmuxWebtermApp(["1", "2"])
     webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: [session for session in ("2", "1") if session in (session_names or [])]
     webapp.cached_session_files_payloads_for_infos = lambda agent_infos, hours=24.0: {session: {"files": [], "repos": [], "errors": []} for session in agent_infos}
     webapp.activity_snapshot_with_recency = lambda snapshot=None: {"1": {"last_user_input_ts": 10}, "2": {"last_user_input_ts": 20}}
     webapp.agent_window_screen_state = lambda agent, preclassified_by_target=None: dict(screens[agent.pane_target])
     webapp.merge_shared_attention_acks = lambda: False
-
-    def build_windows(session, **kwargs):
-        row_builds.append(session)
-        screen = kwargs["preclassified_by_target"][f"%{session}"]
-        return [{"session": session, "state": webapp.agent_window_state_from_screen(screen)}]
-
-    webapp.agent_window_status_payloads = build_windows
+    # `compute_tabber_activity_rows_via_jobd` submits one batch per `build_activity_payload()` call
+    # containing every session whose signature changed since the last call, so this replaces the
+    # old per-session `row_builds`/`recent_builds` tracking (now internal to the jobd task).
+    submitted_session_batches = _install_fake_tabber_activity_jobd(monkeypatch, webapp)
     try:
         first = webapp.build_activity_payload()
         second = webapp.build_activity_payload()
@@ -5267,8 +3893,47 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     assert "2" not in deleted["agent_windows"]
     assert "2" not in webapp.activity_transcript_service.tabber_cache_record.session_rows
     assert acknowledged["agent_windows"]["1"][0]["state"] == "idle"
-    assert row_builds == ["2", "1", "2", "1"]
-    assert recent_builds == [("2",), ("1",), ("2",), ("1",)]
+    assert submitted_session_batches == [["1", "2"], ["2"], ["1"]]
+
+
+def test_tabber_activity_rebuild_signature_reacts_to_owned_roster_row_change_alone(monkeypatch):
+    # A roster-only change (e.g. a cooldown timer statusd advances) with no new tmux screen
+    # capture must still bust the per-session reuse signature -- otherwise a REUSED session would
+    # keep serving a stale owned row (state/attention/cooldown) until something else changed.
+    session = "1"
+    pane = PaneInfo(session, "0", "0", "%1", f"{session}:0.0", "/repo", "codex", True, True, "codex", 101)
+    info = SessionInfo(
+        session=session, panes=[pane], selected_pane=pane,
+        agents=[AgentInfo(session, "codex", 101, "%1", "codex", "/repo", "running", "sid-1", None, None)],
+    )
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({session: info}, []))
+    webapp = app_module.TmuxWebtermApp([session])
+    webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: [session]
+    webapp.cached_session_files_payloads_for_infos = lambda agent_infos, hours=24.0: {name: {"files": [], "repos": [], "errors": []} for name in agent_infos}
+    webapp.activity_snapshot_with_recency = lambda snapshot=None: {}
+    webapp.agent_window_screen_state = lambda agent, preclassified_by_target=None: {"key": "idle", "text": ""}
+    webapp.merge_shared_attention_acks = lambda: False
+    roster_stopped_ts = {"value": 100.0}
+
+    def fake_status_snapshot_payload():
+        return {
+            "agent_window_snapshot_revision": 1,
+                "sessions": {session: {"agent_windows": [{"window_index": 0, "pane_target": "%1", "kind": "codex", "state": "idle", "working_stopped_ts": roster_stopped_ts["value"]}]}},
+        }
+
+    webapp.status_snapshot_payload = fake_status_snapshot_payload
+    submitted = _install_fake_tabber_activity_jobd(monkeypatch, webapp)
+    try:
+        first = webapp.build_activity_payload()
+        second = webapp.build_activity_payload()
+        roster_stopped_ts["value"] = 200.0
+        changed = webapp.build_activity_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert first["agent_windows"][session][0]["working_stopped_ts"] == 100.0
+    assert changed["agent_windows"][session][0]["working_stopped_ts"] == 200.0
+    assert submitted == [[session], [session]]
 
 
 def test_session_files_and_tabber_refreshes_are_per_target_single_flight(monkeypatch, tmp_path):
@@ -5672,10 +4337,13 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
 
     def fake_session_work_graph(_info, _cache, allow_network=True):
         calls.append(allow_network)
-        return enriched_graph if not allow_network else metadata.empty_work_graph()
+        return enriched_graph
 
     monkeypatch.setattr(app_module, "session_work_graph", fake_session_work_graph)
     webapp = app_module.TmuxWebtermApp(["5"])
+    # The jobd network/git warm itself is tested independently (test_jobd.py); here only the
+    # downstream "did the graph actually change" comparison is under test.
+    monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): calls.append("jobd"))
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
         monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
@@ -5683,7 +4351,7 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
     finally:
         webapp.control_server.stop()
 
-    assert calls == [True, False]
+    assert calls == ["jobd", False]
     assert refreshes == [(True, True)]
 
 
@@ -5701,6 +4369,7 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
 
     monkeypatch.setattr(app_module, "session_work_graph", fake_session_work_graph)
     webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): None)
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
         monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
@@ -5709,6 +4378,146 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
         webapp.control_server.stop()
 
     assert refreshes == []
+
+
+def test_warm_metadata_cache_reuses_valid_repository_identity(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    agent = AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "working", "agent-5", None, None)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[agent])
+    calls = []
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): calls.append(sorted(sessions)))
+    monkeypatch.setattr(app_module, "session_work_graph", lambda *_args, **_kwargs: metadata.empty_work_graph())
+    monkeypatch.setattr(webapp, "watcher_covers_repo", lambda root: root == "/repo")
+    try:
+        cached_graph = metadata.empty_work_graph()
+        cached_graph["git_worktrees"] = {"worktree:/repo": {"root": "/repo"}}
+        webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
+        webapp.warm_metadata_cache({"5": info}, threading.Event())
+        # Agent/status payload churn is outside the repository identity, so it must not cause a
+        # second GitHub/Linear/Git warm while the normal metadata TTL is valid.
+        idle_agent = AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "idle", "agent-5", None, None)
+        status_only = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[idle_agent])
+        webapp.warm_metadata_cache({"5": status_only}, threading.Event())
+        assert calls == [["5"]]
+
+        with webapp.session_files_service.cache_lock:
+            webapp.session_files_service.repo_dirty_generations["/repo"] = 1
+        webapp.warm_metadata_cache({"5": status_only}, threading.Event())
+        assert calls == [["5"], ["5"]]
+
+        changed_pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/other-repo", "claude", True, True, "claude", 5)
+        changed_agent = AgentInfo("5", "claude", 5, "%5", "claude", "/other-repo", "idle", "agent-5", None, None)
+        changed_path = SessionInfo(session="5", panes=[changed_pane], selected_pane=changed_pane, agents=[changed_agent])
+        webapp.warm_metadata_cache({"5": changed_path}, threading.Event())
+        assert calls == [["5"], ["5"], ["5"]]
+
+        with webapp.metadata_warm_lock:
+            signature, _deadline = webapp.metadata_warm_record.completed["5"]
+            webapp.metadata_warm_record.completed["5"] = (signature, 0.0)
+        webapp.warm_metadata_cache({"5": changed_path}, threading.Event())
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == [["5"], ["5"], ["5"], ["5"]]
+
+
+def test_warm_metadata_cache_via_jobd_replays_product_entries_into_metadata_cache(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
+
+    def fake_session_work_graph(_info, cache, allow_network=True):
+        cache.set("github-pr-branch:acme/repo:main", {"number": 9, "state": "open"}, ttl=120.0)
+        return metadata.empty_work_graph()
+
+    monkeypatch.setattr(metadata, "session_work_graph", fake_session_work_graph)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    submitted = _install_fake_metadata_warm_jobd(monkeypatch, webapp)
+    try:
+        webapp.warm_metadata_cache_via_jobd({"5": info})
+    finally:
+        webapp.control_server.stop()
+
+    assert submitted == [["5"]]
+    assert webapp.metadata_cache.get("github-pr-branch:acme/repo:main") == {"number": 9, "state": "open"}
+
+
+def test_metadata_warm_jobd_identity_ignores_agent_status_but_fences_watched_repo_changes(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    working = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "working", "agent-5", None, None)])
+    idle = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", "/repo", "idle", "agent-5", None, None)])
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp, "watcher_covers_repo", lambda repo: str(repo) == "/repo")
+    try:
+        first = webapp.metadata_warm_source_signature({"5": working}, (("/repo", 0),))
+        assert webapp.metadata_warm_source_signature({"5": idle}, (("/repo", 0),)) == first
+        assert webapp.metadata_warm_source_signature({"5": idle}, (("/repo", 1),)) != first
+    finally:
+        webapp.control_server.stop()
+
+
+def test_two_app_session_files_callers_share_jobd_product_until_watcher_generation_changes(tmp_path, monkeypatch):
+    """The real app caller derives one cross-port product until its watcher state changes."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "one.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "one.py")
+    git(repo, "commit", "-m", "init")
+    (repo / "one.py").write_text("x = 2\n", encoding="utf-8")
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=10.0, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    first = app_module.TmuxWebtermApp(["5"])
+    second = app_module.TmuxWebtermApp(["5"])
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", str(repo), "claude", True, True, "claude", 5)
+    working = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", str(repo), "working", "agent-5", None, None)])
+    idle = SessionInfo("5", [pane], pane, [AgentInfo("5", "claude", 5, "%5", "claude", str(repo), "idle", "agent-5", None, None)])
+    try:
+        for webapp in (first, second):
+            webapp.job_client = jobd.JobClient(tmp_path / "jobd.sock")
+            monkeypatch.setattr(webapp, "watcher_covers_repo", lambda candidate: Path(candidate) == repo)
+        deadline = time.monotonic() + 2.0
+        while not first.job_client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        first_payload, first_status = first.session_files_payload_for_infos("5", {"5": working}, 24.0, force=True, requester="finder-visible")
+        second_payload, second_status = second.session_files_payload_for_infos("5", {"5": idle}, 24.0, force=True, requester="finder-session-toggle")
+        status_before = first.job_client.request({"action": "status"})
+
+        for webapp in (first, second):
+            with webapp.session_files_service.cache_lock:
+                webapp.session_files_service.repo_dirty_generations[str(repo)] = 1
+        changed_payload, changed_status = first.session_files_payload_for_infos("5", {"5": idle}, 24.0, force=True, requester="filesystem-event")
+        status_after = first.job_client.request({"action": "status"})
+    finally:
+        first.control_server.stop()
+        second.control_server.stop()
+        first.job_client.request({"action": "shutdown"})
+        worker.join(timeout=2.0)
+
+    assert first_status == second_status == changed_status == HTTPStatus.OK
+    assert first_payload == second_payload
+    assert changed_payload["files"] == first_payload["files"]
+    # Status/Finder churn may rebuild the lightweight attribution product, but the shared Git
+    # snapshot must be reused until the watcher-authoritative repository generation changes.
+    assert status_before["product_counters"]["session_files_view"]["completed"] == 2
+    assert status_before["product_work_totals"]["session_files_view"]["git_snapshots"] == 1
+    assert status_before["product_work_totals"]["session_files_view"]["git_snapshot_cache_hits"] == 1
+    assert status_after["product_counters"]["session_files_view"]["completed"] == 3
+    assert status_after["product_work_totals"]["session_files_view"]["git_snapshots"] == 2
+
+
+def test_warm_metadata_cache_via_jobd_raises_when_jobd_submit_is_rejected(monkeypatch):
+    pane = PaneInfo("5", "0", "0", "%5", "5:0.0", "/repo", "claude", True, True, "claude", 5)
+    info = SessionInfo(session="5", panes=[pane], selected_pane=pane, agents=[])
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp.job_client, "submit", lambda *args, **kwargs: {"ok": False, "error": "queue full"})
+    try:
+        with pytest.raises(app_module.MetadataWarmJobdUnavailable):
+            webapp.warm_metadata_cache_via_jobd({"5": info})
+    finally:
+        webapp.control_server.stop()
 
 
 def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatch):
@@ -6100,6 +4909,115 @@ def test_prompt_and_screen_status_does_not_hide_programmer_errors(monkeypatch):
         webapp.control_server.stop()
 
 
+def _install_fake_session_files_jobd(monkeypatch, webapp, response):
+    """Mock only the `session_files_view` jobd product (checkbox 4/9 routes the
+    request-thread compute through jobd submit()+product(), not an inline
+    session_files call); every other task (e.g. transcript_view) still goes
+    through the real job_client. `response` is either a payload dict or a
+    call-tuple -> payload dict callable; returns the recorded submit calls as
+    (session, infos_keys, hours, from_ref, to_ref, repo_refs) tuples."""
+    calls = []
+    coalesce_keys: set[str] = set()
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "session_files_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        calls.append((
+            payload.get("session") or None,
+            tuple(payload.get("infos", {}).keys()),
+            payload["hours"],
+            payload.get("from_ref") or None,
+            payload.get("to_ref") or None,
+            payload.get("repo_refs") or None,
+        ))
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        result = response(calls[-1]) if callable(response) else response
+        body = json.dumps({"payload": result, "status": 200}).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
+    return calls
+
+
+def _install_fake_tabber_activity_jobd(monkeypatch, webapp):
+    """Mock only the `tabber_activity_view` jobd product; every other task still goes through the
+    real job_client. Runs the REAL activity_summary.tabber_activity_view_result end-to-end (an
+    honest simulation, not canned data), so the web-side gathering (agent_window_gathered_agents,
+    which still uses whatever screen-state/discover_sessions mocks the calling test installed)
+    feeds a real pure assembly. Returns the list of session names submitted per call, in order,
+    so a test can assert which sessions were rebuilt without reaching into the old in-process call
+    points that this migration retired."""
+    submitted_session_batches: list[list[str]] = []
+    coalesce_keys: set[str] = set()
+    payloads_by_key: dict[str, dict] = {}
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "tabber_activity_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        payloads_by_key[coalesce_key] = payload
+        submitted_session_batches.append(sorted(payload.get("sessions", {}).keys()))
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        # compute_tabber_activity_rows_via_jobd reads {"session_rows": ...} directly from the
+        # product body -- unlike session_files_view, there is no {"payload": ..., "status": ...}
+        # envelope for this product.
+        result = activity_summary.tabber_activity_view_result(payloads_by_key[coalesce_key], max_bytes=512 * 1024)
+        body = json.dumps(result).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
+    return submitted_session_batches
+
+
+def _install_fake_metadata_warm_jobd(monkeypatch, webapp):
+    """Mock only the `metadata_warm_view` jobd product; every other task still goes through the
+    real job_client. Runs the REAL metadata.metadata_warm_view_result end-to-end (a session's live
+    `session_work_graph(..., allow_network=True)` call happens for real against whatever
+    `metadata.session_work_graph`/network mocks the calling test installed), proving the returned
+    entries actually replay into `webapp.metadata_cache`."""
+    submitted_session_batches: list[list[str]] = []
+    coalesce_keys: set[str] = set()
+    payloads_by_key: dict[str, dict] = {}
+    real_submit = webapp.job_client.submit
+    real_product = webapp.job_client.product
+
+    def fake_submit(task, payload, *, coalesce_key="", **kwargs):
+        if task != "metadata_warm_view":
+            return real_submit(task, payload, coalesce_key=coalesce_key, **kwargs)
+        coalesce_keys.add(coalesce_key)
+        payloads_by_key[coalesce_key] = payload
+        submitted_session_batches.append(sorted(payload.get("sessions", {}).keys()))
+        return {"ok": True, "job": {"job_id": "fake"}}
+
+    def fake_product(coalesce_key, timeout=0.5):
+        if coalesce_key not in coalesce_keys:
+            return real_product(coalesce_key, timeout=timeout)
+        # compute reads {"entries": ...} directly from the product body -- no {"payload": ...,
+        # "status": ...} envelope, matching the tabber_activity_view convention.
+        result = metadata.metadata_warm_view_result(payloads_by_key[coalesce_key], max_bytes=512 * 1024)
+        body = json.dumps(result).encode("utf-8")
+        return {"ok": True, "state": "ready", "generation": 2**62}, body
+
+    monkeypatch.setattr(webapp.job_client, "submit", fake_submit)
+    monkeypatch.setattr(webapp.job_client, "product", fake_product)
+    return submitted_session_batches
+
+
 def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp_path):
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "Fix tabs"}}) + "\n", encoding="utf-8")
@@ -6139,7 +5057,6 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     }
     monkeypatch.setattr(app_module, "session_work_graph", lambda info, cache, allow_network=False: {"version": 1, "loading": False, "generation": 1, "git_worktrees": {}, "local_repositories": {}, "hosted_repositories": {}, "local_branches": {}, "pull_requests": {}, "linear_issues": {}, "path_observations": {}, "runtime_actors": {}, "tmux_sessions": {}, "tmux_windows": {}, "tmux_panes": {}, "worktree_branch_activity": {}})
     monkeypatch.setattr(app_module, "activity_work_summary_from_graph", lambda _graph: work_payload)
-    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", lambda info, hours=24.0, **_kwargs: files_payload)
 
     def fake_build(info, work, files, locale="en", **_kwargs):
         calls.append((info.session, locale))
@@ -6147,6 +5064,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
 
     monkeypatch.setattr(app_module, "build_session_activity_summary", fake_build)
     webapp = app_module.TmuxWebtermApp(["5"])
+    _install_fake_session_files_jobd(monkeypatch, webapp, files_payload)
     webapp.warm_metadata_cache_async = lambda sessions: None
     tail_many_calls = []
 
@@ -6303,6 +5221,37 @@ def test_tabber_activity_cache_record_owns_signature_and_refresh(monkeypatch):
         assert webapp.start_tabber_activity_cache_refresh() is False
     finally:
         webapp.control_server.stop()
+
+
+def test_tabber_activity_disk_cache_path_is_stable_across_source_generations():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        first_path, first_signature = webapp.tabber_activity_cache_disk_path(24.0, "source-a")
+        second_path, second_signature = webapp.tabber_activity_cache_disk_path(24.0, "source-b")
+    finally:
+        webapp.control_server.stop()
+
+    assert first_path == second_path
+    assert first_signature == second_signature
+
+
+def test_activity_payload_keeps_last_good_cache_during_source_generation_change(monkeypatch):
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["5"])
+    payload = {"activity": {"5": {"last_user_input_ts": 100}}, "agents": [], "agent_windows": {}, "errors": [], "session_scope": "configured", "session_file_hours": 24.0}
+    try:
+        webapp.set_tabber_activity_cache(payload, write_disk=False, source_signature="generation-one")
+        monkeypatch.setattr(webapp, "tabber_activity_source_signature", lambda: "generation-two")
+        monkeypatch.setattr(webapp, "start_tabber_activity_cache_refresh", lambda: True)
+
+        result, status = webapp.activity_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert result["activity"] == payload["activity"]
+    assert result["cache"]["stale"] is True
+    assert result["cache"]["refreshing"] is True
 
 
 def test_tabber_activity_parallel_cache_state_is_retired():
@@ -6601,57 +5550,105 @@ def test_tabber_activity_cache_warmer_refreshes_snapshot(monkeypatch):
     refreshes = []
     events = []
 
-    def stop_after_sleep(seconds):
-        raise RuntimeError(f"stop after sleeping {seconds}")
-
     try:
         record = webapp.activity_transcript_service.tabber_warmer_record
         record.running = True
         webapp.mark_tabber_activity_consumer()
+        record.refresh_due_at = time.monotonic()
+        record.refresh_triggers.add("test")
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
-        monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger: events.append(trigger) or [])
-        monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
-        monkeypatch.setattr(app_module.time, "sleep", stop_after_sleep)
-
-        with pytest.raises(RuntimeError, match="stop after sleeping"):
-            webapp.tabber_activity_cache_warmer_loop(record)
+        monkeypatch.setattr(webapp, "publish_tabber_activity_refresh_if_changed", lambda **_kwargs: events.append("published") or setattr(record, "running", False) or True)
+        webapp.tabber_activity_cache_warmer_loop(record)
     finally:
         webapp.control_server.stop()
 
     assert refreshes == ["refresh"]
-    assert events == []
+    assert events == ["published"]
     assert webapp.activity_transcript_service.tabber_warmer_record.running is False
 
 
-def test_tabber_activity_cache_warmer_skips_without_visible_consumer(monkeypatch):
+def test_tabber_activity_refresh_publishes_only_new_cache_generation(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    published = []
+    try:
+        monkeypatch.setattr(webapp, "publish_background_refresh_done", lambda role, payload: published.append((role, payload)))
+        record = webapp.activity_transcript_service.tabber_cache_record
+        record.payload = {"activity": {"1": {}}, "session_file_hours": 24.0}
+        record.source_signature = "generation-one"
+
+        assert webapp.publish_tabber_activity_refresh_if_changed(compute_ms=12.5) is True
+        assert webapp.publish_tabber_activity_refresh_if_changed(compute_ms=25.0) is False
+        record.source_signature = "generation-two"
+        assert webapp.publish_tabber_activity_refresh_if_changed(compute_ms=7.0) is True
+    finally:
+        webapp.control_server.stop()
+
+    assert published == [
+        (app_module.BACKGROUND_ROLE_TABBER_ACTIVITY, {"compute_ms": 12.5, "cache_changed": True}),
+        (app_module.BACKGROUND_ROLE_TABBER_ACTIVITY, {"compute_ms": 7.0, "cache_changed": True}),
+    ]
+
+
+def test_tabber_activity_cache_warmer_parks_without_visible_consumer(monkeypatch):
+    """Expired consumer demand must PARK the warmer (no recurring idle work),
+    and a returning consumer must unpark it via mark_tabber_activity_consumer."""
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
     refreshes = []
     sleeps = []
 
-    def stop_after_sleep(seconds):
+    def forbid_sleep(seconds):
         sleeps.append(seconds)
-        raise RuntimeError(f"stop after sleeping {seconds}")
+        raise RuntimeError(f"unexpected sleep {seconds}")
 
     try:
         record = webapp.activity_transcript_service.tabber_warmer_record
         record.running = True
         monkeypatch.setattr(webapp, "refresh_tabber_activity_cache", lambda: refreshes.append("refresh") or {})
         monkeypatch.setattr(webapp, "tabber_activity_refresh_seconds", lambda: 15.0)
-        monkeypatch.setattr(app_module.time, "sleep", stop_after_sleep)
+        monkeypatch.setattr(app_module.time, "sleep", forbid_sleep)
 
-        with pytest.raises(RuntimeError, match="stop after sleeping"):
-            webapp.tabber_activity_cache_warmer_loop(record)
+        # No consumer: the loop parks on the wake event (no sleep, no refresh).
+        waits = []
+
+        def wake_then_stop():
+            waits.append(True)
+            record.running = False  # unparked by teardown -> loop exits
+
+        monkeypatch.setattr(record.wake, "wait", wake_then_stop)
+        webapp.tabber_activity_cache_warmer_loop(record)
+        assert refreshes == []
+        assert sleeps == []
+        assert waits == [True]
+        recent = webapp.performance_metrics_payload()["recent"]
+        assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
+        assert recent[-1]["cache_status"] == "skipped:no-consumer"
+
+        # A returning consumer unparks the warmer (event set), never starts a thread.
+        record.wake.clear()
+        assert webapp.mark_tabber_activity_consumer() is True
+        assert record.wake.is_set()
+
     finally:
         webapp.control_server.stop()
 
-    assert refreshes == []
-    assert len(sleeps) == 1
-    assert 59.9 <= sleeps[0] <= 60.0
-    recent = webapp.performance_metrics_payload()["recent"]
-    assert recent[-1]["role"] == app_module.BACKGROUND_ROLE_TABBER_ACTIVITY
-    assert recent[-1]["cache_status"] == "skipped:no-consumer"
-    assert webapp.activity_transcript_service.tabber_warmer_record.running is False
+
+def test_tabber_activity_producer_refresh_is_demand_gated_and_debounced(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        record = webapp.activity_transcript_service.tabber_warmer_record
+        monkeypatch.setattr(webapp, "background_can_run", lambda _role: True)
+        monkeypatch.setattr(webapp, "start_tabber_activity_cache_warmer", lambda: False)
+        assert webapp.request_tabber_activity_refresh("tmux") is False
+        webapp.mark_tabber_activity_consumer()
+        assert webapp.request_tabber_activity_refresh("tmux") is True
+        first_due = record.refresh_due_at
+        assert webapp.request_tabber_activity_refresh("transcript") is True
+        assert record.refresh_due_at >= first_due
+        assert record.refresh_triggers == {"tmux", "transcript"}
+        assert record.wake.is_set()
+    finally:
+        webapp.control_server.stop()
 
 
 def test_tabber_activity_warmer_record_reuses_worker_and_protects_replacement(monkeypatch):
@@ -6809,16 +5806,10 @@ def test_normalized_client_session_files_uses_shared_lookback_bounds():
 
 def test_session_files_payload_reuses_short_cache(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
-    calls = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
-
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
-        calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
-        return {"session": session, "files": [], "repos": [], "errors": []}, HTTPStatus.OK
-
-    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5"])
+    calls = _install_fake_session_files_jobd(monkeypatch, webapp, lambda call: {"session": call[0], "files": [], "repos": [], "errors": []})
     webapp.refresh_sessions = lambda *args, **kwargs: []
     try:
         first, first_status = webapp.session_files_payload("5")
@@ -6838,17 +5829,13 @@ def test_session_files_payload_reuses_short_cache(monkeypatch):
 
 def test_session_files_payload_reuses_shared_disk_cache_between_apps(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
-    calls = []
 
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
-
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
-        calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
-        return {"session": session, "files": [{"path": "/repo/one.txt"}], "repos": [{"path": "/repo"}], "errors": []}, HTTPStatus.OK
-
-    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
+    fake_payload = {"files": [{"path": "/repo/one.txt"}], "repos": [{"path": "/repo"}], "errors": []}
     first_app = app_module.TmuxWebtermApp(["5"])
     second_app = app_module.TmuxWebtermApp(["5"])
+    calls = _install_fake_session_files_jobd(monkeypatch, first_app, lambda call: {"session": call[0], **fake_payload})
+    calls2 = _install_fake_session_files_jobd(monkeypatch, second_app, lambda call: {"session": call[0], **fake_payload})
     first_app.refresh_sessions = lambda *args, **kwargs: []
     second_app.refresh_sessions = lambda *args, **kwargs: []
     try:
@@ -6861,6 +5848,7 @@ def test_session_files_payload_reuses_shared_disk_cache_between_apps(monkeypatch
     assert first_status == HTTPStatus.OK
     assert second_status == HTTPStatus.OK
     assert calls == [("5", ("5",), 24.0, None, None, None)]
+    assert calls2 == []  # the second app reused the shared disk cache; it never called jobd itself
     assert first["cache"]["hit"] is False
     assert second["cache"]["hit"] is True
     assert second["files"] == [{"path": "/repo/one.txt"}]
@@ -6930,7 +5918,6 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
     info5 = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     info6 = SessionInfo(session="6", panes=[], selected_pane=None, agents=[])
     discover_calls = []
-    payload_calls = []
     test_thread_id = threading.get_ident()
 
     def fake_discover(sessions):
@@ -6938,16 +5925,11 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
         infos = {"5": info5, "6": info6}
         return {session: infos[session] for session in sessions if session in infos}, []
 
-    def fake_session_files_payload(session, infos, hours, from_ref=None, to_ref=None, repo_refs=None, **_kwargs):
-        payload_calls.append((session, tuple(infos), hours, from_ref, to_ref, repo_refs))
-        return {"session": session, "files": [{"path": f"{session}.txt"}], "repos": [], "errors": []}, HTTPStatus.OK
-
     monkeypatch.setattr(app_module, "discover_sessions", fake_discover)
-    monkeypatch.setattr(app_module.session_files, "session_files_payload", fake_session_files_payload)
     webapp = app_module.TmuxWebtermApp(["5", "6"])
+    payload_calls = _install_fake_session_files_jobd(monkeypatch, webapp, lambda call: {"session": call[0], "files": [{"path": f"{call[0]}.txt"}], "repos": [], "errors": []})
     webapp.refresh_sessions = lambda *args, **kwargs: []
     discover_calls.clear()
-    payload_calls.clear()
     try:
         first, first_status = webapp.session_files_batch_payload(["5", "6"])
         second, second_status = webapp.session_files_batch_payload(["5", "6"])
@@ -6969,6 +5951,53 @@ def test_session_files_batch_payload_discovers_once_and_uses_per_session_cache(m
     assert first["sessions"]["6"]["files"] == [{"path": "6.txt"}]
 
 
+def test_session_files_cold_miss_never_calls_inline_compute_on_request_thread(monkeypatch):
+    # Checkbox 9: the request-thread cold-miss path must never resurrect inline
+    # git/discovery -- it routes through the jobd session_files_view product.
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("request-thread cold miss must not call inline session_files compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    _install_fake_session_files_jobd(monkeypatch, webapp, {"session": "5", "files": [{"path": "via-jobd.py"}], "repos": [], "errors": []})
+    webapp.refresh_sessions = lambda *args, **kwargs: []
+    try:
+        payload, status = webapp.session_files_payload("5", force=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["files"] == [{"path": "via-jobd.py"}]
+
+
+def test_session_files_jobd_unavailable_returns_pending_never_inline_git(monkeypatch):
+    # Checkbox 9: when jobd cannot produce the product, the request thread must
+    # serve the bounded "refreshing elsewhere" shape, never fall back to inline git.
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("jobd-unavailable fallback must not call inline session_files compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["5"])
+    monkeypatch.setattr(webapp.job_client, "submit", lambda *args, **kwargs: {"ok": False, "error": "jobd down"})
+    webapp.refresh_sessions = lambda *args, **kwargs: []
+    try:
+        payload, status = webapp.session_files_payload("5", force=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload.get("refreshing_elsewhere") is True
+    assert payload["files"] == []
+
+
 def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     calls = []
@@ -6983,6 +6012,14 @@ def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.refresh_sessions = lambda *args, **kwargs: []
     webapp.start_session_files_cache_refresh = lambda cache_key, target, *args: (target(cache_key, *args) or True)
+
+    # The owner-side background refresh now materializes the payload in jobd; simulate a successful
+    # product so the stale-while-revalidate recompute is still observed by the in-process fake.
+    def fake_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority="freshness", requester="unknown"):
+        assert requester in {"api-session-files", "background-refresh"}
+        return fake_session_files_payload(session, infos, hours, from_ref, to_ref, repo_refs)
+
+    monkeypatch.setattr(webapp, "compute_session_files_payload_via_jobd", fake_via_jobd)
     try:
         first, first_status = webapp.session_files_payload("5")
         key = next(iter(webapp.session_files_service.cache))
@@ -7248,7 +6285,8 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     webapp.client_event_payload_signature = fake_signature
     webapp.merge_shared_attention_acks = fake_merge_attention_acks
     try:
-        _path, disk_signature = webapp.session_files_disk_cache_path(("payload", {"session": "5"}))
+        cache_key = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "5", 24.0, "", "", (), ("infos-sig",), ("repo-sigs",))
+        _path, disk_signature = webapp.session_files_disk_cache_path(cache_key)
         payload_signature = webapp.session_files_payload_signature({"files": [{"path": "same.py"}]})
         tabber_signature = webapp.tabber_activity_source_signature()
     finally:
@@ -7257,7 +6295,9 @@ def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
     assert disk_signature == hashlib.sha256(b"encoded-1").hexdigest()
     assert payload_signature == hashlib.sha256(b"encoded-2").hexdigest()
     assert tabber_signature == hashlib.sha256(b"encoded-4").hexdigest()
-    assert calls[0] == ("payload", {"session": "5"})
+    # The durable path hashes ONLY the stable logical view key; the volatile
+    # info/repo signatures (last two elements) are the replaceable generation.
+    assert calls[0] == cache_key[:-2]
     assert calls[1] == {"files": [{"path": "same.py"}]}
     assert calls[3] == {"scope": "configured", "sessions": [("5", None)], "attention_ack_rev": 7, "tmux_signature": "encoded-3"}
 
@@ -7300,6 +6340,52 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         assert webapp.client_watch_files_snapshot() == []
         assert webapp.client_watch_background_files_snapshot() == []
     finally:
+        webapp.control_server.stop()
+
+
+def test_client_watch_descriptors_union_contract_and_release_on_final_sse_disconnect(monkeypatch, tmp_path):
+    """Two browser identities must never replace one another's Finder demand."""
+    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", tmp_path / "watch-index.json")
+    monotonic = [100.0]
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: monotonic[0])
+    monkeypatch.setattr(app_module.time, "time", lambda: monotonic[0])
+    webapp = app_module.TmuxWebtermApp([])
+    first, _ = webapp.client_events.subscribe(channels="files", client_id="browser-a")
+    second, _ = webapp.client_events.subscribe(channels="files", client_id="browser-a")
+    other, _ = webapp.client_events.subscribe(channels="files", client_id="browser-b")
+    try:
+        assert webapp.update_client_watch_roots({
+            "client_id": "browser-a", "roots": ["/repo/a"], "files": ["/repo/a/open.py"],
+        })["mode"] == "lifecycle"
+        assert webapp.update_client_watch_roots({
+            "client_id": "browser-b", "roots": ["/repo/b"], "background_files": ["/repo/b/dirty.py"],
+        })["mode"] == "lifecycle"
+        assert webapp.client_watch_roots_snapshot() == ["/repo/a", "/repo/b"]
+        assert webapp.client_watch_files_snapshot() == ["/repo/a/open.py"]
+        assert webapp.client_watch_background_files_snapshot() == ["/repo/b/dirty.py"]
+
+        # A pane contraction affects only its descriptor, not browser-b's demand.
+        webapp.update_client_watch_roots({"client_id": "browser-a", "roots": ["/repo/a-next"]})
+        assert webapp.client_watch_roots_snapshot() == ["/repo/a-next", "/repo/b"]
+        assert webapp.client_watch_files_snapshot() == []
+        assert webapp.client_watch_background_files_snapshot() == ["/repo/b/dirty.py"]
+
+        webapp.client_events.unsubscribe(first)
+        webapp.client_event_subscriber_disconnected("browser-a")
+        assert webapp.client_watch_roots_snapshot() == ["/repo/a-next", "/repo/b"], "one reconnecting same-id stream retains demand"
+        webapp.client_events.unsubscribe(second)
+        webapp.client_event_subscriber_disconnected("browser-a")
+        assert webapp.client_watch_roots_snapshot() == ["/repo/b"]
+        assert webapp.client_watch_background_files_snapshot() == ["/repo/b/dirty.py"]
+
+        # A dead legacy/no-stream descriptor is the bounded orphan fallback.
+        webapp.update_client_watch_roots({"roots": ["/repo/legacy"]})
+        monotonic[0] += app_module.CLIENT_WATCH_ROOT_TTL_SECONDS / 2 + 1
+        webapp.touch_client_watch_descriptor("browser-b")
+        monotonic[0] += app_module.CLIENT_WATCH_ROOT_TTL_SECONDS / 2 + 1
+        assert webapp.client_watch_roots_snapshot() == ["/repo/b"]
+    finally:
+        webapp.client_events.unsubscribe(other)
         webapp.control_server.stop()
 
 
@@ -7601,8 +6687,30 @@ def test_native_filesystem_watch_configuration_canonicalizes_roots(monkeypatch, 
 
     assert roots == (str(root.resolve()),)
     assert str(root.resolve()) in watch_paths
+    assert str(app_module.common.TMUX_AI_STATUS_PATH.parent.resolve()) in watch_paths
     assert transcripts == ()
     assert app_module.filesystem.SEARCH_SKIP_DIRS <= skip_dirs
+
+
+def test_native_filesystem_changes_refresh_shared_attention_acks(monkeypatch, tmp_path):
+    status_path = tmp_path / "tmux-AI-status.json"
+    status_path.write_text(json.dumps({"attention_acks": {"rev": 1, "keys": {"prompt:1": 123.0}}}), encoding="utf-8")
+    monkeypatch.setattr(app_module.common, "TMUX_AI_STATUS_PATH", status_path)
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    published = []
+    follower_notifications = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)) or {})
+    monkeypatch.setattr(webapp, "notify_background_client_event_followers", lambda *args: follower_notifications.append(args))
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(1, str(status_path))}) == ["attention_acks_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert webapp.attention_ack_keys == {"prompt:1": 123.0}
+    assert published[0][0] == ("attention_acks_changed", {"acknowledged": ["prompt:1"], "acknowledged_at": {"prompt:1": 123.0}})
+    assert published[0][1]["trigger"] == "native-watch"
+    assert len(follower_notifications) == 1
 
 
 def test_native_filesystem_changes_ignore_blocked_credentials(monkeypatch):
@@ -7632,7 +6740,9 @@ def test_native_filesystem_changes_reindex_and_publish_one_batch(monkeypatch, tm
     record.filesystem_watch_paths = (str(root),)
     reindex_calls = []
     published = []
+    invalidated_paths = []
     monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(app_module, "invalidate_git_metadata_paths", lambda paths: invalidated_paths.append(paths) or set())
     monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
     monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [f"session-files:{trigger}"])
@@ -7642,10 +6752,152 @@ def test_native_filesystem_changes_reindex_and_publish_one_batch(monkeypatch, tm
         webapp.control_server.stop()
 
     assert reindex_calls == [([str(changed.resolve())], "native-watch")]
+    assert invalidated_paths == [[changed.resolve()]]
     assert events == ["fs_changed", "session-files:native-watch"]
     assert published[0][0] == [str(root)]
     assert published[0][1]["trigger"] == "native-watch"
     assert published[0][1]["change_summary"]["event_paths"] == 1
+
+
+def test_native_filesystem_change_matrix_routes_create_edit_delete_and_rename(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    created = root / "created.py"
+    edited = root / "edited.py"
+    renamed = root / "renamed.py"
+    deleted = root / "deleted.py"
+    created.write_text("created\n", encoding="utf-8")
+    edited.write_text("edited\n", encoding="utf-8")
+    renamed.write_text("renamed\n", encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    reindex_calls = []
+    published = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
+    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
+    try:
+        events = webapp.handle_native_filesystem_changes(record, {
+            (1, str(created)),  # create
+            (2, str(edited)),  # edit
+            (3, str(deleted)),  # delete
+            (3, str(root / "old-name.py")),
+            (1, str(renamed)),  # rename arrives as delete + create
+        })
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["fs_changed"]
+    assert reindex_calls == [([str(path.resolve()) for path in sorted((created, edited, deleted, root / "old-name.py", renamed))], "native-watch")]
+    assert published[0][1]["change_summary"]["event_paths"] == 5
+
+
+def test_native_filesystem_changes_route_directory_atomic_replacement(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    replacement = root / "replacement"
+    replacement.mkdir()
+    removed = root / "old-replacement"
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    reindex_calls = []
+    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
+    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
+    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda *_args, **_kwargs: ["fs_changed"])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(3, str(removed)), (1, str(replacement))}) == ["fs_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert reindex_calls == [([str(removed.resolve()), str(replacement.resolve())], "native-watch")]
+
+
+def test_native_filesystem_changes_keep_symlink_escape_out_of_routing(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("private\n", encoding="utf-8")
+    link = root / "escape"
+    link.symlink_to(outside)
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_roots = (str(root),)
+    record.filesystem_watch_paths = (str(root),)
+    monkeypatch.setattr(app_module.filesystem, "_ensure_path_allowed", lambda path: (_ for _ in ()).throw(app_module.filesystem.FilesystemError(f"blocked {path}")))
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(2, str(link))}) == []
+    finally:
+        webapp.control_server.stop()
+
+
+def test_publish_native_files_changed_covers_visible_and_background_files(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    visible = root / "visible.py"
+    background = root / "background.py"
+    visible.write_text("visible\n", encoding="utf-8")
+    background.write_text("background\n", encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    published = []
+    monkeypatch.setattr(webapp, "files_for_watch", lambda: [str(visible)])
+    monkeypatch.setattr(webapp, "background_files_for_watch", lambda: [str(background)])
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)))
+    try:
+        assert webapp.publish_native_files_changed([visible, background]) == ["files_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert [item["path"] for item in published[0][0][1]["files"]] == [str(background.resolve()), str(visible.resolve())]
+
+
+def test_native_filesystem_changes_route_settings_atomic_replace(monkeypatch, tmp_path):
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("appearance: {}\n", encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_watch_paths = (str(tmp_path),)
+    webapp.client_watch_service.settings_signature = ("before",)
+    published = []
+    monkeypatch.setattr(app_module, "SETTINGS_PATH", settings)
+    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: ("after",))
+    monkeypatch.setattr(webapp, "settings_payload", lambda: {"settings": {"appearance": {"theme": "dark"}}})
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)))
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(3, str(settings.with_suffix(".tmp"))), (1, str(settings))}) == ["settings_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert published[0][0][0] == "settings_changed"
+    assert published[0][1]["trigger"] == "native-watch"
+
+
+def test_native_filesystem_changes_route_transcript_append(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    transcript = root / "agent.jsonl"
+    transcript.write_text('{"type":"message"}\n', encoding="utf-8")
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_watch_paths = (str(root),)
+    record.filesystem_transcripts = (str(transcript),)
+    calls = []
+    monkeypatch.setattr(webapp, "clear_transcript_caches", lambda: calls.append("clear"))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, *_args, **_kwargs: calls.append(event_type))
+    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="": calls.append(f"context:{trigger}") or [])
+    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="": calls.append(f"activity:{trigger}") or [])
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": calls.append(f"session-files:{trigger}") or [])
+    try:
+        assert webapp.handle_native_filesystem_changes(record, {(2, str(transcript))}) == ["transcripts_changed"]
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == ["clear", "transcripts_changed", "context:native-watch", "activity:native-watch", "session-files:native-watch"]
 
 
 def test_native_filesystem_changes_do_not_reindex_modified_directory_metadata(monkeypatch, tmp_path):
@@ -7676,6 +6928,17 @@ def test_native_filesystem_changes_do_not_reindex_modified_directory_metadata(mo
         "event_paths": 1,
         "indexed_paths": 0,
     }
+
+
+def test_native_filesystem_metadata_invalidation_ignores_only_modified_watch_roots(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root, (str(root),)) is False
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root / "src", (str(root),)) is True
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(1, root, (str(root),)) is True
+    assert webapp.native_filesystem_path_requires_metadata_invalidation(3, root, (str(root),)) is True
 
 
 def test_native_filesystem_changes_ignore_synthetic_watched_root_added_event(monkeypatch, tmp_path):
@@ -7740,6 +7003,130 @@ def test_native_filesystem_watcher_uses_one_record_owned_watch_thread(monkeypatc
     assert paths == (str(root),)
     assert kwargs["debounce"] == app_module.NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS
     assert kwargs["stop_event"] is not record.stop_event
+
+
+def test_native_filesystem_watcher_reconfigures_without_leaking_the_old_watch(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    entered = threading.Event()
+    reconfigured = threading.Event()
+    watch_stop_events = []
+
+    def fake_watch(*_paths, **kwargs):
+        watch_stop_events.append(kwargs["stop_event"])
+        entered.set()
+        if len(watch_stop_events) == 2:
+            reconfigured.set()
+        while not kwargs["stop_event"].wait(0.01):
+            pass
+        if False:
+            yield set()
+
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    monkeypatch.setattr(webapp, "background_can_run", lambda role: role == app_module.BACKGROUND_ROLE_WATCH_ROOTS)
+    monkeypatch.setattr(webapp, "native_filesystem_watch_configuration", lambda: ((str(root),), (str(root),), (), frozenset()))
+    monkeypatch.setattr(app_module, "watchfiles_watch", fake_watch)
+    try:
+        assert webapp.start_native_filesystem_watcher(record) is True
+        assert entered.wait(timeout=1.0)
+        webapp.request_native_filesystem_watch_reconfigure()
+        assert reconfigured.wait(timeout=1.0)
+        assert watch_stop_events[0].is_set() is True
+        assert watch_stop_events[0] is not watch_stop_events[1]
+    finally:
+        record.stop_event.set()
+        record.filesystem_stop_event.set()
+        worker = record.filesystem_worker
+        if worker is not None:
+            worker.join(timeout=1.0)
+        webapp.control_server.stop()
+
+
+def test_native_filesystem_watch_loss_coalesces_reconciliation_and_fallback(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    record.filesystem_healthy = True
+    record.next_file_poll_at = 999.0
+    record.next_background_file_poll_at = 999.0
+    record.next_signature_poll_at = 999.0
+    starts = []
+    events = []
+    monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(webapp, "start_client_directory_poll", lambda current: starts.append(current) or (len(starts) == 1))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    try:
+        assert webapp.handle_native_filesystem_watch_loss(record, reason="watch-error", diagnostic="overflow") is True
+    finally:
+        webapp.control_server.stop()
+
+    assert record.filesystem_healthy is False
+    assert record.next_file_poll_at == 100.0
+    assert record.next_background_file_poll_at == 100.0
+    assert record.next_signature_poll_at == 100.0
+    assert record.next_filesystem_retry_at == 100.0 + app_module.NATIVE_FILESYSTEM_RETRY_SECONDS
+    assert starts == [record]
+    assert events[0][0][1] == "native_filesystem_watch_loss"
+    assert events[0][0][3]["reason"] == "watch-error"
+
+
+def test_native_filesystem_watcher_error_normalizes_to_watch_loss(monkeypatch, tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    losses = []
+
+    def fake_watch(*_paths, **_kwargs):
+        raise RuntimeError("native queue overflow")
+        yield set()
+
+    def capture_loss(current, **kwargs):
+        losses.append((current, kwargs))
+        current.stop_event.set()
+        return True
+
+    monkeypatch.setattr(webapp, "native_filesystem_watch_configuration", lambda: ((str(root),), (str(root),), (), frozenset()))
+    monkeypatch.setattr(app_module, "watchfiles_watch", fake_watch)
+    monkeypatch.setattr(webapp, "handle_native_filesystem_watch_loss", capture_loss)
+    try:
+        webapp.native_filesystem_watch_loop(record)
+    finally:
+        record.stop_event.set()
+        webapp.control_server.stop()
+
+    assert losses == [(record, {"reason": "watch-error", "diagnostic": "native queue overflow"})]
+
+
+def test_client_event_watch_runs_file_fallback_after_native_watch_loss(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
+    record = webapp.client_watch_service.event_watcher_record
+
+    class StopAfterOneWait:
+        def clear(self):
+            return None
+
+        def wait(self, _timeout=None):
+            record.stop_event.set()
+            return True
+
+    calls = []
+    record.filesystem_healthy = False
+    record.next_file_poll_at = 0.0
+    record.next_background_file_poll_at = 0.0
+    record.next_filesystem_retry_at = 999999.0
+    record.next_signature_poll_at = 999999.0
+    record.wake_event = StopAfterOneWait()
+    monkeypatch.setattr(webapp, "poll_client_file_events_once", lambda: calls.append("visible") or [])
+    monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: calls.append("background") or [])
+    try:
+        webapp.client_event_watch_loop(record)
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+        webapp.control_server.stop()
+
+    assert calls == ["visible", "background"]
 
 
 def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
@@ -7928,6 +7315,128 @@ def test_poll_client_events_once_transcript_content_change_skips_metadata_refres
     assert webapp.activity_transcript_service.context_items_cache == {}
 
 
+def test_publish_context_items_ready_events_on_transcript_watch_routes_through_jobd(monkeypatch, tmp_path):
+    # Checkbox 8: transcript-identity watch events must invalidate the typed jobd transcript_view
+    # product, not parse inline. publish_context_items_ready_events (called from
+    # poll_client_events_once on transcripts_changed/transcript_content_changed, a server-side
+    # watch loop) calls context_items -> transcript_compact_view_bounded, which checkbox 5 already
+    # routes through jobd -- prove that wiring holds for the transcript-watch trigger path.
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "watched"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("transcript-watch-triggered refresh must not parse inline")))
+    submitted_tasks = []
+
+    class TrackingJobClient:
+        def submit(self, task, payload, **kwargs):
+            submitted_tasks.append(task)
+            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "pending", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = TrackingJobClient()
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([{"session": "5", "messages": 20}], [], []))
+    published = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: published.append(event_type))
+    try:
+        events = webapp.publish_context_items_ready_events(trigger="transcripts_changed")
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["context_items_ready"]
+    assert published == ["context_items_ready"]
+    # A perpetually-pending product polls/resubmits, but every submission is the jobd product
+    # task -- never an inline parse.
+    assert submitted_tasks and set(submitted_tasks) == {"transcript_view"}
+
+
+def test_publish_session_files_ready_events_on_fs_watch_routes_through_jobd_not_inline(monkeypatch):
+    # Checkbox 8: filesystem/transcript watch events (poll_client_events_once, a server-side
+    # watch loop, never a browser poll) must invalidate the typed jobd product, not recompute
+    # inline. publish_session_files_ready_events uses cache-aware session_files_payload(),
+    # which checkbox 9 already routes through compute_session_files_payload_via_jobd -- prove
+    # that wiring holds for the fs-watch/transcript-watch trigger path specifically.
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("fs-watch-triggered session-files refresh must not call inline compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = _install_fake_session_files_jobd(monkeypatch, webapp, {"session": "1", "files": [{"path": "watched.py"}], "repos": [], "errors": []})
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], [{"session": "1", "hours": 24.0, "from_ref": None, "to_ref": None, "repo_refs": None}], []))
+    published = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: published.append(event_type))
+    try:
+        events = webapp.publish_session_files_ready_events(trigger="fs_changed")
+    finally:
+        webapp.control_server.stop()
+
+    assert events == ["session_files_ready"]
+    assert published == ["session_files_ready"]
+    assert calls == [("1", ("1",), 24.0, None, None, None)]  # jobd was submitted, inline never called
+    # Checkbox 10: the trigger that drove this jobd-backed refresh is counted as a
+    # dependency invalidation, bounded by trigger reason.
+    assert webapp.client_watch_service.invalidation_counts == {"fs_changed": 1}
+
+
+def test_publish_session_files_ready_events_keeps_watch_refresh_noninteractive(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    calls = []
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], [{"session": "1", "hours": 24.0}], []))
+    monkeypatch.setattr(webapp, "session_files_payload", lambda *args, **kwargs: (calls.append((args, kwargs)) or ({"session": "1", "files": [], "repos": [], "errors": []}, HTTPStatus.OK)))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        webapp.publish_session_files_ready_events(trigger="fs_changed")
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == [(("1", 24.0), {"from_ref": None, "to_ref": None, "repo_refs": None, "force": False, "requester": "background-refresh"})]
+
+
+def test_dependency_invalidation_counts_are_bounded_by_trigger_not_by_event_volume(monkeypatch):
+    info_one = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    info_two = SessionInfo(session="2", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info_one, "2": info_two}, []))
+
+    def fail_inline(*_args, **_kwargs):
+        raise AssertionError("must not call inline compute")
+
+    monkeypatch.setattr(app_module.session_files, "session_files_payload", fail_inline)
+    monkeypatch.setattr(app_module.session_files, "session_files_payload_for_info", fail_inline)
+    webapp = app_module.TmuxWebtermApp(["1", "2"])
+    _install_fake_session_files_jobd(monkeypatch, webapp, lambda call: {"session": call[0], "hours": call[2], "files": [], "repos": [], "errors": []})
+    # Use distinct hours per round so each round's cache_key is genuinely new -- the 30-second
+    # in-process freshness window on the SAME key is an intentional anti-duplicate-work debounce
+    # (compute_session_files_cache_entry), not something this counter test should fight.
+    monkeypatch.setattr(webapp.client_watch_service, "snapshot", lambda: ([], [
+        {"session": "1", "hours": 24.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+        {"session": "2", "hours": 24.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+    ], []))
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: None)
+    try:
+        webapp.publish_session_files_ready_events(trigger="fs_changed")
+        webapp.client_watch_service.snapshot = lambda: ([], [
+            {"session": "1", "hours": 25.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+            {"session": "2", "hours": 25.0, "from_ref": None, "to_ref": None, "repo_refs": None},
+        ], [])
+        webapp.publish_session_files_ready_events(trigger="transcripts_changed")
+    finally:
+        webapp.control_server.stop()
+
+    # Two sessions x two trigger calls = one entry per DISTINCT trigger reason, summed across
+    # both sessions and both calls -- never one entry per event/session.
+    assert webapp.client_watch_service.invalidation_counts == {"fs_changed": 2, "transcripts_changed": 2}
+
+
 def test_poll_client_events_once_refreshes_session_files_on_transcript_change(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp([])
@@ -8099,6 +7608,7 @@ def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsin
                     "result": {
                         "read_generation": [stat.st_mtime_ns, stat.st_size],
                         "generation": [stat.st_mtime_ns, stat.st_size],
+                        "identity": [stat.st_dev, stat.st_ino],
                         "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}],
                         "compact_lines": [],
                         "since_items": [],
@@ -8107,24 +7617,238 @@ def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsin
                 },
             }
 
+        def product(self, coalesce_key, timeout=0.5):
+            # Cold first pass: nothing materialized yet, so the pending path stays pending.
+            return {"ok": True, "state": "none", "generation": 0}, b""
+
     monkeypatch.setattr(app_module, "tail_file_lines", unexpected_tail_file_lines)
     webapp = app_module.TmuxWebtermApp(["5"])
     worker = CompletedTranscriptJob()
     webapp.job_client = worker
     try:
-        first, first_status = webapp.context_items("5", 20)
-        second, second_status = webapp.context_items("5", 20)
+        # Drive the single-shot core: the first request submits and returns pending without any
+        # request-time parse; the second returns the bounded worker facts once jobd has completed.
+        first, first_status = webapp.transcript_compact_view("5", 20)
+        second, second_status = webapp.transcript_compact_view("5", 20)
     finally:
         webapp.control_server.stop()
 
     assert first_status == HTTPStatus.OK
     assert second_status == HTTPStatus.OK
     assert first["pending"] is True
+    assert first["stale"] is False
     assert first["items"] == []
     assert second["pending"] is False
     assert second["items"] == [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}]
     assert len(worker.submissions) == 1
     assert worker.submissions[0][0] == "transcript_view"
+    # The coalesce key is byte-generation-stripped so appends supersede rather than re-key forever.
+    coalesce_key = worker.submissions[0][2]["coalesce_key"]
+    assert coalesce_key.startswith(f"transcript:v{app_module.TRANSCRIPT_PARSER_GENERATION}:")
+    assert str(transcript.stat().st_mtime_ns) not in coalesce_key
+
+
+def _single_agent_session_info(session: str, transcript: Path, tmp_path: Path) -> SessionInfo:
+    return SessionInfo(
+        session=session,
+        panes=[],
+        selected_pane=None,
+        agents=[
+            AgentInfo(
+                session=session,
+                kind="codex",
+                pid=123,
+                pane_target=f"{session}:0.0",
+                command="codex",
+                cwd=str(tmp_path),
+                status="running",
+                session_id=f"session-{session}",
+                transcript=str(transcript),
+                error=None,
+            )
+        ],
+    )
+
+
+def test_transcript_compact_view_serves_last_known_good_product_stale_during_append(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "old"}}) + "\n", encoding="utf-8")
+    # Simulate an in-progress append: a raw line jobd has not parsed yet. The web process must never
+    # surface this raw text; it serves the prior complete product instead.
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write('{"payload":{"type":"user_message","message":"RAW-APPENDED-UNPARSED"}}\n')
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+    stat = transcript.stat()
+    product_body = json.dumps({
+        "generation": [stat.st_mtime_ns - 10, stat.st_size - 5],
+        "read_generation": [stat.st_mtime_ns - 10, stat.st_size - 5],
+        "identity": [stat.st_dev, stat.st_ino],
+        "items": [{"role": "assistant", "timestamp": "", "cwd": "", "text": "prior complete answer"}],
+        "compact_lines": ["prior complete answer"],
+        "since_items": [],
+        "since_stats": {},
+    }).encode("utf-8")
+
+    class StaleProductJob:
+        def submit(self, task, payload, **kwargs):
+            return {"ok": True, "coalesced": False, "job": {"job_id": "job-newer"}}
+
+        def result(self, job_id):
+            # The newer-generation parse is still building.
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "stale", "generation": 1}, product_body
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = StaleProductJob()
+    try:
+        payload, status = webapp.transcript_compact_view("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    assert payload["pending"] is False
+    assert payload["stale"] is True
+    assert payload["items"] == [{"role": "assistant", "timestamp": "", "cwd": "", "text": "prior complete answer"}]
+    assert "RAW-APPENDED-UNPARSED" not in json.dumps(payload)
+
+
+def test_transcript_compact_view_rejects_replaced_inode_result(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "current file"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+    stat = transcript.stat()
+
+    class ReplacedInodeJob:
+        def __init__(self):
+            self.submissions = 0
+
+        def submit(self, task, payload, **kwargs):
+            self.submissions += 1
+            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
+
+        def result(self, job_id):
+            # Same [mtime, size] as the live file, but a DIFFERENT device+inode: a replaced file
+            # that coincidentally reproduced the byte generation must not satisfy this key.
+            return {
+                "ok": True,
+                "job": {
+                    "status": "completed",
+                    "result": {
+                        "generation": [stat.st_mtime_ns, stat.st_size],
+                        "read_generation": [stat.st_mtime_ns, stat.st_size],
+                        "identity": [stat.st_dev + 1, stat.st_ino + 1],
+                        "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "from a replaced file"}],
+                        "compact_lines": [],
+                        "since_items": [],
+                        "since_stats": {},
+                    },
+                },
+            }
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "none", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    worker = ReplacedInodeJob()
+    webapp.job_client = worker
+    try:
+        first, _ = webapp.transcript_compact_view("5", 20)
+        second, _ = webapp.transcript_compact_view("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert first["pending"] is True
+    # The mismatched-inode completion is rejected, so the view stays pending and re-submits.
+    assert second["pending"] is True
+    assert second["items"] == []
+    assert worker.submissions == 2
+    assert "from a replaced file" not in json.dumps(second)
+
+
+def test_bumping_transcript_parser_generation_busts_cached_transcript_job(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "hello"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+
+    class SubmitTrackingJob:
+        def __init__(self):
+            self.coalesce_keys = []
+
+        def submit(self, task, payload, **kwargs):
+            self.coalesce_keys.append(kwargs.get("coalesce_key"))
+            return {"ok": True, "coalesced": False, "job": {"job_id": f"job-{len(self.coalesce_keys)}"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            return {"ok": True, "state": "none", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    worker = SubmitTrackingJob()
+    webapp.job_client = worker
+    baseline = app_module.TRANSCRIPT_PARSER_GENERATION
+    try:
+        webapp.transcript_compact_view("5", 20)
+        # A parser-shape change bumps the generation and must bust the previously keyed cache/product.
+        monkeypatch.setattr(app_module, "TRANSCRIPT_PARSER_GENERATION", baseline + 1)
+        webapp.transcript_compact_view("5", 20)
+    finally:
+        webapp.control_server.stop()
+
+    assert len(worker.coalesce_keys) == 2
+    assert worker.coalesce_keys[0].startswith(f"transcript:v{baseline}:")
+    assert worker.coalesce_keys[1].startswith(f"transcript:v{baseline + 1}:")
+    assert worker.coalesce_keys[0] != worker.coalesce_keys[1]
+
+
+def test_context_items_bounded_wrapper_resolves_warm_product_without_local_parse(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "warm"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "tail_file_lines", lambda *a, **k: (_ for _ in ()).throw(AssertionError("web process must not parse")))
+    stat = transcript.stat()
+
+    class WarmProductJob:
+        def submit(self, task, payload, **kwargs):
+            return {"ok": True, "coalesced": True, "job": {"job_id": "job-1"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "running"}}
+
+        def product(self, coalesce_key, timeout=0.5):
+            body = json.dumps({
+                "generation": [stat.st_mtime_ns - 1, stat.st_size - 1],
+                "read_generation": [stat.st_mtime_ns - 1, stat.st_size - 1],
+                "identity": [stat.st_dev, stat.st_ino],
+                "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "warm"}],
+                "compact_lines": [],
+                "since_items": [],
+                "since_stats": {},
+            }).encode("utf-8")
+            return {"ok": True, "state": "ready", "generation": 1}, body
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = WarmProductJob()
+    try:
+        payload, status = webapp.transcript_compact_view_bounded("5", 20, wait_ms=0)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.OK
+    # A warm product returns synchronously as stale (distinct from pending), even with a zero wait.
+    assert payload["pending"] is False
+    assert payload["stale"] is True
+    assert payload["items"] == [{"role": "user", "timestamp": "", "cwd": "", "text": "warm"}]
 
 
 def test_yoagent_session_summary_updates_from_transcript_delta(monkeypatch, tmp_path):
@@ -13008,6 +12732,7 @@ def test_update_notification_iteration_deduplicates_initialized_target():
 
 def test_update_check_loop_logs_iteration_failure(monkeypatch, caplog):
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    webapp.update_check_record = app_module.UpdateCheckRecord()
     webapp.updates_settings = lambda: {"notify_level": "patch", "check_interval_minutes": 1}
     webapp.update_notify_level = lambda _section: "patch"
     webapp.publish_update_notification_if_available = lambda: (_ for _ in ()).throw(RuntimeError("update probe exploded"))
@@ -13017,6 +12742,19 @@ def test_update_check_loop_logs_iteration_failure(monkeypatch, caplog):
         webapp.update_check_loop()
 
     assert any("update check failed: update probe exploded" in record.message for record in caplog.records)
+    assert webapp.update_check_recurring_work_snapshot()["failures"] == 1
+
+
+def test_update_check_recurring_work_excludes_disabled_idle_sleep():
+    webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
+    webapp.update_check_record = app_module.UpdateCheckRecord()
+
+    webapp.note_update_check(useful=False, next_due_seconds=60.0, enabled=False)
+    row = webapp.update_check_recurring_work_snapshot()
+
+    assert row["class"] == "external-reconcile"
+    assert row["demanded"] is False
+    assert row["attempts"] == row["useful"] == row["no_change"] == row["failures"] == 0
 
 
 def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(monkeypatch):
@@ -13335,28 +13073,160 @@ def test_indexed_repo_discovery_is_submitted_to_jobd_and_consumed_as_a_snapshot(
     assert len(webapp.job_client.submissions) == 1
 
 
-def test_stats_coverage_integrity_self_check_surfaces_violation_to_logs(monkeypatch, tmp_path):
-    database = tmp_path / "stats.sqlite3"
-    store = stats_store.StatsStore(database)
-    connection = store._connection()
-    with connection:
-        for epoch_id, start, end in (("o1", 1000, 1300), ("o2", 1290, 1600)):
-            connection.execute(
-                "INSERT INTO stats_coverage_intervals(family,epoch_id,start,end,cadence,owner_generation,source)"
-                " VALUES('cpu',?,?,?,10,1,'sampler')",
-                (epoch_id, start, end),
-            )
-    store.close()
-    # Point the read-only check at the corrupt fixture DB (no repair on read-only open).
-    monkeypatch.setattr(statsd, "default_database_path", lambda: database)
-    server_logs.SERVER_LOGS.clear()
+def test_indexed_repo_discovery_reuses_healthy_generation_until_a_descendant_changes(tmp_path):
+    class FakeJobClient:
+        def __init__(self):
+            self.submissions = []
+
+        def submit(self, task, payload, **options):
+            self.submissions.append((task, payload, options))
+            return {"ok": True, "job": {"job_id": f"repo-job-{len(self.submissions)}", "status": "queued"}}
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"status": "completed", "result": {"roots": [str(tmp_path / "repo")]}}}
+
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    report = webapp.check_stats_coverage_integrity()
-    assert report is not None and report["ok"] is False and report["overlapping_pairs"] == 1, report
-    coverage_errors = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage" and entry["level"] == "error"]
-    assert coverage_errors, server_logs.server_logs_payload()
-    assert "coverage integrity violated" in coverage_errors[0]["message"]
-    # Deduped: a second immediate check must not emit a second line.
-    webapp.check_stats_coverage_integrity()
-    coverage_errors_after = [entry for entry in server_logs.server_logs_payload()["logs"] if entry["category"] == "coverage"]
-    assert len(coverage_errors_after) == 1, coverage_errors_after
+    webapp.activity_transcript_service = app_module.ActivityTranscriptService()
+    webapp.client_watch_service = app_module.ClientWatchService()
+    webapp.client_watch_service.event_watcher_record.filesystem_healthy = True
+    webapp.job_client = FakeJobClient()
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": [str(tmp_path)]}}}
+
+    webapp.indexed_repo_roots_snapshot()
+    first = webapp.activity_transcript_service.indexed_repo_record.worker
+    assert first is not None
+    first.join(timeout=2.0)
+    assert len(webapp.job_client.submissions) == 1
+    assert webapp.indexed_repo_roots_snapshot() == [str(tmp_path / "repo")]
+    assert len(webapp.job_client.submissions) == 1, "an unchanged healthy root must not re-walk on the old 30-second clock"
+
+    webapp.mark_indexed_repo_discovery_dirty([tmp_path / "repo" / ".git" / "HEAD"])
+    webapp.indexed_repo_roots_snapshot()
+    second = webapp.activity_transcript_service.indexed_repo_record.worker
+    assert second is not None and second is not first
+    second.join(timeout=2.0)
+    assert len(webapp.job_client.submissions) == 2
+    assert webapp.job_client.submissions[0][2]["generation"] != webapp.job_client.submissions[1][2]["generation"]
+
+
+def test_session_files_index_updates_append_a_journal_instead_of_rewriting_the_base(tmp_path, monkeypatch):
+    """A durable cache write must not read and rewrite the whole O(historical
+    entries) JSON index; it appends one journal line, reads merge base+journal,
+    and a full rewrite folds the journal in and truncates it."""
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "cache")
+
+    base = webapp.session_files_disk_cache_index_path()
+    journal = webapp.session_files_disk_cache_index_journal_path()
+    webapp.update_session_files_disk_cache_index("sig-a", size=10, mtime=1.0)
+    webapp.update_session_files_disk_cache_index("sig-b", size=20, mtime=2.0)
+    webapp.update_session_files_disk_cache_index("sig-a", size=30, mtime=3.0)  # later wins
+
+    assert not base.exists()  # the base was never rewritten per write
+    assert len(journal.read_text(encoding="utf-8").splitlines()) == 3
+    merged = webapp.read_session_files_disk_cache_index_unlocked()
+    assert merged["entries"]["sig-a"] == {"size": 30, "mtime": 3.0}
+    assert merged["entries"]["sig-b"] == {"size": 20, "mtime": 2.0}
+
+    # A full rewrite (the prune path) folds the merged view into the base and
+    # truncates the journal; the merged view is unchanged afterwards.
+    webapp.write_session_files_disk_cache_index_unlocked(merged)
+    assert base.exists() and not journal.exists()
+    assert webapp.read_session_files_disk_cache_index_unlocked()["entries"] == merged["entries"]
+
+
+def test_session_files_durable_cache_replaces_one_file_per_logical_view(tmp_path, monkeypatch):
+    """The durable filename derives ONLY from the stable logical view key
+    (kind, version, session, hours, refs, per-repo ref overrides); the volatile
+    info/repo signatures are a replaceable source generation INSIDE the record.
+    Frequent agent-status/transcript changes must replace the same file, never
+    mint key-per-generation filenames; an older generation serves only as a
+    stale last-known-good and never as a fresh hit."""
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["1"])
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "cache")
+    stable = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 24.0, "", "", ())
+    payload_one = {"files": [{"path": "one.py"}], "repos": [], "errors": []}
+    payload_two = {"files": [{"path": "two.py"}], "repos": [], "errors": []}
+    try:
+        # Ten source generations of the same logical view: agent status flips.
+        for index in range(10):
+            key = (*stable, (("1", f"info-sig-{index}"),), (("~/repo", ("id", index)),))
+            webapp.write_session_files_disk_cache(key, payload_one if index % 2 else payload_two, HTTPStatus.OK)
+        cache_files = sorted(path.name for path in (tmp_path / "cache").glob("*.json"))
+        payload_files = [name for name in cache_files if not name.endswith(("manifest.json",)) and name != app_module.SESSION_FILES_DISK_CACHE_INDEX_FILENAME and not name.endswith(".journal")]
+        assert len(payload_files) == 1  # one durable file, replaced ten times
+
+        newest = (*stable, (("1", "info-sig-9"),), (("~/repo", ("id", 9)),))
+        older = (*stable, (("1", "info-sig-0"),), (("~/repo", ("id", 0)),))
+        fresh = webapp.read_session_files_disk_cache(newest, max_age_seconds=60.0)
+        assert fresh is not None and fresh[2] is True and fresh[0]["files"] == payload_one["files"]
+
+        # Older generation: no fresh hit; stale last-known-good only.
+        assert webapp.read_session_files_disk_cache(older, max_age_seconds=60.0) is None
+        stale = webapp.read_session_files_disk_cache(older, allow_stale=True)
+        assert stale is not None and stale[2] is False and stale[0]["files"] == payload_one["files"]
+        # The stale serve must not have poisoned the memory cache for `older`.
+        assert older not in webapp.session_files_service.cache
+
+        # Different logical views (other hours; pane switch to another session)
+        # each get their own single file.
+        other_view = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "1", 8.0, "", "", (), (("1", "info-sig-9"),), ())
+        webapp.write_session_files_disk_cache(other_view, payload_two, HTTPStatus.OK)
+        pane_switch = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "2", 24.0, "", "", (), (("2", "info-sig-9"),), ())
+        webapp.write_session_files_disk_cache(pane_switch, payload_two, HTTPStatus.OK)
+        payload_files = [name for name in sorted(path.name for path in (tmp_path / "cache").glob("*.json")) if not name.endswith("manifest.json") and name != app_module.SESSION_FILES_DISK_CACHE_INDEX_FILENAME]
+        assert len(payload_files) == 3
+
+        # An old-format key-per-generation file is never imported into active
+        # serving: it does not match any stable-name lookup and is left on disk
+        # for the existing prune (never deleted here).
+        legacy = tmp_path / "cache" / (hashlib.sha256(b"old-full-key-hash").hexdigest() + ".json")
+        legacy.write_text(json.dumps({"version": 1, "payload": {"files": [{"path": "legacy.py"}]}}), encoding="utf-8")
+        fresh_again = webapp.read_session_files_disk_cache(newest, max_age_seconds=60.0)
+        assert fresh_again is not None and fresh_again[0]["files"] == payload_one["files"]
+        assert legacy.exists()
+    finally:
+        webapp.control_server.stop()
+
+
+def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkeypatch):
+    """Last-known-good through refresh errors: a stale populated payload is
+    served immediately, the failing background refresh replaces nothing, and a
+    later read still returns the populated payload — never an empty placeholder."""
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
+    webapp = app_module.TmuxWebtermApp(["1"])
+    try:
+        info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+        key = webapp.session_files_cache_key("payload", {"1": info}, "1", 24.0, None, None, None)
+        populated = {"files": [{"path": "keep.py"}], "repos": [], "errors": []}
+        webapp.set_session_files_memory_cache(key, populated, HTTPStatus.OK, stored_at=app_module.time.monotonic() - 999.0)
+
+        compute_calls = []
+
+        def failing_via_jobd(*args, **kwargs):
+            compute_calls.append(True)
+            raise app_module.SessionFilesJobdUnavailable("refresh blew up")
+
+        # The refresh WORKER (now a jobd product materialization) fails; the request-side stale serve
+        # must not care, and the failing refresh must replace nothing.
+        monkeypatch.setattr(webapp, "compute_session_files_payload_via_jobd", failing_via_jobd)
+
+        payload = webapp.cached_session_files_payload_for_info(info)
+        assert payload["files"] == populated["files"]
+
+        # Let the background refresh worker run (and fail).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with webapp.session_files_service.cache_lock:
+                busy = bool(webapp.session_files_service.work_records)
+            if not busy and compute_calls:
+                break
+            time.sleep(0.02)
+        assert compute_calls, "the stale hit must have scheduled one background refresh"
+
+        # The populated stale entry is still there; nothing replaced it with empty.
+        cached = webapp.get_session_files_cache(key, max_age_seconds=None, allow_stale=True)
+        assert cached is not None and cached[0]["files"] == populated["files"]
+    finally:
+        webapp.control_server.stop()

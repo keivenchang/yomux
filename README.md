@@ -2,7 +2,7 @@
 
 Lightweight, powerful browser workspace for managing AI work.
 
-`yolomux.py` brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. Two companion tools ship alongside it: `auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tmux_wall.py` (a read-only snapshot wall).
+`yolomux.py` brings AI management, editing and viewing, collaboration, file and Git context, and observability into one interactive UI. It integrates with local tmux sessions through browser xterm.js terminals while keeping the workspace focused on directing, reviewing, and completing AI-assisted work. Two companion tools ship alongside it: `tools/auto_approve_tmux.py` (YOLO auto-approval without the UI) and `tools/tmux_wall.py` (a read-only snapshot wall).
 
 Contributor and build instructions live in [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md). AI-agent conventions live in [`AGENTS.md`](AGENTS.md), detailed product behavior lives under [`docs/specs/`](docs/specs/), and peer findings live in [`docs/RESEARCH.md`](docs/RESEARCH.md).
 
@@ -32,7 +32,7 @@ Open `https://localhost:9998/`. The first launch shows a setup page — see [Fir
 
 ## Runtime architecture
 
-YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one `statsd` writer, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, and zero or one `approvald` while YO targets are enabled. YO!stats history reads do not need a service at all: each web process encodes history and sample responses in-process from a read-only WAL connection to the same durable database (`statsd` remains the sole writer). A normal stats + Quick Open session has three Python processes (`yolomux.py`, `statsd`, `indexd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one supervised `statsd`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, one lazy `statusd`, and zero or one `approvald` while YO targets are enabled. The current YO!stats architecture makes `statsd` the sole database writer and history-serving owner: it stores original observations, usage atoms, coverage epochs, and unavailable spans in a schema-versioned database, builds immutable resolution layers asynchronously, and serves exact cached snapshots/deltas while web processes only authenticate and forward. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns the current schema/fence/path literals. `statusd` is the sole owner of the shared public session/agent-status snapshot (lightweight tmux discovery, pane classification, encoded auto-approve bytes) and a private session-inventory contract that other daemon-owned products key work on; web processes only forward its bytes. `jobd` is a bounded CPU broker for stateless registered tasks and typed materialized products (`transcript_view`, `session_files_view`, `tabber_activity_view`, `metadata_warm_view`) that serve last-known-good bytes while a newer generation builds. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `indexd`, `statusd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
 
 ```mermaid
 flowchart TB
@@ -58,10 +58,11 @@ flowchart TB
 
   subgraph services["Shared local services per YOLOMUX_STATE_DIR"]
     direction TB
-    statsd["statsd writer\nSTATE_DIR/services/statsd.sock\nsole SQLite mutator\npartial merges + maintenance"]
+    statsd["statsd\nversioned state socket\nsole SQLite writer\nasync four-layer materializer\nexact snapshot/delta cache"]
     indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
-    jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\n60s idle when queue empty"]
+    jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\nlast-known-good product store\n60s idle when queue empty"]
     execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
+    statusd["statusd\nSTATE_DIR/services/statusd.sock\nshared session/agent-status snapshot\nprivate session-inventory contract\n60s idle after leases"]
     approvald["approvald\nSTATE_DIR/services/approvald.sock\ntarget AutoApproveWorker threads\n60s idle after targets stop"]
     jobd --> execs
   end
@@ -77,7 +78,7 @@ flowchart TB
 
   subgraph durable["Durable state"]
     direction TB
-    statsdb["STATE_DIR/stats-history.sqlite3\nstatsd is sole writer"]
+    statsdb["versioned stats database\noriginals + usage + coverage\nschema/min-writer fence"]
     indexdb["STATE_DIR/search_index/<digest>.sqlite3\nindexd is sole writer"]
     locks["STATE_DIR/background-owner/*\nSTATE_DIR/services/*.service.json\nSTATE_DIR/locks/auto-approve-*.lock"]
     caches_state["STATE_DIR/session-files-cache\nSTATE_DIR/activity-cache\nSTATE_DIR/watch-index.json"]
@@ -98,9 +99,9 @@ flowchart TB
   app <--> statsd
   app <--> indexd
   app <--> jobd
+  app <--> statusd
   app <--> approvald
-  statsd --> statsdb
-  app -. read-only WAL .-> statsdb
+  statsd <--> statsdb
   indexd --> indexdb
   app --> locks
   app --> caches_state
@@ -123,11 +124,11 @@ flowchart TB
   class events,native,signals,owner,caches worker
   class bridge request
   class attach,tmuxctl,tmuxd,pane,fs child
-  class control,statsd,indexd,jobd,execs,approvald local
+  class control,statsd,indexd,jobd,execs,statusd,approvald local
   class statsdb,indexdb,locks,caches_state database
 ```
 
-The web process accepts browser traffic, forwards tmux bytes, coordinates auth/settings/SSE, and serves cached or worker-encoded bytes. It does not own the YO!stats database, Quick Open database, CPU job executor, or YO auto-approval target workers. If a service is missing, stale, incompatible, or in crash backoff, the request path returns last-known-good data, pending/unavailable status, or a bounded error; it does not run the retired heavy implementation in the web PID.
+The web process accepts browser traffic, forwards tmux bytes, coordinates auth/settings/SSE, and serves cached or worker-encoded bytes. It does not own the YO!stats database, Quick Open database, CPU job executor, or YO auto-approval target workers. If a compatible service is missing, stale, or in crash backoff, the request path returns last-known-good data, pending/unavailable status, or a bounded error; it does not run the retired heavy implementation in the web PID. A newer stats schema/protocol is different: the old client receives `upgrade_required`, stops retrying, and never replaces or mutates the newer owner/database.
 
 ```mermaid
 sequenceDiagram
@@ -168,14 +169,15 @@ flowchart TB
     ownerlock["background-owner/owner.lock"]
     ownerjson["background-owner/owner.json\ngenerations/*.json"]
     records["services/*.service.json\nservices/*.service.lock"]
-    statsdb["stats-history.sqlite3\none statsd writer"]
+    statsdb["versioned stats database\noriginals + usage + coverage\nschema/min-writer fence"]
     indexes["search_index/<digest>.sqlite3\none indexd writer"]
     caches["session-files-cache\nactivity-cache\nwatch-index.json"]
   end
   subgraph svc["Shared service PIDs"]
-    statsd2["statsd writer\nservices/statsd.sock\npartial merges + maintenance"]
+    statsd2["statsd\nversioned state socket\nsole writer + materializer\nexact cache"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
+    statusd3["statusd\nservices/statusd.sock\nshared status snapshot\n60s idle"]
     approvald2["approvald\nservices/approvald.sock\nexits when no targets"]
   end
 
@@ -195,11 +197,11 @@ flowchart TB
   app2 --> indexer
   app1 --> jobd2
   app2 --> jobd2
+  app1 --> statusd3
+  app2 --> statusd3
   app1 --> approvald2
   app2 --> approvald2
-  statsd2 --> statsdb
-  app1 -. read-only WAL .-> statsdb
-  app2 -. read-only WAL .-> statsdb
+  statsd2 <--> statsdb
   indexer --> indexes
   app1 <--> caches
   app2 <--> caches
@@ -211,7 +213,7 @@ flowchart TB
   class app1,app2 process
   class sock1,sock2 socket
   class ownerlock,ownerjson,records,statsdb,indexes,caches durable
-  class statsd2,indexer,jobd2,approvald2 localChild
+  class statsd2,indexer,jobd2,statusd3,approvald2 localChild
 ```
 
 | Communication path | Used for | Transport |
@@ -221,8 +223,8 @@ flowchart TB
 | tmux signal watcher ↔ tmux | Pane/window/client lifecycle changes | Long-lived `tmux -C attach-session` control-mode child over stdin/stdout; its tmux client uses the tmux Unix socket |
 | Server ↔ server | Owner refresh requests, status, runtime profiling, release/takeover | Local Unix-domain socket; versioned length-framed JSON with legacy newline compatibility, mode `0600` |
 | Server ↔ server election | One owner for expensive cross-process work | `flock` plus atomic JSON generation records under the state directory |
-| Elected server → `statsd` | Independently scheduled YO!stats CPU/status/GPU/memory/token partial records and bounded maintenance | Local Unix RPC; the elected server collects each family asynchronously and `statsd` is the sole SQLite WAL writer for `STATE_DIR/stats-history.sqlite3` |
-| Server → stats history (in-process) | Retained-history queries, aggregation, and pre-encoded responses | No RPC: each web process encodes directly from its own SQLite `mode=ro`/`query_only` WAL connection to `STATE_DIR/stats-history.sqlite3`, so a long range query cannot occupy the writer listener or suppress a CPU deadline |
+| Elected server → `statsd` | Independently scheduled YO!stats CPU/status/GPU/memory/token original observations | Current local Unix RPC; statsd appends/deduplicates originals as the sole SQLite writer and rejects stale writer protocols before mutation |
+| Server ↔ `statsd` exact stats | Exact Range/Resolution snapshots, live deltas, and bounded diagnostics | Current binary local Unix RPC; statsd serves pre-encoded immutable cache generations, while the web process never opens or aggregates the stats database |
 | Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
 | Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` and indexed-repository discovery | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues. The web process consumes the last completed repository snapshot and never recursively walks configured index roots. |
 | Server ↔ `approvald` | YO auto-approval start/status/stop/pending-prompt checks | Local Unix RPC; `approvald` owns target locks and target-keyed `AutoApproveWorker` threads |
@@ -237,10 +239,10 @@ flowchart TB
 | Terminal WebSocket → tmux | The handler opens a PTY, then spawns `tmux attach-session [-r] [-f ignore-size] -t <session>:` with that PTY as stdin/stdout/stderr. Terminal bytes move over the PTY; tmux’s client then talks to its tmux server over tmux’s Unix socket, not a TCP port. `YOLOMUX_TMUX_SOCKET` adds `tmux -S <socket>` when a non-default tmux socket is required. |
 | Signal watcher → tmux | A long-lived child runs `tmux -C attach-session -f read-only,ignore-size -t <session>:`. YOLOmux reads/writes tmux control-mode records on the child’s stdin/stdout; the child uses the same tmux Unix socket. |
 | Server → elected server | Versioned length-framed JSON request/response over a mode-`0600` Unix socket, with legacy newline reads only for rolling compatibility. Normally: `$YOLOMUX_STATE_DIR/control/yolomux-<pid>-<token>.sock`; a deterministic `/tmp/ycs-…/` path is used if the Unix socket pathname would be too long. RPC actions include `background_refresh`, `background_status`, `background_ping`, `background_client_event`, `runtime_profile`, and release/disable operations. Token-consumer demand uses a family-specific refresh that wakes only the elected token sampler. |
-| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Service sockets are `$YOLOMUX_STATE_DIR/services/statsd.sock`, `$YOLOMUX_STATE_DIR/search_index/indexer.sock`, `$YOLOMUX_STATE_DIR/services/jobd.sock`, and `$YOLOMUX_STATE_DIR/services/approvald.sock`; `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include stats writes/maintenance, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. History/sample encoding is not an RPC action: it runs in-process in each web server from a read-only WAL connection. |
+| Server → local services | Versioned length-framed Unix RPC over mode-`0600` sockets. Each service owns a state-directory socket; the current stats socket name is version-scoped with the stats protocol and schema, while the indexer, job, and approval services use their service-local paths. `safe_socket_path()` moves only the socket pathname to deterministic `/tmp/yolomux-…` storage when a platform path limit requires it. Common actions include `ping`, `status`, `profile`, `lease`, `release`, `shutdown`, and `shutdown_if_idle`; service-specific actions include current stats observation writes/exact snapshots, index enqueue/search/unindex, job submit/result/cancel, and approval target start/status/stop. Stats snapshot bodies are encoded and cached by statsd, then forwarded without web-process database access or re-aggregation. |
 | Markdown → visual preview | Browser-local rendering; there is no SVG server or preview port. A changed Markdown content generation replaces its derived DOM, reruns Mermaid to a sanitized SVG/blob image, recreates inline media nodes, and rejects any late render from an older generation. |
 
-The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while the elected process coordinates shared refresh demand and service leases. A configured preferred port has higher election priority than later-started followers, while followers still take over if it dies. Lower-priority processes cannot force the preferred live owner to release its lock. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, incompatible protocol peers are retired, and repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership prevent split writers; idle shutdown only happens after leases and queued work drain.
+The owner role is deliberately narrow: every server still accepts browser traffic and owns its own WebSocket/PTy children, while the elected process coordinates shared refresh demand and service leases. A configured preferred port has higher election priority than later-started followers, while followers still take over if it dies. Lower-priority processes cannot force the preferred live owner to release its lock. Service startup is serialized by `services/<name>.service.lock`; stale records are cleaned only after PID checks, an older incompatible peer may be replaced only by a compatible current caller, and a newer peer makes the caller stop with `upgrade_required`. Repeated spawn failures back off from 0.25 seconds up to 8 seconds. Singleton service locks and one-writer SQLite ownership prevent split writers; idle shutdown only happens after leases and queued work drain.
 
 ## First launch
 
@@ -293,21 +295,23 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - Use the pane Info Bar to switch tmux sub-windows (`0:bash`, `1:codex`, ...), cycle among a session's repositories with `< N/M >` or pick one from the `N/M` menu, open transcripts (`Tx`), request an AI summary (`AI`), or inspect the event log (`Log`).
 - File -> `Search & Runs` opens a data pane that searches captured session events and summaries, then lists compact run history rows with prompt, cwd, agent, timing, final state, PR, and latest summary.
 - File -> `YO!info` opens a grouped relationship tree over `TmuxSession`, `TmuxWindow`, `TmuxPane`, `RuntimeActor`, observed paths, Git worktrees, local/hosted repositories, branches, pull requests, and Linear work. One worktree and branch inventory is shared by all observed paths and actors that use it; search accepts combinations such as a tmux target plus a branch or PR. A tab with exactly one focused PR shows that PR; when several focused PRs apply it shows an explicit count instead of choosing one arbitrarily.
-- File -> `YO!stats` opens API/SSE events and performance graphs for host CPU/memory, GPU or macOS GPU activity/memory, client traffic, agent status, and agent tokens. The elected server collects each metric family in its own non-overlapping worker: CPU every second, Agent Status and GPU every 10 seconds, system memory every minute, and tokens every 10 seconds while watched or every minute while idle. Each family persists independently before its SSE notification, so a slow GPU, transcript, or memory probe cannot stop CPU history. Its `System` view shows the serving process, distributed background owner, local service lifecycles, queues and refresh work, index/cache state, event/chat transport, top API/background timings, per-family cadence/attempt/success/failure/late/missed/runtime health, and last history latency/cache rate; its `Logs` view shows bounded leveled server/service diagnostics plus explicit history retry, coverage, timeout, owner-change, and rollup reasons. These views refresh only while selected and provide a manual Refresh action. Local services render as one transposed live table with services as columns, Queues last, fresh/stale value coloring, `prev:` values after exit, and Started/Last ran relative ages. CPU shows system average plus YOLOmux servers; memory reports actual host/device bytes. At one-second display resolution, slower gauge observations are presentation-held only to their named cadence (GPU 10 seconds and memory 60 seconds); hover identifies held values and their real source timestamp/sample count, while durable counts, costs, rates, and gaps remain unchanged. Its first graph request shows only `Waiting for server stats...` until the server accepts a sample. Thereafter it loads retained history incrementally: widening a range preserves visible data while the missing interval loads, and one Retry action replaces the same loading slot if that request fails. A valid partial live response paints all returned data—including synchronized Agent/Model token bars—and treats an explicitly unavailable older prefix as known unavailable instead of discarding the response or retrying forever; malformed or missing coverage remains a bounded error. The server compresses large JSON responses when the browser accepts gzip, and owner/follower servers expose the same durable global history while keeping each browser's client metrics private. Startup callers share one request per resource, so boot, SSE-ready, visibility, and Tabber rendering do not duplicate background-status, auto-approve, or activity reads. Client communication charts tolerate event-driven empty buckets and distinguish shared all-client bad-connection intervals from actual API/SSE, latency, and bandwidth samples, including after 24-hour history compaction; one stale client cannot shade a live peer, and zero labels align with the shared plot baseline. When priced usage is available, the `Cost` toggle immediately after `Model tokens` opens the default-off compact `Cost summary`, pairing Input, Cache, Output, and Total estimated cost with token counts. Its explicit `More Info` button opens or activates the normal `YO!cost` tab with token charts, synced Range/Resolution, freshness/Refresh, sortable stretchable By Agent/By Model/calculation/source tables, known-vs-unpriced accounting, and transcript-source links; JSONL sources open in the file Preview as a rendered event table. Unpriced usage keeps Known priced total, Unpriced tokens, and Worst-case estimate visible, with each provider/model/class and its token count in an explicit disclosure instead of one run-on label. Non-token units remain separate and the result is an API list-price estimate, not an invoice. `est. $…` means the displayed components are priced, retained usage is backfilled, and telemetry is complete; `est. ≥$…` is a lower bound when usage is unpriced or incomplete, or while retained usage is still backfilling. The detailed behavior contract lives in [`docs/specs/GUI.md`](docs/specs/GUI.md).
-- YO!stats history models sleep, restart, and owner changes as explicit sampler epochs with bounded per-family coverage intervals. Prefix, suffix, middle, multiple, and empty gaps render as no-data spans instead of errors or silent zeros. The Range slider starts at 5m; controls stay mounted during chart refreshes; only the ongoing cell may move at live ranges up to 1h, while longer and historical views remain static. Delivery follows the shared YO!stats/YO!cost range: 5m/15m use the one-second stats SSE feed, 30m and longer use one fetch per minute with no stats SSE, fixed historical zooms use the coarse path, and hidden pages use neither; returning short performs an immediate history backfill.
-- Token hover reports the real retained bucket span, tokens/min, and sample count; gaps say `No token samples`. The Model-token dimension selector also switches Agent tokens: Output stays on exact generated counters, while Input/Cache/All use tmux-attributed billable atoms and show a labeled unavailable state when attribution is absent. These switches repaint YO!stats and YO!cost immediately from loaded history without refetching. Resolution choices rebuild for every range/zoom and clamp stale overrides, and loading overlays dim both tabs with the same inactive-pane treatment while keeping their message prominent.
-- Operators can rebuild retained YO!stats token/cost components from all discoverable Claude/Codex JSONL transcripts with `python3 tools/rebuild_stats_tokens.py --apply --stop-services`. The offline tool stops every server sharing the state directory, proves exclusive DB ownership, creates a timestamped backup, preserves generated-output and live metrics, and reports transcriptless output-only buckets; see [Offline token/cost history rebuild](docs/DEVELOPMENT.md#offline-tokencost-history-rebuild).
+- File -> `YO!stats` retains the established polished `Graph`, `API/SSE`, `System`, and `Logs` UI exactly: the range slider, Resolution picker, AUTO/S/M/L/MAX sizing, twelve named chart toggles, chart-specific cards/units/legends, per-card X controls, and the original System/Logs layouts remain unchanged while the current backend supplies their data. The chart row puts `Cost` immediately after `Model tokens` and leaves Cost off by default. File -> `YO!cost` renders the exact cost and token-usage series from the same persisted Range/Resolution selection, shows one compact server-precomputed Cost Summary, and opens full model/agent/dimension/pricing attribution only from the explicit `More Info` button in an internally scrollable modal with outside-click, Escape, and X dismissal. Agent rows keep a stable server identity and privacy-safe display label, so separate Codex/Claude windows never collapse into one total; background labels stay compact and narrow tables scroll without clipping their trailing costs. Independent collectors preserve their real cadences: CPU every second, Agent Status and GPU every 10 seconds, system memory every minute, and tokens every 10 seconds while watched or every minute while idle. Claude token collection covers recent independent and background sessions in each demanded project even when the pane-attributed transcript is idle; background Agent-token series use a stable project/session identity instead of borrowing the pane label. statsd persists each original independently, derives plot-ready values, a complete range cost report, and per-family no-data spans. Browser latency, API/SSE rate, bandwidth, and disconnected time are shared privacy-safe series: each bucket first folds each browser's samples, then averages those client values so a high-volume client cannot dominate. One conflicting usage atom is quarantined without blocking clean atoms or coverage; an unreadable retired database is preserved as an `unsupported-*` artifact while YO!stats starts with empty history instead of crash-looping. The System sampler card warns only when transcripts are durably advancing while accepted usage atoms are stale, then clears when recording resumes. `System` and `Logs` fetch their bounded status only while their subview is visible, provide an explicit Refresh action, and preserve their internal scroll position. The first exact request shows one loading state; changing Range/Resolution atomically replaces the accepted generation, while pending or unavailable service state backs off without paging or a legacy fallback. A terminal startup error shows the server reason and selected range without a contradictory waiting label; Retry clears the daemon latch and repairs both snapshot and stream without reloading the page. Detailed behavior lives in [`docs/specs/GUI.md`](docs/specs/GUI.md), and the storage/wire contract lives in [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md).
+- The current-only YO!stats contract supports only `1s`, `10s`, `60s`, and `300s` plus AUTO through the server-owned matrix. Each response contains one exact uniform duration with at most 600 buckets. Delivery and presentation are resolution-driven rather than range-driven: the exact `/api/stats-stream` cadence is one second for `1s`, ten seconds for `10s`, and one minute for `60s`/`300s`. Slower or sparse Agent/Model token, cost, GPU, status, and memory series are not repeated into fake fine-resolution values; their existing points drift left with the live time domain until another real observation arrives. Hidden and fixed historical views do no live work; selection, reconnect, missed generation, or visibility restoration performs one exact snapshot repair.
+- Under that contract, sleep, restart, owner changes, and unreconstructable migrated spans are explicit bounded per-family no-data. Prefix, suffix, middle, multiple, and empty gaps render as no-data instead of errors or silent zeros. Token hover reports the returned bucket span, tokens/min, source timestamp, and sample count; gaps say `No token samples`. Agent and Model token dimensions and YO!cost derive from the same identity-deduplicated usage atoms and reconcile exactly; unavailable attribution remains unavailable instead of zero. Resolution choices come from server capabilities, and an invalid saved choice normalizes visibly to AUTO before a request.
+
+- YO!cost separates estimated marginal cost from the API-list-price counterfactual. Preferences can stamp new OpenAI or Anthropic CLI usage as subscription-covered, making its marginal cost `$0` while retaining the token volume, reviewed pricing evidence, and API-list comparison; direct API and Images usage remains API-priced. The stamped profile is durable history and changing the Preference does not rewrite older usage.
+- The current database is schema-versioned and fences writers before mutation. Startup performs a read-only schema/minimum-writer preflight before any write, and the atomic all-source migration activates the new file only after reconciliation succeeds. It refuses to guess if a loss marker overlaps exact coverage, repairs only exactly matched copied parent prefixes, and retains genuine child token deltas. An old runner cannot reach current data through the retired `stats-history.sqlite3` name; any client or writer that encounters a newer fence receives terminal `upgrade_required`, stops before mutation, and cannot replace the newer statsd. Successful migration removes retired storage/protocol state instead of keeping a dual-format period. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns the current schema, protocol, build, filename, and socket details.
 - The pane header pop-out button opens supported file previews, YO!info, and YO!stats in a detached browser window.
 - File -> `YO!share...` creates short live magic URLs for the current YOLOmux layout. Defaults are short-lived, read-only, http links; write access requires https. The host can extend active shares and see connected users with duration, IP, and browser type. Replay details live in [`docs/specs/SHARE_MIRRORING.md`](docs/specs/SHARE_MIRRORING.md).
 - File -> `Finder/Differ/Tabber` opens the three independent file-surface tabs. At 900px and wider they live in an explicit narrow left Side Pane; a missing one recreates that Side Pane, and Side tabs never enter Generic Panes. Below 900px there is no Side Pane and File opens only the selected surface in the sole full-width Generic Pane. Widening restores Finder/Differ/Tabber to the left while leaving YO!* tabs generic. Finder Sync remembers each session's root, expansion, selection, and every touched path; touched ancestors carry that session's `★`. Switching sessions paints the shared bounded cache immediately, then revalidates visible directories in the background. Filesystem permission failures are reported in Finder instead of terminating the request. Quick Search is `Mod+P`; it hides clean deleted file tabs, keeps dirty buffers reachable when their backing path is missing, and restores clean tabs when the file reappears.
 - Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root, starts one lazy local indexer on demand, and excludes common dependency/build directories. Paths displayed by Finder or Differ are batched at two seconds; hidden paths rely on the long safety refresh. The indexer incrementally replaces only changed subtrees and writes row deltas to SQLite. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same indexed-root list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yolomux/settings.yaml`.
 - Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI language.
-- YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT_SKILLS.md`](docs/YOAGENT_SKILLS.md) for setup and examples.
+- YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT.md`](docs/YOAGENT.md) for setup, intents, and coordination rules.
 - File -> `YO!chat`, immediately after `YO!stats`, opens one global conversation shared by authenticated admin and readonly users whose servers use the same `YOLOMUX_STATE_DIR`; YO!share guests cannot access it. Human headers preserve the authenticated username's case, show the server-observed IP, use a stable per-person color from the shared theme, and show relative age for the first four hours before switching to an exact local timestamp; the composer border uses the same color as that user's sent messages. A non-persisted YO!agent introduction with one of several localized greetings remains first in the current timeline, named typing presence uses localized list formatting, history search stays absent until Cmd/Ctrl-F and its X hides it again, older messages load in bounded pages as you scroll upward, the composer grows with content only up to half the pane, and the keyboard/touch emoji picker lazy-loads its catalog. New content follows the bottom only while you are already viewing the tail; scrolling into older messages preserves that position and exposes New messages. `/yo <query>` stores the question, shares `YO!agent is typing…` through the normal typing lease without adding a fake history message, delegates to the existing YO!agent task/transcript/recommendation pipeline, renders the stored answer through the shared sanitized Markdown path, and shares it with every client. Searchable state lives in SQLite and exact messages are also journaled under `YOLOMUX_STATE_DIR/yochat-history/YYYY-MM-DD.jsonl` using UTC dates. Both are retained for seven days by default (`Preferences -> YO!chat` supports 1–365 days), the database is capped at 100,000 messages, and first load starts at the current tail.
 - Cross-pane notifications appear in one global toast rail and identify their target tab without changing your current focus. Attention remains until acknowledged; completion, chat, PR, and job notices are coalesced by target. Clicking a notice opens its target and clears it. Uploads and file/editor errors remain in the pane where that direct action occurred. Preferences independently control in-YOLOmux and system notifications.
 - Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOLOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications. Visible spinner/timer history is bounded and resets when it disappears, so a reused tmux pane cannot inherit stale working state.
 - The browser title, favicon badge, and topbar activity count report working Claude/Codex sub-windows, so two active agents inside one tmux session count as two everywhere.
-- Touch/coarse-pointer terminals provide a movable smart-key palette whose launcher shares inactive-tab paint. Its top grabber moves the palette and launcher together; the primary utility column is Esc/Ctrl/Shift, its normal-width bottom row is C-c/Alt/Cmd, and the D-pad labels Copy/Paste as `⌘C`/`⌘V`. Switching repeatedly between the primary and `⋯` pages keeps the chosen side, launcher-adjacent edge, and `⋯` key fixed instead of making the palette jump.
+- Touch/coarse-pointer terminals provide a movable fixed-size smart-key palette whose launcher shares inactive-tab paint. Opening it hides every launcher copy and shows the primary page; More swaps to a bounded second page without resizing or internal scrolling, the full-width top handle moves the palette and launcher together, and the top-right X closes it and restores every launcher at the remembered position. Esc and Ctrl/Shift/Alt sit left of the cursor pad, shared Ctrl-C stays bottom-right on both pages, and PgUp/PgDn retain wider targets. A plain terminal tap still focuses xterm; a vertical finger pan scrolls tmux history without opening the software keyboard, while alternate-screen apps with active mouse reporting receive line-accurate wheel input and other alternate-screen apps retain cursor-aware arrows.
 
 For exact UI behavior, edge cases, and coverage, see [`docs/specs/GUI.md`](docs/specs/GUI.md).
 
@@ -321,8 +325,6 @@ For exact UI behavior, edge cases, and coverage, see [`docs/specs/GUI.md`](docs/
 - After a terminal copy/open action consumes selected text, YOLOmux clears stale browser/xterm selection. Explicit `Copy tmux selection` also exits tmux copy-mode after copying so selected rows do not stay painted as green blocks.
 
 The `YO` button toggles YOLO auto-approval for a tmux session. See [Agent permissions & YOLO](#agent-permissions--yolo).
-
-- The optional `Servers Load` chart sits immediately after CPU and persists one line per running local service from an independent 10-second sampler. It reuses existing service-status CPU/RSS values, retains min/average/max rollups and honest coverage gaps, and starts off. System tables share non-wrapping first columns and table-local narrow scrolling; sampler headings use localized compact labels with full tooltips.
 
 ## Running options
 
@@ -358,7 +360,7 @@ python3 yolomux.py --cert fullchain.pem --key privkey.pem   # bring your own
 python3 yolomux.py --http                  # explicit plain-HTTP opt-out
 ```
 
-HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; proceed past the warning only when it matches the server you intended to reach. `--http` cannot be combined with `--cert`/`--key`.
+HTTPS is the default. The compatibility flags `--self-signed` and `--https-self-signed` remain accepted but are redundant. Generating the default certificate requires `openssl` on `PATH`; if it is unavailable, YOLOmux emits a loud warning and falls back to HTTP so the server can still start. Install OpenSSL, provide `--cert` and `--key`, or deliberately select plain HTTP with `--http`. Browsers warn for the generated certificate because it is self-signed; run `tools/setup-tls.sh` once to issue a local-CA certificate, then import the printed CA once on each client that connects by LAN IP or hostname. `--http` cannot be combined with `--cert`/`--key`.
 
 ## Authentication & roles
 
@@ -443,30 +445,30 @@ python3 yolomux.py --host 127.0.0.1 --port 9998 --dang
 autossh -M 0 -N -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 9998:127.0.0.1:9998 user@server
 ```
 
-## Companion: `auto_approve_tmux.py`
+## Companion: `tools/auto_approve_tmux.py`
 
 Standalone YOLO auto-approval without the browser UI:
 
 ```bash
-python3 auto_approve_tmux.py --list                       # list tmux sessions
-python3 auto_approve_tmux.py --dry-run --once project1    # preview one visible prompt
-python3 auto_approve_tmux.py project1                     # watch one session
-python3 auto_approve_tmux.py "project*"                   # glob
+python3 tools/auto_approve_tmux.py --list                       # list tmux sessions
+python3 tools/auto_approve_tmux.py --dry-run --once project1    # preview one visible prompt
+python3 tools/auto_approve_tmux.py project1                     # watch one session
+python3 tools/auto_approve_tmux.py "project*"                   # glob
 ```
 
 Background:
 
 ```bash
-setsid nohup env PYTHONUNBUFFERED=1 python3 auto_approve_tmux.py --interval 0.5 "project*" > /tmp/auto_approve.log 2>&1 < /dev/null &
+setsid nohup env PYTHONUNBUFFERED=1 python3 tools/auto_approve_tmux.py --interval 0.5 "project*" > /tmp/auto_approve.log 2>&1 < /dev/null &
 ```
 
-## Companion: `tmux_wall.py`
+## Companion: `tools/tmux_wall.py`
 
 Read-only snapshot wall — passive view of terminal panes with no login layer (refuses non-loopback by default):
 
 ```bash
-python3 tmux_wall.py --port 8765
-python3 tmux_wall.py --targets project1:0.0,project2:0.0 --slots 4
+python3 tools/tmux_wall.py --port 8765
+python3 tools/tmux_wall.py --targets project1:0.0,project2:0.0 --slots 4
 ```
 
 Set `YOLOMUX_CONTAINER_HELPER=/path/to/show_project_containers.py` if the wall should include container metadata from a helper outside `~/utils/container/show_project_containers.py`.

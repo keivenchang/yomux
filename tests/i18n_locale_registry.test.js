@@ -4,10 +4,10 @@
 const assert = require('node:assert');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const {makeCatalogT, runSuites, sourceBetween, testAsync} = require('./layout_test_helper');
+const {makeCatalogT, runSuites, sourceBetween, testAsync} = require('./browser_helpers/layout_test_helper');
 
 const source = fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8');
-const shareSource = fs.readFileSync('static_src/js/yolomux/97_share_replay.js', 'utf8');
+const shareSource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
 const layoutSource = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
 const menuSource = fs.readFileSync('static_src/js/yolomux/30_app_menus.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');

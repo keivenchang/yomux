@@ -15,8 +15,8 @@ from typing import Any
 from ..common import SUMMARY_MAX_PROMPT_CHARS
 from ..common import SessionInfo
 from ..common import truncate_text
-from ..transcripts import format_transcript_item
-from ..transcripts import trim_prompt_text
+from ..observability.transcripts import format_transcript_item
+from ..observability.transcripts import trim_prompt_text
 
 
 YOAGENT_SESSION_SUMMARIES_STATE_KEY = "yoagent_session_summaries"

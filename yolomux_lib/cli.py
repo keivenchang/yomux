@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -15,19 +16,27 @@ from pathlib import Path
 from typing import Any
 
 from .app import TmuxWebtermApp
-from .background_owner import background_owner_priority
-from .background_owner import read_background_owner_debug_status
-from .common import AUTH_CONFIG_DISPLAY_PATH
-from .common import SERVER_HOSTNAME
-from .common import STATE_DIR
-from .common import auth_setup_required
-from .common import default_session_names
-from .common import split_csv
-from .common import unique_session_names
-from .common import warn_unavailable_agent_commands_once
+from .infra.background_owner import background_owner_priority
+from .infra.background_owner import read_background_owner_debug_status
+from .infra.common import AUTH_CONFIG_DISPLAY_PATH
+from .infra.common import SERVER_HOSTNAME
+from .infra.common import STATE_DIR
+from .infra.common import auth_setup_required
+from .infra.common import default_session_names
+from .infra.common import split_csv
+from .infra.common import unique_session_names
+from .infra.common import warn_unavailable_agent_commands_once
 from .control import send_yolomux_control_request
+from .local_services.registry import bounded_process_table
+from .local_services.registry import set_local_service_launch_context
+from .local_services.registry import tracked_local_service_groups
+from .local_services.registry import tracked_port_process_group
+from .local_services.watchdog import GroupOverloadWatchdog
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
+from .server_logs import emit_server_log
+from .server_logs import install_server_log_handler
+from .tmux.tmux_utils import cmd_error
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,7 +92,7 @@ def start_dev_backend_watcher() -> None:
     """Dev-velocity #1c: re-exec the server when a backend source file changes, so a Python edit takes
     effect without the manual systemd-run restart dance. Daemon thread; only started under --dev."""
     repo_root = Path(__file__).resolve().parents[1]
-    watched = [repo_root / "yolomux.py", repo_root / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
+    watched = [repo_root / "yolomux.py", repo_root / "tools" / "tmux_wall.py", *sorted((repo_root / "yolomux_lib").glob("*.py"))]
 
     def snapshot() -> dict[str, int]:
         stamps: dict[str, int] = {}
@@ -112,19 +121,81 @@ def self_signed_cert_paths() -> tuple[Path, Path]:
     return tls_dir / "self-signed.crt", tls_dir / "self-signed.key"
 
 
+def self_signed_interface_ips() -> tuple[str, ...]:
+    addresses: list[str] = []
+
+    def add(value: str, interface: str = "") -> None:
+        if interface.startswith(("docker", "br-", "veth")):
+            return
+        candidate = value.split("%", 1)[0]
+        try:
+            parsed = ipaddress.ip_address(candidate)
+        except ValueError:
+            return
+        if parsed.is_loopback or parsed.is_unspecified or candidate in addresses:
+            return
+        addresses.append(candidate)
+
+    for family, target in (
+        (socket.AF_INET, ("10.255.255.255", 1)),
+        (socket.AF_INET6, ("2001:db8::1", 1, 0, 0)),
+    ):
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM) as probe:
+                probe.connect(target)
+                add(probe.getsockname()[0])
+        except OSError:
+            pass
+    try:
+        for iface_addr in socket.getaddrinfo(socket.gethostname(), None):
+            add(iface_addr[4][0])
+    except OSError:
+        pass
+    ip_command = shutil.which("ip")
+    if ip_command:
+        try:
+            result = subprocess.run(
+                [ip_command, "-j", "address", "show"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for interface in json.loads(result.stdout):
+                for addr_info in interface.get("addr_info", []):
+                    add(str(addr_info.get("local", "")), str(interface.get("ifname", "")))
+        except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, TypeError):
+            pass
+    ifconfig_command = shutil.which("ifconfig")
+    if ifconfig_command:
+        try:
+            result = subprocess.run(
+                [ifconfig_command],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            interface = ""
+            for line in result.stdout.splitlines():
+                if line and not line[0].isspace():
+                    interface = line.split(":", 1)[0]
+                for match in re.finditer(r"\binet6?\s+(?:addr:)?([^\s]+)", line):
+                    add(match.group(1), interface)
+        except (OSError, subprocess.CalledProcessError):
+            pass
+    return tuple(addresses)
+
+
 def self_signed_san() -> str:
     names = ["DNS:localhost", "IP:127.0.0.1"]
     if SERVER_HOSTNAME and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", SERVER_HOSTNAME):
         if SERVER_HOSTNAME != "localhost":
             names.append(f"DNS:{SERVER_HOSTNAME}")
-    try:
-        for iface_addrs in socket.getaddrinfo(socket.gethostname(), None):
-            ip = iface_addrs[4][0]
-            entry = f"IP:{ip}"
-            if entry not in names:
-                names.append(entry)
-    except OSError:
-        pass
+    for ip in self_signed_interface_ips():
+        entry = f"IP:{ip}"
+        if entry not in names:
+            names.append(entry)
     return ",".join(names)
 
 
@@ -173,7 +244,7 @@ def ensure_self_signed_cert() -> tuple[Path, Path]:
     try:
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except subprocess.CalledProcessError as error:
-        detail = (error.stderr or error.stdout or str(error)).strip()
+        detail = cmd_error(error, str(error))
         raise RuntimeError(f"failed to generate self-signed certificate: {detail}") from error
 
     cert_path.chmod(0o600)
@@ -208,7 +279,11 @@ def tls_context_for_args(args: argparse.Namespace) -> tuple[ssl.SSLContext | Non
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
     if generated:
-        return context, f"Using self-signed HTTPS certificate {cert_path}"
+        return context, (
+            f"Using self-signed HTTPS certificate {cert_path} (SAN: {self_signed_san()}). "
+            "Clients reaching this by an IP/hostname not in the SAN will get certificate errors; "
+            "run tools/setup-tls.sh and import the CA on each client."
+        )
     return context, f"Using HTTPS certificate {cert_path}"
 
 
@@ -254,19 +329,74 @@ def runtime_report_background_status() -> tuple[dict[str, Any], dict[str, Any], 
 
 
 def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) -> int:
-    app = TmuxWebtermApp(sessions, dangerously_yolo=dangerously_yolo)
-    try:
-        owner_debug, owner_control_response, background_status = runtime_report_background_status()
-        payload = app.runtime_report_payload(
-            background_status=background_status,
-            owner_debug=owner_debug,
-            owner_control_response=owner_control_response,
-        )
-        print(json.dumps(payload, sort_keys=True, indent=2))
+    """Print runtime diagnostics via bounded record/socket lookups only.
+
+    The old path constructed a second full TmuxWebtermApp just to render this
+    JSON; on a loaded host that construction (SQLite opens, control-socket
+    thread, forced transcript build) could stall indefinitely and leave stray
+    children behind. A live server now answers over its existing control
+    socket; with no live owner the report degrades to the durable ledger
+    records instead of starting anything.
+    """
+    del sessions, dangerously_yolo  # the bounded report never constructs an app
+    owner_debug = read_background_owner_debug_status()
+    owner = owner_debug.get("current_owner") if isinstance(owner_debug, dict) else None
+    response = send_yolomux_control_request(owner, {"action": "runtime_report"})
+    report = response.get("report") if response.get("ok") else None
+    if isinstance(report, dict):
+        report.setdefault("owner_debug", owner_debug)
+        print(json.dumps(report, sort_keys=True, indent=2))
         return 0
-    finally:
-        app.stop_auto_approve_all()
-        app.control_server.stop()
+    table = bounded_process_table()
+    port_groups = []
+    for lease_path in sorted((STATE_DIR / "server-leases").glob("*.lock")):
+        try:
+            port = int(lease_path.stem)
+        except ValueError:
+            continue
+        group = tracked_port_process_group(port, STATE_DIR, table)
+        if group:
+            port_groups.append(group)
+    payload = {
+        "mode": "bounded-records",
+        "reason": "no live server answered the control socket; report built from ledger records only",
+        "owner_debug": owner_debug,
+        "owner_control_response": response,
+        "port_groups": port_groups,
+        "local_service_groups": tracked_local_service_groups(STATE_DIR / "services", table),
+    }
+    print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
+
+
+STARTUP_WATCHDOG_SECONDS_ENV = "YOLOMUX_STARTUP_WATCHDOG_SECONDS"
+STARTUP_WATCHDOG_DEFAULT_SECONDS = 120.0
+
+
+def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
+    """Arm the bounded overload watchdog for the startup window only.
+
+    A failed or wedged launch is when runaway groups have historically formed
+    (2026-07-19 incident: the dev server plus two orphaned workers at ~300%
+    CPU). The watchdog samples only the ledger-tracked group for this port and
+    disarms itself when the window ends; set the env var to 0 to disable.
+    """
+    raw = os.environ.get(STARTUP_WATCHDOG_SECONDS_ENV, "")
+    try:
+        seconds = float(raw) if raw else STARTUP_WATCHDOG_DEFAULT_SECONDS
+    except ValueError:
+        seconds = STARTUP_WATCHDOG_DEFAULT_SECONDS
+    if seconds <= 0:
+        return None
+    watchdog = GroupOverloadWatchdog(port=int(port), state_dir=STATE_DIR, service_dir=STATE_DIR / "services")
+    thread = threading.Thread(
+        target=watchdog.run,
+        args=(seconds,),
+        name=f"startup-overload-watchdog-{port}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def print_auth_setup_error() -> None:
@@ -282,6 +412,7 @@ def print_auth_setup_error() -> None:
 
 def main() -> int:
     args = parse_args()
+    install_server_log_handler()
     warn_unavailable_agent_commands_once()
     if args.print_background_owner:
         return print_background_owner_status()
@@ -298,6 +429,11 @@ def main() -> int:
     if lease is None:
         print(f"YOLOmux port {args.port} is already owned by another server launch; refusing a duplicate.", file=sys.stderr)
         return 1
+    # Ledger provenance + bounded startup protection: services spawned from
+    # here on are stamped with this port, and a runaway during the launch
+    # window is contained by the tracked-group watchdog.
+    set_local_service_launch_context(args.port)
+    start_startup_overload_watchdog(args.port)
 
     app: TmuxWebtermApp | None = None
     server: TmuxWebtermHTTPServer | None = None
@@ -321,6 +457,7 @@ def main() -> int:
         url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
         session_text = ", ".join(sessions) if sessions else "no tmux sessions"
         print(f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/ for {session_text}")
+        emit_server_log("info", "server", f"Serving YOLOmux on {scheme}://{url_host}:{args.port}/", category="lifecycle")
         if tls_message:
             print(tls_message)
         if args.dangerously_yolo:

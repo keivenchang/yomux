@@ -16,7 +16,8 @@ const suiteFiles = [
   'tests/editor_preview_core.test.js',
   'tests/editor_preview_tmux.test.js',
   'tests/editor_preview_settings.test.js',
-  'tests/yostats_performance.test.js',
+  'tests/stats_current_ui.test.js',
+  'tests/stats_current_panel.test.js',
   'tests/tabber.test.js',
   'tests/layout_async.test.js',
 ];

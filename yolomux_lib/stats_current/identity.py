@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+"""One identity-text contract for current YO!stats boundaries."""
+
+from __future__ import annotations
+
+import hashlib
+
+
+MAX_EVENT_ID_BYTES = 512
+MAX_IDENTITY_BYTES = 256
+MAX_SERIES_COMPONENT_BYTES = 192
+
+
+class IdentityValidationError(ValueError):
+    """An identity cannot safely cross storage, materialization, or wire."""
+
+
+def identity_text(
+    value: object,
+    name: str,
+    *,
+    maximum_bytes: int = MAX_IDENTITY_BYTES,
+    strip: bool = False,
+) -> str:
+    if not isinstance(value, str):
+        raise IdentityValidationError(f"{name} must be a non-empty string")
+    normalized = value.strip() if strip else value
+    if not normalized or not normalized.strip():
+        raise IdentityValidationError(f"{name} must be a non-empty string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in normalized):
+        raise IdentityValidationError(f"{name} contains control characters")
+    if len(normalized.encode("utf-8")) > maximum_bytes:
+        raise IdentityValidationError(f"{name} exceeds {maximum_bytes} bytes")
+    return normalized
+
+
+def legacy_identity(
+    value: object,
+    scope: str,
+    *,
+    maximum_bytes: int = MAX_SERIES_COMPONENT_BYTES,
+) -> tuple[str, bool]:
+    """Preserve a safe legacy identity or replace it with a stable opaque key."""
+
+    try:
+        return identity_text(value, scope, maximum_bytes=maximum_bytes, strip=True), False
+    except IdentityValidationError:
+        encoded = str(value).encode("utf-8", errors="surrogatepass")
+        digest = hashlib.sha256(encoded).hexdigest()
+        return f"retired-{scope}:{digest}", True

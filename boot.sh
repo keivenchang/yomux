@@ -9,7 +9,13 @@ else
   platform_default_port=7770
 fi
 primary_port="${YOLOMUX_PORT:-$platform_default_port}"
-background_owner_primary_port="${YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT:-$primary_port}"
+# An explicit port names this launcher's primary owner. Do not let an inherited server's owner
+# port redirect a separately configured test/dev launch; without YOLOMUX_PORT, retain the override.
+if [[ -n "${YOLOMUX_PORT:-}" ]]; then
+  background_owner_primary_port="$primary_port"
+else
+  background_owner_primary_port="${YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT:-$primary_port}"
+fi
 default_port="$primary_port"
 host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
@@ -167,11 +173,14 @@ print_launch_command() {
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    local launcher
+    local launcher socket_name session_name
     launcher="$(yolomux_macos_server_launcher)"
+    socket_name="$(yolomux_macos_server_tmux_socket)"
+    session_name="$(yolomux_macos_server_tmux_session "$port")"
     printf 'launchctl bootout %q 2>/dev/null || true\n' "$(yolomux_macos_launch_target "$port")"
-    printf 'launchctl submit -l %q -o %q -e %q -- /bin/bash -c %q bash %q %q %q %q %q %q' \
-      "local.yolomux.$port" "$log_path" "$log_path" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$background_owner_primary_port"
+    printf 'tmux -L %q kill-session -t %q 2>/dev/null || true\n' "$socket_name" "=$session_name"
+    printf 'tmux -L %q new-session -d -s %q -c %q /bin/bash -c %q bash %q %q %q %q %q %q %q' \
+      "$socket_name" "$session_name" "$repo_root" "$launcher" "$repo_root" "$PATH" "$server_shell" "$python_bin" "$repo_root/yolomux.py" "$background_owner_primary_port" "$log_path"
     for item in "${server_args[@]}"; do
       printf ' %q' "$item"
     done
@@ -199,7 +208,9 @@ shell_command_for() {
   # socket still travels through YOLOMUX_TMUX_SOCKET below.
   printf 'cd %q && exec env TMUX= TMUX_PANE= TERM=%q PYTHONUNBUFFERED=%q MALLOC_ARENA_MAX=%q PATH=%q' "$repo_root" "$TERM" "$PYTHONUNBUFFERED" "$MALLOC_ARENA_MAX" "$PATH"
   for item in "${extra_env[@]}"; do
-    printf ' %q' "$item"
+    local key="${item%%=*}"
+    local value="${item#*=}"
+    printf ' %s=%q' "$key" "$value"
   done
   printf ' %q %q' "$python_bin" "${repo_root}/yolomux.py"
   for item in "${server_args[@]}"; do
@@ -443,6 +454,14 @@ restart_port() {
     yolomux_bootout_macos_server "$port"
   fi
   stop_port_listener "$port"
+
+  # Fail closed: a wedged previous owner (alive but not listening, so the
+  # listener kill above never reached it) or identity-verified stale children
+  # of a dead owner must be resolved before another launch can stack on top.
+  if ! "$python_bin" -m yolomux_lib.local_services.preflight --port "$port"; then
+    release_port_restart_lock "$port"
+    die "port $port launch preflight refused (wedged owner or stale tracked children; see message above)"
+  fi
 
   printf '\n[%s] boot.sh launching port %s from %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$port" "$repo_root" >> "$log_path"
   if [[ "$(uname -s)" == "Darwin" ]]; then

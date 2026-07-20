@@ -102,6 +102,27 @@ def test_approvald_exposes_common_profile_and_drain_actions(tmp_path, monkeypatc
     assert drain == {"ok": True, "drained": True, "targets": 0}
 
 
+def test_approvald_aggregates_worker_recurring_work_without_target_names(tmp_path, monkeypatch):
+    item = service(tmp_path, monkeypatch)
+    response, _binary = item.handle({"action": "start_worker", "session": "6", "target": "%11"})
+    assert response["ok"] is True
+    FakeWorker.created[0].status = lambda: {
+        "target": "%11", "enabled": True, "recurring_work": {
+            "attempts": 5, "useful": 2, "no_change": 2, "failures": 1,
+            "last_attempt_at": 20.0, "last_useful_at": 10.0,
+        },
+    }
+
+    recurring = item.status()["recurring_work"]
+
+    assert recurring == {
+        "class": "sample", "cadence_seconds": approvald.approval_interval_seconds(), "demanded": True,
+        "attempts": 5, "useful": 2, "no_change": 2, "failures": 1,
+        "last_attempt_at": 20.0, "last_useful_at": 10.0,
+    }
+    assert "%11" not in str(recurring)
+
+
 def test_approvald_reports_lock_owner_without_recording_duplicate_worker(tmp_path, monkeypatch):
     item = service(tmp_path, monkeypatch)
     FakeWorker.start_owner = {"pid": 123, "session": "6"}

@@ -147,8 +147,8 @@ const terminalMobileAccessoryKeyPresses = new Map();
 const terminalMobileAccessorySuppressedClicks = new Map();
 const terminalMobileAccessoryPaneObservers = new Map();
 const terminalMobileAccessoryModifierTapTimes = new Map();
-let terminalMobileAccessoryDismissalInstalled = false;
 let terminalMobileAccessoryResizeInstalled = false;
+let terminalMobileAccessorySurfaceObserver = null;
 // Clipboard reads must start while a touch still has browser user activation.  The shared
 // terminal context menu opens after the long-press delay, when Safari may reject a new read.
 // Keep only availability (never clipboard contents) so that menu can truthfully offer Paste.
@@ -192,14 +192,14 @@ function primeTerminalClipboardAvailability() {
 const terminalMobileAccessoryKeyDefs = Object.freeze([
   {action: 'escape', label: 'Esc', ariaLabel: 'Esc', data: '\x1b'},
   {action: 'ctrl', label: 'Ctrl', ariaLabel: 'Ctrl', modifier: 'ctrl'},
-  {action: 'alt', label: 'Alt', ariaLabel: 'Alt', modifier: 'alt'},
+  {action: 'alt', macLabel: '⌥', pcLabel: 'Alt', macAriaLabel: 'Option / Alt', pcAriaLabel: 'Alt', modifier: 'alt'},
   {action: 'shift', label: 'Shift', ariaLabel: 'Shift', modifier: 'shift'},
-  {action: 'cmd', label: 'Cmd', ariaLabel: 'Command / Meta', modifier: 'cmd'},
+  {action: 'cmd', macLabel: '⌘', pcLabel: '⊞', macAriaLabel: 'Command / Meta', pcAriaLabel: 'Windows / Super / Meta', modifier: 'cmd'},
   {action: 'interrupt', label: '^C', ariaLabel: 'Ctrl-C', data: '\x03', className: 'mobile-terminal-key--interrupt'},
   {action: 'tmux-prefix', label: '^B', ariaLabel: 'Ctrl-B (tmux prefix)', data: '\x02'},
   {action: 'tab', label: 'Tab', ariaLabel: 'Tab', data: '\t'},
-  {action: 'copy', label: '⌘C', ariaLabelKey: 'common.copy', ariaLabelSuffix: 'Cmd-C'},
-  {action: 'command-v', label: '⌘V', ariaLabel: 'Command-V'},
+  {action: 'copy', macLabel: '⌘C', pcLabel: 'Ctrl+C', ariaLabelKey: 'common.copy', macAriaLabelSuffix: 'Command-C', pcAriaLabelSuffix: 'Ctrl-C'},
+  {action: 'command-v', macLabel: '⌘V', pcLabel: 'Ctrl+V', macAriaLabel: 'Command-V', pcAriaLabel: 'Ctrl-V'},
   {action: 'tmux-scroll-up', label: 'Pg↑', ariaLabel: 'Scroll tmux up'},
   {action: 'tmux-scroll-down', label: 'Pg↓', ariaLabel: 'Scroll tmux down'},
   {action: 'backspace', label: '⌫', ariaLabel: 'Backspace', data: '\x7f'},
@@ -213,7 +213,7 @@ const terminalMobileAccessoryKeyDefs = Object.freeze([
 const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   // These mirror browser/app actions that a phone has no physical Command key for. They are
   // actions rather than terminal bytes: Cmd-P opens quick-open; Paste stays visible in the first row.
-  {action: 'command-p', label: '⌘P', ariaLabel: 'Command-P'},
+  {action: 'command-p', macLabel: '⌘P', pcLabel: 'Ctrl+P', macAriaLabel: 'Command-P', pcAriaLabel: 'Ctrl-P'},
   {action: 'home', label: 'Home', ariaLabel: 'Home'},
   {action: 'end', label: 'End', ariaLabel: 'End'},
   {action: 'delete', label: 'Del', ariaLabel: 'Delete', data: '\x1b[3~'},
@@ -223,22 +223,19 @@ const terminalMobileAccessoryMoreKeyDefs = Object.freeze([
   {action: 'ctrl-l', label: '^L', ariaLabel: 'Ctrl-L', data: '\x0c'},
   {action: 'ctrl-r', label: '^R', ariaLabel: 'Ctrl-R', data: '\x12'},
 ]);
-// Overflow refers to shared definitions instead of creating parallel key definitions that could
-// drift from their terminal-byte behavior.
 const terminalMobileAccessoryMoreActions = Object.freeze(['command-p', 'home', 'end', 'delete', 'shift-tab', 'ctrl-d', 'ctrl-z', 'ctrl-l', 'ctrl-r']);
 const terminalMobileAccessoryModifierActions = Object.freeze(['ctrl', 'alt', 'shift', 'cmd']);
 const terminalMobileAccessoryModifierDoubleTapMs = 450;
 // Keep one visible definition for every first-page key. The primary row stays compact while
 // Backspace uses its existing terminal-byte definition; Alt/Cmd get a reachable horizontal row.
-const terminalMobileAccessoryPrimaryActions = Object.freeze(['tab', 'tmux-prefix', 'backspace', 'more']);
-// Esc renders alone in the top-left corner (see terminalMobileAccessoryHtml); Ctrl/Shift
-// keep the left side column directly below it.
+const terminalMobileAccessoryPrimaryActions = Object.freeze(['tmux-prefix', 'backspace', 'more']);
+// Esc renders alone in the top-left corner. Tab, Shift, and Ctrl fill the left utility column;
+// Ctrl anchors the bottom row before Alt/Cmd, and Copy/Paste stack beside the navigation grid.
 const terminalMobileAccessoryCornerAction = 'escape';
-const terminalMobileAccessorySideActions = Object.freeze(['ctrl', 'shift']);
-const terminalMobileAccessoryBottomActions = Object.freeze(['interrupt', 'alt', 'cmd']);
+const terminalMobileAccessorySideActions = Object.freeze(['tab', 'shift', 'ctrl']);
 // The surrounding command keys form one compact five-column navigation pad: clipboard controls
 // live on the left, direct tmux scrolling on the right, and arrows retain their physical D-pad.
-const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'command-v', 'arrow-down', 'tmux-scroll-down']);
+const terminalMobileAccessoryDpadActions = Object.freeze(['copy', 'command-v', 'arrow-up', 'tmux-scroll-up', 'arrow-left', 'enter', 'arrow-right', 'alt', 'arrow-down', 'tmux-scroll-down']);
 
 function terminalMobileAccessoryState(session, options = {}) {
   const key = String(session || '');
@@ -293,8 +290,10 @@ function terminalMobileAccessoryButtonHtml(session, definition, state, extraClas
   // every other palette key can change the terminal and keeps the existing write gate.
   const disabled = readOnlyMode && !shareWriteMode && definition.action !== 'copy' ? ' disabled' : '';
   const expanded = definition.more ? ` aria-expanded="${state?.more === true ? 'true' : 'false'}"` : '';
-  const label = definition.labelKey ? t(definition.labelKey) : definition.label;
-  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : definition.ariaLabel}${definition.ariaLabelSuffix ? ` (${definition.ariaLabelSuffix})` : ''}`;
+  const macPlatform = isMacPlatform();
+  const label = definition.labelKey ? t(definition.labelKey) : (macPlatform ? definition.macLabel : definition.pcLabel) || definition.label;
+  const ariaLabelSuffix = macPlatform ? definition.macAriaLabelSuffix : definition.pcAriaLabelSuffix;
+  const ariaLabel = `${definition.ariaLabelKey ? t(definition.ariaLabelKey) : (macPlatform ? definition.macAriaLabel : definition.pcAriaLabel) || definition.ariaLabel}${ariaLabelSuffix ? ` (${ariaLabelSuffix})` : ''}`;
   return `<button type="button" class="mobile-terminal-key${definition.className ? ` ${definition.className}` : ''}${active ? ' active' : ''}${locked ? ' locked' : ''}${extraClass ? ` ${extraClass}` : ''}" data-terminal-mobile-key="${esc(definition.action)}" data-terminal-mobile-session="${esc(session)}" aria-label="${esc(ariaLabel)}"${definition.modifier ? ` aria-pressed="${active ? 'true' : 'false'}"` : ''}${expanded}${disabled}>${esc(label)}</button>`;
 }
 
@@ -476,25 +475,16 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
       side = fit?.side || candidates.sort((a, b) => b.room - a.room)[0]?.side || 'above';
     }
   }
-  let anchor = Number(previous?.anchor);
-  if (!Number.isFinite(anchor)) {
-    anchor = side === 'above' ? top - gap
-      : side === 'below' ? bottom + gap
-        : side === 'left' ? left - gap
-          : right + gap;
-  }
-  let x = right - width;
-  let y = anchor - height;
-  if (side === 'below') {
-    x = left;
-    y = anchor;
-  } else if (side === 'left') {
-    x = anchor - width;
-    y = top;
-  } else if (side === 'right') {
-    x = anchor;
-    y = top;
-  }
+  // The launcher disappears when the palette opens, so replace it at the same pane-facing corner
+  // instead of leaving a visually detached gap. Preserve that exact corner across page-size changes.
+  const inlineEdge = previous?.inlineEdge || ((left + right) / 2 >= paneWidth / 2 ? 'end' : 'start');
+  const blockEdge = previous?.blockEdge || ((top + bottom) / 2 >= paneHeight / 2 ? 'end' : 'start');
+  // Coordinates are surface-local: one session can have more than one rendered pane during a
+  // Dockview/replay transition, so caching the first surface's pixel anchor misplaces later copies.
+  const anchorX = inlineEdge === 'end' ? right : left;
+  const anchorY = blockEdge === 'end' ? bottom : top;
+  const x = inlineEdge === 'end' ? anchorX - width : anchorX;
+  const y = blockEdge === 'end' ? anchorY - height : anchorY;
   const placement = {
     side,
     x: Math.round(terminalMobileAccessoryClamp(x, 0, paneWidth - width)),
@@ -503,10 +493,8 @@ function terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, 
   if (state) {
     state.palettePlacement = {
       side,
-      anchor: side === 'above' ? placement.y + height
-        : side === 'below' ? placement.y
-          : side === 'left' ? placement.x + width
-            : placement.x,
+      inlineEdge,
+      blockEdge,
     };
   }
   return placement;
@@ -525,88 +513,108 @@ function terminalMobileAccessoryHtml(session) {
   if (!isTmuxSession(session) || !terminalMobileAccessoryEnabled()) return '';
   const state = terminalMobileAccessoryState(session, {create: true});
   const key = action => terminalMobileAccessoryButtonHtml(session, terminalMobileAccessoryDefinition(action), state, `mobile-terminal-key--${action}`);
-  const primaryKeys = terminalMobileAccessoryPrimaryActions.filter(action => action !== 'more').map(key).join('');
+  const primaryKeys = terminalMobileAccessoryPrimaryActions.map(key).join('');
   const cornerKey = key(terminalMobileAccessoryCornerAction);
   const sideKeys = terminalMobileAccessorySideActions.map(key).join('');
-  const bottomKeys = terminalMobileAccessoryBottomActions.map(key).join('');
-  // The overflow button remains the rightmost control in both palette states. Keeping the return
-  // target in one physical corner avoids a touch user hunting for it after the content switches.
-  const moreKeys = [...terminalMobileAccessoryMoreActions.map(key), key('more')].join('');
-  const launcherLabel = state.open ? t('shortcuts.close') : t('common.keyboardShortcuts');
-  return `<button type="button" class="mobile-terminal-key-launcher${state.open ? ' mobile-terminal-key-launcher--open' : ''}" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(launcherLabel)}" aria-expanded="${state.open ? 'true' : 'false'}"${terminalMobileAccessoryPositionStyle(state)}>${state.open ? '×' : '⌨'}</button>
+  const moreKeys = terminalMobileAccessoryMoreActions.map(key).join('');
+  const interruptKey = key('interrupt');
+  const commandKey = key('cmd');
+  const moreKey = key('more');
+  return `<button type="button" class="mobile-terminal-key-launcher" data-terminal-mobile-accessory="${esc(session)}" data-terminal-mobile-toggle="${esc(session)}" aria-label="${esc(t('common.keyboardShortcuts'))}" aria-expanded="${state.open ? 'true' : 'false'}"${state.open ? ' hidden' : ''}${terminalMobileAccessoryPositionStyle(state)}>⌨</button>
     <div class="mobile-terminal-keybar" data-terminal-mobile-keybar="${esc(session)}" role="toolbar" aria-label="${esc(t('common.keyboardShortcuts'))}"${state.open ? '' : ' hidden'}>
-      <div class="mobile-terminal-key-grabber" aria-hidden="true"></div>
-      ${cornerKey}
-      <div class="mobile-terminal-key-side">
-        ${sideKeys}
+      <div class="mobile-terminal-key-grabber" role="button" aria-label="Drag keyboard"></div>
+      <button type="button" class="mobile-terminal-key mobile-terminal-key--close" data-terminal-mobile-close="${esc(session)}" aria-label="${esc(t('shortcuts.close'))}">×</button>
+      <div class="mobile-terminal-key-content" data-terminal-mobile-page="primary"${state.more ? ' hidden' : ''}>
+        ${cornerKey}
+        <div class="mobile-terminal-key-side">${sideKeys}</div>
+        <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div></div>
+        <div class="mobile-terminal-key-dpad">
+          ${terminalMobileAccessoryDpadActions.map(key).join('')}
+          ${commandKey}
+          ${interruptKey}
+        </div>
       </div>
-      <div class="mobile-terminal-keyrow-shell"><div class="mobile-terminal-keyrow mobile-terminal-keyrow--primary">${primaryKeys}</div>${key('more')}</div>
-      <div class="mobile-terminal-key-dpad">${terminalMobileAccessoryDpadActions.map(key).join('')}</div>
-      <div class="mobile-terminal-keyrow mobile-terminal-keyrow-bottom">${bottomKeys}</div>
-      <div class="mobile-terminal-keyrow mobile-terminal-keyrow--more"${state.more ? '' : ' hidden'}>${moreKeys}</div>
+      <div class="mobile-terminal-key-content mobile-terminal-key-content--more" data-terminal-mobile-page="more"${state.more ? '' : ' hidden'}>
+        ${moreKeys}
+        ${moreKey}
+        ${interruptKey}
+      </div>
     </div>`;
+}
+
+function terminalMobileAccessorySurfaces(session) {
+  const key = cssEscape(session);
+  return {
+    bars: [...document.querySelectorAll(`[data-terminal-mobile-keybar="${key}"]`)],
+    launchers: [...document.querySelectorAll(`[data-terminal-mobile-toggle="${key}"]`)],
+  };
 }
 
 function syncTerminalMobileAccessoryState(session) {
   const state = terminalMobileAccessoryState(session);
-  const bar = document.querySelector(`[data-terminal-mobile-keybar="${cssEscape(session)}"]`);
-  const launcher = document.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
-  if (!state || !bar) return false;
-  const pane = launcher?.closest?.('.tab-pane') || bar.closest?.('.tab-pane');
-  terminalMobileAccessoryObservePane(session, pane);
-  if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
-  for (const modifier of terminalMobileAccessoryModifierActions) {
-    const button = bar.querySelector(`[data-terminal-mobile-key="${modifier}"]`);
-    if (!button) continue;
-    const active = state[modifier] === true;
-    const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
-    button.classList.toggle(CLS.active, active);
-    button.classList.toggle('locked', locked);
-    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  const {bars, launchers} = terminalMobileAccessorySurfaces(session);
+  if (!state || (!bars.length && !launchers.length)) return false;
+  const open = state.open === true;
+  // Placement still derives from launcher geometry. Reveal every copy only during this synchronous
+  // measurement; the final pass returns all rendered surfaces to one XOR visibility state.
+  for (const launcher of launchers) launcher.hidden = false;
+  for (const bar of bars) {
+    const pane = bar.closest?.('.tab-pane') || null;
+    const launcher = launchers.find(item => item.closest?.('.tab-pane') === pane) || launchers[0] || null;
+    terminalMobileAccessoryObservePane(session, pane);
+    if (launcher && pane) terminalMobileAccessoryClampStateToPane(state, launcher, pane);
+    for (const modifier of terminalMobileAccessoryModifierActions) {
+      for (const button of bar.querySelectorAll(`[data-terminal-mobile-key="${modifier}"]`)) {
+        const active = state[modifier] === true;
+        const locked = state[terminalMobileAccessoryModifierLockedKey(modifier)] === true;
+        button.classList.toggle(CLS.active, active);
+        button.classList.toggle('locked', locked);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+      }
+    }
+    for (const page of bar.querySelectorAll('[data-terminal-mobile-page]')) {
+      page.hidden = page.dataset.terminalMobilePage === 'more' ? !state.more : state.more;
+    }
+    for (const button of bar.querySelectorAll('[data-terminal-mobile-key="more"]')) {
+      button.setAttribute('aria-expanded', state.more ? 'true' : 'false');
+    }
+    bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
+    bar.hidden = !open;
+    const positionedInline = Number.isFinite(state.x);
+    const positionedBlock = Number.isFinite(state.y);
+    if (open && launcher) {
+      const paneRect = pane?.getBoundingClientRect?.();
+      const launcherRect = launcher.getBoundingClientRect();
+      if (paneRect) {
+        const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
+        bar.style.insetInlineStart = `${placement.x}px`;
+        bar.style.insetInlineEnd = 'auto';
+        bar.style.insetBlockStart = `${placement.y}px`;
+        bar.style.insetBlockEnd = 'auto';
+        bar.style.transform = 'none';
+        bar.dataset.terminalMobilePlacement = placement.side;
+      }
+    } else {
+      bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
+      bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
+      bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
+      bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
+      bar.style.transform = positionedBlock ? 'none' : '';
+      delete bar.dataset.terminalMobilePlacement;
+    }
   }
-  const more = bar.querySelector('.mobile-terminal-keyrow--more');
-  const moreButtons = bar.querySelectorAll('[data-terminal-mobile-key="more"]');
-  bar.hidden = state.open !== true;
-  bar.classList.toggle('mobile-terminal-keybar--more', state.more === true);
-  // Set both visibility levers before measuring. Measuring after only the class change observes a
-  // hybrid primary/overflow layout and creates a second corrective placement on the next sync.
-  if (more) more.hidden = state.more !== true;
-  if (launcher) {
-    const open = state.open === true;
+  for (const launcher of launchers) {
     launcher.setAttribute('aria-expanded', open ? 'true' : 'false');
-    launcher.setAttribute('aria-label', open ? t('shortcuts.close') : t('common.keyboardShortcuts'));
-    launcher.textContent = open ? '×' : '⌨';
-    launcher.classList.toggle('mobile-terminal-key-launcher--open', open);
+    launcher.setAttribute('aria-label', t('common.keyboardShortcuts'));
+    launcher.textContent = '⌨';
     const position = terminalMobileAccessoryLauncherPosition(state);
     launcher.style.insetInlineStart = position.insetInlineStart;
     launcher.style.insetInlineEnd = position.insetInlineEnd;
     launcher.style.insetBlockStart = position.insetBlockStart;
     launcher.style.insetBlockEnd = position.insetBlockEnd;
     launcher.style.transform = position.transform;
+    launcher.hidden = open;
   }
-  const positionedInline = Number.isFinite(state.x);
-  const positionedBlock = Number.isFinite(state.y);
-  if (state.open === true && launcher) {
-    const paneRect = pane?.getBoundingClientRect?.();
-    const launcherRect = launcher.getBoundingClientRect();
-    if (paneRect) {
-      const placement = terminalMobileAccessoryPalettePlacement(state, paneRect, launcherRect, {width: bar.offsetWidth, height: bar.offsetHeight});
-      bar.style.insetInlineStart = `${placement.x}px`;
-      bar.style.insetInlineEnd = 'auto';
-      bar.style.insetBlockStart = `${placement.y}px`;
-      bar.style.insetBlockEnd = 'auto';
-      bar.style.transform = 'none';
-      bar.dataset.terminalMobilePlacement = placement.side;
-    }
-  } else {
-    bar.style.insetInlineStart = positionedInline ? `${Math.max(0, Math.round(state.x))}px` : '';
-    bar.style.insetInlineEnd = positionedInline ? 'auto' : '';
-    bar.style.insetBlockStart = positionedBlock ? `${Math.max(0, Math.round(state.y))}px` : '';
-    bar.style.insetBlockEnd = positionedBlock ? 'auto' : '';
-    bar.style.transform = positionedBlock ? 'none' : '';
-    delete bar.dataset.terminalMobilePlacement;
-  }
-  for (const moreButton of moreButtons) moreButton.setAttribute('aria-expanded', state.more === true ? 'true' : 'false');
   scheduleFit(session);
   return true;
 }
@@ -615,11 +623,14 @@ function toggleTerminalMobileAccessoryState(session, key) {
   const state = terminalMobileAccessoryState(session, {create: true});
   if (!state || ![...terminalMobileAccessoryModifierActions, 'more', 'open'].includes(key)) return false;
   if (terminalMobileAccessoryModifierActions.includes(key)) return toggleTerminalMobileAccessoryModifier(session, key);
-  if (key === 'open' && state.open !== true) {
-    dismissTerminalMobileAccessories(session);
+  if (key === 'open') {
+    if (state.open === true) return true;
     state.palettePlacement = null;
+    state.more = false;
+    state.open = true;
+  } else {
+    state[key] = !state[key];
   }
-  state[key] = !state[key];
   syncTerminalMobileAccessoryState(session);
   return state[key];
 }
@@ -635,27 +646,6 @@ function dismissTerminalMobileAccessory(session) {
   return true;
 }
 
-function dismissTerminalMobileAccessories(exceptSession = '') {
-  let dismissed = false;
-  for (const session of terminalMobileAccessoryStates.keys()) {
-    if (session === String(exceptSession || '')) continue;
-    dismissed = dismissTerminalMobileAccessory(session) || dismissed;
-  }
-  return dismissed;
-}
-
-function installTerminalMobileAccessoryDismissal() {
-  if (terminalMobileAccessoryDismissalInstalled) return;
-  terminalMobileAccessoryDismissalInstalled = true;
-  // The key palette is an on-demand aid, not persistent pane chrome. A touch outside its own
-  // launcher/palette means the user has resumed another terminal or app action, so close it.
-  document.addEventListener('pointerdown', event => {
-    const target = event.target;
-    if (target?.closest?.('[data-terminal-mobile-keybar], [data-terminal-mobile-toggle]')) return;
-    dismissTerminalMobileAccessories();
-  }, {capture: true, passive: true});
-}
-
 function installTerminalMobileAccessoryResizeSync() {
   if (terminalMobileAccessoryResizeInstalled) return;
   terminalMobileAccessoryResizeInstalled = true;
@@ -664,6 +654,29 @@ function installTerminalMobileAccessoryResizeSync() {
       syncTerminalMobileAccessoryState(session);
     }
   }, {passive: true});
+}
+
+function installTerminalMobileAccessorySurfaceSync() {
+  if (terminalMobileAccessorySurfaceObserver || typeof MutationObserver !== 'function' || !document.body) return;
+  terminalMobileAccessorySurfaceObserver = new MutationObserver(records => {
+    const sessions = new Set();
+    const collect = node => {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+      const surfaces = node.matches?.('[data-terminal-mobile-toggle], [data-terminal-mobile-keybar]')
+        ? [node]
+        : [];
+      surfaces.push(...(node.querySelectorAll?.('[data-terminal-mobile-toggle], [data-terminal-mobile-keybar]') || []));
+      for (const surface of surfaces) {
+        const session = String(surface.dataset?.terminalMobileToggle || surface.dataset?.terminalMobileKeybar || '');
+        if (session && terminalMobileAccessoryState(session)) sessions.add(session);
+      }
+    };
+    for (const record of records) {
+      for (const node of record.addedNodes || []) collect(node);
+    }
+    for (const session of sessions) syncTerminalMobileAccessoryState(session);
+  });
+  terminalMobileAccessorySurfaceObserver.observe(document.body, {childList: true, subtree: true});
 }
 
 const terminalMobileAccessoryLongPressMs = 450;
@@ -729,7 +742,6 @@ function beginTerminalMobileAccessoryLauncherPress(session, event, button) {
   // suppression must not eat this new intentional tap; suppression is only for the immediate
   // click following the drag release that set it.
   state.suppressLauncherClick = false;
-  dismissTerminalMobileAccessories(session);
   const paneRect = pane.getBoundingClientRect();
   const launcherRect = button.getBoundingClientRect();
   const startX = Number.isFinite(state.x) ? state.x : launcherRect.left - paneRect.left;
@@ -807,11 +819,17 @@ function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
   const state = terminalMobileAccessoryState(session, {create: true});
   const pane = bar?.closest?.('.tab-pane');
   if (!state || event.button > 0 || !bar || !pane || state.open !== true) return false;
-  if (event.target?.closest?.('[data-terminal-mobile-key]')) return false;
+  const grabber = event.target?.closest?.('.mobile-terminal-key-grabber');
+  if (!grabber || !bar.contains(grabber)) return false;
   const paneRect = pane.getBoundingClientRect();
   const launcher = pane.querySelector(`[data-terminal-mobile-toggle="${cssEscape(session)}"]`);
   if (!launcher) return false;
+  const launcherWasHidden = launcher.hidden === true;
+  if (launcherWasHidden) launcher.hidden = false;
   const launcherRect = launcher?.getBoundingClientRect?.();
+  const launcherWidth = launcher?.offsetWidth || 0;
+  const launcherHeight = launcher?.offsetHeight || 0;
+  if (launcherWasHidden) launcher.hidden = true;
   const startX = Number.isFinite(state.x) ? state.x : (Number(launcherRect?.left) || 0) - paneRect.left;
   const startY = Number.isFinite(state.y) ? state.y : (Number(launcherRect?.top) || 0) - paneRect.top;
   const press = {
@@ -823,8 +841,8 @@ function beginTerminalMobileAccessoryPalettePress(session, event, bar) {
     startY,
     paneWidth: pane.clientWidth,
     paneHeight: pane.clientHeight,
-    launcherWidth: launcher?.offsetWidth || 0,
-    launcherHeight: launcher?.offsetHeight || 0,
+    launcherWidth,
+    launcherHeight,
   };
   state.palettePress = press;
   bar.setPointerCapture?.(event.pointerId);
@@ -963,8 +981,9 @@ async function pasteTerminalMobileAccessoryClipboard(session) {
 
 function sendTerminalMobileAccessoryInput(session, action) {
   if (action === 'copy') {
-    const term = terminals.get(session)?.term || null;
-    const container = document.getElementById(terminalDomId(session));
+    const item = terminals.get(session);
+    const term = item?.term || null;
+    const container = item?.container || document.getElementById(terminalDomId(session));
     void copyTerminalSelection(session, term, {}, container);
     return true;
   }
@@ -979,19 +998,19 @@ function sendTerminalMobileAccessoryInput(session, action) {
   if (action === 'tmux-scroll-up' || action === 'tmux-scroll-down') {
     const item = terminals.get(session);
     const term = item?.term;
-    const pageLines = Math.max(1, Math.floor((Number(term?.rows) || 24) * terminalWheelPageFraction));
+    const container = item?.container || document.getElementById(terminalDomId(session));
+    const pageLines = terminalScrollPageLines(term);
     const signedLines = action === 'tmux-scroll-up' ? -pageLines : pageLines;
-    if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
-      queueTmuxScroll(item, signedLines);
-      return true;
-    }
-    if (term) {
-      queueLocalTerminalScroll(term, signedLines);
-      return true;
-    }
+    if (routeTerminalScrollLines(session, term, container, signedLines, {source: 'page-key'})) return true;
+    // The palette represents physical PgUp/PgDn. In an alternate-screen TUI the router leaves
+    // those keys to the app, so send their normal xterm byte rather than stealing its paging.
+    const data = action === 'tmux-scroll-up' ? '\x1b[5~' : '\x1b[6~';
+    noteTerminalExplicitInput(session);
+    if (handleTerminalData(session, data, {mobileAccessory: true, bypassMobileAccessoryModifiers: true})) return true;
     statusErr(terminalNotConnectedHtml(session));
     return false;
   }
+  if (action === 'close') return dismissTerminalMobileAccessory(session);
   if (terminalMobileAccessoryModifierActions.includes(action) || action === 'more' || action === 'open') {
     toggleTerminalMobileAccessoryState(session, action);
     return true;
@@ -1631,12 +1650,7 @@ function normalizeInfoLegacyPresetGrouping(grouping) {
 function readStoredInfoGrouping() {
   const raw = storageGet(infoGroupingStorageKey, '') || storageGet(infoLegacyGroupingStorageKey, '');
   if (!raw) return infoDefaultGrouping.slice();
-  try {
-    const parsed = JSON.parse(raw);
-    return normalizeInfoGrouping(parsed, {migrateLegacyPresets: true});
-  } catch (_) {
-    return normalizeInfoGrouping(raw, {migrateLegacyPresets: true});
-  }
+  return normalizeInfoGrouping(safeJsonParse(raw, raw), {migrateLegacyPresets: true});
 }
 
 function writeInfoGrouping(value) {
@@ -2524,16 +2538,27 @@ function infoTabGroupStatusRecord(group = {}) {
 }
 
 function infoTabGroupLeadingActivityHtml(group = {}) {
+  const representative = infoGroupRepresentativeRecord(group);
   const status = infoTabGroupStatusRecord(group);
-  if (!status?.record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
-  const record = status.record;
+  const record = representative || status?.record;
+  if (!record || typeof agentWindowActivityIconHtmlForStatus !== 'function') return undefined;
   const session = String(record?.tabSession || '').trim();
   if (!session) return undefined;
   const info = transcriptMetadataState.payload.sessions?.[session] || {};
-  const summary = sessionAgentWindowStatusSummary(session, info, autoApproveStates.get(session));
   const payload = autoApproveStates.get(session);
   const auto = payload?.enabled === true;
   const yoloHtml = yoloMarkerHtml(session, auto, {enabledOnly: false, toggle: !readOnlyMode, yoloWorking: false, payload});
+  const groupRecords = Array.isArray(group.records) ? group.records : [];
+  const representativeKind = String(record.aiKind || '').trim().toLowerCase();
+  const exactWindowSurface = representativeKind && groupRecords.every(item => String(item?.aiKind || '').trim().toLowerCase() === representativeKind);
+  const exactAgent = exactWindowSurface ? infoRecordCanonicalAgent(record) : null;
+  const exactActivityHtml = exactAgent
+    ? agentWindowActivityIconHtmlForStatus(exactAgent, record.aiKind, session, {statusOnly: true})
+    : '';
+  if (exactActivityHtml) {
+    return `${yoloHtml}<span class="session-agent-activity-marker info-tree-tab-group-status">${exactActivityHtml}</span>`;
+  }
+  const summary = sessionAgentWindowStatusSummary(session, info, payload);
   const agent = summary?.agent || infoRecordDisplayAgent(record);
   const activityHtml = summary?.item
     ? agentWindowActivityIconHtml(agent.kind, agent.state, agentWindowIdleSeconds(agent), {
@@ -3591,6 +3616,11 @@ function bindPanelControls(panel, session) {
     const targetSession = button.dataset.terminalMobileToggle || session;
     if (consumeTerminalMobileAccessoryLauncherClick(targetSession)) return;
     sendTerminalMobileAccessoryInput(targetSession, 'open');
+  });
+  delegate(panel, 'click', '[data-terminal-mobile-close]', (event, button) => {
+    event.preventDefault();
+    event.stopPropagation();
+    sendTerminalMobileAccessoryInput(button.dataset.terminalMobileClose || session, 'close');
   });
   delegate(panel, 'pointerdown', '[data-terminal-mobile-keybar]', (event, bar) => {
     beginTerminalMobileAccessoryPalettePress(bar.dataset.terminalMobileKeybar || session, event, bar);
@@ -4776,7 +4806,7 @@ function activateTab(session, name, options = {}) {
     scheduleFit(session);
     setTimeout(() => refreshTerminal(session), terminalRefreshAfterTabSelectMs);
     scheduleTerminalBlankScreenRefresh(session, {reason: 'terminal-tab'});
-    if (options.userInitiated) focusTerminalFromUserAction(session);
+    if (options.userInitiated) focusTerminalFromUserAction(session, 0, options);
     else focusTerminalWhenAutoFocus(session, 25);
   } else {
     clearFocusedTerminal(session);
@@ -4786,6 +4816,7 @@ function activateTab(session, name, options = {}) {
   }
   if (name === 'summary') startSummaryStream(session);
   if (name === 'events') refreshEventLog(session);
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand();
   if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }
 
@@ -5216,8 +5247,8 @@ function bindTerminalContainerForSession(session, term, container) {
   if (!session || !term || !container) return;
   if (container.dataset?.terminalHandlersBound === session) return;
   if (container.dataset) container.dataset.terminalHandlersBound = session;
-  installTerminalMobileAccessoryDismissal();
   installTerminalMobileAccessoryResizeSync();
+  installTerminalMobileAccessorySurfaceSync();
   installTerminalContextMenu(session, term, container);
   installTerminalCopyShortcut(session, term, container);
   installTerminalFileDrop(session, container);
@@ -5233,15 +5264,12 @@ function bindTerminalContainerForSession(session, term, container) {
     copyTerminalSelectionToClipboardEvent(session, term, event, container);
   }, {capture: true});
   container.addEventListener('keydown', () => {
-    dismissTerminalMobileAccessory(session);
     noteTerminalExplicitInput(session);
   }, {capture: true});
   container.addEventListener('paste', () => {
-    dismissTerminalMobileAccessory(session);
     noteTerminalExplicitInput(session);
   }, {capture: true});
   container.addEventListener('beforeinput', () => {
-    dismissTerminalMobileAccessory(session);
     noteTerminalExplicitInput(session);
   }, {capture: true});
 }
@@ -5407,11 +5435,12 @@ async function setAutoApprove(session, enabled) {
   }
   try {
     const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    autoApproveStates.set(session, payload);
+    const state = autoApproveStateWithSnapshotRevision(payload);
+    autoApproveStates.set(session, state);
     updateDocumentTitle();
     updateSessionButtonStates();
     renderInfoPanel();
-    renderAutoApproveButton(session, payload);
+    renderAutoApproveButton(session, state);
     scheduleTerminalAttentionHighlight(session);
     scheduleShareUiStatePublish();
     statusEl.innerHTML = payload.enabled
@@ -5421,10 +5450,11 @@ async function setAutoApprove(session, enabled) {
     const payload = error?.payload || {};
     if (error?.status) {
       if (payload?.target || payload?.session) {
-        autoApproveStates.set(session, payload);
+        const state = autoApproveStateWithSnapshotRevision(payload);
+        autoApproveStates.set(session, state);
         updateDocumentTitle();
         updateSessionButtonStates();
-        renderAutoApproveButton(session, payload);
+        renderAutoApproveButton(session, state);
         scheduleTerminalAttentionHighlight(session);
         scheduleShareUiStatePublish();
       }
@@ -5461,7 +5491,7 @@ function loadAutoStatuses(options = {}) {
     for (const session of activeSessions.filter(isTmuxSession)) {
       try {
         const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        autoApproveStates.set(session, payload);
+        autoApproveStates.set(session, autoApproveStateWithSnapshotRevision(payload));
       } catch (_) {}
     }
     result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
@@ -5479,11 +5509,19 @@ loadAutoStatuses.request = null;
 loadAutoStatuses.lastResult = null;
 loadAutoStatuses.updatedAt = 0;
 
+function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnapshotRevision(state)) {
+  if (!state || typeof state !== 'object') return state;
+  const normalizedRevision = Number(revision || 0);
+  if (!Number.isInteger(normalizedRevision) || normalizedRevision <= 0 || agentWindowSnapshotRevision(state) === normalizedRevision) return state;
+  return {...state, agent_window_snapshot_revision: normalizedRevision};
+}
+
 function renderAutoApproveStatusSurfaces(result = {}) {
   const perf = clientPerfStart('autoStatusRender');
   try {
     if (result?.sessionsChanged) renderPanels(result.previousActive || activeSessions.slice());
     else if (typeof renderPaneTabStrips === 'function') renderPaneTabStrips();
+    if (typeof refreshDebugAgentWindowLiveDetails === 'function') refreshDebugAgentWindowLiveDetails();
     updateDocumentTitle();
   // Re-toggle the YO markers' working class from the fresh states on the SAME poll the title updates,
   // so a finished/idle pane's marker stops spinning instead of lingering (the transcript poll path
@@ -5509,8 +5547,9 @@ function applyAutoApprovePayload(payload, options = {}) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
   }
+  const snapshotRevision = agentWindowSnapshotRevision(payload);
   for (const session of sessions) {
-    const state = payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'};
+    const state = autoApproveStateWithSnapshotRevision(payload.sessions?.[session] || {target: session, enabled: false, last_action: 'off'}, snapshotRevision);
     autoApproveStates.set(session, state);
     reconcileTmuxWindowMetadataFromAgentWindows(session, state);
   }
@@ -5695,7 +5734,7 @@ function stopSummaryStream(session) {
 
 function reloadIsSafe() {
   // Don't yank the page out from under unsaved work or active typing.
-  for (const file of openFiles.values()) {
+  for (const file of fileState.values()) {
     if (file?.dirty) return false;
   }
   const active = document.activeElement;
@@ -5768,7 +5807,7 @@ function selfUpdateOwnsServerVersion(serverVersion) {
 }
 
 function selfUpdateReloadDeferredReason() {
-  for (const file of openFiles.values()) {
+  for (const file of fileState.values()) {
     if (file?.dirty) return t('update.defer.unsavedEdits');
   }
   const active = document.activeElement;
@@ -5946,7 +5985,7 @@ async function applySessionMetadataPayload(payload, options = {}) {
   }
   renderPaneTabStrips();
   scheduleFileExplorerActiveTabSync();
-  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({renew: true});
+  if (!shareViewMode && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
   if (!shareViewMode) scheduleShareUiStatePublish();
   trackSessionStateChanges();
   refreshOpenEventLogs();
@@ -6466,30 +6505,75 @@ function formatEventTime(value) {
   });
 }
 
-async function refreshEventLog(session) {
-  const node = document.getElementById(`events-${session}`);
-  if (!node) return;
-  delete node.dataset.localeTextKey;
-  try {
-    const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
-    const events = Array.isArray(payload.events) ? payload.events : [];
-    node.innerHTML = events.length
-      ? events.slice().reverse().map(eventItemHtml).join('')
-      : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
-  } catch (error) {
-    if (error?.status) {
-      node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
-      return;
-    }
-    node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
+function eventLogRefreshRecord(session) {
+  const key = String(session || '');
+  let record = eventLogRefreshRecords.get(key);
+  if (!record) {
+    record = {request: null, pending: false};
+    eventLogRefreshRecords.set(key, record);
   }
+  return record;
+}
+
+function refreshEventLog(session) {
+  const node = document.getElementById(`events-${session}`);
+  if (!node) return Promise.resolve(false);
+  const record = eventLogRefreshRecord(session);
+  if (record.request) {
+    record.pending = true;
+    return record.request;
+  }
+  delete node.dataset.localeTextKey;
+  const scrollTop = Number(node.scrollTop) || 0;
+  const request = (async () => {
+    try {
+      const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      node.innerHTML = events.length
+        ? events.slice().reverse().map(eventItemHtml).join('')
+        : `<div class="event-empty">${esc(t('events.empty'))}</div>`;
+      // A push is an invalidation, not a command to move a reader away from
+      // the older page of the bounded tail they are inspecting.
+      node.scrollTop = scrollTop;
+      return true;
+    } catch (error) {
+      if (error?.status) {
+        node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
+        return false;
+      }
+      node.innerHTML = `<div class="event-empty">${localizedHtml('events.loadFailedWithError', {error})}</div>`;
+      return false;
+    } finally {
+      if (record.request === request) {
+        record.request = null;
+        if (record.pending) {
+          record.pending = false;
+          Promise.resolve().then(() => refreshEventLog(session));
+        }
+      }
+    }
+  })();
+  record.request = request;
+  return request;
 }
 
 function refreshOpenEventLogs() {
+  const refreshes = [];
   for (const session of activeSessions.filter(isTmuxSession)) {
     const pane = document.getElementById(`events-pane-${session}`);
-    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
+    if (pane?.classList.contains(CLS.active)) refreshes.push(refreshEventLog(session));
   }
+  return Promise.all(refreshes);
+}
+
+function refreshEventLogsFromPush(payload = {}) {
+  const session = String(payload.session || '');
+  if (session) {
+    const pane = document.getElementById(`events-pane-${session}`);
+    if (pane?.classList.contains(CLS.active)) refreshEventLog(session);
+    return;
+  }
+  refreshOpenEventLogs();
 }
 
 function postEvent(session, type, message, details = {}) {
@@ -6547,16 +6631,7 @@ function renderLatency(latestMs) {
 }
 
 async function updateLatency() {
-  if (document.visibilityState === 'hidden') return null;
-  const startedAt = performance.now();
-  try {
-    await apiFetchJson(`/api/ping?t=${Date.now()}`, {cache: 'no-store'});
-    const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
-    latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
-    renderLatency(elapsedMs);
-  } catch (_) {
-    renderLatency(null);
-  }
+  return measureClientHealth();
 }
 
 function refreshAll() {
@@ -6699,7 +6774,6 @@ async function boot() {
   installShareViewerBanner();
   installSharePointerPublisher();
   installShareScrollPublisher();
-  installShareGeometryDigestLoop();
   installSharePopupLayerPublisher();
   installShareReplayMutationPublisher();
   startShareStatusRefresh();
@@ -6709,12 +6783,8 @@ async function boot() {
 }
 
 function clientEventEnvelope(event) {
-  try {
-    const parsed = JSON.parse(event?.data || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch (_error) {
-    return {};
-  }
+  const parsed = safeJsonParse(event?.data, {});
+  return parsed && typeof parsed === 'object' ? parsed : {};
 }
 
 function clientEventPayloadFromEnvelope(envelope) {
@@ -6723,8 +6793,93 @@ function clientEventPayloadFromEnvelope(envelope) {
     : envelope;
 }
 
+function applyClientEventReadyEnvelope(envelope = {}) {
+  const epoch = String(envelope.epoch || '');
+  if (!epoch) return false;
+  if (clientEventTransportState.resourceEpoch !== epoch) {
+    clientEventTransportState.resourceEpoch = epoch;
+    clientEventTransportState.resourceRevisions.clear();
+  }
+  // `ready` is a reconnect fence, not state.  Seeding accepted revisions here
+  // would discard queued frames without proving the corresponding panel read
+  // happened.  Channel-scoped repair below establishes readable state first.
+  return true;
+}
+
+function repairClientEventReadyChannels(channels) {
+  if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
+  if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
+  if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
+  if (channels.has('transcripts') && typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events ready transcript refresh failed', error));
+  if (channels.has('activity') && typeof refreshActivitySummary === 'function') refreshActivitySummary({force: true}).catch(error => console.warn('client-events ready activity refresh failed', error));
+  if (channels.has('events') && typeof refreshOpenEventLogs === 'function') refreshOpenEventLogs().catch(error => console.warn('client-events ready event-log refresh failed', error));
+  if (channels.has('yoagent') && typeof loadYoagentConversation === 'function') loadYoagentConversation({force: true, render: yoagentPanelIsActive(), scrollBottom: false}).catch(error => console.warn('client-events ready YO!agent refresh failed', error));
+}
+
+function repairReadyEventLogRevisions(resources, envelope) {
+  const eventLogResources = resources.filter(resource => /^event_log_changed/.test(resource));
+  if (!eventLogResources.length || typeof refreshOpenEventLogs !== 'function') return;
+  const epoch = String(envelope.epoch || '');
+  refreshOpenEventLogs().then(() => {
+    if (clientEventTransportState.resourceEpoch !== epoch) return;
+    for (const resource of eventLogResources) {
+      const revision = Number(envelope.resource_revisions?.[resource]);
+      if (Number.isFinite(revision)) clientEventTransportState.resourceRevisions.set(resource, revision);
+    }
+  }).catch(error => console.warn('client-events ready event-log refresh failed', error));
+}
+
+function clientEventRepairChannels(resources = []) {
+  const channels = new Set();
+  for (const rawResource of resources) {
+    const resource = String(rawResource || '');
+    if (/^(?:files_changed|fs_changed|roots_changed|session_files_ready)/.test(resource)) channels.add('files');
+    else if (/^(?:auto_approve_changed|attention_acks_changed|tmux_signals_changed)/.test(resource)) channels.add('status');
+    else if (/^event_log_changed/.test(resource)) channels.add('events');
+    else if (/^(?:transcripts_changed|context_changed|context_items_ready)/.test(resource)) channels.add('transcripts');
+    else if (/^activity_summary_ready|background:tabber-activity/.test(resource)) channels.add('activity');
+    else if (/^yoagent_/.test(resource)) channels.add('yoagent');
+    else if (/^chat_/.test(resource)) channels.add('chat');
+    else channels.add('core');
+  }
+  return channels;
+}
+
+function repairClientEventResources(resources = []) {
+  const channels = clientEventRepairChannels(resources);
+  if (channels.size) repairClientEventReadyChannels(channels);
+}
+
+function clientEventReadyGapResources(envelope = {}) {
+  const revisions = envelope.resource_revisions;
+  if (!revisions || typeof revisions !== 'object') return [];
+  const gaps = [];
+  for (const [resource, rawRevision] of Object.entries(revisions)) {
+    const revision = Number(rawRevision);
+    if (!Number.isSafeInteger(revision) || revision < 1) continue;
+    if (revision > (clientEventTransportState.resourceRevisions.get(resource) || 0)) gaps.push(resource);
+  }
+  return gaps;
+}
+
+function clientEventEnvelopeIsCurrent(envelope = {}) {
+  const epoch = String(envelope.epoch || '');
+  const resource = String(envelope.resource || '');
+  const revision = Number(envelope.resource_revision);
+  // Older servers and direct unit-test calls remain valid until every dev server has re-execed.
+  if (!epoch || !resource || !Number.isSafeInteger(revision) || revision < 1) return true;
+  if (clientEventTransportState.resourceEpoch !== epoch) {
+    clientEventTransportState.resourceEpoch = epoch;
+    clientEventTransportState.resourceRevisions.clear();
+  }
+  const previous = clientEventTransportState.resourceRevisions.get(resource) || 0;
+  if (revision <= previous) return false;
+  clientEventTransportState.resourceRevisions.set(resource, revision);
+  return true;
+}
+
 function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
-  if (!jsDebugCollectionEnabled) return;
   const payload = clientEventPayloadFromEnvelope(envelope);
   const rawData = rawEvent?.data || '';
   const dataBytes = utf8ByteLength(rawData);
@@ -6924,6 +7079,18 @@ function clientPushEventSessionKey(payload = {}) {
   return String(payload.session || payload.request?.session || payload.data?.session || payload.data?.target || '');
 }
 
+// Keep EventSource registration and the browser dispatch owner on one typed contract. The server
+// still validates its authoritative set in ClientEventBroker; this prevents a browser-only typo or
+// a newly added handler from silently having no EventSource listener.
+const clientPushEventTypes = Object.freeze([
+  'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
+  'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
+  'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
+  'chat_messages_changed', 'chat_typing_changed',
+]);
+
 function clientPushEventCoalesceKey(type, payload = {}) {
   const key = String(type || 'event');
   const session = clientPushEventSessionKey(payload);
@@ -6931,9 +7098,9 @@ function clientPushEventCoalesceKey(type, payload = {}) {
   return key;
 }
 
-function queueClientPushEvent(type, payload = {}) {
+function queueClientPushEvent(type, payload = {}, envelope = {}) {
   const key = clientPushEventCoalesceKey(type, payload);
-  clientEventTransportState.queue.set(key, {type, payload});
+  clientEventTransportState.queue.set(key, {type, payload, envelope});
   // Chrome pauses requestAnimationFrame in background tabs. Status events still have to update
   // notification state there, otherwise a complete green->red/yellow transition can be missed
   // before the user returns to YOLOmux.
@@ -6954,14 +7121,17 @@ function flushQueuedClientPushEvents() {
   const events = Array.from(clientEventTransportState.queue.values());
   clientEventTransportState.queue.clear();
   recordClientPerfCounter('sseEvent', 0, {nodes: events.length});
-  for (const event of events) handleClientPushEventNow(event.type, event.payload);
+  for (const event of events) handleClientPushEventNow(event.type, event.payload, event.envelope);
 }
 
-function handleClientPushEvent(type, payload = {}) {
-  queueClientPushEvent(type, payload);
+function handleClientPushEvent(type, payload = {}, envelope = {}) {
+  repairClientEventResources(envelope.repair_resources);
+  if (!clientEventEnvelopeIsCurrent(envelope)) return false;
+  queueClientPushEvent(type, payload, envelope);
+  return true;
 }
 
-function handleClientPushEventNow(type, payload = {}) {
+function handleClientPushEventNowByType(type, payload = {}) {
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
     return;
@@ -6970,6 +7140,10 @@ function handleClientPushEventNow(type, payload = {}) {
     if (payload.data && typeof payload.data === 'object') {
       applySettingsPayload(payload.data, {force: true});
     }
+    return;
+  }
+  if (type === 'pricing_catalog_changed') {
+    if (typeof refreshDebugCostPricingStatus === 'function') refreshDebugCostPricingStatus().catch(error => console.warn('pricing catalog refresh failed', error));
     return;
   }
   if (type === 'stats_sample') {
@@ -6991,13 +7165,25 @@ function handleClientPushEventNow(type, payload = {}) {
   if (type === 'background_owner_changed') {
     if (!applyBackgroundOwnerStatusPayload(payload)) {
       refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('background-owner status refresh failed', error));
+    } else if (typeof refreshAllIndexedDirsStatus === 'function') {
+      // A new owner may have rebuilt or invalidated an index while this client was
+      // following the previous owner. Revalidate only surfaces that are currently demanded.
+      refreshAllIndexedDirsStatus();
     }
+    return;
+  }
+  if (type === 'background_refresh_requested') {
+    refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('background refresh request status failed', error));
     return;
   }
   if (type === 'background_refresh_done') {
     if (payload.role === 'search-index') {
-      refreshBackgroundOwnerStatus({force: true}).catch(error => console.warn('search-index status refresh failed', error));
-      if (payload.root) refreshFileIndexStatus(payload.root);
+      const applied = payload.root && typeof applyFileIndexStatusPayload === 'function'
+        ? applyFileIndexStatusPayload(payload.root, payload)
+        : false;
+      // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
+      // immediately recreates the retired building-index poll and can race a newer generation.
+      if (payload.root && !applied) refreshFileIndexStatus(payload.root);
       if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
         refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
       }
@@ -7007,6 +7193,9 @@ function handleClientPushEventNow(type, payload = {}) {
       if (!session || session === fileExplorerSessionFilesTargetSession()) {
         fetchSessionFiles({silent: true}).catch(error => console.warn('session-files refresh failed', error));
       }
+    }
+    if (payload.role === 'tabber-activity' && typeof itemIsActivePaneTab === 'function' && itemIsActivePaneTab(tabberItemId) && document.visibilityState !== 'hidden') {
+      fetchTabberActivity().catch(error => console.warn('Tabber activity refresh failed', error));
     }
     return;
   }
@@ -7032,12 +7221,20 @@ function handleClientPushEventNow(type, payload = {}) {
     }
     return;
   }
+  if (type === 'context_changed') {
+    if (typeof refreshTranscripts === 'function') refreshTranscripts({refreshAuto: false, refreshActivity: false}).catch(error => console.warn('client-events context refresh failed', error));
+    return;
+  }
   if (type === 'context_items_ready') {
     if (payload.data) applyContextItemsPayloadFromPush(payload.data, {session: payload.session, preserveScroll: true});
     return;
   }
   if (type === 'activity_summary_ready') {
     if (payload.data) applyActivitySummaryPayloadFromPush(payload.data);
+    return;
+  }
+  if (type === 'event_log_changed') {
+    refreshEventLogsFromPush(payload);
     return;
   }
   if (type === 'yoagent_conversation_changed') {
@@ -7083,7 +7280,20 @@ function handleClientPushEventNow(type, payload = {}) {
     if (typeof refreshFileExplorerFromPush === 'function') {
       refreshFileExplorerFromPush(payload).catch(error => console.warn('client fs push refresh failed', error));
     }
+    return;
   }
+  if (type === 'roots_changed') {
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  }
+}
+
+const clientPushEventHandlers = Object.freeze(Object.fromEntries(
+  clientPushEventTypes.map(type => [type, payload => handleClientPushEventNowByType(type, payload)])
+));
+
+function handleClientPushEventNow(type, payload = {}) {
+  const handler = clientPushEventHandlers[type];
+  if (handler) handler(payload);
 }
 
 function clientEventDemandDescriptor() {
@@ -7104,6 +7314,7 @@ function clientEventDemandDescriptor() {
       channels.add('activity');
       channels.add('transcripts');
     }
+    if (activeItems.some(item => isTmuxSession(item) && panelActiveTabName(item) === 'events')) channels.add('events');
     if ((activeItems.includes(debugPaneItemId) || activeItems.includes(yocostItemId))
         && (typeof jsDebugStatsLivePushEnabled !== 'function' || jsDebugStatsLivePushEnabled())) channels.add('stats');
     if (activeItems.includes(yoagentItemId)) {
@@ -7165,11 +7376,23 @@ function openClientEventStream(descriptor) {
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
-    recordSseDebugEvent('ready', clientEventEnvelope(event), event);
-    if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true});
-    if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
-    if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
-    if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
+    const envelope = clientEventEnvelope(event);
+    const readyEpoch = String(envelope.epoch || '');
+    // Older servers did not include an epoch/revision summary. Treat that compatibility frame
+    // as an unknown reconnect and conservatively repair current demand rather than assuming it
+    // is the same generation with zero gaps.
+    const freshEpoch = !readyEpoch || clientEventTransportState.resourceEpoch !== readyEpoch;
+    applyClientEventReadyEnvelope(envelope);
+    recordSseDebugEvent('ready', envelope, event);
+    if (freshEpoch) {
+      repairClientEventReadyChannels(channels);
+    } else {
+      const gapResources = clientEventReadyGapResources(envelope);
+      repairReadyEventLogRevisions(gapResources, envelope);
+      const repairChannels = clientEventRepairChannels(gapResources);
+      repairChannels.delete('events');
+      repairClientEventReadyChannels(new Set([...repairChannels].filter(channel => channels.has(channel))));
+    }
   });
   source.addEventListener('ping', event => {
     if (clientEventTransportState.source !== source) return;
@@ -7182,14 +7405,14 @@ function openClientEventStream(descriptor) {
     clientEventTransportState.connected = false;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
   };
-  for (const type of ['settings_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed', 'background_owner_changed', 'background_refresh_done', 'tmux_signals_changed', 'watched_prs_changed', 'files_changed', 'fs_changed', 'session_files_ready', 'transcripts_changed', 'context_items_ready', 'activity_summary_ready', 'update_available', 'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta', 'chat_messages_changed', 'chat_typing_changed']) {
+  for (const type of Object.keys(clientPushEventHandlers)) {
     source.addEventListener(type, event => {
       if (clientEventTransportState.source !== source) return;
       clientEventTransportState.connected = true;
       if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
       const envelope = clientEventEnvelope(event);
       recordSseDebugEvent(type, envelope, event);
-      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope));
+      handleClientPushEvent(type, clientEventPayloadFromEnvelope(envelope), envelope);
     });
   }
   return source;

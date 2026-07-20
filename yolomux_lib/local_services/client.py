@@ -19,13 +19,16 @@ from .runtime import redact_local_service_text
 class LocalServiceClient:
     """Thin typed client that owns shared registry/RPC behavior once."""
 
-    def __init__(self, service: str, module: str, socket_path: Path, protocol_version: int = LOCAL_RPC_VERSION, *, idle_seconds: float = 60.0, extra_args: tuple[str, ...] = (), code_revision: str = ""):
+    def __init__(self, service: str, module: str, socket_path: Path, protocol_version: int = LOCAL_RPC_VERSION, *, idle_seconds: float = 60.0, extra_args: tuple[str, ...] = (), code_revision: str = "", build_revision: int = 0, service_dir: Path | None = None):
+        requested_socket_path = Path(socket_path)
+        requested_service_dir = Path(service_dir) if service_dir is not None else requested_socket_path.parent
         self.service = service
-        self.socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service}")
+        self.socket_path = safe_socket_path(requested_socket_path, prefix=f"yolomux-{service}")
         self.registry = LocalServiceRegistry(
-            self.socket_path.parent,
-            LocalServiceSpec(service, module, self.socket_path.name, protocol_version, idle_seconds=idle_seconds, extra_args=extra_args, code_revision=code_revision),
+            requested_service_dir,
+            LocalServiceSpec(service, module, self.socket_path.name, protocol_version, idle_seconds=idle_seconds, extra_args=extra_args, code_revision=code_revision, build_revision=build_revision),
             socket_path=self.socket_path,
+            service_dir=requested_service_dir,
         )
 
     def request_with_binary(self, payload: dict[str, Any], timeout: float = 0.5) -> tuple[dict[str, Any], bytes]:
@@ -54,4 +57,8 @@ class LocalServiceClient:
         return response
 
     def ensure_started(self) -> bool:
+        return self.registry.ensure_started()
+
+    def retry(self) -> bool:
+        self.registry.retry()
         return self.registry.ensure_started()

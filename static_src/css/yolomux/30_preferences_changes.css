@@ -260,6 +260,30 @@
 .js-debug-system-state--bad {
   color: var(--bad);
 }
+.js-debug-usage-health {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  margin-block: var(--space-8);
+  padding: var(--space-6) var(--space-8);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+}
+.js-debug-usage-health strong {
+  color: var(--text);
+}
+.js-debug-usage-health > :last-child {
+  margin-inline-start: auto;
+  font-family: var(--mono-font);
+}
+.js-debug-usage-health--warning {
+  border-color: var(--warning-border-strong);
+  color: var(--text);
+}
+.js-debug-usage-health--warning strong {
+  color: var(--warning-border-strong);
+}
 .js-debug-system-fixed-table {
   --js-debug-system-first-column-width: 10rem;
   --js-debug-system-table-min-width: 46rem;
@@ -456,18 +480,16 @@
   gap: var(--space-8);
   min-width: 0;
   min-height: 0;
+  container-type: inline-size;
 }
 .js-debug-graph--empty {
   min-height: 180px;
 }
 .js-debug-graph-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) max-content;
-  align-items: center;
+  flex-wrap: nowrap;
   gap: var(--space-6);
   justify-self: stretch;
   min-width: 0;
-  container-type: inline-size;
 }
 .js-debug-resolution-label {
   min-width: 0;
@@ -502,8 +524,27 @@
   color: var(--muted);
   font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
 }
+.js-debug-chart-layout-control {
+  flex: 0 0 auto;
+}
+.js-debug-range-resolution-controls {
+  flex: 1 1 12rem;
+  gap: var(--space-6);
+  min-width: 0;
+}
+.js-debug-range-resolution-controls > .js-debug-resolution-label {
+  flex: 0 0 auto;
+}
+.js-debug-range-resolution-controls > .js-debug-range-slider-control {
+  flex: 1 1 auto;
+  min-inline-size: 12rem;
+}
+.js-debug-chart-toggle-control {
+  flex: 0 0 auto;
+  position: relative;
+}
 .js-debug-chart-layout-control button,
-.js-debug-chart-toggle-control button {
+.js-debug-chart-toggle-control summary {
   min-inline-size: 2.5rem;
   min-block-size: 1.65rem;
   padding: var(--space-2) var(--space-4);
@@ -513,16 +554,59 @@
   background: var(--panel2);
   font: inherit;
 }
-@container (max-width: 56rem) {
+.js-debug-chart-toggle-control summary {
+  cursor: pointer;
+  list-style: none;
+}
+.js-debug-chart-toggle-control summary::-webkit-details-marker {
+  display: none;
+}
+.js-debug-chart-toggle-menu {
+  position: absolute;
+  z-index: var(--z-menu-dropdown);
+  top: calc(100% + var(--space-3));
+  left: 0;
+  display: grid;
+  min-inline-size: 14rem;
+  padding: var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel2);
+  box-shadow: var(--shadow-popover);
+}
+.js-debug-chart-toggle-menu label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-block-size: 1.7rem;
+  cursor: pointer;
+}
+.js-debug-chart-toggle-menu input {
+  accent-color: var(--active-accent-bright);
+}
+/* 34rem is the measured intrinsic width of Charts + Size + a usable range slider + Resolution. */
+@container (max-width: 34rem) {
   .js-debug-graph-controls {
-    grid-template-columns: minmax(0, 1fr);
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-rows: auto auto;
   }
-  .js-debug-resolution-label {
-    justify-self: start;
+  .js-debug-range-resolution-controls {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    min-width: 0;
   }
   .js-debug-chart-layout-control,
   .js-debug-chart-toggle-control {
+    white-space: nowrap;
+  }
+  .js-debug-chart-layout-control {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .js-debug-chart-toggle-control {
     grid-column: 1;
+    grid-row: 1;
   }
 }
 .js-debug-subtab:not(.active):hover,
@@ -531,6 +615,9 @@
   background: var(--pane-inactive-tab-bg-hover);
 }
 .js-debug-range-slider-control {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
   min-width: 0;
 }
 .js-debug-chart-close {
@@ -549,18 +636,9 @@
 }
 .js-debug-range-slider {
   flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
+  inline-size: auto;
+  min-inline-size: 8rem;
   accent-color: var(--active-accent-bright);
-}
-.js-debug-chart-toggle-control {
-  display: inline-flex;
-  grid-column: 1 / -1;
-  grid-row: 2;
-  flex: 0 1 auto;
-  align-items: center;
-  gap: var(--space-4);
-  min-width: 0;
 }
 .js-debug-range-slider-control datalist {
   display: none;
@@ -579,6 +657,16 @@
   min-width: 2.5rem;
   color: var(--text);
   text-align: center;
+}
+.js-debug-range-slider-control--zoomed .js-debug-range-slider {
+  display: none;
+}
+.js-debug-range-label--zoomed {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
 }
 .js-debug-zoom-reset {
   flex: 0 0 auto;
@@ -754,6 +842,26 @@
   font: 700 var(--js-debug-display-label-font-size)/1.15 var(--ui-font);
   text-align: end;
 }
+.js-debug-agent-window-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-8);
+  color: var(--muted);
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+}
+.js-debug-agent-window-detail[data-js-debug-agent-window-detail-state="changed"] {
+  color: var(--warning-border-strong);
+}
+.js-debug-agent-window-detail details {
+  min-inline-size: 0;
+}
+.js-debug-agent-window-detail summary {
+  cursor: pointer;
+}
+.js-debug-agent-window-detail ul {
+  margin: var(--space-3) 0 0;
+  padding-inline-start: var(--space-12);
+}
 .js-debug-chart-body {
   display: grid;
   grid-template-columns: minmax(58px, auto) minmax(0, 1fr);
@@ -764,6 +872,43 @@
 }
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-chart-body {
   grid-template-rows: minmax(72px, 1fr) minmax(20px, auto);
+}
+.js-debug-mac-memory-details {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, max-content));
+  gap: var(--space-3) var(--space-10);
+  margin: 0;
+  min-width: 0;
+}
+.js-debug-mac-memory-details > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-5);
+  min-width: 0;
+  border-block-end: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+}
+.js-debug-mac-memory-details dt,
+.js-debug-mac-memory-details dd {
+  margin: 0;
+  font: 600 var(--ui-font-size-2xs)/1.25 var(--ui-font);
+}
+.js-debug-mac-memory-details dt {
+  color: var(--muted);
+}
+.js-debug-mac-memory-details dd {
+  color: var(--text);
+  text-align: end;
+  white-space: nowrap;
+}
+@container (max-width: 32rem) {
+  .js-debug-mac-memory-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@container (max-width: 20rem) {
+  .js-debug-mac-memory-details {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .js-debug-cost-summary {
   display: grid;
@@ -830,39 +975,8 @@
   overflow-wrap: normal;
   word-break: normal;
 }
-.js-debug-cost-compact {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-3);
+.js-debug-cost-summary > .js-debug-system-table-wrap {
   margin: var(--space-6) 0 0;
-}
-.js-debug-cost-compact div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-6);
-  min-width: max-content;
-}
-.js-debug-cost-compact dt {
-  white-space: nowrap;
-  overflow-wrap: normal;
-  word-break: normal;
-  color: var(--muted);
-  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
-}
-.js-debug-cost-compact dd {
-  margin: 0;
-  color: var(--text);
-  font: 700 var(--ui-font-size-xs)/1.15 var(--mono-font);
-  text-align: end;
-  white-space: nowrap;
-  overflow-wrap: normal;
-  word-break: normal;
-}
-.js-debug-cost-token-count {
-  margin-inline-start: var(--space-4);
-  color: var(--muted);
-  font: 600 var(--ui-font-size-2xs)/1.15 var(--mono-font);
 }
 .js-debug-cost-summary > .js-debug-cost-modal-host {
   display: flex;
@@ -899,7 +1013,7 @@
    sizing parent for both tables. */
 .js-debug-cost-usage-table-section .js-debug-cost-table {
   inline-size: max-content;
-  max-inline-size: 100%;
+  max-inline-size: none;
   min-inline-size: auto;
 }
 .js-debug-cost-unpriced-disclosure {
@@ -979,6 +1093,13 @@
 }
 .js-debug-cost-table-metric small {
   color: var(--muted);
+}
+.js-debug-cost-price-pair {
+  display: inline-grid;
+  gap: var(--space-1);
+  color: var(--muted);
+  font: 500 var(--ui-font-size-2xs)/1.2 var(--mono-font);
+  white-space: nowrap;
 }
 .js-debug-cost-model-identity {
   display: inline-flex;
@@ -1101,6 +1222,10 @@
   min-width: 0;
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
+.js-debug-cost-report-basis {
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.35 var(--ui-font);
+}
 /* Compact catalog status line: field groups wrap as units on a narrow pane and
    never stretch four scalar facts to opposite edges of a wide screen. */
 .js-debug-cost-catalog-line {
@@ -1156,26 +1281,17 @@
   font: var(--ui-font-size-xs)/1.35 var(--ui-font);
 }
 .js-yocost-controls > [data-js-yocost-data-age-label],
-.js-yocost-controls > .js-debug-resolution-label,
 .js-yocost-controls > button {
   flex: none;
 }
-.js-yocost-controls > .js-debug-range-slider-control {
-  flex: 1 1 20ch;
-  max-inline-size: 40%;
+.js-yocost-controls > .js-debug-range-resolution-controls {
+  flex: 1 0 100%;
+  order: 2;
 }
 .js-yocost-controls > button {
   margin-inline-start: auto;
 }
-@container (max-width: 40rem) {
-  .js-yocost-controls > .js-debug-range-slider-control {
-    flex-basis: 100%;
-    max-inline-size: 100%;
-    order: 2;
-  }
-  .js-yocost-controls > .js-debug-resolution-label {
-    order: 3;
-  }
+@container (max-width: 20rem) {
   .js-yocost-controls > button {
     order: 1;
   }
@@ -1342,6 +1458,9 @@
   height: 100%;
   min-height: 104px;
   border-block-end: 1px solid var(--line);
+  /* Vertical motion belongs to page scrolling; the shared gesture policy arms chart
+     zoom only after touch movement proves horizontal or becomes a short hold. */
+  touch-action: pan-y;
 }
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-line-chart,
 .js-debug-chart[data-js-debug-chart="cpu"] .js-debug-y-axis {
@@ -1396,9 +1515,6 @@
   animation-timing-function: var(--status-pulse-timing);
   animation-iteration-count: infinite;
   animation-direction: normal;
-}
-body.theme-light .js-debug-live-pulse.heartbeat-pulse {
-  fill: rgb(var(--active-accent-rgb) / 0.1);
 }
 .js-debug-hover-line {
   opacity: 0;
@@ -1997,27 +2113,13 @@ body.theme-light .js-debug-live-pulse.heartbeat-pulse {
   padding: 0;
   vertical-align: 0;
 }
-.changes-meta-separator {
-  color: rgba(174, 184, 199, 0.62);
-}
 .changes-diff-add {
   color: var(--30-preferences-changes-changes-diff-add-fg-43);
-  font-weight: 800;
-}
-.changes-diff-add-neutral {
-  color: var(--muted);
   font-weight: 800;
 }
 .changes-diff-remove {
   color: var(--30-preferences-changes-changes-diff-remove-fg-44);
   font-weight: 800;
-}
-.changes-diff-file-label {
-  color: var(--muted);
-  font-weight: 700;
-}
-.changes-count-badge {
-  margin-inline-start: var(--space-5);
 }
 .preferences-path-row {
   display: grid;

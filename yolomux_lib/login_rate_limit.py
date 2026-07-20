@@ -77,10 +77,10 @@ from pathlib import Path
 from typing import Any
 from typing import Callable
 
-from .atomic_file import begin_wal_migration
-from .atomic_file import load_or_create_secret_key
-from .atomic_file import open_wal_database
-from .atomic_file import open_wal_session
+from .infra.atomic_file import begin_wal_migration
+from .infra.atomic_file import load_or_create_secret_key
+from .infra.atomic_file import open_wal_database
+from .infra.atomic_file import open_wal_session
 
 
 # --- Centrally owned, validated policy defaults ---------------------------------

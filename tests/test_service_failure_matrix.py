@@ -6,8 +6,6 @@ from concurrent.futures.process import BrokenProcessPool
 
 from yolomux_lib import approvald
 from yolomux_lib import jobd
-from yolomux_lib import statsd
-from yolomux_lib.local_services import stats_store
 from yolomux_lib.local_services.registry import LOCAL_SERVICE_BACKOFF_SECONDS
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
@@ -18,14 +16,11 @@ SERVICE_FAILURE_MATRIX = [
     ("connect_failure", "registry", "failed spawn records backoff and visible status"),
     ("crash_before_work", "registry", "exited child does not spin restarts"),
     ("crash_during_work", "jobd", "broken executor marks the job failed"),
-    ("crash_after_work", "statsd", "failed transaction preserves last committed rows"),
     ("hang", "jobd", "timed-out running work keeps its slot until worker exit"),
     ("deadline", "jobd", "expired queued work fails before dispatch"),
     ("queue_full", "jobd", "saturated queue rejects new work"),
     ("stale_generation", "jobd", "newer generation supersedes stale queued work"),
     ("protocol_config_mismatch", "registry", "wrong protocol version stays unhealthy"),
-    ("disk_full", "statsd", "oversize durable row rolls back"),
-    ("corrupt_db", "statsd", "status stays visible when SQLite cannot open"),
     ("parent_death", "registry", "dead service record is removed before restart"),
     ("sleep_time_jump", "registry", "backoff uses monotonic deadlines"),
     ("approval_no_replay", "approvald", "shutdown/restart does not recreate target workers"),
@@ -70,14 +65,11 @@ def test_service_failure_matrix_names_every_required_cell():
         "connect_failure",
         "crash_before_work",
         "crash_during_work",
-        "crash_after_work",
         "hang",
         "deadline",
         "queue_full",
         "stale_generation",
         "protocol_config_mismatch",
-        "disk_full",
-        "corrupt_db",
         "parent_death",
         "sleep_time_jump",
         "approval_no_replay",
@@ -208,34 +200,6 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
     running.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
     service._pump()
     service._on_shutdown()
-
-
-def test_statsd_failure_rows_preserve_committed_state_and_visible_status(tmp_path):
-    store = stats_store.StatsStore(tmp_path / "stats.sqlite3")
-    good = stats_store.empty_bucket(100, 1)
-    good["sequence"] = 1
-    store.upsert_bucket(good)
-    too_large = stats_store.empty_bucket(101, 1)
-    too_large["clients"]["browser-a"] = {"blob": "x" * (stats_store.STATS_STORE_MAX_JSON_BYTES + 1)}
-
-    try:
-        store.replace_buckets([too_large])
-    except ValueError as exc:
-        assert "too large" in str(exc)
-    else:
-        raise AssertionError("oversize row should fail")
-
-    assert store.query_buckets() == [good]
-    store.close()
-
-    corrupt_path = tmp_path / "corrupt.sqlite3"
-    corrupt_path.write_bytes(b"not sqlite")
-    service = statsd.PersistentStatsService(tmp_path / "statsd.sock", corrupt_path)
-    status = service.common_status()
-
-    assert status["ok"] is True
-    assert status["cache"]["rows"] == 0
-    assert "not a database" in status["last_failure"]
 
 
 def test_approvald_live_socket_status_and_shutdown_do_not_replay_actions(tmp_path, monkeypatch):

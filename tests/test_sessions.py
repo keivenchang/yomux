@@ -35,8 +35,8 @@ def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
 def test_classify_agent_requires_an_agent_entry_point():
     assert sessions.classify_agent("/Users/me/.local/bin/claude --resume abc") == "claude"
     assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
-    assert sessions.classify_agent("python3 tools/claude.py --mock") == "claude"
-    assert sessions.classify_agent("python3 tools/codex.py --mock") == "codex"
+    assert sessions.classify_agent("python3 tools/agent_clients/claude.py --mock") == "claude"
+    assert sessions.classify_agent("python3 tools/agent_clients/codex.py --mock") == "codex"
     assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
     assert sessions.classify_agent("python3 -m pytest -k codex") is None
     assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
@@ -209,7 +209,85 @@ def test_find_transcript_by_session_id_caches_glob(tmp_path, monkeypatch):
     assert sessions.find_transcript_by_session_id(root, "session-123") == transcript
     assert sessions.find_transcript_by_session_id(root, "session-123") == transcript
 
-    assert glob_calls == ["**/session-123.jsonl"]
+    # The lookup resolves through the per-directory catalog now; the recursive
+    # glob of the whole projects tree is retired.
+    assert glob_calls == []
+
+
+def test_read_claude_agent_prefers_latest_transcript_cwd(tmp_path):
+    clear_transcript_lookup_cache()
+    claude_root = tmp_path / ".claude"
+    sessions_root = claude_root / "sessions"
+    projects_root = claude_root / "projects"
+    project_root = projects_root / "-home-user"
+    sessions_root.mkdir(parents=True)
+    project_root.mkdir(parents=True)
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    home.mkdir()
+    repo.mkdir()
+    transcript = project_root / "session-120.jsonl"
+    transcript.write_text(
+        "\n".join([
+            json.dumps({"type": "user", "cwd": str(home), "sessionId": "session-120"}),
+            json.dumps({
+                "type": "assistant",
+                "cwd": str(repo),
+                "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}]},
+                "sessionId": "session-120",
+            }),
+        ]),
+        encoding="utf-8",
+    )
+    (sessions_root / "101.json").write_text(json.dumps({
+        "pid": 101,
+        "sessionId": "session-120",
+        "cwd": str(home),
+        "status": "busy",
+    }), encoding="utf-8")
+
+    agent = sessions.read_claude_agent(
+        "120",
+        _pane(101),
+        ProcessInfo(pid=101, ppid=100, command="claude"),
+        sessions_root=sessions_root,
+        projects_root=projects_root,
+    )
+
+    assert agent.transcript == str(transcript)
+    assert agent.cwd == str(repo)
+
+
+def test_lightweight_status_discovery_skips_transcript_and_process_path_enrichment(monkeypatch, tmp_path):
+    pane = _pane(100)
+    processes = {
+        100: ProcessInfo(pid=100, ppid=1, command="bash"),
+        101: ProcessInfo(pid=101, ppid=100, command="claude"),
+    }
+    sessions_root = tmp_path / "sessions"
+    sessions_root.mkdir()
+    (sessions_root / "101.json").write_text(json.dumps({"sessionId": "session-101", "cwd": "/repo", "status": "busy"}), encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(sessions, "list_tmux_panes", lambda: ([pane], None))
+    monkeypatch.setattr(sessions, "list_processes", lambda: (processes, None))
+    monkeypatch.setattr(sessions, "find_transcript_by_session_id", lambda *_args: calls.append("transcript") or None)
+    monkeypatch.setattr(sessions, "claude_transcript_latest_cwd", lambda *_args: calls.append("tail") or None)
+    original_select = sessions.select_claude_agent
+    monkeypatch.setattr(
+        sessions,
+        "select_claude_agent",
+        lambda session, item, candidates, *, enrich_paths=True: original_select(
+            session, item, candidates, sessions_root=sessions_root, projects_root=tmp_path / "projects", enrich_paths=enrich_paths,
+        ),
+    )
+
+    discovered, errors = sessions.discover_status_sessions(["1"])
+
+    assert errors == []
+    agent = discovered["1"].agents[0]
+    assert (agent.kind, agent.pid, agent.pane_target, agent.model, agent.session_id) == ("claude", 101, pane.target, None, "session-101")
+    assert agent.cwd == "/repo"
+    assert calls == []
 
 
 def test_select_claude_agent_follows_daemon_delegated_session(tmp_path):
@@ -596,7 +674,7 @@ def test_pane_process_label_recognizes_merged_mock_entrypoints():
         _pane(100),
         [
             ProcessInfo(pid=100, ppid=1, command="bash"),
-            ProcessInfo(pid=321, ppid=100, command="python3 tools/codex.py --mock"),
+            ProcessInfo(pid=321, ppid=100, command="python3 tools/agent_clients/codex.py --mock"),
         ],
     )
     assert label == "codex"
@@ -606,7 +684,7 @@ def test_pane_process_label_recognizes_merged_mock_entrypoints():
         _pane(100),
         [
             ProcessInfo(pid=100, ppid=1, command="bash"),
-            ProcessInfo(pid=654, ppid=100, command="python3 tools/claude.py --mock"),
+            ProcessInfo(pid=654, ppid=100, command="python3 tools/agent_clients/claude.py --mock"),
         ],
     )
     assert label == "claude"
@@ -641,3 +719,148 @@ def test_list_processes_uses_portable_command_field_for_macos_wrappers(monkeypat
         ppid=100,
         command="/Users/me/.local/bin/claude --dangerously-skip-permissions",
     )
+
+
+def test_rollout_catalog_relists_only_changed_directories(tmp_path, monkeypatch):
+    """A warm candidate scan must not re-list every dated directory: unchanged
+    directories are served from the per-directory mtime cache, and a new rollout
+    appears because only ITS day directory re-lists."""
+    root = tmp_path / "sessions"
+    day_one = root / "2026" / "07" / "15"
+    day_two = root / "2026" / "07" / "16"
+    day_one.mkdir(parents=True)
+    day_two.mkdir(parents=True)
+    (day_one / "rollout-2026-07-15T01-old.jsonl").write_text("{}\n", encoding="utf-8")
+    (day_two / "rollout-2026-07-16T01-new.jsonl").write_text("{}\n", encoding="utf-8")
+
+    sessions._TRANSCRIPT_DIR_CATALOG.clear()
+    scans = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path):
+        scans.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(sessions.os, "scandir", counting_scandir)
+    first = {path.name for path in sessions._codex_rollout_files(root)}
+    assert first == {"rollout-2026-07-15T01-old.jsonl", "rollout-2026-07-16T01-new.jsonl"}
+    cold_scans = len(scans)
+    assert cold_scans >= 5  # root + year + month + two day dirs
+
+    # Warm, unchanged tree: zero directory listings (stats only).
+    scans.clear()
+    assert {path.name for path in sessions._codex_rollout_files(root)} == first
+    assert scans == []
+
+    # A new rollout bumps only its day directory's mtime -> exactly one re-list.
+    (day_two / "rollout-2026-07-16T02-newer.jsonl").write_text("{}\n", encoding="utf-8")
+    scans.clear()
+    warm = {path.name for path in sessions._codex_rollout_files(root)}
+    assert "rollout-2026-07-16T02-newer.jsonl" in warm
+    assert scans == [str(day_two)]
+
+
+def test_recent_claude_candidates_are_top_level_bounded_and_mtime_aware(tmp_path):
+    project = tmp_path / "-Users-someone-repo"
+    project.mkdir()
+    files = {name: project / f"{name}.jsonl" for name in ("a", "b", "c", "d")}
+    for index, path in enumerate(files.values(), 1):
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (index, index))
+    subagent = project / "a" / "subagents" / "agent-newer.jsonl"
+    subagent.parent.mkdir(parents=True)
+    subagent.write_text("{}\n", encoding="utf-8")
+    os.utime(subagent, (100, 100))
+    sessions._TRANSCRIPT_DIR_CATALOG.clear()
+
+    candidates = sessions.recent_claude_transcript_candidates(project, limit=2)
+
+    assert [path.name for path in candidates] == ["d.jsonl", "c.jsonl"]
+    assert subagent not in candidates
+    files["a"].write_text("{}\n{}\n", encoding="utf-8")
+    os.utime(files["a"], (200, 200))
+    assert [path.name for path in sessions.recent_claude_transcript_candidates(project, limit=2)] == [
+        "d.jsonl", "c.jsonl", "a.jsonl",
+    ]
+
+
+def test_recent_codex_candidate_order_is_unchanged_by_shared_selector(tmp_path):
+    root = tmp_path / "sessions"
+    day = root / "2026" / "07" / "16"
+    day.mkdir(parents=True)
+    files = {
+        name: day / f"rollout-{name}.jsonl"
+        for name in ("a", "b", "c", "d")
+    }
+    for index, path in enumerate(files.values(), 1):
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (index, index))
+    os.utime(files["a"], (100, 100))
+    sessions._TRANSCRIPT_DIR_CATALOG.clear()
+
+    assert [path.name for path in sessions.recent_codex_transcript_candidates(root, limit=2)] == [
+        "rollout-d.jsonl", "rollout-c.jsonl", "rollout-a.jsonl",
+    ]
+
+
+def test_claude_session_id_lookup_uses_catalog_not_recursive_glob(tmp_path, monkeypatch):
+    """find_transcript_by_session_id must resolve through the shared per-directory
+    catalog: a warm repeat lookup re-lists no directories, and the recursive
+    Path.glob is never used."""
+    projects = tmp_path / "projects"
+    slug = projects / "-Users-someone-repo"
+    slug.mkdir(parents=True)
+    (slug / "abc-123.jsonl").write_text("{}\n", encoding="utf-8")
+
+    sessions._TRANSCRIPT_DIR_CATALOG.clear()
+    sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+    monkeypatch.setattr(Path, "glob", lambda *a, **k: (_ for _ in ()).throw(AssertionError("recursive glob is retired for claude session-id lookup")))
+
+    found = sessions.find_transcript_by_session_id(projects, "abc-123")
+    assert found == slug / "abc-123.jsonl"
+    assert sessions.find_transcript_by_session_id(projects, "missing") is None
+
+    # Warm catalog: after the 2s lookup cache expires, the re-resolve lists nothing.
+    sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
+    scans = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path):
+        scans.append(str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(sessions.os, "scandir", counting_scandir)
+    assert sessions.find_transcript_by_session_id(projects, "abc-123") == slug / "abc-123.jsonl"
+    assert scans == []
+
+
+def test_codex_transcript_meta_caches_by_identity_but_not_empty_meta(tmp_path):
+    """session_meta never changes after it is written, so it is cached by file
+    identity (no re-read per stats pass) — but an empty result (meta line not
+    yet flushed) must keep re-reading until the thread id appears."""
+    rollout = tmp_path / "rollout-2026-07-16T01-abc.jsonl"
+    rollout.write_text("", encoding="utf-8")
+    sessions._CODEX_TRANSCRIPT_META_CACHE.clear()
+    assert sessions.codex_transcript_meta(rollout) == ("", "")
+
+    meta_line = json.dumps({"type": "session_meta", "payload": {"id": "thread-1", "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-9"}}}}})
+    rollout.write_text(meta_line + "\n", encoding="utf-8")
+    assert sessions.codex_transcript_meta(rollout) == ("thread-1", "parent-9")
+
+    # Cached by identity: further appends read zero header bytes.
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "turn"}) + "\n")
+    reads = []
+    original_open = Path.open
+
+    def counting_open(self, *args, **kwargs):
+        if self == rollout:
+            reads.append(args)
+        return original_open(self, *args, **kwargs)
+
+    Path.open = counting_open
+    try:
+        assert sessions.codex_transcript_meta(rollout) == ("thread-1", "parent-9")
+    finally:
+        Path.open = original_open
+    assert reads == []

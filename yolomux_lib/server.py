@@ -31,12 +31,13 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
+from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 import yaml
 
 from . import filesystem
-from . import yolo_rules
+from .approval import yolo_rules
 from .app import TmuxWebtermApp
 from .common import DEFAULT_COLS
 from .common import DEFAULT_ROWS
@@ -55,23 +56,24 @@ from .filesystem import FilesystemError
 from .http_routes import dispatch_http_route
 from .http_routes import parse_query_float
 from .http_routes import parse_query_int
-from .http_routes import parse_repo_refs_param
+from .http_routes import parse_repo_refs_param  # noqa: F401 - compatibility re-export
 from .http_routes import query_bool
-from .http_routes import query_list
 from .http_routes import query_one
 from .http_routes import route_for_request
 from .http_routes import SHARE_ACCESS_NONE
-from .tmux_utils import tmux
-from .tmux_utils import tmux_command
-from .tmux_utils import tmux_session_client_rows
-from .tmux_utils import tmux_session_target
-from .transcripts import codex_event_text
-from .transcripts import strip_terminal_query_responses
-from .transcripts import transcript_items_from_raw_line
+from .tmux.tmux_utils import tmux
+from .tmux.tmux_utils import tmux_command
+from .tmux.tmux_utils import tmux_session_client_rows
+from .tmux.tmux_utils import tmux_session_target
+from .observability.transcripts import codex_event_text
+from .observability.transcripts import strip_terminal_query_responses
+from .observability.transcripts import transcript_items_from_raw_line
 from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
 from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
 from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
+from .stats_current import http as stats_current_http
+from .stats_current import protocol as stats_current_protocol
 from .locales import resolve_locale_preference
 from .locales import user_message_payload
 from .web import html_page
@@ -99,6 +101,7 @@ SHARE_VIEWER_OVERFLOW_LIMIT = 3
 SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
 SHARE_VIEWER_SEND_TIMEOUT_SECONDS = 5.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
+DEV_RELOAD_POLL_SECONDS = 2.0
 TMUX_ATTACH_REFRESH_DELAYS_SECONDS = (0.1, 0.5)
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
@@ -218,7 +221,7 @@ SHARE_MIRROR_DEBUG_NAMES = {
 }
 SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
 MAX_FS_BATCH_REQUESTS = 64
-TOKEN_LOG_RE = re.compile(r"([?&]token=)[^&\s\"]+")
+TOKEN_LOG_RE = re.compile(r"([?&](?:token|client_id)=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
 STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
@@ -982,6 +985,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
         return f"{method} {path}"[:120]
 
+    def measurement_scope(self) -> str:
+        """Return a generic in-memory scope without retaining a browser marker."""
+        headers = getattr(self, "headers", {})
+        marker = str(headers.get("X-YOLOmux-Measurement") or "") if hasattr(headers, "get") else ""
+        if marker.startswith("capture-") and len(marker) == 40 and all(char in "0123456789abcdef" for char in marker[8:]):
+            return "capture"
+        return ""
+
     def record_http_response_bytes(
         self,
         status: HTTPStatus | int,
@@ -1001,6 +1012,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
             "content_type": content_type_base(content_type),
         }
+        measurement_scope = self.measurement_scope()
+        if measurement_scope:
+            details["measurement_scope"] = measurement_scope
         request_started = getattr(self, "_http_request_started_at", None)
         dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
         response_started = time.perf_counter()
@@ -1686,6 +1700,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         response_payload = {"responses": responses}
         recorder = getattr(getattr(getattr(self, "server", None), "app", None), "record_performance_sample", None)
         if callable(recorder):
+            measurement_scope = self.measurement_scope()
+            details = {"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)}
+            if measurement_scope:
+                details["measurement_scope"] = measurement_scope
             recorder(
                 "fs-batch",
                 "api",
@@ -1696,7 +1714,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 cache_status="computed",
                 owner_role="client",
                 count=len(requests),
-                details={"ops": json.dumps(op_counts, sort_keys=True), "paths": json.dumps(path_samples)},
+                details=details,
             )
         self.write_json(response_payload)
 
@@ -1818,7 +1836,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             if str(client_bundle_revision or "") != last:
                 self.write_sse_json("reload", {"signature": last})
             while True:
-                time.sleep(0.5)
+                time.sleep(DEV_RELOAD_POLL_SECONDS)
                 current = self.dev_bundle_signature()
                 if current != last:
                     last = current
@@ -1834,7 +1852,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.send_auth_cookie_if_needed()
         self.end_headers()
-        subscriber_id, subscriber_queue = self.server.app.client_events.subscribe(
+        subscriber_id, _subscriber_queue = self.server.app.client_events.subscribe(
             channels=channels or None,
             client_id=client_id,
         )
@@ -1843,22 +1861,106 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         if hasattr(self.server.app, "wake_client_event_watcher"):
             self.server.app.wake_client_event_watcher()
         try:
-            self.write_sse_json("ready", {"time": time.time()})
+            client_event_snapshot = self.server.app.client_events.ready_snapshot(subscriber_id)
+            self.write_sse_json("ready", {
+                "time": time.time(),
+                "epoch": client_event_snapshot["epoch"],
+                "resource_revisions": client_event_snapshot["resource_revisions"],
+            })
             while True:
                 try:
-                    event = subscriber_queue.get(timeout=15.0)
+                    event = self.server.app.client_events.next_event(subscriber_id, timeout=15.0)
                 except queue.Empty:
+                    if hasattr(self.server.app, "touch_client_watch_descriptor"):
+                        self.server.app.touch_client_watch_descriptor(client_id)
                     self.write_sse_json("ping", {"time": time.time()})
+                    self.server.app.client_events.record_heartbeat()
                     continue
                 self.write_sse_json(str(event.get("type") or "event"), event)
         except OSError:
             return
         finally:
             self.server.app.client_events.unsubscribe(subscriber_id)
+            if hasattr(self.server.app, "client_event_subscriber_disconnected"):
+                self.server.app.client_event_subscriber_disconnected(client_id)
             if hasattr(self.server.app, "wake_client_event_watcher"):
                 self.server.app.wake_client_event_watcher()
             if hasattr(self.server.app, "stop_client_event_watcher_if_idle"):
                 self.server.app.stop_client_event_watcher_if_idle()
+
+    def stream_stats_current_delta(
+        self,
+        raw_query: str,
+        *,
+        authenticated_username: str,
+    ) -> None:
+        try:
+            cursor = stats_current_http.parse_http_delta_query(raw_query)
+        except stats_current_protocol.UnsupportedRequest as error:
+            self.write_json(error.response, status=HTTPStatus.BAD_REQUEST)
+            return
+        result = self.server.app.stats_current_http.delta_stream(
+            raw_query,
+            authenticated_username=authenticated_username,
+        )
+        if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+            self.write_json(
+                result.metadata,
+                status=result.status,
+            )
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
+        self.end_headers()
+        cache_generation = cursor.after_cache_generation
+        revision_number = cursor.after_revision
+        cadence_seconds = stats_current_protocol.live_cadence_seconds(
+            cursor.resolution_seconds
+        )
+        waiter = threading.Event()
+        next_deadline = time.monotonic() + cadence_seconds
+        try:
+            while True:
+                if result.status == HTTPStatus.OK:
+                    self.write_sse_bytes("delta", result.body)
+                    cache_generation = int(result.metadata["cache_generation"])
+                    revision_number = int(result.metadata["revision"])
+                else:
+                    payload = result.metadata
+                    cache_generation = int(
+                        payload.get("cache_generation") or cache_generation
+                    )
+                    self.write_sse_json("ready", {
+                        "cache_generation": cache_generation,
+                        "revision": revision_number,
+                    })
+                waiter.wait(max(0.0, next_deadline - time.monotonic()))
+                now = time.monotonic()
+                while next_deadline <= now:
+                    next_deadline += cadence_seconds
+                query = urlencode({
+                    "range_seconds": cursor.range_seconds,
+                    "resolution_seconds": cursor.resolution_seconds,
+                    "client_id": cursor.client_id,
+                    "after_cache_generation": cache_generation,
+                    "after_revision": revision_number,
+                })
+                result = self.server.app.stats_current_http.delta_stream(
+                    query,
+                    authenticated_username=authenticated_username,
+                )
+                if result.status == HTTPStatus.CONFLICT:
+                    self.write_sse_json("repair", result.metadata)
+                    return
+                if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+                    self.write_sse_json("unavailable", result.metadata)
+                    return
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            return
 
     def stream_context_items(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1899,6 +2001,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     "path": str(path),
                     "items": items,
                     "pending": bool(payload.get("pending")),
+                    "stale": bool(payload.get("stale")),
                     "agent": payload.get("agent"),
                     "errors": payload.get("errors", []),
                 },
@@ -2171,6 +2274,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.wfile.write(b"\n")
         self.wfile.flush()
 
+    def write_sse_bytes(self, event: str, value: bytes) -> None:
+        """Write an already-validated compact JSON payload without decoding it."""
+
+        if not isinstance(value, bytes) or not value:
+            raise ValueError("SSE byte payload must be non-empty")
+        event_name = str(event or "").strip()
+        if not event_name.isascii() or not event_name or any(
+            character.isspace() or ord(character) < 33 for character in event_name
+        ):
+            raise ValueError("SSE event name is invalid")
+        self.wfile.write(f"event: {event_name}\n".encode("ascii"))
+        for line in value.splitlines() or [b""]:
+            self.wfile.write(b"data: " + line + b"\n")
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
     def write_html(self, body: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = body.encode("utf-8")
         self.send_response(status)
@@ -2266,7 +2385,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        content_type = "application/json; charset=utf-8"
         encode_started = time.perf_counter()
         data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         json_encode_ms = (time.perf_counter() - encode_started) * 1000
@@ -2764,6 +2882,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             os.write(master_fd, payload)
             return
         msg_type = message.get("type")
+        if readonly and msg_type != "refresh":
+            return
         if msg_type == "refresh":
             refresh_tmux_session_clients(session)
             # A refresh carrying a window-switch transaction id gets a structured TEXT-frame
@@ -2778,8 +2898,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 except OSError:
                     pass
         elif msg_type == "input":
-            if readonly:
-                return
             data = message.get("data")
             if isinstance(data, str):
                 filtered = strip_terminal_query_responses(data)
@@ -2788,8 +2906,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     # Queue input activity outside the PTY echo loop (readonly already returned above).
                     self.server.app.record_user_input(session, len(filtered), data=filtered)
         elif msg_type == "resize":
-            if readonly:
-                return
             if message.get("foreground") is False:
                 return
             dimensions = ws_resize_dimensions(message, DEFAULT_ROWS, DEFAULT_COLS)
@@ -2814,8 +2930,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if callable(recorder) and (size_changed or authority_changed):
                     recorder(session, rows, cols)
         elif msg_type == "tmux-scroll":
-            if readonly:
-                return
             direction = message.get("direction")
             lines = message.get("lines")
             if isinstance(direction, str) and isinstance(lines, int):

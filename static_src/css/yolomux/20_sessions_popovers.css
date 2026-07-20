@@ -20,11 +20,6 @@
   overflow: visible;
   white-space: nowrap;
 }
-.session-label-agent {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-}
 .session-button-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -524,19 +519,15 @@ html.status-pulse-disabled .agent-window-agent-icon--active {
   transform-origin: center;
 }
 .ci-indicator {
-  flex: 0 0 auto;
   max-width: none;
   min-width: 17px;
   height: 14px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   padding: 0 var(--space-2);
   border-radius: 0;
   border: 1px solid var(--divider);
+  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
   color: var(--pr-status-closed);
   background: var(--neutral-status-bg);
-  font: 800 var(--ui-font-size-3xs)/1 var(--mono-font);
 }
 body.tab-meta-hidden .pane-tab .tab-symbol,
 body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
@@ -657,9 +648,9 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
   box-shadow: var(--20-sessions-popovers-session-popover-shadow-27);
   transform: translateY(-2px);
   transition:
-    opacity var(--motion-interaction-fast) ease var(--popover-hide-delay),
-    transform var(--motion-interaction-fast) ease var(--popover-hide-delay),
-    visibility 0s linear calc(var(--popover-hide-delay) + var(--motion-interaction-fast));
+    opacity var(--motion-interaction-fast) ease 0s,
+    transform var(--motion-interaction-fast) ease 0s,
+    visibility 0s linear var(--motion-interaction-fast);
 
 
   border-color: var(--20-sessions-popovers-session-popover-border-26);
@@ -969,23 +960,6 @@ body.tab-meta-hidden .tmux-pane-tab-token .tab-symbol {
 
 
   color: var(--20-sessions-popovers-state-legend-item-fg-35);
-}
-.popover-desc {
-  line-height: 1.35;
-
-
-  color: var(--20-sessions-popovers-popover-desc-fg-38);
-}
-.popover-desc-title {
-  font-weight: 700;
-}
-.popover-desc-body {
-  margin-top: var(--space-4);
-
-  color: var(--20-sessions-popovers-popover-desc-body-fg-34);
-}
-.popover-desc-line + .popover-desc-line {
-  margin-top: var(--space-4);
 }
 .popover-value a,
 .branch-link,

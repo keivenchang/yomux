@@ -1,0 +1,264 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+"""Current-only catalog pricing projection contracts."""
+
+from contextlib import nullcontext
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from yolomux_lib.pricing_catalog import PricingCatalog, ResolvedRate
+from yolomux_lib.stats_current import materializer, pricing, storage
+from yolomux_lib.stats_current import service as service_module
+
+
+def _atom(
+    *, event_id="usage-1", model="gpt-5.6-sol", quantity=1_000_000,
+    observed_at=None, pricing_profile="default",
+):
+    timestamp = _observed_at() if observed_at is None else observed_at
+    return storage.UsageAtom(event_id, "output", "text", "none", "tokens", timestamp, {
+        "quantity": quantity,
+        "provider": "openai",
+        "model": model,
+        "agent_id": "agent",
+        "pricing_profile": pricing_profile,
+        "telemetry_complete": True,
+    })
+
+
+def _observed_at():
+    return datetime(2026, 7, 11, tzinfo=timezone.utc).timestamp()
+
+
+def _snapshot(*atoms):
+    return storage.StoreSnapshot(
+        storage.SchemaMetadata(5, 23, 1, 1), (), (), atoms, (), (),
+    )
+
+
+def _build(snapshot, resolver, cache_generation):
+    observed_until = _observed_at() + 1
+    return materializer.build_generation(
+        snapshot,
+        source_generation=1,
+        cache_generation=cache_generation,
+        generated_at=observed_until,
+        observed_until=observed_until,
+        price_resolver=resolver,
+    )
+
+
+def _cost(generation):
+    bucket = next(
+        bucket
+        for bucket in generation.layer(1).buckets
+        if bucket.start == int(_observed_at())
+    )
+    return next(item.value for item in bucket.series if item.name == "cost_micro_usd")
+
+
+def _api_list_cost(generation):
+    bucket = next(
+        bucket
+        for bucket in generation.layer(1).buckets
+        if bucket.start == int(_observed_at())
+    )
+    return next(
+        item.value for item in bucket.series
+        if item.name == "api_list_cost_micro_usd"
+    )
+
+
+def _total_cost(generation):
+    return sum(
+        item.value
+        for bucket in generation.layer(1).buckets
+        for item in bucket.series
+        if item.name == "cost_micro_usd"
+    )
+
+
+class CountingCatalog:
+    def __init__(self):
+        self.status_calls = 0
+        self.resolve_calls = 0
+
+    def status(self):
+        self.status_calls += 1
+        return {"catalog_revision": 7}
+
+    def resolve_rate(self, **_fields):
+        self.resolve_calls += 1
+        return ResolvedRate(
+            "openai", "gpt-5.6-sol", "gpt-5.6-sol", "output", "text",
+            "none", "tokens", 1_000_000, Decimal("30.00"),
+            "2026-07-09T00:00:00Z", "seed", "", 7,
+        )
+
+
+class ProfileCatalog(CountingCatalog):
+    def __init__(self):
+        super().__init__()
+        self.profiles = []
+
+    def resolve_rate(self, **fields):
+        self.resolve_calls += 1
+        profile = fields["profile"]
+        self.profiles.append(profile)
+        return ResolvedRate(
+            "openai", "gpt-5.6-sol", "gpt-5.6-sol", "output", "text",
+            "none", "tokens", 1_000_000,
+            Decimal("15.00" if profile == "batch" else "30.00"),
+            "2026-07-09T00:00:00Z", "seed", "", 7,
+        )
+
+
+def test_seed_priced_model_projects_exact_nonzero_integer_micro_usd(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+
+    projection = resolver(_atom())
+
+    assert projection.micro_usd == 30_000_000
+    assert projection.api_list_micro_usd == 30_000_000
+    assert isinstance(projection.micro_usd, int)
+    assert projection.evidence is not None
+    assert projection.evidence.catalog_model == "gpt-5.6-sol"
+    assert projection.evidence.catalog_revision == 3
+    assert projection.evidence.rate_usd == "30.00"
+    assert projection.evidence.rate_scale == 1_000_000
+    assert projection.evidence.source_kind == "seed"
+    assert projection.evidence.source_url.startswith("https://developers.openai.com/")
+    assert _cost(_build(_snapshot(_atom()), resolver, 1)) == 30_000_000
+    assert _api_list_cost(_build(_snapshot(_atom()), resolver, 2)) == 30_000_000
+
+
+def test_subscription_profile_is_zero_marginal_with_api_list_counterfactual(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atom = _atom(pricing_profile="subscription")
+
+    projection = resolver(atom)
+    generation = _build(_snapshot(atom), resolver, 1)
+    bucket = next(
+        item for item in generation.layer(1).buckets
+        if item.start == int(_observed_at())
+    )
+    report = materializer.build_cost_report(
+        materializer.slice_generation(generation, 300, 1),
+    )
+
+    assert projection.micro_usd == 0
+    assert projection.api_list_micro_usd == 30_000_000
+    assert projection.priced is True
+    assert projection.evidence is not None
+    assert _cost(generation) == 0
+    assert _api_list_cost(generation) == 30_000_000
+    assert bucket.cost_detail.priced.tokens == 1_000_000
+    assert bucket.cost_detail.evidence[0].pricing_profile == "subscription"
+    assert bucket.cost_detail.evidence[0].micro_usd == 0
+    assert bucket.cost_detail.evidence[0].api_list_micro_usd == 30_000_000
+    assert report["total_tokens"] == 1_000_000
+    assert report["total_micro_usd"] == 0
+    assert report["total_api_list_micro_usd"] == 30_000_000
+    assert report["priced"] == {"atoms": 1, "tokens": 1_000_000}
+    assert report["evidence"][0]["pricing_profile"] == "subscription"
+    assert report["evidence"][0]["micro_usd"] == 0
+    assert report["evidence"][0]["api_list_micro_usd"] == 30_000_000
+
+
+def test_nondefault_catalog_profile_keeps_its_marginal_rate_evidence():
+    catalog = ProfileCatalog()
+    resolver = pricing.UsagePriceProjector(
+        catalog, revision_check_seconds=60, monotonic=lambda: 10.0,
+    )
+
+    projection = resolver(_atom(pricing_profile="batch"))
+
+    assert projection.micro_usd == 15_000_000
+    assert projection.api_list_micro_usd == 30_000_000
+    assert projection.evidence is not None
+    assert projection.evidence.rate_usd == "15.00"
+    assert catalog.profiles == ["default", "batch"]
+
+
+def test_unknown_model_remains_unpriced_instead_of_using_a_guess(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+
+    projection = resolver(_atom(model="not-a-catalog-model"))
+
+    assert projection.micro_usd is None
+    assert projection.api_list_micro_usd is None
+    assert projection.evidence is None
+
+
+def test_known_sub_micro_usd_cost_rounds_honestly_to_zero(tmp_path):
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+    atom = storage.UsageAtom(
+        "tiny", "input", "text", "read", "tokens", _observed_at(), {
+            "quantity": 1,
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "agent_id": "agent",
+            "telemetry_complete": True,
+        },
+    )
+
+    projection = resolver(atom)
+
+    assert projection.micro_usd == 0
+    assert projection.api_list_micro_usd == 0
+    assert projection.evidence is not None
+
+
+def test_warm_full_reconciliation_reuses_effective_rate_window():
+    catalog = CountingCatalog()
+    resolver = pricing.UsagePriceProjector(
+        catalog, revision_check_seconds=60, monotonic=lambda: 10.0,
+    )
+    snapshot = _snapshot(
+        _atom(),
+        _atom(event_id="usage-2", observed_at=_observed_at() + 1),
+    )
+
+    first = _build(snapshot, resolver, 1)
+    second = _build(snapshot, resolver, 2)
+
+    assert _total_cost(first) == _total_cost(second) == 60_000_000
+    assert catalog.status_calls == 1
+    assert catalog.resolve_calls == 2
+
+
+def test_rate_dimension_cache_is_bounded_and_evicts_least_recently_used():
+    catalog = CountingCatalog()
+    resolver = pricing.UsagePriceProjector(
+        catalog,
+        max_rate_dimensions=1,
+        revision_check_seconds=60,
+        monotonic=lambda: 10.0,
+    )
+
+    resolver(_atom(model="model-a"))
+    resolver(_atom(model="model-b"))
+    resolver(_atom(model="model-a"))
+
+    assert catalog.resolve_calls == 3
+
+
+def test_current_service_default_projects_seed_priced_usage(tmp_path, monkeypatch):
+    catalog_root = tmp_path / "pricing"
+    monkeypatch.setattr(pricing, "PricingCatalog", lambda: PricingCatalog(catalog_root))
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: _observed_at() + 1,
+    )
+    reader = type("SnapshotReader", (), {
+        "pinned_snapshot": lambda self, **_kwargs: nullcontext(
+            lambda: _snapshot(_atom())
+        ),
+    })()
+
+    service._build_once(reader, True, frozenset())
+
+    assert isinstance(service.price_resolver, pricing.UsagePriceProjector)
+    assert service._cache is not None
+    assert _cost(service._cache.generation) == 30_000_000

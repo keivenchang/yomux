@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers split from 80_panes_preferences.js.
+// Shared panel layout, pane-tab shell, tmux sub-window controls, and search/history panel helpers.
 
 function renderPanels(previousActive = [], options = {}) {
   const perf = clientPerfStart('renderPanels');
@@ -847,7 +847,7 @@ function maybeLoadFileTabForPopover(tab, item) {
   if (!state?.loading) return;
   const path = fileItemPath(item);
   if (!state.loadingPromise) loadFileEditorState(path, panelNodes.get(item), item);
-  const pending = openFiles.get(path)?.loadingPromise;
+  const pending = fileState.get(path)?.loadingPromise;
   pending?.finally?.(() => refreshFilePopoversForPath(path));
 }
 
@@ -905,9 +905,11 @@ function positionPaneTabPopover(tab, popover = null) {
     ? tab.closest?.('.file-explorer-panel, .file-explorer-changes-panel')
     : null;
   const tabberPaneRect = tabberPane ? appSpaceRect(tabberPane) : null;
-  // A session detail explains the pane that owns the tab, not the tab's narrow label. Keep file
-  // previews content-sized, but let every session surface share the full owning-pane geometry.
-  const sessionPane = !tabberPane && !popover?.classList?.contains?.('file-popover')
+  // A session detail explains the pane that owns the tab, not the tab's narrow label. Prefer the
+  // owning pane width with one small bounded overflow allowance. File previews retain their
+  // existing content-sized path.
+  const filePopover = popover?.classList?.contains?.('file-popover') === true;
+  const sessionPane = !tabberPane && !filePopover
     ? paneTabPopoverOwningPane(tab)
     : null;
   const sessionPaneRect = sessionPane ? appSpaceRect(sessionPane) : null;
@@ -923,11 +925,24 @@ function positionPaneTabPopover(tab, popover = null) {
   // near-right-edge popover further left; clamping to the tab width let a wide needs-input popover
   // overflow and clip off the top-right corner.
   if (popover?.style) popover.style.height = '';
+  if (!filePopover && !useAvailableInlineWidth && popover?.style) {
+    popover.style.width = 'max-content';
+    popover.style.maxWidth = `${Math.round(maxInline)}px`;
+  }
   const measured = Math.ceil(popover?.getBoundingClientRect?.().width || 0);
   const paneGutter = sessionPaneRect ? edgeGap : 0;
+  const contentWidth = measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline;
+  const paneWidth = Math.max(0, Number(paneRect?.width) || 0);
+  const paneOverflowAllowance = Math.min(64, paneWidth * 0.15);
+  const sessionWidthLimit = paneWidth > 0 ? paneWidth + paneOverflowAllowance : maxInline;
   const width = useAvailableInlineWidth
     ? maxInline
-    : Math.min(maxInline, Math.max(0, (paneRect?.width || 0) - (2 * paneGutter)) || measured || rootCssLengthPx('--pane-tab-popover-inline-size') || maxInline);
+    : Math.min(maxInline, contentWidth, filePopover ? maxInline : sessionWidthLimit);
+  const inlineSize = `${Math.round(width)}px`;
+  if (popover?.style) {
+    popover.style.width = inlineSize;
+    popover.style.maxWidth = (!filePopover || useAvailableInlineWidth) ? inlineSize : '';
+  }
   const height = Math.ceil(popover?.getBoundingClientRect?.().height || 0);
   const blockSize = height > 0 ? `${Math.round(height)}px` : '';
   const position = clampToViewport(
@@ -939,14 +954,11 @@ function positionPaneTabPopover(tab, popover = null) {
   );
   const top = `${Math.round(position.top)}px`;
   const left = `${Math.round(position.left)}px`;
-  const inlineSize = `${Math.round(width)}px`;
   document.documentElement.style.setProperty('--pane-tab-popover-top', top);
   document.documentElement.style.setProperty('--pane-tab-popover-left', left);
   if (popover?.style) {
     popover.style.top = top;
     popover.style.left = left;
-    popover.style.width = inlineSize;
-    popover.style.maxWidth = (paneRect || useAvailableInlineWidth) ? inlineSize : '';
     if (blockSize) popover.style.height = blockSize;
     else popover.style.height = '';
   }
@@ -977,7 +989,7 @@ function searchHistoryPaneTabHtml(item = searchHistoryItemId, options = {}) {
 
 function fileEditorPaneTabHtml(item, options = {}) {
   const path = fileItemPath(item);
-  const state = openFiles.get(path) || {};
+  const state = fileState.get(path) || {};
   const owners = openFileOwnerSessionsForPath(path);
   const ownerTitle = owners.length > 1 ? t('filetab.ownersMulti', {sessions: owners.join(', ')}) : owners[0] ? t('filetab.owner', {session: owners[0]}) : '';
   const ownerText = owners.length > 1 ? t('filetab.multi') : owners[0] || '';
@@ -1267,6 +1279,10 @@ function bindPanelShell(panel, session) {
         return;
       }
       if (eventTargetIsTerminalFocusSurface(event?.target)) {
+        // enableTerminalScroll owns the tap-versus-pan decision for touch.
+        // Calling xterm.focus() on pointerdown raises the iPad keyboard before
+        // its following touchmove can claim a vertical scroll.
+        if (event.pointerType === 'touch') return;
         focusTerminalFromUserAction(session);
       } else {
         noteFileExplorerChangesSessionInteraction(session);

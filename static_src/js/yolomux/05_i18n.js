@@ -99,7 +99,8 @@ function relativeTimeFormat(secondsAgo) {
   const sec = Math.max(0, Math.round(Number(secondsAgo) || 0));
   let value;
   let unit;
-  if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
+  if (sec < 60) { value = sec; unit = 'second'; }
+  else if (sec < 3600) { value = Math.round(sec / 60); unit = 'minute'; }
   else if (sec < 86400) { value = Math.round(sec / 3600); unit = 'hour'; }
   else if (sec < 604800) { value = Math.round(sec / 86400); unit = 'day'; }
   else if (sec < 2629800) { value = Math.round(sec / 604800); unit = 'week'; }
@@ -108,6 +109,7 @@ function relativeTimeFormat(secondsAgo) {
   try {
     return new Intl.RelativeTimeFormat(i18nActiveLocale, {numeric: 'always'}).format(-value, unit);
   } catch (_) {
+    if (unit === 'second') return new Intl.RelativeTimeFormat('en', {numeric: 'always'}).format(-value, unit);
     return t(`relative.${unit}`, {count: value});
   }
 }

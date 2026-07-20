@@ -6,9 +6,11 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from .filesystem.io_ops import read_json_file
 from .common import AUTH_CONFIG_DISPLAY_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
 from .common import MAX_YOLOMUX_SESSION_TABS
+from .common import path_mtime_or_zero
 from .common import SERVER_HOSTNAME
 from .common import SERVER_STARTED_AT
 from .common import STATIC_DIR
@@ -33,12 +35,13 @@ from .locales import plural_category
 from .locales import resolve_locale_preference
 from .settings import save_settings
 from .settings import settings_payload
+from .stats_current import storage as stats_current_storage
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import agent_command
 from .workdir import available_agent_commands
 from .workdir import available_terminal_commands
-from .yolo_rules import rules_status
+from .approval.yolo_rules import rules_status
 
 
 STATIC_CONTENT_TYPES = {
@@ -102,10 +105,7 @@ def bootstrap_locale_catalogs(locale: str) -> dict:
     normalized = normalize_locale(locale)
     for code in dict.fromkeys([FALLBACK_LOCALE, normalized]):
         path = STATIC_DIR / "locales" / f"{code}.json"
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, ValueError):
-            data = {}
+        data = read_json_file(path, {}, exceptions=(OSError, ValueError))
         if isinstance(data, dict):
             catalogs[code] = data
     return catalogs
@@ -154,12 +154,7 @@ def server_plural(locale: str, key: str, count: object, **params: object) -> str
 
 def static_asset_version(asset: str) -> int:
     path = static_asset_path(asset)
-    if path is None:
-        return 0
-    try:
-        return int(path.stat().st_mtime)
-    except OSError:
-        return 0
+    return int(path_mtime_or_zero(path)) if path is not None else 0
 
 
 def static_asset_url(asset: str) -> str:
@@ -278,6 +273,12 @@ def html_page(
         "versionCommitTime": yolomux_commit_time_pt(),
         "versionCommitCount": yolomux_commit_count(),
         "settingsPayload": bootstrap_settings_payload(settings_data),
+        # This fence ships atomically with the cache-busted client bundle. An already-loaded older
+        # bundle keeps its old fence and is rejected before it can write into a newer stats store.
+        "statsWriterFence": {
+            "protocol_version": stats_current_storage.MIN_WRITER_PROTOCOL,
+            "schema_generation": stats_current_storage.SCHEMA_VERSION,
+        },
         # i18n: resolved active locale for first paint plus the canonical registry that every client
         # uses for normalization, system resolution, endonyms, and direction. The active locale's catalog (+ the en fallback) is INLINED
         # so t() resolves SYNCHRONOUSLY on the first render — the menu bar, tabs, and wordmark paint at
