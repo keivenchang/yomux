@@ -116,10 +116,11 @@ test('CPU promotes the newest sampled owner instead of covering it with a duplic
   assert.equal(context.result[0].linePattern, 'solid');
 });
 
-test('all established chart controls and semantic renderers remain present', () => {
-  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agents', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
-    assert.ok(source.includes(`toggleLabelEn: '${label}'`), label);
-  }
+test('chart popup uses the full localized chart titles', () => {
+  const controls = sourceFunction('debugGraphChartToggleControlsHtml', 'debugGraphLayoutControlsHtml');
+  assert.match(controls, /const label = debugGraphLocalizedLabel\(group\)/);
+  assert.match(controls, /\$\{esc\(label\)\}<\/label>/);
+  assert.doesNotMatch(source, /toggleLabelEn/);
   for (const token of ['data-js-debug-range-slider', 'data-js-debug-resolution-override', 'data-js-debug-chart-layout', 'data-js-debug-chart-close']) {
     assert.ok(source.includes(token), token);
   }
@@ -127,6 +128,16 @@ test('all established chart controls and semantic renderers remain present', () 
   assert.match(css, /\.js-debug-chart/);
   assert.match(css, /\.js-debug-system-grid/);
   assert.match(css, /\.js-debug-logs-view/);
+});
+
+test('model output chart is fixed to generated output without a dimension picker', () => {
+  const english = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+  assert.equal(english['debug.graph.chart.modelTokens'], 'Model output tokens/min');
+  assert.match(source, /key: 'modelTokens'[\s\S]*dynamicTokenDimension: 'model'/);
+  assert.doesNotMatch(source, /data-js-debug-model-token-dimension-select/);
+  assert.doesNotMatch(source, /jsDebugGraphModelTokenDimension/);
+  assert.doesNotMatch(source, /debugGraphAgentTokenBucketDimensionValue/);
+  assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
 });
 
 test('macOS keeps Activity Monitor memory facts and pressure in one card', () => {
@@ -1174,6 +1185,9 @@ test('the Cost summary card renders as a ruled table sharing the report cost-tab
   // Shared report table style + scroll-wrap owner reused (no bespoke summary table style).
   assert.match(summaryFn, /<div class="js-debug-system-table-wrap js-debug-cost-table-wrap">/);
   assert.match(summaryFn, /<table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary"/);
+  // The summary joins the exact report-table content-sizing owner rather than
+  // inheriting the base system-table 100% minimum width.
+  assert.match(css, /\.js-debug-cost-usage-table-section \.js-debug-cost-table,\s*\.js-debug-cost-summary \.js-debug-cost-table\s*\{\s*inline-size: max-content;\s*max-inline-size: none;\s*min-inline-size: auto;/);
   // Header row: Usage / Tokens / Price.
   assert.match(summaryFn, /<thead><tr><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.usage', 'Usage'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.modelTokens\.label', 'Tokens'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.priceColumn', 'Price'\)\)\}<\/th><\/tr><\/thead>/);
   // Input/Cache/Output in tbody, Total in tfoot, via the shared row shape.
@@ -1199,6 +1213,33 @@ test('the Cost summary card renders as a ruled table sharing the report cost-tab
   assert.doesNotMatch(css, /\.js-debug-cost-token-count/);
 });
 
+test('the YO!cost report renders one shared always-visible column legend with translated terse glosses', () => {
+  const copyStart = source.indexOf('const debugGraphCostUsageColumnCopy = Object.freeze(');
+  const copyEnd = source.indexOf('\nfunction debugGraphCostUsageColumnHeaderAttrs(', copyStart);
+  const report = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const legend = sourceFunction('debugGraphCostUsageColumnLegendHtml', 'debugGraphCostUsageColumnHeaderAttrs');
+  assert.notEqual(copyStart, -1, 'one shared copy owner exists');
+  assert.notEqual(copyEnd, -1, 'shared copy owner precedes header attrs');
+  const copy = source.slice(copyStart, copyEnd);
+  for (const key of ['input', 'cache', 'output', 'other', 'total']) {
+    assert.match(copy, new RegExp(`${key}: Object\\.freeze\\(\\{description:`), `${key} has the long description in the shared owner`);
+    assert.match(copy, new RegExp(`debug\\.cost\\.${key}\\.gloss`), `${key} has the terse gloss in the shared owner`);
+    assert.match(legend, new RegExp(`js-debug-cost-usage-swatch--\\$\\{esc\\(key\\)\\}`), 'legend uses the matching swatch');
+  }
+  assert.match(copy, /cache reads \+ writes, combined/);
+  assert.match(report, /<p class="js-debug-cost-report-totals"[\s\S]*?\$\{debugGraphCostUsageColumnLegendHtml\(\)\}[\s\S]*?\$\{debugGraphCostTmuxBreakdownHtml/);
+  assert.equal((report.match(/debugGraphCostUsageColumnLegendHtml\(\)/g) || []).length, 1, 'report renders the legend once, not per table');
+  assert.match(legend, /<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend/);
+  assert.match(css, /\.js-debug-cost-column-legend \{[\s\S]*?grid-template-columns: repeat\(5, max-content\);[\s\S]*?max-width: 100%;/);
+  assert.match(css, /@container \(max-width: 34rem\) \{[\s\S]*?\.js-debug-cost-column-legend \{[\s\S]*?repeat\(3, minmax\(0, 1fr\)\)/);
+  for (const name of fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'))) {
+    const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${name}`, 'utf8'));
+    for (const key of ['input', 'cache', 'output', 'other', 'total']) {
+      assert.ok(String(catalog[`debug.cost.${key}.gloss`] || '').trim(), `${name} has debug.cost.${key}.gloss`);
+    }
+  }
+});
+
 test('the YO!stats Daemons subtab keeps the system key and every locale carries a non-empty label', () => {
   const path = require('node:path');
   // The subtab wiring keeps the internal `system` key; only the human label changed.
@@ -1213,6 +1254,29 @@ test('the YO!stats Daemons subtab keeps the system key and every locale carries 
     assert.doesNotMatch(label, /^Services$/, `${name} debug.tab.services no longer the old "Services" label`);
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(built, 'en.json'), 'utf8'))['debug.tab.services'], 'Daemons');
+});
+
+test('the YO!cost report shows one always-visible column legend sharing the description owner', () => {
+  // Legend rendered once in the report body, above the usage tables.
+  const reportFn = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const legendCalls = reportFn.match(/debugGraphCostUsageColumnLegendHtml\(\)/g) || [];
+  assert.equal(legendCalls.length, 1, 'legend rendered exactly once per report');
+  // The legend renders a swatch (except Total) + label + terse gloss for each column, and reuses
+  // the shared header explain-attrs so the full description stays as the hover tooltip.
+  const legendFn = sourceFunction('debugGraphCostUsageColumnLegendHtml', 'debugGraphCostUsageColumnHeaderAttrs');
+  assert.match(legendFn, /class="js-debug-cost-column-legend"/);
+  assert.match(legendFn, /\['input', 'cache', 'output', 'other', 'total'\]/);
+  assert.match(legendFn, /js-debug-cost-usage-swatch--\$\{esc\(key\)\}/);
+  assert.match(legendFn, /debugGraphCostUsageColumnHeaderAttrs\(key, labels\[key\]\)/);
+  assert.match(legendFn, /debugGraphCostUsageColumnGloss\(key\)/);
+  assert.match(legendFn, /js-debug-cost-usage-swatch--\$\{esc\(key\)\}/); // Total uses the matching swatch too
+  // Gloss owner shares the same keys as the description owner (one wording source, terse layer).
+  for (const key of ['input', 'cache', 'output', 'other', 'total']) {
+    assert.match(source, new RegExp(`${key}: Object\\.freeze\\(\\{description:[^\\n]+debug\\.cost\\.${key}\\.gloss`), `gloss owner has ${key}`);
+  }
+  assert.match(source, /cache reads \+ writes, combined/); // Cached stays combined and self-labels it
+  // Tight legend CSS: bounded responsive grid, compact font, no fixed width.
+  assert.match(css, /\.js-debug-cost-column-legend \{[\s\S]*?display: grid;[\s\S]*?grid-template-columns:/);
 });
 
 Promise.all(pending).then(() => {

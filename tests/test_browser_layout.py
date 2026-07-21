@@ -196,6 +196,46 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
+def test_stats_cost_summary_table_uses_the_shared_content_sized_table_owner(browser, tmp_path):
+    load_static_html_fixture(
+        browser,
+        tmp_path,
+        "stats-cost-summary-table-width.html",
+        page_html(
+            """
+            <section class="js-debug-cost-summary" data-js-debug-summary-group="costSummary">
+              <div class="js-debug-system-table-wrap js-debug-cost-table-wrap">
+                <table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary">
+                  <thead><tr><th>Usage</th><th>Tokens</th><th>Price</th></tr></thead>
+                  <tbody><tr><th>Input</th><td>100</td><td>$0.01</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+            """,
+            extra_css=".js-debug-cost-summary { width: 40rem; }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const table = document.querySelector('[data-js-debug-cost-table="summary"]');
+        const wrap = table.closest('.js-debug-cost-table-wrap');
+        return {
+          tableWidth: table.getBoundingClientRect().width,
+          wrapWidth: wrap.getBoundingClientRect().width,
+          inlineSize: getComputedStyle(table).inlineSize,
+          minInlineSize: getComputedStyle(table).minInlineSize,
+          maxInlineSize: getComputedStyle(table).maxInlineSize,
+          overflowX: getComputedStyle(wrap).overflowX,
+        };
+        """
+    )
+    assert metrics["tableWidth"] < metrics["wrapWidth"], metrics
+    assert metrics["inlineSize"] != "100%", metrics
+    assert metrics["minInlineSize"] == "0px", metrics
+    assert metrics["maxInlineSize"] == "none", metrics
+    assert metrics["overflowX"] == "auto", metrics
+
+
 def test_tab_minimize_spacing_keeps_its_hit_target_and_gives_titles_the_compact_available_width(browser, tmp_path):
     tab_inner = """
       <span class="pane-tab-core"><span class="session-button-prefix">[yo7771]</span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">Fix an intentionally long tab title before ellipsis truncation</span></span></span>
@@ -799,7 +839,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "range": True,
         "resolution": True,
         "toggles": 12,
-        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agents", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
+        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Agent tokens/min", "Model output tokens/min", "Cost summary", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -10601,6 +10641,12 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           return {
             preferences,
             reportText: report?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+            legend: report ? {
+              count: report.querySelectorAll('[data-js-debug-cost-column-legend]').length,
+              entries: [...report.querySelectorAll('[data-js-debug-cost-column-legend] > div')].map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
+              swatches: [...report.querySelectorAll('[data-js-debug-cost-column-legend] .js-debug-cost-usage-swatch')].map(node => node.className),
+              headerTitles: [...report.querySelectorAll('[data-js-debug-cost-table="agent"] thead th[title]')].map(node => node.title),
+            } : null,
             grandTotals: [...report?.querySelectorAll('tfoot th') || []].map(node => node.textContent.trim()),
             pairCount: report?.querySelectorAll('.js-debug-cost-price-pair').length || 0,
             pricingOpen: opened,
@@ -10621,6 +10667,17 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert "$0.00 marginal" in result["reportText"], result
     assert "list" in result["reportText"], result
     assert result["reportText"].count("At API list prices") == 1, result
+    assert result["legend"]["count"] == 1, result
+    assert len(result["legend"]["entries"]) == 5, result
+    assert any(entry.startswith("Cached") and "cache reads + writes, combined" in entry for entry in result["legend"]["entries"]), result
+    assert set(result["legend"]["swatches"]) == {
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--input",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--cache",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--output",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--other",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--total",
+    }, result
+    assert any("cache READS" in title and "cache WRITES" in title for title in result["legend"]["headerTitles"]), result
     assert result["restoredScrollLeft"] == result["expectedScrollLeft"], result
     assert set(result["grandTotals"]) == {"Grand total · marginal / API list prices"}, result
     assert result["pairCount"] >= 2, result
@@ -10633,6 +10690,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             """
             const table = document.querySelector('[data-js-debug-cost-table="agent"]');
             const wrap = table?.closest('.js-debug-cost-table-wrap');
+                const legend = document.querySelector('[data-js-debug-cost-column-legend]');
             if (!table || !wrap) return null;
             wrap.scrollLeft = wrap.scrollWidth;
             const tableRect = table.getBoundingClientRect();
@@ -10648,6 +10706,9 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               finalVisible: finalCells.every(cell => cell.getBoundingClientRect().right <= wrapRect.right + 1),
               otherHeading: [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === 'Cached')
                 && [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === 'Other'),
+              legendExists: Boolean(legend),
+              legendRows: legend ? new Set([...legend.children].map(node => Math.round(node.getBoundingClientRect().top))).size : 0,
+              reportOverflow: legend ? legend.closest('.js-debug-cost-report')?.scrollWidth <= legend.closest('.js-debug-cost-report')?.clientWidth + 1 : false,
             };
             """
         )
@@ -10656,6 +10717,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
         assert metrics["cellsFit"] and metrics["finalVisible"], (width, metrics)
         assert metrics["tableRight"] <= metrics["wrapRight"] + 1, (width, metrics)
         assert metrics["otherHeading"], (width, metrics)
+        assert metrics["legendExists"] and metrics["legendRows"] <= 2 and metrics["reportOverflow"], (width, metrics)
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):

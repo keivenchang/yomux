@@ -5290,6 +5290,40 @@ body :is(
 .js-debug-cost-usage-swatch--other {
   background: var(--js-debug-agent-token-beige);
 }
+/* Always-visible column legend: one tight row that wraps; the terse gloss is visible, the full
+   description stays on the header hover tooltip. Kept compact so it never re-widens the report. */
+.js-debug-cost-column-legend {
+  display: grid;
+  grid-template-columns: repeat(5, max-content);
+  gap: var(--space-3) var(--space-7);
+  max-width: 100%;
+  margin: var(--space-5) 0;
+  padding: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-column-legend > div {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.js-debug-cost-column-legend dt {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  white-space: nowrap;
+}
+.js-debug-cost-column-legend dd {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-usage-swatch--total {
+  background: var(--text);
+}
 .js-debug-cost-model-list > li {
   overflow-x: auto;
   white-space: nowrap;
@@ -5332,7 +5366,8 @@ body :is(
    the shared cell metrics; the wrap's contained horizontal scroller takes over only
    when the content's minimum readable (nowrap) width exceeds the pane. One shared
    sizing parent for both tables. */
-.js-debug-cost-usage-table-section .js-debug-cost-table {
+.js-debug-cost-usage-table-section .js-debug-cost-table,
+.js-debug-cost-summary .js-debug-cost-table {
   inline-size: max-content;
   max-inline-size: none;
   min-inline-size: auto;
@@ -5574,10 +5609,19 @@ body :is(
   font: 700 var(--ui-font-size-lg)/1.25 var(--ui-font);
 }
 .js-debug-cost-report-body {
+  container-type: inline-size;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
   padding-top: var(--space-5);
+}
+/* Five terse column meanings fit on one wide line. Three bounded tracks turn
+   the narrow form into a 3+2 grid instead of a tall five-row list. */
+@container (max-width: 34rem) {
+  .js-debug-cost-column-legend {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
 }
 .js-yocost-panel .js-yocost-body,
 .js-yocost-panel .js-yocost-scroll,

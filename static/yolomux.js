@@ -44615,16 +44615,6 @@ let jsDebugCostPanelNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
-// Output is the compatibility view: before component-level accounting existed,
-// Model tokens/min was a projection of generated (output) transcript tokens.
-const jsDebugGraphModelTokenDimensions = Object.freeze([
-  Object.freeze({key: 'output', labelKey: 'debug.cost.output', fallback: 'Output'}),
-  Object.freeze({key: 'all', labelKey: 'debug.modelTokens.allBillable', fallback: 'All billable'}),
-  Object.freeze({key: 'input', labelKey: 'debug.cost.input', fallback: 'Input'}),
-  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache hits & refreshes'}),
-  Object.freeze({key: 'cacheWrite', labelKey: 'debug.modelTokens.cacheWrite', fallback: 'Cache write'}),
-]);
-let jsDebugGraphModelTokenDimension = 'output';
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
 const jsDebugCostComponentSortState = {key: 'cost', direction: 'desc'};
 const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
@@ -44876,37 +44866,33 @@ const jsDebugGraphSeries = Object.freeze([
 // sampler cadence, and the owning chart groups / series. Coverage lookups and
 // chart->family mapping READ this table; inline per-family if/alias chains
 // outside it are contract-banned (tests/yostats_performance.test.js pins both
-// mirrors against each other). modelTokenDimension names which modelTokens
-// chart dimension the family backs ('output' is the generated-token counter;
-// 'default' covers every billing dimension).
+// mirrors against each other).
 const jsDebugStatsFamilyManifest = Object.freeze({
   cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
   service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
-  agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
-  cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
+  agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens', 'modelTokens']), series: Object.freeze(['tokensPerAgent'])}),
+  cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
   system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory', 'macMemoryPressure'])}),
 });
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
-const jsDebugStatsFamilyByModelTokenDimension = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
-  .filter(([, entry]) => entry.modelTokenDimension).map(([family, entry]) => [entry.modelTokenDimension, family])));
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Daemons load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
-  {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agents', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
-  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
-  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
+  {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
+  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
+  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
 const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
-  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title', toggleLabelEn: 'Cost'})]
+  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
   : [group]));
 
 function debugGraphLocalizedLabel(item = {}) {
@@ -44959,9 +44945,6 @@ function loadJsDebugStatsUiPreferences() {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
-  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === String(saved.modelTokenDimension || ''))
-    ? String(saved.modelTokenDimension)
-    : 'output';
   const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
   const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
   for (const key of visible) hidden.delete(key);
@@ -44985,7 +44968,6 @@ function saveJsDebugStatsUiPreferences() {
       rangeSeconds: jsDebugGraphRangeSeconds,
       resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
       chartLayout: jsDebugGraphChartLayout,
-      modelTokenDimension: jsDebugGraphModelTokenDimension,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
       logLevels: [...jsDebugLogsState.levels].sort(),
@@ -47181,21 +47163,11 @@ function debugGraphAgentTokenBucketValue(bucket, item) {
   return Number(item?.samples || 0) > 0 ? Number(item.total || 0) / Number(item.samples || 1) : 0;
 }
 
-function debugGraphAgentTokenBucketDimensionValue(bucket, item, dimension = jsDebugGraphModelTokenDimension) {
-  if (dimension === 'output') return debugGraphAgentTokenBucketValue(bucket, item);
-  const quantity = Math.max(0, Number(item?.billableTokens?.[dimension]) || 0);
-  return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
-}
-
 function debugGraphAgentTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
     if (!(bucket?.agentTokenRates instanceof Map)) continue;
     for (const item of bucket.agentTokenRates.values()) {
-      if (jsDebugGraphModelTokenDimension !== 'output') {
-        if (item?.billableAvailable === true) total += Math.max(0, Number(item?.billableTokens?.[jsDebugGraphModelTokenDimension]) || 0);
-        continue;
-      }
       const tokens = Number(item?.tokens);
       if (Number.isFinite(tokens) && tokens >= 0) {
         total += tokens;
@@ -47212,12 +47184,6 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
 function debugGraphModelTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
-    const components = debugGraphModelTokenComponentRecords(bucket);
-    if (components.length) {
-      total += components.reduce((sum, component) => sum + Math.max(0, Number(component?.quantity) || 0), 0);
-      continue;
-    }
-    if (jsDebugGraphModelTokenDimension !== 'output') continue;
     if (!(bucket?.agentTokenRates instanceof Map)) continue;
     for (const item of bucket.agentTokenRates.values()) {
       if (!(item?.modelRates instanceof Map)) continue;
@@ -47610,7 +47576,6 @@ function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
 }
 
 function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
-  const selectedAgentDimension = dimension === 'agent' ? jsDebugGraphModelTokenDimension : 'output';
   const tokenItems = new Map();
   for (const bucket of buckets) {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
@@ -47618,9 +47583,7 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       if (dimension === 'agent') {
         const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
         existing.label = item?.label || existing.label;
-        existing.samples += selectedAgentDimension === 'output'
-          ? Number(item?.samples || 0)
-          : (item?.billableAvailable === true ? 1 : 0);
+        existing.samples += Number(item?.samples || 0);
         tokenItems.set(String(key), existing);
         continue;
       }
@@ -47655,7 +47618,7 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') {
           if (!tokenItem) return 0;
-          return debugGraphAgentTokenBucketDimensionValue(bucket, tokenItem, selectedAgentDimension);
+          return debugGraphAgentTokenBucketValue(bucket, tokenItem);
         }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
@@ -47670,7 +47633,6 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       hasData: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          if (selectedAgentDimension !== 'output') return tokenItem?.billableAvailable === true;
           return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
@@ -47681,7 +47643,6 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       sampleCount: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          if (selectedAgentDimension !== 'output') return Math.max(0, Number(tokenItem?.billableSamples?.[selectedAgentDimension]) || 0);
           return Math.max(0, Number(tokenItem?.samples) || 0);
         }
         let samples = 0;
@@ -47729,63 +47690,7 @@ function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.
   });
 }
 
-function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDimension) {
-  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
-  return item ? debugGraphCostText(item.labelKey, item.fallback) : debugGraphCostText('debug.cost.output', 'Output');
-}
-
-function debugGraphModelTokenDimensionDescriptionKey(dimension = jsDebugGraphModelTokenDimension) {
-  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
-  return item ? jsDebugGraphDescriptionKeyByLabelKey[item.labelKey] : '';
-}
-
-function setDebugGraphModelTokenDimension(value, {persist = true} = {}) {
-  const selected = String(value || '');
-  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected)
-    ? selected
-    : 'output';
-  if (persist) saveJsDebugStatsUiPreferences();
-  // Every token dimension is projected from the buckets already in memory.
-  // Repaint both tabs synchronously and bypass the passive focused-control
-  // deferral; no history request or artificial loading state is warranted.
-  refreshDebugGraphSurfaces({force: true, deferFocusedControl: false});
-  return jsDebugGraphModelTokenDimension;
-}
-
-function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGraphModelTokenDimension) {
-  if (String(component?.unit || '').toLowerCase() !== 'tokens') return false;
-  const direction = String(component?.direction || '').toLowerCase();
-  const cacheRole = String(component?.cache_role || '').toLowerCase();
-  if (dimension === 'all') return true;
-  if (dimension === 'input') return direction === 'input' && !cacheRole.includes('read') && !cacheRole.includes('write');
-  if (dimension === 'cacheRead') return cacheRole.includes('read');
-  if (dimension === 'cacheWrite') return cacheRole.includes('write');
-  return direction === 'output';
-}
-
-function debugGraphModelTokenComponentRecords(bucket, dimension = jsDebugGraphModelTokenDimension) {
-  // Output is the compatibility projection of the authoritative generated-token
-  // partition. Cost atoms can be temporarily partial during migration or across
-  // provider telemetry variants, so they must not override the exact agent/model
-  // totals that keep Agent tokens and Model tokens synchronized.
-  if (dimension === 'output') return [];
-  const components = debugGraphCostRows(bucket?.costSummary?.components);
-  return components.filter(component => debugGraphModelTokenComponentMatches(component, dimension));
-}
-
-function debugGraphModelTokenSeriesIdentity(component) {
-  const model = String(component?.model || 'unknown').trim() || 'unknown';
-  const effort = String(component?.effort || '').trim().toLowerCase() || 'unknown';
-  return {key: `${model}\u0000${effort}`, model, effort, label: effort === 'unknown' ? model : `${model} · ${effort}`};
-}
-
 function debugGraphSelectedModelTokenBucketValue(bucket) {
-  const components = debugGraphModelTokenComponentRecords(bucket);
-  if (components.length) return components.reduce((total, component) => total + Math.max(0, Number(component?.quantity) || 0), 0)
-    / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
-  // Existing retained history only has the generated-output projection. Keep
-  // that output view exact until component atoms are available for a bucket.
-  if (jsDebugGraphModelTokenDimension !== 'output') return 0;
   let total = 0;
   for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
     for (const rate of agentRate?.modelRates?.values?.() || []) total += debugGraphAgentTokenBucketValue(bucket, {...rate, seconds: agentRate.seconds});
@@ -47794,83 +47699,7 @@ function debugGraphSelectedModelTokenBucketValue(bucket) {
 }
 
 function debugGraphModelTokenSeriesDefs(buckets) {
-  const tokenItems = new Map();
-  for (const bucket of buckets) {
-    const components = debugGraphModelTokenComponentRecords(bucket);
-    if (components.length) {
-      for (const component of components) {
-        const identity = debugGraphModelTokenSeriesIdentity(component);
-        const item = tokenItems.get(identity.key) || {...identity, samples: 0, componentBacked: true};
-        item.samples += 1;
-        tokenItems.set(identity.key, item);
-      }
-      continue;
-    }
-    // The default Output selector always uses the authoritative generated-token
-    // partition, including new buckets with cost atoms, so its stack is exactly
-    // the same total as Agent tokens/min.
-    if (jsDebugGraphModelTokenDimension !== 'output') continue;
-    for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
-      for (const [rawModel, rate] of agentRate?.modelRates?.entries?.() || []) {
-        const model = String(rawModel || 'unknown').trim() || 'unknown';
-        const item = tokenItems.get(`legacy\u0000${model}`) || {key: `legacy\u0000${model}`, model, effort: '', label: model, samples: 0, componentBacked: false};
-        item.samples += Number(rate?.samples || 0) > 0 || Number(rate?.tokens || 0) > 0 ? 1 : 0;
-        tokenItems.set(item.key, item);
-      }
-    }
-  }
-  const displayedItems = [...tokenItems.values()]
-    .filter(item => item.samples > 0)
-    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key));
-  const visuals = debugGraphDisplayedTokenVisuals(displayedItems, item => item.key);
-  return displayedItems.map((item, index) => ({
-      key: `${jsDebugGraphModelTokenSeriesPrefix}${item.key}`,
-      label: item.label,
-      descKey: 'debug.graph.series.modelToken.desc',
-      descParams: {model: item.label},
-      unit: 'tokensPerMinute',
-      cssKey: 'agentToken',
-      tokenPatternSeries: true,
-      agentTokenKey: item.key,
-      tokenDimension: 'model',
-      agentTokenPatternIndex: visuals[index].patternIndex,
-      color: visuals[index].color,
-      value: bucket => {
-        const components = debugGraphModelTokenComponentRecords(bucket);
-        if (components.length) {
-          const quantity = components
-            .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key)
-            .reduce((total, component) => total + Math.max(0, Number(component?.quantity) || 0), 0);
-          return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
-        }
-        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
-        let value = 0;
-        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
-          const rate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(item.model) : null;
-          if (rate) value += debugGraphAgentTokenBucketValue(bucket, {...rate, seconds: agentRate.seconds});
-        }
-        return value;
-      },
-      hasData: bucket => {
-        const components = debugGraphModelTokenComponentRecords(bucket);
-        if (components.length) return components.some(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
-        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return false;
-        return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => Number(agentRate?.modelRates?.get(item.model)?.tokens || 0) > 0);
-      },
-      sampleCount: bucket => {
-        const components = debugGraphModelTokenComponentRecords(bucket)
-          .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
-        if (components.length) {
-          return components.reduce((total, component) => total + Math.max(1, Number(component?.samples ?? component?.sample_count) || 0), 0);
-        }
-        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
-        let samples = 0;
-        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
-          samples += Math.max(0, Number(agentRate?.modelRates?.get(item.model)?.samples) || 0);
-        }
-        return samples;
-      },
-    }));
+  return debugGraphTokenSeriesDefs(buckets, 'model');
 }
 
 
@@ -48157,11 +47986,8 @@ function debugGraphChartToggleControlsHtml() {
     <div class="js-debug-chart-toggle-menu" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     ${jsDebugGraphChartControlItems.map(group => {
       const label = debugGraphLocalizedLabel(group);
-      // Compact labels are an English-only design vocabulary. Other locales keep the existing
-      // localized chart title until their own compact translation exists; never leak English UI.
-      const toggleLabel = i18nActiveLocale === 'en' ? String(group.toggleLabelEn || label) : label;
       const visible = debugGraphChartVisible(group.key);
-      return `<label title="${esc(label)}"><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(toggleLabel)}</label>`;
+      return `<label title="${esc(label)}"><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(label)}</label>`;
     }).join('')}
     </div>
   </details>`;
@@ -48466,11 +48292,6 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
 function jsDebugHistoryCoverageFamilyForGroup(group) {
   const key = String(group?.key || '');
   if (!key) return '';
-  // modelTokens is the one dimension-dependent chart: the manifest declares
-  // which family backs each dimension instead of an inline family if-chain.
-  if (key === 'modelTokens') {
-    return jsDebugStatsFamilyByModelTokenDimension[jsDebugGraphModelTokenDimension === 'output' ? 'output' : 'default'] || '';
-  }
   return jsDebugStatsFamilyByChartGroup[key] || '';
 }
 
@@ -49332,27 +49153,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ? debugGraphCostText('debug.graph.gpuNoWindowSamples', 'No GPU samples in this time window')
       : debugGraphCostText('debug.graph.gpuUnavailableHost', 'GPU telemetry is not available on this host'))
     : '';
-  const agentBillableUnavailable = group.key === 'agentTokens'
-    && jsDebugGraphModelTokenDimension !== 'output'
-    && !buckets.some(bucket => [...(bucket?.agentTokenRates?.values?.() || [])].some(rate => rate?.billableAvailable === true));
-  const chartUnavailable = gpuUnavailable || agentBillableUnavailable;
-  const chartUnavailableText = agentBillableUnavailable
-    ? debugGraphCostText('debug.graph.agentTokens.billableUnavailable', 'No billable breakdown for this window')
-    : gpuUnavailableText;
+  const chartUnavailable = gpuUnavailable;
+  const chartUnavailableText = gpuUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
-  const modelDimensionControl = group.key === 'modelTokens'
-    ? `<label class="js-debug-resolution-label js-debug-model-token-dimension" data-js-debug-model-token-dimension>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}: <select data-js-debug-model-token-dimension-select aria-label="${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}">${jsDebugGraphModelTokenDimensions.map(item => {
-        const label = debugGraphModelTokenDimensionLabel(item.key);
-        return `<option value="${esc(item.key)}"${item.key === jsDebugGraphModelTokenDimension ? ' selected' : ''}${debugGraphExplainAttrs(label, debugGraphModelTokenDimensionDescriptionKey(item.key), {attribute: 'data-js-debug-model-token-dimension-desc'})}>${esc(label)}</option>`;
-      }).join('')}</select></label>`
-    : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${spikeAxis && (group.key === 'agentTokens' || group.key === 'modelTokens') ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
       <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
-        ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
@@ -49417,8 +49226,7 @@ function debugGraphTokenSpikeAxisDescriptor(buckets) {
   const values = (buckets || []).map(bucket => {
     let total = 0;
     for (const rate of bucket?.agentTokenRates?.values?.() || []) {
-      if (jsDebugGraphModelTokenDimension !== 'output' && rate?.billableAvailable !== true) continue;
-      total += debugGraphAgentTokenBucketDimensionValue(bucket, rate);
+      total += debugGraphAgentTokenBucketValue(bucket, rate);
     }
     // Model input/cache can legitimately exceed generated output. The shared
     // descriptor must include the selected Model chart while remaining one
@@ -49492,20 +49300,40 @@ function debugGraphCostClass(item) {
   return 'other';
 }
 
-// One description owner for the visible usage columns. The wording states exactly what
-// debugGraphCostClass implements (a mutually exclusive projection: Cached bundles cache
-// READS and WRITES and is separated from Input, so nothing is double-counted), not
-// assumed provider semantics. Rendered via the shared explain-attrs (title + aria) owner.
+// One copy owner for the visible usage columns. Cached deliberately bundles cache
+// reads and writes, and every concise legend entry derives from this same key set.
+const debugGraphCostUsageColumnCopy = Object.freeze({
+  input: Object.freeze({description: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'], gloss: ['debug.cost.input.gloss', 'new prompt/context tokens']}),
+  cache: Object.freeze({description: ['debug.cost.cached.desc', 'Cumulative prompt-cache token accounting across requests: cache READS (hits/refreshes) and cache WRITES (5m/1h creation) combined. Reused history/tool/system context is counted again on every request, so in long conversations Cached can legitimately dwarf Input. This is billing accounting, not stored cache size or GPU cache occupancy.'], gloss: ['debug.cost.cache.gloss', 'cache reads + writes, combined']}),
+  output: Object.freeze({description: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'], gloss: ['debug.cost.output.gloss', 'generated tokens']}),
+  other: Object.freeze({description: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'], gloss: ['debug.cost.other.gloss', 'non-token units (image/audio/tool)']}),
+  total: Object.freeze({description: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'], gloss: ['debug.cost.total.gloss', 'Input + Cached + Output + Other']}),
+});
+
 function debugGraphCostUsageColumnDescription(key) {
-  const descriptions = {
-    input: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'],
-    cache: ['debug.cost.cached.desc', 'Cumulative prompt-cache token accounting across requests: cache READS (hits/refreshes) and cache WRITES (5m/1h creation) combined. Reused history/tool/system context is counted again on every request, so in long conversations Cached can legitimately dwarf Input. This is billing accounting, not stored cache size or GPU cache occupancy.'],
-    output: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'],
-    other: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'],
-    total: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'],
-  };
-  const entry = descriptions[key];
+  const entry = debugGraphCostUsageColumnCopy[key]?.description;
   return entry ? debugGraphCostText(entry[0], entry[1]) : '';
+}
+
+function debugGraphCostUsageColumnGloss(key) {
+  const entry = debugGraphCostUsageColumnCopy[key]?.gloss;
+  return entry ? debugGraphCostText(entry[0], entry[1]) : '';
+}
+
+// One always-visible legend for the cost tables' Input/Cached/Output/Other/Total columns, so the
+// meaning is glanceable without hovering or expanding. Reuses the column swatch colors and the
+// shared header explain-attrs (full description as the hover tooltip); the gloss is the terse
+// visible layer. Rendered ONCE per report, above the usage tables.
+function debugGraphCostUsageColumnLegendHtml() {
+  const labels = {
+    input: debugGraphCostText('debug.cost.input', 'Input'),
+    cache: debugGraphCostText('debug.cost.cached', 'Cached'),
+    output: debugGraphCostText('debug.cost.output', 'Output'),
+    other: debugGraphCostText('debug.cost.other', 'Other'),
+    total: debugGraphCostText('debug.cost.total', 'Total'),
+  };
+  const legendLabel = debugGraphCostText('debug.cost.columnLegend', 'What the columns count');
+  return `<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend aria-label="${esc(legendLabel)}">${['input', 'cache', 'output', 'other', 'total'].map(key => `<div${debugGraphCostUsageColumnHeaderAttrs(key, labels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i><dt>${esc(labels[key])}</dt><dd>${esc(debugGraphCostUsageColumnGloss(key))}</dd></div>`).join('')}</dl>`;
 }
 
 function debugGraphCostUsageColumnHeaderAttrs(key, label) {
@@ -50197,6 +50025,7 @@ function debugGraphCostReportHtml(summary, domain) {
       <p class="js-debug-cost-report-totals" data-js-debug-cost-report-totals aria-label="${esc(`${estimateSentence}; ${totalsExact}`)}">${esc(totalsLine)}</p>
       ${debugGraphCostUnknownUsageHtml(summary)}
       ${debugGraphCostCatalogDetailsHtml(summary)}
+      ${debugGraphCostUsageColumnLegendHtml()}
       ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true, summary})}
       ${debugGraphCostComponentDetailsHtml(summary.components)}
@@ -52038,7 +51867,7 @@ function debugGraphFocusedControl(graph) {
   // These controls live outside the replaceable graph body. Keeping either
   // focused must not defer an accepted history paint until focusout.
   if (active.matches?.('[data-js-debug-range-slider], [data-js-debug-resolution-override]')) return null;
-  return active.closest?.('.js-debug-graph-controls, [data-js-debug-model-token-dimension]') || null;
+  return active.closest?.('.js-debug-graph-controls') || null;
 }
 
 function syncDebugGraphControls(graph, nowMs = Date.now()) {
@@ -52101,19 +51930,17 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
     const expectedText = [...expectedResolution.childNodes].find(node => node.nodeType === 3);
     if (firstText && expectedText) firstText.textContent = expectedText.textContent;
   }
-  const dimension = graph.querySelector('[data-js-debug-model-token-dimension-select]');
-  if (dimension && document.activeElement !== dimension) dimension.value = jsDebugGraphModelTokenDimension;
 }
 
 function preserveDebugGraphBodyControls(graph, nextBody) {
-  const selectors = ['[data-js-debug-model-token-dimension-select]', '[data-js-debug-chart-close]'];
+  const selectors = ['[data-js-debug-chart-close]'];
   for (const selector of selectors) {
     const currentByKey = new Map([...graph.querySelectorAll(selector)].map(control => [
-      control.dataset.jsDebugChartClose || control.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens',
+      control.dataset.jsDebugChartClose,
       control,
     ]));
     for (const replacement of nextBody.querySelectorAll(selector)) {
-      const key = replacement.dataset.jsDebugChartClose || replacement.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens';
+      const key = replacement.dataset.jsDebugChartClose;
       const current = currentByKey.get(key);
       if (!current) continue;
       for (const attribute of [...replacement.attributes]) current.setAttribute(attribute.name, attribute.value);
@@ -52813,7 +52640,7 @@ function handleDebugGraphPointerDown(event, panel) {
   if (ratio == null || event.button > 0) return false;
   const pointerType = event.pointerType || 'mouse';
   if (pointerType !== 'touch') jsDebugGraphLastPointerType = pointerType;
-  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control], [data-js-debug-model-token-dimension]')) document.activeElement.blur?.();
+  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control]')) document.activeElement.blur?.();
   const svg = event.target.closest('.js-debug-line-chart');
   const candidate = {
     panel,
@@ -53003,11 +52830,6 @@ function handleDebugGraphControlEvent(event, panel) {
   const resolutionOverride = event.target.closest('[data-js-debug-resolution-override]');
   if (resolutionOverride && panel.contains(resolutionOverride) && event.type === 'change') {
     setDebugGraphResolutionOverride(resolutionOverride.value);
-    return true;
-  }
-  const modelDimension = event.target.closest('[data-js-debug-model-token-dimension-select]');
-  if (modelDimension && panel.contains(modelDimension) && event.type === 'change') {
-    setDebugGraphModelTokenDimension(modelDimension.value);
     return true;
   }
   const chartLayout = event.target.closest('button[data-js-debug-chart-layout]');
