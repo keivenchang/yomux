@@ -6812,6 +6812,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(source.includes('function clientPushSuppressesPolling()'), false, 'expensive client polling gate is removed');
     assert.equal(source.includes('refreshTranscriptsFromRuntime'), false, 'metadata fallback poll wrapper is removed');
     assert.equal(source.includes('refreshWatchedFilesystemFromRuntime'), false, 'filesystem fallback poll wrapper is removed');
+    assert.equal(source.includes("resetRuntimeInterval('filesystem'"), false, 'Finder must not restore the removed client filesystem polling interval');
     assert.equal(source.includes('refreshSettingsFromRuntime'), false, 'settings fallback poll wrapper is removed');
     assert.ok(source.includes('syncServerWatchRoots({immediate: true, force: true})'), 'SSE ready/reconnect restores watched roots without a browser renewal interval');
     assert.ok(source.includes("apiFetch('/api/watch/roots'"), 'client registers watched roots for server-side SSE polling');

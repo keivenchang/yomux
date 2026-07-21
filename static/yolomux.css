@@ -5281,7 +5281,11 @@ body :is(
 .js-debug-cost-usage-swatch--input {
   background: var(--js-debug-agent-token-cyan);
 }
-.js-debug-cost-usage-swatch--cache {
+.js-debug-cost-usage-swatch--cache,
+.js-debug-cost-usage-swatch--cache_read,
+.js-debug-cost-usage-swatch--cache_write,
+.js-debug-cost-usage-swatch--cache_write_5m,
+.js-debug-cost-usage-swatch--cache_write_1h {
   background: var(--js-debug-agent-token-orange);
 }
 .js-debug-cost-usage-swatch--output {
@@ -5289,6 +5293,44 @@ body :is(
 }
 .js-debug-cost-usage-swatch--other {
   background: var(--js-debug-agent-token-beige);
+}
+/* Always-visible column legend: one tight row that wraps; the terse gloss is visible, the full
+   description stays on the header hover tooltip. Kept compact so it never re-widens the report. */
+.js-debug-cost-column-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-7);
+  max-width: 100%;
+  margin: var(--space-5) 0;
+  padding: 0;
+  color: var(--muted);
+  font: 600 var(--ui-font-size-xs)/1.25 var(--ui-font);
+}
+.js-debug-cost-column-legend > div {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.js-debug-cost-column-legend dt {
+  display: block;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.js-debug-cost-column-legend dd {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.js-debug-cost-column-legend dd::before {
+  content: " \00b7 ";
+}
+.js-debug-cost-usage-swatch--total {
+  background: var(--text);
 }
 .js-debug-cost-model-list > li {
   overflow-x: auto;
@@ -5332,7 +5374,8 @@ body :is(
    the shared cell metrics; the wrap's contained horizontal scroller takes over only
    when the content's minimum readable (nowrap) width exceeds the pane. One shared
    sizing parent for both tables. */
-.js-debug-cost-usage-table-section .js-debug-cost-table {
+.js-debug-cost-usage-table-section .js-debug-cost-table,
+.js-debug-cost-summary .js-debug-cost-table {
   inline-size: max-content;
   max-inline-size: none;
   min-inline-size: auto;
@@ -5408,12 +5451,27 @@ body :is(
   display: grid;
   gap: var(--space-1);
 }
+.js-debug-cost-table-metric--inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.js-debug-cost-table-metric--inline .js-debug-cost-price-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
 .js-debug-cost-table-metric strong,
 .js-debug-cost-table-metric small {
   font-family: var(--mono-font);
 }
 .js-debug-cost-table-metric small {
   color: var(--muted);
+}
+.js-debug-cost-unreported {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
 }
 .js-debug-cost-price-pair {
   display: inline-grid;
@@ -5445,7 +5503,13 @@ body :is(
   inline-size: 1em;
   block-size: 1em;
 }
-.js-debug-cost-model-copy,
+.js-debug-cost-model-copy {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-inline-size: 0;
+  white-space: nowrap;
+}
 .js-debug-cost-stacked-cell {
   display: grid;
   gap: var(--space-1);
@@ -5475,18 +5539,15 @@ body :is(
   font-weight: 500;
 }
 .js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child {
+  /* Tables scroll as a whole on narrow panes, so a model identifier must not
+     be ellipsized merely to make one column fit. */
   inline-size: auto;
-  max-inline-size: 24ch;
-  white-space: normal;
+  max-inline-size: none;
+  white-space: nowrap;
 }
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(2),
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(3),
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(5),
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
-  text-align: start;
-}
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
-  white-space: normal;
+.js-debug-cost-model-formula {
+  display: inline-block;
+  white-space: nowrap;
 }
 .js-debug-cost-transcript-link {
   display: block;
@@ -5574,10 +5635,45 @@ body :is(
   font: 700 var(--ui-font-size-lg)/1.25 var(--ui-font);
 }
 .js-debug-cost-report-body {
+  container-type: inline-size;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
   padding-top: var(--space-5);
+}
+/* Keep the wide legend as compact inline chips. A two-column grid gives each
+   narrow item enough width for a label plus an indented explanation instead
+   of crushing six meanings into unreadable three-column fragments. */
+@container (max-width: 34rem) {
+  .js-debug-cost-column-legend {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+  .js-debug-cost-column-legend > div {
+    display: grid;
+    grid-template-columns: min-content minmax(0, 1fr);
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+    align-items: start;
+  }
+  .js-debug-cost-column-legend > div > .js-debug-cost-usage-swatch {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    align-self: start;
+    margin-block-start: 0.3em;
+  }
+  .js-debug-cost-column-legend dt,
+  .js-debug-cost-column-legend dd {
+    grid-column: 2;
+  }
+  .js-debug-cost-column-legend dt {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .js-debug-cost-column-legend dd::before {
+    content: none;
+  }
 }
 .js-yocost-panel .js-yocost-body,
 .js-yocost-panel .js-yocost-scroll,
@@ -5663,6 +5759,13 @@ body :is(
 .js-debug-cost-pricing-links::after {
   content: "]";
   color: var(--muted);
+}
+.js-debug-cost-pricing-links--compact {
+  margin-inline-start: 0;
+}
+.js-debug-cost-pricing-links--compact::before,
+.js-debug-cost-pricing-links--compact::after {
+  content: none;
 }
 .js-debug-cost-report-total {
   margin: var(--space-6) 0 0;
@@ -16353,11 +16456,21 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-preview-find-match {
   color: inherit;
-  background: color-mix(in srgb, var(--active-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--editor-cursor) 50%, transparent);
 }
 .file-editor-preview-find-match.active {
-  color: var(--active-accent-text);
-  background: var(--active-accent);
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
+}
+.file-editor-preview-pane ::selection,
+.file-editor-preview-pane-panel ::selection {
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
+}
+.file-editor-preview-pane ::-moz-selection,
+.file-editor-preview-pane-panel ::-moz-selection {
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
 }
 .file-editor-content.split-preview .file-editor-codemirror,
 .file-editor-content.split-preview .file-editor-codemirror-panel {

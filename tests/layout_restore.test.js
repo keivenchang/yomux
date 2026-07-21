@@ -153,9 +153,13 @@ async function runLayoutRestoreSuite() {
     assert.ok(/function trackCodeMirrorViews\(panel, api, views\)[\s\S]*panel\._cmViews = views\.filter\(Boolean\)/.test(codeMirrorEditorSource)
       && (codeMirrorEditorSource.match(/Array\.isArray\(panel\?\._cmViews\)/g) || []).length === 3
       && !/_cm(?:Theme|EditorOption|Locale)Views/.test(codeMirrorEditorSource), 'theme, editor-option, and locale compartments consume one shared live CodeMirror view list');
-    assert.ok(/function updateCodeMirrorViewPreservingState[\s\S]*requestMeasure[\s\S]*requestAnimationFrame[\s\S]*function syncCodeMirrorDocument[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*function reconfigureCodeMirrorPanelLocale[\s\S]*updateCodeMirrorViewPreservingState/.test(codeMirrorEditorSource), 'document sync and locale compartment refresh share one selection/scroll preservation parent');
+    const preservationSource = codeMirrorEditorSource.slice(codeMirrorEditorSource.indexOf('function updateCodeMirrorViewPreservingState('), codeMirrorEditorSource.indexOf('\nfunction syncCodeMirrorDocument('));
+    assert.ok(/function updateCodeMirrorViewPreservingState[\s\S]*view\.scrollSnapshot[\s\S]*update\(selection, scrollSnapshot\)[\s\S]*view\.dispatch\(\{selection/.test(preservationSource) && /function syncCodeMirrorDocument[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*scrollSnapshot[\s\S]*function reconfigureCodeMirrorPanelLocale[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*scrollSnapshot/.test(codeMirrorEditorSource), 'document sync and locale compartment refresh share one atomic selection/scroll preservation parent');
+    assert.equal(/requestMeasure|requestAnimationFrame/.test(preservationSource), false, 'passive CodeMirror preservation has no deferred scroll restore race');
+    assert.ok(/function codeMirrorSearchScrollFix[\s\S]*const scrollTop = view\.scrollDOM\?\.scrollTop \|\| 0;[\s\S]*view\.state\.selection\.main\.head !== head[\s\S]*scrollTop\) > 1[\s\S]*scrollIntoView\(head/.test(fileActionsSource), 'a delayed Find centering pass yields to a newer manual scroll or selection');
+    assert.ok(/\.cm-searchMatch-selected[\s\S]*backgroundColor: 'var\(--editor-cursor\)'/.test(fileActionsSource), 'selected Find match reuses the live editor cursor color');
     const changesEditorSource = fs.readFileSync('static_src/js/yolomux/86_changes_editor.js', 'utf8');
-    assert.ok(/function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true[\s\S]*view\.hasFocus[\s\S]*captureFileEditorPanelViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep the focused live selection/scroll authoritative through the shared restore parent');
+    assert.ok(/function preserveFileEditorPanelPassiveViewState[\s\S]*updateCodeMirrorViewPreservingState[\s\S]*scrollSnapshot[\s\S]*captureFileEditorPanelViewState[\s\S]*function restoreFileEditorPanelViewState\(item, panel, options = \{\}\)[\s\S]*options\.restoreFocused !== true && options\.restoreFresh !== true[\s\S]*preserveFileEditorPanelPassiveViewState\(item, panel\)/.test(changesEditorSource), 'ordinary editor rerenders keep every live selection/scroll authoritative through the shared passive owner');
     assert.equal((fileActionsSource.match(/restoreFileEditorPanelViewState\(item, panel, \{restoreFocused: true\}\)/g) || []).length, 2, 'explicit disk replacement alone opts into restoring the captured focused editor snapshot');
     assert.ok(fileActionsSource.includes("t('editor.codemirrorBundleLoadFailed', {url: script.src})") && fileActionsSource.includes("t('editor.codemirrorBundleMissingExports')") && fileActionsSource.includes("t('editor.codemirrorBundleUnavailable', {detail, path: '/static/codemirror.js'})"), 'CodeMirror loader errors localize each leaf reason while retaining URL and path parameters');
     assert.equal(/CodeMirror bundle failed to load:|CodeMirror bundle missing critical exports|CodeMirror local bundle is unavailable or incomplete/.test(fileActionsSource), false, 'CodeMirror loader retains no raw-English visible reason');
@@ -2726,7 +2730,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/async function renderMermaidSourceInto[\s\S]*previewZoomOptionsForKind\(fullPreview \? 'mermaidFull' : 'mermaidInline'/.test(source), 'Mermaid previews use shared renderer zoom policy');
     assert.ok(/function disconnectPreviewZoomSurface\(shell, options = \{\}\)[\s\S]*resetPreviewZoomSurfaceClasses/.test(source), 'visual preview zoom cleanup uses one reset helper');
     assert.ok(/function hydratePreviewZoomSurface[\s\S]*data-preview-zoom-action[\s\S]*setPreviewZoomSurfaceState/.test(source), 'visual preview zoom controls can hydrate existing markup');
-    assert.ok(source.includes("renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'})"), 'Split Preview uses its own preview zoom context');
+    assert.ok(source.includes("renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'})"), 'Split Preview keeps its own preview zoom context through the shared selection/find-preserving renderer');
     assert.ok(source.includes("hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc)"), 'preview pop-out rehydrates zoom controls after snapshot writes');
     assert.ok(source.includes('.file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell'), 'preview pop-out preserves zoom-shell layout');
     assert.equal(source.includes('fileEditorImageModeForPath'), false, 'visual previews do not keep the obsolete imageMode state path');
@@ -2930,6 +2934,28 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
   });
 
+  test('Find count follows the first visible result after a manual editor scroll', () => {
+    const api = loadYolomux('', ['1']);
+    const text = 'Legal one\n'.repeat(1) + 'filler\n'.repeat(20) + 'Legal two\n' + 'filler\n'.repeat(20) + 'Legal three\n';
+    const matches = api.codeMirrorSearchMatches(text, 'Legal');
+    assert.equal(matches.length, 3);
+    assert.equal(
+      api.codeMirrorSearchVisibleMatchIndex(matches, {from: matches[0].from, to: matches[0].to}, [{from: matches[0].from, to: matches[0].to + 5}]),
+      0,
+      'the selected match remains current while it is visible',
+    );
+    assert.equal(
+      api.codeMirrorSearchVisibleMatchIndex(matches, {from: matches[0].from, to: matches[0].to}, [{from: matches[1].from, to: matches[1].to + 5}]),
+      1,
+      'manual scroll to another visible Find result advances the current index without a scroll effect',
+    );
+    assert.equal(
+      api.codeMirrorSearchVisibleMatchIndex(matches, {from: 0, to: 0}, [{from: matches[1].from, to: matches[1].to + 5}]),
+      -1,
+      'ordinary non-Find text selections retain ownership rather than being replaced by a visible match',
+    );
+  });
+
   test('file editor save hygiene helper respects the two opt-in settings', () => {
     const api = loadYolomux('', ['1']);
     const source = 'alpha  \n beta\t\nlast';
@@ -3038,7 +3064,7 @@ async function runLayoutRestoreSuite() {
     assert.strictEqual(saved.scrollSnapshot, scrollSnapshot, 'capture stores CodeMirror scrollSnapshot so long-file restore has a line anchor');
     scrollDOM.scrollTop = 0;
     scrollDOM.scrollLeft = 0;
-    api.restoreFileEditorPanelViewStateForTest(item, panel);
+    api.restoreFileEditorPanelViewStateForTest(item, panel, {restoreFresh: true});
     assert.equal(dispatches[0].selection.anchor, 80000);
     assert.strictEqual(dispatches[0].effects, scrollSnapshot, 'restore dispatches CodeMirror scrollSnapshot instead of relying only on raw scrollTop');
     assert.equal(scrollDOM.scrollTop, 960);

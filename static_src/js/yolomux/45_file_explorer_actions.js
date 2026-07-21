@@ -40,8 +40,12 @@ async function fetchFilePathInfo(path, options = {}) {
     'info',
     normalized,
     options,
-    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true}),
-    {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
+    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
+    {
+      skipRequest: () => suppressBackgroundFilesystemFetch(options),
+      skipValue: null,
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('info', normalized, options),
+    },
   );
 }
 
@@ -956,7 +960,7 @@ async function refreshFileExplorerPanelTrees(options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
-async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot()) {
+async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
   const entriesByDir = new Map();
   const directories = new Set([normalizedRoot]);
@@ -965,7 +969,7 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   }
   const listings = await Promise.all(Array.from(directories).map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory),
+    entries: await fetchDirectory(directory, options),
   })));
   for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
@@ -977,7 +981,7 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   const root = normalizeDirectoryPath(options.root || currentFileExplorerRoot());
   const entriesByDir = options.entriesByDir instanceof Map
     ? options.entriesByDir
-    : await fileExplorerEntriesByWatchedDirectory(root);
+    : await fileExplorerEntriesByWatchedDirectory(root, options);
   const rootEntries = Array.isArray(options.entries) ? options.entries : entriesByDir.get(root);
   if (!rootEntries) return false;
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
@@ -2419,7 +2423,7 @@ function syncServerWatchRoots(options = {}) {
   }, delay);
 }
 
-async function refreshFileExplorerIfChanged() {
+async function refreshFileExplorerIfChanged(options = {}) {
   if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
   if (!directories.length) return;
@@ -2428,7 +2432,7 @@ async function refreshFileExplorerIfChanged() {
   const signaturesByDir = new Map();
   const listings = await Promise.all(directories.map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true}),
+    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true, trigger: options.trigger}),
   })));
   for (const {directory, entries} of listings) {
     if (!entries) continue;
@@ -2815,8 +2819,8 @@ function codeMirrorThemeExtension(api) {
     },
     '.cm-searchMatch-selected': {
       color: scheme.dark ? '#111827' : '#111827',
-      backgroundColor: scheme.dark ? '#ffd166' : '#ff9f1c',
-      boxShadow: `inset 0 0 0 2px ${scheme.dark ? '#fff2a8' : '#7c2d12'}, 0 0 0 1px ${scheme.dark ? 'rgba(0, 0, 0, 0.46)' : 'rgba(255, 255, 255, 0.68)'}`,
+      backgroundColor: 'var(--editor-cursor)',
+      boxShadow: `inset 0 0 0 2px ${scheme.bg}, 0 0 0 1px var(--editor-cursor)`,
       borderRadius: '2px',
       fontWeight: '800',
     },
@@ -3231,6 +3235,24 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
 }
 
+// Find owns the selected result, but the viewport is the user's current navigation surface when
+// they scroll manually. Keep the selected match while it remains visible; once it leaves the
+// viewport, adopt the first visible match without requesting another scroll.
+function codeMirrorSearchVisibleMatchIndex(matches, selection = {}, visibleRanges = []) {
+  if (!matches.length) return -1;
+  const selectionFrom = Number(selection.from);
+  const selectionTo = Number(selection.to);
+  const selectedIndex = matches.findIndex(match => match.from === selectionFrom && match.to === selectionTo);
+  if (selectedIndex < 0) return -1;
+  const visible = matches.filter(match => visibleRanges.some(range => (
+    match.from < Number(range?.to) && match.to > Number(range?.from)
+  )));
+  if (!visible.length) return selectedIndex;
+  const selected = matches[selectedIndex];
+  if (visible.some(match => match === selected)) return selectedIndex;
+  return matches.indexOf(visible[0]);
+}
+
 function codeMirrorPhraseValues() {
   return {
     Find: t('common.find'),
@@ -3268,7 +3290,13 @@ function codeMirrorSearchScrollFix(api) {
     if (!update.transactions.some(tr => tr.isUserEvent?.('select.search'))) return;
     const head = update.state.selection.main.head;
     const view = update.view;
+    const scrollTop = view.scrollDOM?.scrollTop || 0;
+    const scrollLeft = view.scrollDOM?.scrollLeft || 0;
     requestAnimationFrame(() => {
+      // Find keeps focus in its panel, so a manual scroll between the search
+      // selection and this deferred centering pass is newer user navigation.
+      if (!view.dom?.isConnected || view.state.selection.main.head !== head) return;
+      if (Math.abs((view.scrollDOM?.scrollTop || 0) - scrollTop) > 1 || Math.abs((view.scrollDOM?.scrollLeft || 0) - scrollLeft) > 1) return;
       try {
         view.dispatch({effects: api.EditorView.scrollIntoView(head, {x: 'center', y: 'nearest'})});
       } catch (_) {}
@@ -3346,6 +3374,19 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       }
       const query = panel.querySelector?.('input[name="search"]')?.value || '';
       const selection = this.view.state?.selection?.main || {};
+      const matches = codeMirrorSearchMatches(
+        this.view.state?.doc?.toString?.() || '',
+        query,
+        codeMirrorSearchCheckboxState(panel),
+      );
+      const visibleMatchIndex = codeMirrorSearchVisibleMatchIndex(matches, selection, this.view.visibleRanges || []);
+      if (visibleMatchIndex >= 0 && visibleMatchIndex !== matches.findIndex(match => (
+        match.from === Number(selection.from) && match.to === Number(selection.to)
+      ))) {
+        const match = matches[visibleMatchIndex];
+        this.view.dispatch({selection: {anchor: match.from, head: match.to}});
+        return;
+      }
       count.textContent = codeMirrorSearchMatchSummary(
         this.view.state?.doc?.toString?.() || '',
         query,

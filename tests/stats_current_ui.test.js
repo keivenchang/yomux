@@ -49,14 +49,14 @@ function seriesValue(value, at, sourceCount = 1) {
 }
 
 function costDimensions(changes = {}) {
-  return Object.fromEntries(['input', 'cache_read', 'cache_write', 'output', 'other'].map(name => [
+  return Object.fromEntries(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(name => [
     name, changes[name] || {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
   ]));
 }
 
 function costReport(changes = {}) {
   return {
-    schema_version: 2,
+    schema_version: 3,
     total_micro_usd: 0,
     total_api_list_micro_usd: 0,
     total_tokens: 0,
@@ -269,8 +269,8 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
   };
   put(0, 'cpu_percent:host', 10);
   put(resolution, 'cpu_percent:host', 20);
-  put(0, 'agent_tokens_per_minute:sol', 100);
-  put(10, 'agent_tokens_per_minute:sol', 900);
+  put(0, 'agent_tokens_per_minute:122_parser-toolkits|0|%17|codex', 100);
+  put(10, 'agent_tokens_per_minute:122_parser-toolkits|0|%17|codex', 900);
   put(0, 'model_tokens_per_minute:output:gpt', 80);
   put(10, 'model_tokens_per_minute:output:gpt', 800);
   put(0, 'model_tokens_per_minute:input:gpt', 5000);
@@ -286,7 +286,7 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
   const dimensions = costDimensions({
     input: {tokens: 600, micro_usd: 120000, api_list_micro_usd: 240000},
     cache_read: {tokens: 300, micro_usd: 30000, api_list_micro_usd: 60000},
-    cache_write: {tokens: 100, micro_usd: 50000, api_list_micro_usd: 100000},
+    cache_write_5m: {tokens: 100, micro_usd: 50000, api_list_micro_usd: 100000},
     output: {tokens: 200, micro_usd: 100000, api_list_micro_usd: 200000},
   });
   const attribution = {
@@ -305,7 +305,7 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
     priced: {atoms: 4, tokens: 1150},
     unpriced: {atoms: 1, tokens: 50},
     models: [{key: modelKey, provider: 'openai', model: 'gpt-5.6-sol', ...attribution}],
-    agents: [{key: agentKey, source: 'codex', label: 'yo8881|0|codex', ...attribution}],
+    agents: [{key: agentKey, source: 'codex', label: '122_parser-toolkits|0|%17|codex', ...attribution}],
     evidence: [{
       key: evidenceKey, provider: 'openai', model: 'gpt-5.6-sol', dimension: 'output',
       direction: 'output', modality: 'text', cache_role: 'none', unit: 'tokens',
@@ -1567,6 +1567,7 @@ test('mount owns exact capability controls and renders sparse current series wit
   assert.ok(modelUsage.includes('data-y-max="5000"'), 'input/cache dimensions do not distort output parity');
   assert.ok(agent.includes('data-no-data-family="agent_tokens"'));
   assert.ok(agent.includes('data-no-data-source="usage-scan"'));
+  assert.ok(agent.includes('>122_parser-toolkits</li>'), 'Agent tokens/min uses the canonical tmux-session label');
   assert.ok(agent.includes('data-axis-seconds="true"'));
   assert.match(agent, />\d{2}:\d{2}:\d{2}<\/text>/);
   const visibility = root.controls.innerHTML;
@@ -1749,9 +1750,9 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(html.includes('<strong>$0.30</strong> marginal'));
   assert.ok(html.includes('<strong>$0.60</strong> list'));
   assert.ok(html.includes('Total tokens: <strong>1.2K tokens</strong>'));
-  assert.ok(html.includes('Input=600, Cached=300, Cache write=100, Output=200, Other=0'));
+  assert.ok(html.includes('Input=600, Cache read=300, 5m cache write=100, 1h cache write=0, Output=200, Other=0'));
   assert.ok(html.includes('data-stats-current-cost-more>More Info</button>'));
-  assert.equal(html.includes('Model Usages'), false, 'full report details stay out of the compact summary');
+  assert.equal(html.includes('Cost by Model'), false, 'full report details stay out of the compact summary');
 
   root.listeners.get('click')({target: {
     closest: selector => selector === '[data-stats-current-cost-more]' ? {} : null,
@@ -1761,9 +1762,11 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(modal.includes('role="dialog"'));
   assert.ok(modal.includes('data-stats-current-cost-modal-scroll'));
   assert.ok(modal.includes('data-stats-current-cost-modal-close'));
-  assert.ok(modal.includes('Model Usages'));
+  assert.ok(modal.includes('Cost by Model'));
   assert.ok(modal.includes('gpt-5.6-sol'));
-  assert.ok(modal.includes('By Agent'));
+  assert.ok(modal.includes('122_parser-toolkits'), 'Cost by Agent uses the same canonical tmux-session label as Agent tokens/min');
+  assert.ok(modal.includes('>122_parser-toolkits</span>'), 'Cost by Agent does not waste visible space on pane-key suffixes');
+  assert.ok(modal.includes('Cost by Agent'));
   assert.ok(modal.includes('Pricing attribution'));
   assert.ok(modal.includes('$0.10 marginal · $0.20 list'));
   assert.ok(modal.includes('https://example.com/pricing'));

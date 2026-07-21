@@ -19,8 +19,13 @@ MAX_CLIENT_ID_BYTES = 128
 MAX_SOURCE_ID_BYTES = 256
 MAX_RETRY_AFTER_SECONDS = 60
 MAX_DELTA_IDENTITIES = 2 * resolution_policy.MAX_BUCKETS
-COST_REPORT_SCHEMA_VERSION = 2
-COST_REPORT_DIMENSIONS = ("input", "cache_read", "cache_write", "output", "other")
+# Cache-write durations are distinct billable provider operations.  They must remain
+# exclusive cost-report dimensions so each report's dimension sum still reconciles
+# exactly to its total.
+COST_REPORT_SCHEMA_VERSION = 3
+COST_REPORT_DIMENSIONS = (
+    "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "other",
+)
 MAX_COST_DETAIL_MODELS = 16
 MAX_COST_DETAIL_AGENTS = 16
 MAX_COST_DETAIL_EVIDENCE = 32

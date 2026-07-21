@@ -988,6 +988,18 @@ async function runLayoutAsyncSuite() {
     assert.equal(syncOwner.includes('preserveExpanded: false'), false, 'session switches no longer enter the destructive subtree teardown path');
   });
 
+  test('Finder filesystem batches carry bounded caller attribution without path metadata', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/40_file_explorer_files.js', 'utf8');
+    const actionsSource = fs.readFileSync('static_src/js/yolomux/45_file_explorer_actions.js', 'utf8');
+    assert.ok(source.includes('function fileExplorerFsBatchTrigger(options = {})'), 'the shared batch owner, not individual callers, normalizes its trigger enum');
+    assert.ok(source.includes('function fileExplorerFsBatchClientMetadata()'), 'batch requests carry an opaque client revision and scope');
+    assert.ok(source.includes('trigger_counts: item.triggerCounts') && source.includes('...fileExplorerFsBatchClientMetadata()'), 'each batch item carries bounded trigger counts while the request carries browser scope');
+    assert.ok(source.includes('fileExplorerFsBatchTriggerCountLimit = 64'), 'coalesced trigger counts have a fixed bounded ceiling');
+    assert.ok(/catch \(error\)[\s\S]{0,260}trigger: 'watch-diff-fallback'/.test(source), 'watch-diff failure repairs remain attributable');
+    assert.ok(source.includes("trigger: 'deferred-interaction'"), 'the deferred interaction repair is distinguishable from the watch fallback');
+    assert.ok(actionsSource.includes('async function refreshFileExplorerIfChanged(options = {})') && actionsSource.includes('trigger: options.trigger'), 'the fallback owner forwards its trigger to the shared batch request');
+  });
+
   await testAsync('Tabber activity cache treats direct snapshots as newer than in-flight HTTP work', async () => {
     const pending = [];
     const api = loadYolomux('', ['1']);
@@ -3001,12 +3013,12 @@ async function runLayoutAsyncSuite() {
           })),
         }));
       });
-      const first = api.fetchDirectoryForTest('/home/test');
-      const second = api.fetchDirectoryForTest('/home/test/');
+      const first = api.fetchDirectoryForTest('/home/test', {trigger: 'tree-render'});
+      const second = api.fetchDirectoryForTest('/home/test/', {trigger: 'watch-diff-fallback'});
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test', type: 'list'}],
+        requests: [{id: 1, path: '/home/test', trigger_counts: {'tree-render': 1, 'watch-diff-fallback': 1}, type: 'list'}],
         url: '/api/fs/batch',
       }], 'concurrent identical directory listings share one batched backend request');
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
@@ -3041,7 +3053,7 @@ async function runLayoutAsyncSuite() {
       assert.equal((await userFetch)[0].name, 'visible.txt');
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/hidden', type: 'list'}],
+        requests: [{id: 1, path: '/home/hidden', trigger_counts: {'explicit-user': 1}, type: 'list'}],
         url: '/api/fs/batch',
       }], 'explicit user Finder fetches bypass hidden-background suppression');
     }
@@ -3066,7 +3078,7 @@ async function runLayoutAsyncSuite() {
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test', type: 'list'}],
+        requests: [{id: 1, path: '/home/test', trigger_counts: {'fresh-repair': 2}, type: 'list'}],
         url: '/api/fs/batch',
       }], 'concurrent fresh directory listings bypass stale values but share one in-flight backend request');
       const [firstEntries, secondEntries] = await Promise.all([first, second]);
@@ -3097,10 +3109,10 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
         requests: [
-          {id: 1, path: '/repo', type: 'list'},
-          {id: 2, path: '/repo/src', type: 'list'},
-          {id: 3, path: '/repo/src/js', type: 'list'},
-          {id: 4, path: '/repo/tests', type: 'list'},
+          {id: 1, path: '/repo', trigger_counts: {'tree-render': 1}, type: 'list'},
+          {id: 2, path: '/repo/src', trigger_counts: {'tree-render': 1}, type: 'list'},
+          {id: 3, path: '/repo/src/js', trigger_counts: {'tree-render': 1}, type: 'list'},
+          {id: 4, path: '/repo/tests', trigger_counts: {'tree-render': 1}, type: 'list'},
         ],
         url: '/api/fs/batch',
       }], 'watched Finder/Differ directories prefetch in one fs batch instead of one POST per expanded directory');
@@ -3153,7 +3165,7 @@ async function runLayoutAsyncSuite() {
       await api.flushFileExplorerFsBatchForTest();
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test', type: 'info'}],
+        requests: [{id: 1, path: '/home/test', trigger_counts: {'tree-render': 2}, type: 'info'}],
         url: '/api/fs/batch',
       }], 'concurrent identical path-info lookups share one batched backend request');
       const [firstInfo, secondInfo] = await Promise.all([first, second]);
@@ -3239,7 +3251,7 @@ async function runLayoutAsyncSuite() {
       const target = await targetPromise;
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', type: 'info'}],
+        requests: [{id: 1, path: '/home/test/yolomux.dev3/tests/SHARE_TEST_INVENTORY.md', trigger_counts: {'explicit-user': 1}, type: 'info'}],
         url: '/api/fs/batch',
       }], 'terminal file refs confirm existence through the shared fs info batch path');
       assert.deepStrictEqual(canonical(target), {
@@ -3272,7 +3284,7 @@ async function runLayoutAsyncSuite() {
       const links = await providerPromise;
       assert.deepStrictEqual(canonical(calls), [{
         method: 'POST',
-        requests: [{id: 1, path: '/home/test/vortex4/lib/llm/src/protocols/openai/chat_completions/lark3_coder_v2.rs', type: 'info'}],
+        requests: [{id: 1, path: '/home/test/vortex4/lib/llm/src/protocols/openai/chat_completions/lark3_coder_v2.rs', trigger_counts: {'explicit-user': 1}, type: 'info'}],
         url: '/api/fs/batch',
       }], 'terminal lark-style file refs confirm existence against the active pane cwd');
       assert.equal(links.length, 1, 'confirmed terminal file refs are exposed to xterm as visual decorations');

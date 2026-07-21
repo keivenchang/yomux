@@ -732,6 +732,7 @@ class DarwinSystemMemoryDetails:
     compressed_memory_bytes: int
     swap_used_bytes: int | None
     pressure_percent: float | None
+    pressure_level: int | None
 
 
 class DarwinSwapUsage(ctypes.Structure):
@@ -833,6 +834,8 @@ def current_darwin_system_memory_snapshot() -> tuple[tuple[int, int], DarwinSyst
     swap_used = int(swap.used_bytes) if swap is not None else None
     available_percent = darwin_sysctl_value("kern.memorystatus_level", ctypes.c_int)
     pressure_percent = None if available_percent is None else float(100 - max(0, min(100, available_percent)))
+    native_pressure_level = darwin_sysctl_value("kern.memorystatus_vm_pressure_level", ctypes.c_int)
+    pressure_level = native_pressure_level if native_pressure_level in {1, 2, 4} else None
     details = DarwinSystemMemoryDetails(
         physical_memory_bytes=total,
         memory_used_bytes=memory_used,
@@ -842,6 +845,7 @@ def current_darwin_system_memory_snapshot() -> tuple[tuple[int, int], DarwinSyst
         compressed_memory_bytes=compressed_memory,
         swap_used_bytes=swap_used,
         pressure_percent=pressure_percent,
+        pressure_level=pressure_level,
     )
     # The existing cross-platform series intentionally means physical allocation on
     # Darwin. Keep that legacy semantic separate from the pressure display.
@@ -9359,6 +9363,80 @@ class TmuxWebtermApp:
             "last_overload_evidence": str(evidence[-1]) if evidence else "",
         }
 
+    def runtime_filesystem_batch_rows(self, metrics: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+        """Return only the safe fs-batch attribution fields from bounded perf records."""
+        rows: list[dict[str, Any]] = []
+        recent = metrics.get("recent") if isinstance(metrics, dict) else []
+        for item in recent if isinstance(recent, list) else []:
+            if not isinstance(item, dict) or item.get("role") != "http-endpoint" or item.get("surface") != "POST /api/fs/batch":
+                continue
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            if details.get("fs_batch") is not True:
+                continue
+            rows.append({
+                "time": float(item.get("time") or 0.0),
+                "compute_ms": float(item.get("compute_ms") or 0.0),
+                "payload_bytes": int(item.get("payload_bytes") or 0),
+                "batch_size": int(details.get("fs_batch_size") or 0),
+                "operations": str(details.get("fs_batch_operations") or "{}"),
+                "path_hashes": str(details.get("fs_batch_path_hashes") or "[]"),
+                "triggers": str(details.get("fs_batch_triggers") or "{}"),
+                "client_revision": str(details.get("fs_batch_client_revision") or "unknown"),
+                "client_scope": str(details.get("fs_batch_client_scope") or "legacy"),
+            })
+        return rows[-max(1, int(limit or 8)):]
+
+    def runtime_control_report_payload(self) -> dict[str, Any]:
+        """Serve the control socket from in-memory endpoint evidence only.
+
+        The full System report may scan cache trees and query local services. That work can block
+        the single control-server thread precisely while diagnosing a loaded server, so the CLI
+        report uses this small in-memory projection instead.
+        """
+        status = self.background_owner.status_payload()
+        diagnostics = self.performance_diagnostics_payload()
+        metrics = diagnostics.get("perf") if isinstance(diagnostics.get("perf"), dict) else {}
+        client_events = self.client_events.snapshot()
+        chat_events = {
+            event_type: {
+                "published": int(client_events.get("published_by_type", {}).get(event_type, {}).get("events", 0)),
+                "delivered": int(client_events.get("delivered_by_type", {}).get(event_type, {}).get("events", 0)),
+            }
+            for event_type in ("chat_messages_changed", "chat_typing_changed")
+        }
+        # Keep the documented report shape without cache walks, service probes, event-log reads,
+        # or transcript scans on the single control-server thread.
+        bounded_cache = lambda path: {"path": str(path), "exists": Path(path).exists(), "files": 0, "dirs": 0, "bytes": 0, "errors": 0, "truncated": True}
+        return {
+            "ok": True,
+            "state_dir": str(common.STATE_DIR),
+            "owner": {
+                "current_owner": status.get("current_owner"),
+                "status": status.get("status"),
+                "owner": bool(status.get("owner")),
+                "search_index": status.get("search_index"),
+                "debug": {},
+                "control": {"ok": True, "source": "live-owner-control"},
+            },
+            "refresh": {"bounded": True, "roles": status.get("roles", {}), "counters": status.get("counters", {}), "coalescing": status.get("coalescing", {}), "local_refreshing": {}, "dependency_invalidations": {}, "recurring_work": []},
+            "caches": {
+                "session_files": bounded_cache(SESSION_FILES_CACHE_DIR),
+                "activity": bounded_cache(TABBER_ACTIVITY_CACHE_DIR),
+                "search_index": bounded_cache(file_index.INDEX_DIR),
+            },
+            "search_index": {},
+            "local_services": {"services": [], "totals": {}, "ledger": {}, "bounded": True},
+            "top_endpoints": self.runtime_top_endpoints(diagnostics),
+            "top_background_work": self.runtime_top_background_work(diagnostics),
+            "top_event_types": [],
+            "client_events": client_events,
+            "chat": {**self.chat_service.diagnostics(), "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)), "events": chat_events},
+            "login_throttle": {**self.login_rate_limiter.diagnostics(), "edge": self.login_edge_controller.diagnostics()},
+            "largest_active_transcripts": [],
+            "transcripts_cache": {},
+            "filesystem_batch": self.runtime_filesystem_batch_rows(metrics),
+        }
+
     def runtime_report_payload(
         self,
         *,
@@ -10880,15 +10958,7 @@ class TmuxWebtermApp:
             # Serves --print-runtime-report over the existing control socket so the
             # CLI never constructs a second TmuxWebtermApp (whose startup could
             # stall on an overloaded host) just to render this JSON.
-            payload, _status = self.background_owner_status_payload()
-            return {
-                "ok": True,
-                "report": self.runtime_report_payload(
-                    background_status=payload,
-                    owner_control_response={"ok": True, "source": "live-owner-control"},
-                    force_transcripts=False,
-                ),
-            }
+            return {"ok": True, "report": self.runtime_control_report_payload()}
         if action == "background_client_event":
             return self.handle_background_client_event(request)
         if action == "background_refresh":

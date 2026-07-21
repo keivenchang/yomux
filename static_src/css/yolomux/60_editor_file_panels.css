@@ -2336,11 +2336,21 @@ body.editor-theme-light .file-editor-code-preview .code-tag {
 }
 .file-editor-preview-find-match {
   color: inherit;
-  background: color-mix(in srgb, var(--active-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--editor-cursor) 50%, transparent);
 }
 .file-editor-preview-find-match.active {
-  color: var(--active-accent-text);
-  background: var(--active-accent);
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
+}
+.file-editor-preview-pane ::selection,
+.file-editor-preview-pane-panel ::selection {
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
+}
+.file-editor-preview-pane ::-moz-selection,
+.file-editor-preview-pane-panel ::-moz-selection {
+  color: var(--editor-scheme-bg);
+  background: var(--editor-cursor);
 }
 .file-editor-content.split-preview .file-editor-codemirror,
 .file-editor-content.split-preview .file-editor-codemirror-panel {

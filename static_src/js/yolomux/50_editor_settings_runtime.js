@@ -213,7 +213,7 @@ function refreshOpenEditorThemePanels() {
     if (!path || fileState.get(path)?.kind !== 'text') return;
     const state = fileState.get(path);
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
       capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
@@ -383,10 +383,15 @@ function previewFindSelectMatch(host = null, index = 0) {
   return true;
 }
 
-function previewFindApplyQuery(host = null, query = '') {
+function previewFindApplyQuery(host = null, query = '', options = {}) {
   const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
   const state = previewFindStateForHost(host, true);
   if (!preview || !state) return false;
+  // A refresh rebuilds mark nodes after a preview redraw. Keep the user's active result when
+  // the query itself did not change; an input edit is a new search and intentionally starts at 1.
+  const previousIndex = options.preserveIndex === true && state.query === String(query || '')
+    ? state.index
+    : -1;
   previewFindClearMatches(host);
   state.query = String(query || '');
   state.matches = [];
@@ -422,7 +427,7 @@ function previewFindApplyQuery(host = null, query = '') {
       node.replaceWith(fragment);
     }
   }
-  if (state.matches.length) previewFindSelectMatch(host, 0);
+  if (state.matches.length) previewFindSelectMatch(host, previousIndex >= 0 ? previousIndex : 0);
   else previewFindUpdatePanel(host);
   return true;
 }
@@ -456,7 +461,86 @@ function closePreviewFind(host = null) {
 
 function refreshPreviewFind(host = null) {
   if (!previewFindOpenForHost(host)) return;
-  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '');
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function fileEditorPreviewSelectionOffsets(pane = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  if (!pane.contains(range.startContainer) || !pane.contains(range.endContainer)) return null;
+  const offsetAt = (node, offset) => {
+    const prefix = doc.createRange();
+    prefix.selectNodeContents(pane);
+    prefix.setEnd(node, offset);
+    return prefix.toString().length;
+  };
+  try {
+    return {
+      start: offsetAt(range.startContainer, range.startOffset),
+      end: offsetAt(range.endContainer, range.endOffset),
+      text: range.toString(),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection || !snapshot) return false;
+  const textNodes = [];
+  const walker = doc.createTreeWalker(pane, 4);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node);
+  const positionAt = value => {
+    let remaining = Math.max(0, Number(value) || 0);
+    for (const node of textNodes) {
+      if (remaining <= node.nodeValue.length) return {node, offset: remaining};
+      remaining -= node.nodeValue.length;
+    }
+    const node = textNodes[textNodes.length - 1];
+    return node ? {node, offset: node.nodeValue.length} : null;
+  };
+  let startOffset = Number(snapshot.start) || 0;
+  let endOffset = Number(snapshot.end) || startOffset;
+  const selectedText = String(snapshot.text || '');
+  if (selectedText) {
+    const text = pane.textContent || '';
+    let best = text.indexOf(selectedText);
+    for (let index = text.indexOf(selectedText, best + 1); index >= 0; index = text.indexOf(selectedText, index + 1)) {
+      if (best >= 0 && Math.abs(index - startOffset) >= Math.abs(best - startOffset)) continue;
+      best = index;
+    }
+    if (best >= 0) {
+      startOffset = best;
+      endOffset = best + selectedText.length;
+    }
+  }
+  const start = positionAt(startOffset);
+  const end = positionAt(endOffset);
+  if (!start || !end) return false;
+  try {
+    const range = doc.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// All preview redraws pass through one owner. Renderer replacement otherwise drops native viewer
+// selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
+function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
+  if (!pane) return;
+  const selection = fileEditorPreviewSelectionOffsets(pane);
+  renderEditorPreviewPane(pane, path, text, options);
+  refreshPreviewFind(host);
+  restoreFileEditorPreviewSelectionOffsets(pane, selection);
 }
 
 function updateEditorFindButton(button, state, host = null) {
@@ -588,7 +672,7 @@ function applyEditorWrapPreference() {
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (liveText !== null && state.content !== liveText) state.content = liveText;
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }

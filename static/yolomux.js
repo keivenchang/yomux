@@ -16416,7 +16416,7 @@ async function openFileExplorerAt(path, options = {}) {
   } else if (options.syncSelection === true) {
     setFileExplorerSelectionPin(false);
   }
-  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
+  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true, trigger: options.trigger});
   if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
@@ -16470,8 +16470,12 @@ const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
+const fileExplorerFsBatchTriggerCountLimit = 64;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
+const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
+  'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation',
+]);
 let fileExplorerPushRefreshDepth = 0;
 const FILE_TREE_BASE_PAD_PX = 8;
 const FILE_TREE_COMPACT_PAD_PX = 4;
@@ -16603,7 +16607,10 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
     lifecycle.onReuse?.(record.value);
     return Promise.resolve(record.value);
   }
-  if (canReuse && record.request) return record.request;
+  if (canReuse && record.request) {
+    lifecycle.onCoalesce?.();
+    return record.request;
+  }
   if (lifecycle.skipRequest?.() === true) {
     lifecycle.onSkip?.();
     return Promise.resolve(lifecycle.skipValue);
@@ -16651,12 +16658,40 @@ function scheduleFileExplorerFsBatchFlush() {
   fileExplorerFsBatchTimer = setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs);
 }
 
+function fileExplorerFsBatchTrigger(options = {}) {
+  const requested = String(options.trigger || '');
+  if (FILE_EXPLORER_FS_BATCH_TRIGGERS.has(requested)) return requested;
+  if (options.user === true) return 'explicit-user';
+  return options.fresh === true ? 'fresh-repair' : 'tree-render';
+}
+
+function recordFileExplorerFsBatchTrigger(item, trigger) {
+  const count = Number(item.triggerCounts[trigger]) || 0;
+  item.triggerCounts[trigger] = Math.min(fileExplorerFsBatchTriggerCountLimit, count + 1);
+}
+
+function recordPendingFileExplorerFsBatchTrigger(type, path, options = {}) {
+  const pending = fileExplorerFsBatchPending.get(fileExplorerFsBatchKey(type, normalizeDirectoryPath(path)));
+  if (pending?.item && pending.item.sent !== true) recordFileExplorerFsBatchTrigger(pending.item, fileExplorerFsBatchTrigger(options));
+}
+
+function fileExplorerFsBatchClientMetadata() {
+  const revision = String((typeof bootstrap === 'object' && bootstrap?.clientRevision) || '');
+  return {
+    client_revision: /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : '',
+    client_scope: shareViewMode ? 'share' : 'browser',
+  };
+}
+
 function fetchFilesystemBatchItem(type, path, options = {}) {
   const normalized = normalizeDirectoryPath(path);
   const key = fileExplorerFsBatchKey(type, normalized);
   if (options.dedupe !== false) {
     const existing = fileExplorerFsBatchPending.get(key);
-    if (existing) return existing.promise;
+    if (existing) {
+      if (existing.item.sent !== true) recordFileExplorerFsBatchTrigger(existing.item, fileExplorerFsBatchTrigger(options));
+      return existing.promise;
+    }
   }
   let resolve;
   let reject;
@@ -16664,7 +16699,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     resolve = ok;
     reject = fail;
   });
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, key, resolve, reject};
+  const trigger = fileExplorerFsBatchTrigger(options);
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, resolve, reject, sent: false};
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
@@ -16701,12 +16737,15 @@ async function flushFileExplorerFsBatch() {
   fileExplorerFsBatchTimer = null;
   const items = fileExplorerFsBatchQueue.splice(0);
   if (!items.length) return;
-  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path}));
+  const requests = items.map(item => {
+    item.sent = true;
+    return {id: item.id, type: item.type, path: item.path, trigger_counts: item.triggerCounts};
+  });
   try {
     const payload = await apiFetchJson('/api/fs/batch', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({requests}),
+      body: JSON.stringify({requests, ...fileExplorerFsBatchClientMetadata()}),
     });
     const responses = new Map((payload.responses || []).map(response => [response.id, response]));
     for (const item of items) {
@@ -16724,10 +16763,11 @@ async function fetchDirectory(path, options = {}) {
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
       // in the same batch window.
-      const payload = await fetchFilesystemBatchItem('list', root);
+      const payload = await fetchFilesystemBatchItem('list', root, {trigger: fileExplorerFsBatchTrigger(options)});
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('list', root, options),
       skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
       onSkip: () => clearFileExplorerListError(root),
       skipValue: null,
@@ -16814,8 +16854,8 @@ async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
     await refreshFileExplorerFromPush(diffPayload);
   } catch (error) {
     console.warn('client fs watch diff refresh failed', error);
-    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-    else await refreshFileExplorerIfChanged();
+    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
+    else await refreshFileExplorerIfChanged({trigger: 'watch-diff-fallback'});
   }
 }
 
@@ -18164,7 +18204,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
   requestAnimationFrame(() => {
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
-    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true}).then(entriesByDir => {
+    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
       if (
         fileExplorerSyncPlanSignature(plan) !== signature
         || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
@@ -18346,7 +18386,7 @@ function deferFileExplorerRefresh() {
   fileExplorerRefreshDeferred = true;
   setTimeout(() => {
     fileExplorerRefreshDeferred = false;
-    refreshFileExplorerIfChanged().catch(error => console.warn('deferred file explorer refresh failed', error));
+    refreshFileExplorerIfChanged({trigger: 'deferred-interaction'}).catch(error => console.warn('deferred file explorer refresh failed', error));
   }, fileExplorerRefreshIdleMs);
 }
 
@@ -21404,8 +21444,12 @@ async function fetchFilePathInfo(path, options = {}) {
     'info',
     normalized,
     options,
-    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true}),
-    {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
+    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
+    {
+      skipRequest: () => suppressBackgroundFilesystemFetch(options),
+      skipValue: null,
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('info', normalized, options),
+    },
   );
 }
 
@@ -22320,7 +22364,7 @@ async function refreshFileExplorerPanelTrees(options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
-async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot()) {
+async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
   const entriesByDir = new Map();
   const directories = new Set([normalizedRoot]);
@@ -22329,7 +22373,7 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   }
   const listings = await Promise.all(Array.from(directories).map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory),
+    entries: await fetchDirectory(directory, options),
   })));
   for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
@@ -22341,7 +22385,7 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   const root = normalizeDirectoryPath(options.root || currentFileExplorerRoot());
   const entriesByDir = options.entriesByDir instanceof Map
     ? options.entriesByDir
-    : await fileExplorerEntriesByWatchedDirectory(root);
+    : await fileExplorerEntriesByWatchedDirectory(root, options);
   const rootEntries = Array.isArray(options.entries) ? options.entries : entriesByDir.get(root);
   if (!rootEntries) return false;
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
@@ -23783,7 +23827,7 @@ function syncServerWatchRoots(options = {}) {
   }, delay);
 }
 
-async function refreshFileExplorerIfChanged() {
+async function refreshFileExplorerIfChanged(options = {}) {
   if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
   if (!directories.length) return;
@@ -23792,7 +23836,7 @@ async function refreshFileExplorerIfChanged() {
   const signaturesByDir = new Map();
   const listings = await Promise.all(directories.map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true}),
+    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true, trigger: options.trigger}),
   })));
   for (const {directory, entries} of listings) {
     if (!entries) continue;
@@ -24179,8 +24223,8 @@ function codeMirrorThemeExtension(api) {
     },
     '.cm-searchMatch-selected': {
       color: scheme.dark ? '#111827' : '#111827',
-      backgroundColor: scheme.dark ? '#ffd166' : '#ff9f1c',
-      boxShadow: `inset 0 0 0 2px ${scheme.dark ? '#fff2a8' : '#7c2d12'}, 0 0 0 1px ${scheme.dark ? 'rgba(0, 0, 0, 0.46)' : 'rgba(255, 255, 255, 0.68)'}`,
+      backgroundColor: 'var(--editor-cursor)',
+      boxShadow: `inset 0 0 0 2px ${scheme.bg}, 0 0 0 1px var(--editor-cursor)`,
       borderRadius: '2px',
       fontWeight: '800',
     },
@@ -24595,6 +24639,24 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
 }
 
+// Find owns the selected result, but the viewport is the user's current navigation surface when
+// they scroll manually. Keep the selected match while it remains visible; once it leaves the
+// viewport, adopt the first visible match without requesting another scroll.
+function codeMirrorSearchVisibleMatchIndex(matches, selection = {}, visibleRanges = []) {
+  if (!matches.length) return -1;
+  const selectionFrom = Number(selection.from);
+  const selectionTo = Number(selection.to);
+  const selectedIndex = matches.findIndex(match => match.from === selectionFrom && match.to === selectionTo);
+  if (selectedIndex < 0) return -1;
+  const visible = matches.filter(match => visibleRanges.some(range => (
+    match.from < Number(range?.to) && match.to > Number(range?.from)
+  )));
+  if (!visible.length) return selectedIndex;
+  const selected = matches[selectedIndex];
+  if (visible.some(match => match === selected)) return selectedIndex;
+  return matches.indexOf(visible[0]);
+}
+
 function codeMirrorPhraseValues() {
   return {
     Find: t('common.find'),
@@ -24632,7 +24694,13 @@ function codeMirrorSearchScrollFix(api) {
     if (!update.transactions.some(tr => tr.isUserEvent?.('select.search'))) return;
     const head = update.state.selection.main.head;
     const view = update.view;
+    const scrollTop = view.scrollDOM?.scrollTop || 0;
+    const scrollLeft = view.scrollDOM?.scrollLeft || 0;
     requestAnimationFrame(() => {
+      // Find keeps focus in its panel, so a manual scroll between the search
+      // selection and this deferred centering pass is newer user navigation.
+      if (!view.dom?.isConnected || view.state.selection.main.head !== head) return;
+      if (Math.abs((view.scrollDOM?.scrollTop || 0) - scrollTop) > 1 || Math.abs((view.scrollDOM?.scrollLeft || 0) - scrollLeft) > 1) return;
       try {
         view.dispatch({effects: api.EditorView.scrollIntoView(head, {x: 'center', y: 'nearest'})});
       } catch (_) {}
@@ -24710,6 +24778,19 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       }
       const query = panel.querySelector?.('input[name="search"]')?.value || '';
       const selection = this.view.state?.selection?.main || {};
+      const matches = codeMirrorSearchMatches(
+        this.view.state?.doc?.toString?.() || '',
+        query,
+        codeMirrorSearchCheckboxState(panel),
+      );
+      const visibleMatchIndex = codeMirrorSearchVisibleMatchIndex(matches, selection, this.view.visibleRanges || []);
+      if (visibleMatchIndex >= 0 && visibleMatchIndex !== matches.findIndex(match => (
+        match.from === Number(selection.from) && match.to === Number(selection.to)
+      ))) {
+        const match = matches[visibleMatchIndex];
+        this.view.dispatch({selection: {anchor: match.from, head: match.to}});
+        return;
+      }
       count.textContent = codeMirrorSearchMatchSummary(
         this.view.state?.doc?.toString?.() || '',
         query,
@@ -25759,7 +25840,7 @@ function refreshOpenEditorThemePanels() {
     if (!path || fileState.get(path)?.kind !== 'text') return;
     const state = fileState.get(path);
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
       capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
@@ -25929,10 +26010,15 @@ function previewFindSelectMatch(host = null, index = 0) {
   return true;
 }
 
-function previewFindApplyQuery(host = null, query = '') {
+function previewFindApplyQuery(host = null, query = '', options = {}) {
   const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
   const state = previewFindStateForHost(host, true);
   if (!preview || !state) return false;
+  // A refresh rebuilds mark nodes after a preview redraw. Keep the user's active result when
+  // the query itself did not change; an input edit is a new search and intentionally starts at 1.
+  const previousIndex = options.preserveIndex === true && state.query === String(query || '')
+    ? state.index
+    : -1;
   previewFindClearMatches(host);
   state.query = String(query || '');
   state.matches = [];
@@ -25968,7 +26054,7 @@ function previewFindApplyQuery(host = null, query = '') {
       node.replaceWith(fragment);
     }
   }
-  if (state.matches.length) previewFindSelectMatch(host, 0);
+  if (state.matches.length) previewFindSelectMatch(host, previousIndex >= 0 ? previousIndex : 0);
   else previewFindUpdatePanel(host);
   return true;
 }
@@ -26002,7 +26088,86 @@ function closePreviewFind(host = null) {
 
 function refreshPreviewFind(host = null) {
   if (!previewFindOpenForHost(host)) return;
-  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '');
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function fileEditorPreviewSelectionOffsets(pane = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  if (!pane.contains(range.startContainer) || !pane.contains(range.endContainer)) return null;
+  const offsetAt = (node, offset) => {
+    const prefix = doc.createRange();
+    prefix.selectNodeContents(pane);
+    prefix.setEnd(node, offset);
+    return prefix.toString().length;
+  };
+  try {
+    return {
+      start: offsetAt(range.startContainer, range.startOffset),
+      end: offsetAt(range.endContainer, range.endOffset),
+      text: range.toString(),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection || !snapshot) return false;
+  const textNodes = [];
+  const walker = doc.createTreeWalker(pane, 4);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node);
+  const positionAt = value => {
+    let remaining = Math.max(0, Number(value) || 0);
+    for (const node of textNodes) {
+      if (remaining <= node.nodeValue.length) return {node, offset: remaining};
+      remaining -= node.nodeValue.length;
+    }
+    const node = textNodes[textNodes.length - 1];
+    return node ? {node, offset: node.nodeValue.length} : null;
+  };
+  let startOffset = Number(snapshot.start) || 0;
+  let endOffset = Number(snapshot.end) || startOffset;
+  const selectedText = String(snapshot.text || '');
+  if (selectedText) {
+    const text = pane.textContent || '';
+    let best = text.indexOf(selectedText);
+    for (let index = text.indexOf(selectedText, best + 1); index >= 0; index = text.indexOf(selectedText, index + 1)) {
+      if (best >= 0 && Math.abs(index - startOffset) >= Math.abs(best - startOffset)) continue;
+      best = index;
+    }
+    if (best >= 0) {
+      startOffset = best;
+      endOffset = best + selectedText.length;
+    }
+  }
+  const start = positionAt(startOffset);
+  const end = positionAt(endOffset);
+  if (!start || !end) return false;
+  try {
+    const range = doc.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// All preview redraws pass through one owner. Renderer replacement otherwise drops native viewer
+// selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
+function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
+  if (!pane) return;
+  const selection = fileEditorPreviewSelectionOffsets(pane);
+  renderEditorPreviewPane(pane, path, text, options);
+  refreshPreviewFind(host);
+  restoreFileEditorPreviewSelectionOffsets(pane, selection);
 }
 
 function updateEditorFindButton(button, state, host = null) {
@@ -26134,7 +26299,7 @@ function applyEditorWrapPreference() {
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (liveText !== null && state.content !== liveText) state.content = liveText;
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }
@@ -42347,8 +42512,8 @@ function bindPreferencesPanel(panel) {
   ];
   const CURRENT_RESOLUTIONS = Object.freeze([1, 10, 60, 300]);
   const CURRENT_STATS_WIRE_PROTOCOL_VERSION = 2;
-  const CURRENT_COST_REPORT_SCHEMA_VERSION = 2;
-  const CURRENT_COST_DIMENSIONS = Object.freeze(['input', 'cache_read', 'cache_write', 'output', 'other']);
+  const CURRENT_COST_REPORT_SCHEMA_VERSION = 3;
+  const CURRENT_COST_DIMENSIONS = Object.freeze(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']);
   const CURRENT_COST_REPORT_FIELDS = Object.freeze([
     'schema_version', 'total_micro_usd', 'total_api_list_micro_usd', 'total_tokens',
     'dimensions', 'priced', 'unpriced', 'models', 'agents', 'evidence', 'catalog_revision',
@@ -43660,8 +43825,9 @@ function bindPreferencesPanel(panel) {
       `<p class="yo-cost-current-total">Total: ${currentCostPriceHtml(report.total_micro_usd, report.total_api_list_micro_usd, {strong: true})} · Total tokens: <strong>${currentStatsEscape(currentStatsMetric(report.total_tokens, 'usage'))} tokens</strong> · Priced: ${currentStatsEscape(currentStatsMetric(report.priced.tokens, 'usage'))} tokens / ${report.priced.atoms} atoms · Unpriced: ${currentStatsEscape(currentStatsMetric(report.unpriced.tokens, 'usage'))} tokens / ${report.unpriced.atoms} atoms.</p>`,
       '<details class="yo-cost-current-explainer"><summary>What these columns mean</summary><dl>',
       '<div><dt>Input</dt><dd>Prompt and context tokens sent to the model before provider cache adjustments.</dd></div>',
-      '<div><dt>Cached</dt><dd>Previously stored prompt or KV-cache tokens read again; providers commonly report these separately and often price them below ordinary input.</dd></div>',
-      '<div><dt>Cache write</dt><dd>Input tokens written into a provider cache for possible reuse; some providers price cache creation separately.</dd></div>',
+      '<div><dt>Cache read</dt><dd>Previously stored prompt or KV-cache tokens read again; providers commonly report these separately and often price them below ordinary input.</dd></div>',
+      '<div><dt>5m cache write</dt><dd>Input tokens written into a provider cache with a five-minute lifetime.</dd></div>',
+      '<div><dt>1h cache write</dt><dd>Input tokens written into a provider cache with a one-hour lifetime.</dd></div>',
       '<div><dt>Output</dt><dd>Tokens generated by the model. Reasoning is not split out because the current source atoms do not distinguish it reliably.</dd></div>',
       '<div><dt>Other</dt><dd>Non-text token usage or request-priced usage that cannot honestly be assigned to the four text dimensions.</dd></div>',
       '<div><dt>Priced / Unpriced</dt><dd>Usage with a matching reviewed catalog rate versus recorded usage whose cost is unknown; unpriced usage remains visible and is never treated as free.</dd></div>',
@@ -43669,8 +43835,8 @@ function bindPreferencesPanel(panel) {
       '<section><h3>Token and cost breakdown</h3><div class="yo-cost-current-table-scroll"><table><thead><tr><th>Usage</th><th>Tokens</th><th>Marginal / at API list prices</th></tr></thead><tbody>',
       dimensions,
       '</tbody></table></div></section>',
-      currentCostAttributionTable('Model Usages', report.models, 'model'),
-      currentCostAttributionTable('By Agent', report.agents, 'agent'),
+      currentCostAttributionTable('Cost by Model', report.models, 'model'),
+      currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
       '<section><h3>Pricing attribution</h3>',
       evidence ? `<ol class="yo-cost-current-evidence">${evidence}</ol>` : '<p>No priced catalog evidence in this range.</p>',
       '</section>',
@@ -43683,7 +43849,7 @@ function bindPreferencesPanel(panel) {
     const body = rows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
-        : `<span class="yo-cost-current-agent">${currentStatsEscape(row.source)}</span>`;
+        : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
       const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => (
         `<td>${currentCostDimensionCell(row.dimensions[dimension])}</td>`
       )).join('');
@@ -43704,7 +43870,7 @@ function bindPreferencesPanel(panel) {
 
   function currentCostDimensionLabel(dimension) {
     return ({
-      input: 'Input', cache_read: 'Cached', cache_write: 'Cache write', output: 'Output', other: 'Other',
+      input: 'Input', cache_read: 'Cache read', cache_write_5m: '5m cache write', cache_write_1h: '1h cache write', output: 'Output', other: 'Other',
     })[dimension] || dimension;
   }
 
@@ -43909,7 +44075,30 @@ function bindPreferencesPanel(panel) {
   function currentStatsSeriesLabel(name) {
     if (name === 'cost_micro_usd') return 'Marginal';
     if (name === 'api_list_cost_micro_usd') return 'At API list prices';
+    if (name.startsWith('agent_tokens_per_minute:')) {
+      return currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length));
+    }
     return name.replaceAll('_', ' ').replaceAll(':', ' · ');
+  }
+
+  // Usage series retain a stable pane-level key, while the visible identity is the tmux
+  // session. Cost rows carry that same safe key from the server, so both surfaces call this
+  // one owner instead of independently trimming their agent labels.
+  function currentStatsCanonicalAgentLabel(value) {
+    const full = String(value || '').trim();
+    if (!full) return 'Unknown';
+    if (full.startsWith('claude-bg:')) {
+      const [, projectValue = '', sessionValue = ''] = full.split(':');
+      const projectParts = projectValue.split('-').filter(Boolean);
+      const project = projectParts.slice(-2).join('-') || projectValue;
+      const session = sessionValue.slice(0, 8);
+      return ['claude-bg', project, session].filter(Boolean).join(':');
+    }
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
   }
 
   function currentStatsNumber(value) {
@@ -44449,6 +44638,7 @@ function bindPreferencesPanel(panel) {
   }
 
   globalThis.YOLOmuxStatsCurrent = Object.freeze({
+    canonicalAgentLabel: currentStatsCanonicalAgentLabel,
     createBrowserClient,
     createController,
     mount,
@@ -44615,18 +44805,7 @@ let jsDebugCostPanelNextRefreshAtMs = 0;
 let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
-// Output is the compatibility view: before component-level accounting existed,
-// Model tokens/min was a projection of generated (output) transcript tokens.
-const jsDebugGraphModelTokenDimensions = Object.freeze([
-  Object.freeze({key: 'output', labelKey: 'debug.cost.output', fallback: 'Output'}),
-  Object.freeze({key: 'all', labelKey: 'debug.modelTokens.allBillable', fallback: 'All billable'}),
-  Object.freeze({key: 'input', labelKey: 'debug.cost.input', fallback: 'Input'}),
-  Object.freeze({key: 'cacheRead', labelKey: 'debug.modelTokens.cacheRead', fallback: 'Cache hits & refreshes'}),
-  Object.freeze({key: 'cacheWrite', labelKey: 'debug.modelTokens.cacheWrite', fallback: 'Cache write'}),
-]);
-let jsDebugGraphModelTokenDimension = 'output';
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
-const jsDebugCostComponentSortState = {key: 'cost', direction: 'desc'};
 const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
@@ -44862,8 +45041,9 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
   {
-    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', color: 'var(--good)',
+    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', colorForValue: debugGraphMacMemoryPressureColor,
     value: bucket => bucket.hostMetrics?.macMemoryDetailCount ? bucket.hostMetrics.macMemoryPressureTotalPercent / bucket.hostMetrics.macMemoryDetailCount : 0,
+    colorValue: bucket => bucket.hostMetrics?.macMemoryPressureLevel,
     hasData: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0) > 0 && Number.isFinite(Number(bucket?.hostMetrics?.macMemoryPressureTotalPercent)),
     sampleCount: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0),
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
@@ -44876,37 +45056,33 @@ const jsDebugGraphSeries = Object.freeze([
 // sampler cadence, and the owning chart groups / series. Coverage lookups and
 // chart->family mapping READ this table; inline per-family if/alias chains
 // outside it are contract-banned (tests/yostats_performance.test.js pins both
-// mirrors against each other). modelTokenDimension names which modelTokens
-// chart dimension the family backs ('output' is the generated-token counter;
-// 'default' covers every billing dimension).
+// mirrors against each other).
 const jsDebugStatsFamilyManifest = Object.freeze({
   cpu: Object.freeze({legacyAliases: Object.freeze(['server', 'raw', 'buckets']), cadenceSeconds: 1, chartGroups: Object.freeze(['cpu']), series: Object.freeze(['systemCpu'])}),
   service_load: Object.freeze({legacyAliases: Object.freeze([]), cadenceSeconds: 10, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   agent_status: Object.freeze({legacyAliases: Object.freeze(['status']), cadenceSeconds: 10, chartGroups: Object.freeze(['activity']), series: jsDebugAgentStatusSeriesKeys}),
-  agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens']), modelTokenDimension: 'output', series: Object.freeze(['tokensPerAgent'])}),
-  cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), modelTokenDimension: 'default', series: Object.freeze([])}),
+  agent_tokens: Object.freeze({legacyAliases: Object.freeze(['tokens']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze(['agentTokens', 'modelTokens']), series: Object.freeze(['tokensPerAgent'])}),
+  cost: Object.freeze({legacyAliases: Object.freeze(['cost_atoms', 'usage_atoms']), cadenceSeconds: 10, idleCadenceSeconds: 60, chartGroups: Object.freeze([]), series: Object.freeze([])}),
   gpu: Object.freeze({legacyAliases: Object.freeze(['gpu_metrics']), cadenceSeconds: 10, chartGroups: Object.freeze(['gpuUtil', 'gpuMemory']), series: Object.freeze([])}),
   system_memory: Object.freeze({legacyAliases: Object.freeze(['memory']), cadenceSeconds: 60, chartGroups: Object.freeze(['memory']), series: Object.freeze(['systemMemory', 'macMemoryPressure'])}),
 });
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
-const jsDebugStatsFamilyByModelTokenDimension = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
-  .filter(([, entry]) => entry.modelTokenDimension).map(([family, entry]) => [entry.modelTokenDimension, family])));
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', toggleLabelEn: 'CPU', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
-  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', toggleLabelEn: 'Daemons load', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
-  {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', toggleLabelEn: 'Sys mem', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
-  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', toggleLabelEn: 'Agents', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
-  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', toggleLabelEn: 'Agent tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', toggleLabelEn: 'Model tokens', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
-  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', toggleLabelEn: 'GPU', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
-  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', toggleLabelEn: 'GPU mem', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
-  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', toggleLabelEn: 'Latency', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', toggleLabelEn: 'API&SSE', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
-  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', toggleLabelEn: 'Bandwidth', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
+  {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
+  {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
+  {key: 'agentTokens', labelKey: 'debug.graph.chart.agentTokens', descKey: 'debug.graph.chart.agentTokens.desc', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicAgentTokens: true, displayedSummary: 'agentTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'modelTokens', labelKey: 'debug.graph.chart.modelTokens', descKey: 'debug.graph.chart.modelTokens.desc', series: [], unit: 'tokensPerMinute', kind: 'bar', stacked: true, dynamicTokenDimension: 'model', displayedSummary: 'modelTokens', bucketSeconds: jsDebugGraphAgentTokenBucketSeconds},
+  {key: 'gpuUtil', labelKey: 'debug.graph.chart.gpuUtil', descKey: 'debug.graph.chart.gpuUtil.desc', series: [], unit: 'percent', fixedMax: 100, kind: 'bar', zeroBar: true, hostMetric: 'gpuUtil'},
+  {key: 'gpuMemory', labelKey: 'debug.graph.chart.gpuMemory', descKey: 'debug.graph.chart.gpuMemory.desc', series: [], unit: 'bytes', hostMetric: 'gpuMemory', capacityMetric: 'gpuMemory'},
+  {key: 'latency', labelKey: 'common.clientLatency', descKey: 'debug.graph.chart.latency.desc', series: ['latency'], unit: 'ms', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'count', labelKey: 'debug.graph.chart.clientApiSse', descKey: 'debug.graph.chart.clientApiSse.desc', series: ['api', 'sse'], unit: 'countPerSecond', displayedSummary: 'clientRequests', disconnectedOverlay: true, noDataOverlay: true},
+  {key: 'bandwidth', labelKey: 'debug.graph.chart.clientBandwidth', descKey: 'debug.graph.chart.clientBandwidth.desc', series: ['bandwidth'], unit: 'bytesPerSecond', displayedSummary: 'bandwidth', disconnectedOverlay: true, noDataOverlay: true},
 ]);
 const jsDebugGraphChartControlItems = Object.freeze(jsDebugGraphChartGroups.flatMap(group => group.key === 'modelTokens'
-  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title', toggleLabelEn: 'Cost'})]
+  ? [group, Object.freeze({key: 'costSummary', labelKey: 'debug.cost.title'})]
   : [group]));
 
 function debugGraphLocalizedLabel(item = {}) {
@@ -44959,9 +45135,6 @@ function loadJsDebugStatsUiPreferences() {
   jsDebugGraphRangeSeconds = normalizedJsDebugGraphRange(saved.rangeSeconds);
   jsDebugGraphResolutionOverrideSeconds = Math.max(0, Number(saved.resolutionOverrideSeconds) || 0);
   jsDebugGraphChartLayout = Math.max(0, Math.min(4, Math.round(Number(saved.chartLayout) || 0)));
-  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === String(saved.modelTokenDimension || ''))
-    ? String(saved.modelTokenDimension)
-    : 'output';
   const hidden = new Set(jsDebugGraphDefaultHiddenChartKeys);
   const visible = new Set(Array.isArray(saved.visibleCharts) ? saved.visibleCharts.map(value => String(value || '')) : []);
   for (const key of visible) hidden.delete(key);
@@ -44985,7 +45158,6 @@ function saveJsDebugStatsUiPreferences() {
       rangeSeconds: jsDebugGraphRangeSeconds,
       resolutionOverrideSeconds: jsDebugGraphResolutionOverrideSeconds,
       chartLayout: jsDebugGraphChartLayout,
-      modelTokenDimension: jsDebugGraphModelTokenDimension,
       hiddenCharts: [...debugGraphHiddenChartKeys()].sort(),
       visibleCharts: [...(jsDebugGraphVisibleCharts instanceof Set ? jsDebugGraphVisibleCharts : [])].sort(),
       logLevels: [...jsDebugLogsState.levels].sort(),
@@ -45898,6 +46070,7 @@ function debugGraphNewHostMetrics() {
     macWiredMemoryTotalBytes: 0,
     macCompressedMemoryTotalBytes: 0,
     macMemoryPressureTotalPercent: NaN,
+    macMemoryPressureLevel: NaN,
     cpuLabel: '',
     systemMemoryLabel: '',
     cpuProcesses: new Map(),
@@ -46241,6 +46414,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     targetHost.macMemoryDetailCount += Number(sourceHost.macMemoryDetailCount || 0) * scale;
     for (const key of ['macPhysicalMemoryTotalBytes', 'macMemoryUsedTotalBytes', 'macCachedFilesTotalBytes', 'macSwapUsedTotalBytes', 'macAppMemoryTotalBytes', 'macWiredMemoryTotalBytes', 'macCompressedMemoryTotalBytes']) targetHost[key] += Number(sourceHost[key] || 0) * scale;
     if (Number.isFinite(Number(sourceHost.macMemoryPressureTotalPercent))) targetHost.macMemoryPressureTotalPercent = Number(sourceHost.macMemoryPressureTotalPercent);
+    if (Number.isFinite(Number(sourceHost.macMemoryPressureLevel))) targetHost.macMemoryPressureLevel = Math.max(Number(targetHost.macMemoryPressureLevel) || 0, Number(sourceHost.macMemoryPressureLevel));
     if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
     if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
@@ -46695,6 +46869,7 @@ function debugGraphApplyHostMetrics(bucket, source) {
     macCachedFilesTotalBytes: 'mac_cached_files_total_bytes', macSwapUsedTotalBytes: 'mac_swap_used_total_bytes',
     macAppMemoryTotalBytes: 'mac_app_memory_total_bytes', macWiredMemoryTotalBytes: 'mac_wired_memory_total_bytes',
     macCompressedMemoryTotalBytes: 'mac_compressed_memory_total_bytes', macMemoryPressureTotalPercent: 'mac_pressure_total_percent',
+    macMemoryPressureLevel: 'mac_pressure_level',
   };
   let macMemoryDetailSeen = false;
   for (const [targetKey, sourceKey] of Object.entries(macMemoryFields)) {
@@ -47181,21 +47356,11 @@ function debugGraphAgentTokenBucketValue(bucket, item) {
   return Number(item?.samples || 0) > 0 ? Number(item.total || 0) / Number(item.samples || 1) : 0;
 }
 
-function debugGraphAgentTokenBucketDimensionValue(bucket, item, dimension = jsDebugGraphModelTokenDimension) {
-  if (dimension === 'output') return debugGraphAgentTokenBucketValue(bucket, item);
-  const quantity = Math.max(0, Number(item?.billableTokens?.[dimension]) || 0);
-  return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
-}
-
 function debugGraphAgentTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
     if (!(bucket?.agentTokenRates instanceof Map)) continue;
     for (const item of bucket.agentTokenRates.values()) {
-      if (jsDebugGraphModelTokenDimension !== 'output') {
-        if (item?.billableAvailable === true) total += Math.max(0, Number(item?.billableTokens?.[jsDebugGraphModelTokenDimension]) || 0);
-        continue;
-      }
       const tokens = Number(item?.tokens);
       if (Number.isFinite(tokens) && tokens >= 0) {
         total += tokens;
@@ -47212,12 +47377,6 @@ function debugGraphAgentTokenDisplayedSum(buckets) {
 function debugGraphModelTokenDisplayedSum(buckets) {
   let total = 0;
   for (const bucket of buckets || []) {
-    const components = debugGraphModelTokenComponentRecords(bucket);
-    if (components.length) {
-      total += components.reduce((sum, component) => sum + Math.max(0, Number(component?.quantity) || 0), 0);
-      continue;
-    }
-    if (jsDebugGraphModelTokenDimension !== 'output') continue;
     if (!(bucket?.agentTokenRates instanceof Map)) continue;
     for (const item of bucket.agentTokenRates.values()) {
       if (!(item?.modelRates instanceof Map)) continue;
@@ -47610,7 +47769,6 @@ function debugGraphHistoryOverlayHtml(state = jsDebugHistoryReadiness) {
 }
 
 function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
-  const selectedAgentDimension = dimension === 'agent' ? jsDebugGraphModelTokenDimension : 'output';
   const tokenItems = new Map();
   for (const bucket of buckets) {
     if (!(bucket.agentTokenRates instanceof Map)) continue;
@@ -47618,9 +47776,7 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       if (dimension === 'agent') {
         const existing = tokenItems.get(String(key)) || {label: item?.label || String(key), samples: 0};
         existing.label = item?.label || existing.label;
-        existing.samples += selectedAgentDimension === 'output'
-          ? Number(item?.samples || 0)
-          : (item?.billableAvailable === true ? 1 : 0);
+        existing.samples += Number(item?.samples || 0);
         tokenItems.set(String(key), existing);
         continue;
       }
@@ -47655,7 +47811,7 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
         const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
         if (dimension === 'agent') {
           if (!tokenItem) return 0;
-          return debugGraphAgentTokenBucketDimensionValue(bucket, tokenItem, selectedAgentDimension);
+          return debugGraphAgentTokenBucketValue(bucket, tokenItem);
         }
         let value = 0;
         if (bucket?.agentTokenRates instanceof Map) {
@@ -47670,7 +47826,6 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       hasData: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          if (selectedAgentDimension !== 'output') return tokenItem?.billableAvailable === true;
           return Number(tokenItem?.samples || 0) > 0 || Number(tokenItem?.tokens || 0) > 0;
         }
         return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => {
@@ -47681,7 +47836,6 @@ function debugGraphTokenSeriesDefs(buckets, dimension = 'agent') {
       sampleCount: bucket => {
         if (dimension === 'agent') {
           const tokenItem = bucket?.agentTokenRates instanceof Map ? bucket.agentTokenRates.get(key) : null;
-          if (selectedAgentDimension !== 'output') return Math.max(0, Number(tokenItem?.billableSamples?.[selectedAgentDimension]) || 0);
           return Math.max(0, Number(tokenItem?.samples) || 0);
         }
         let samples = 0;
@@ -47729,63 +47883,7 @@ function debugGraphDisplayedTokenVisuals(items, identityForItem = item => item?.
   });
 }
 
-function debugGraphModelTokenDimensionLabel(dimension = jsDebugGraphModelTokenDimension) {
-  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
-  return item ? debugGraphCostText(item.labelKey, item.fallback) : debugGraphCostText('debug.cost.output', 'Output');
-}
-
-function debugGraphModelTokenDimensionDescriptionKey(dimension = jsDebugGraphModelTokenDimension) {
-  const item = jsDebugGraphModelTokenDimensions.find(candidate => candidate.key === dimension);
-  return item ? jsDebugGraphDescriptionKeyByLabelKey[item.labelKey] : '';
-}
-
-function setDebugGraphModelTokenDimension(value, {persist = true} = {}) {
-  const selected = String(value || '');
-  jsDebugGraphModelTokenDimension = jsDebugGraphModelTokenDimensions.some(item => item.key === selected)
-    ? selected
-    : 'output';
-  if (persist) saveJsDebugStatsUiPreferences();
-  // Every token dimension is projected from the buckets already in memory.
-  // Repaint both tabs synchronously and bypass the passive focused-control
-  // deferral; no history request or artificial loading state is warranted.
-  refreshDebugGraphSurfaces({force: true, deferFocusedControl: false});
-  return jsDebugGraphModelTokenDimension;
-}
-
-function debugGraphModelTokenComponentMatches(component, dimension = jsDebugGraphModelTokenDimension) {
-  if (String(component?.unit || '').toLowerCase() !== 'tokens') return false;
-  const direction = String(component?.direction || '').toLowerCase();
-  const cacheRole = String(component?.cache_role || '').toLowerCase();
-  if (dimension === 'all') return true;
-  if (dimension === 'input') return direction === 'input' && !cacheRole.includes('read') && !cacheRole.includes('write');
-  if (dimension === 'cacheRead') return cacheRole.includes('read');
-  if (dimension === 'cacheWrite') return cacheRole.includes('write');
-  return direction === 'output';
-}
-
-function debugGraphModelTokenComponentRecords(bucket, dimension = jsDebugGraphModelTokenDimension) {
-  // Output is the compatibility projection of the authoritative generated-token
-  // partition. Cost atoms can be temporarily partial during migration or across
-  // provider telemetry variants, so they must not override the exact agent/model
-  // totals that keep Agent tokens and Model tokens synchronized.
-  if (dimension === 'output') return [];
-  const components = debugGraphCostRows(bucket?.costSummary?.components);
-  return components.filter(component => debugGraphModelTokenComponentMatches(component, dimension));
-}
-
-function debugGraphModelTokenSeriesIdentity(component) {
-  const model = String(component?.model || 'unknown').trim() || 'unknown';
-  const effort = String(component?.effort || '').trim().toLowerCase() || 'unknown';
-  return {key: `${model}\u0000${effort}`, model, effort, label: effort === 'unknown' ? model : `${model} · ${effort}`};
-}
-
 function debugGraphSelectedModelTokenBucketValue(bucket) {
-  const components = debugGraphModelTokenComponentRecords(bucket);
-  if (components.length) return components.reduce((total, component) => total + Math.max(0, Number(component?.quantity) || 0), 0)
-    / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
-  // Existing retained history only has the generated-output projection. Keep
-  // that output view exact until component atoms are available for a bucket.
-  if (jsDebugGraphModelTokenDimension !== 'output') return 0;
   let total = 0;
   for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
     for (const rate of agentRate?.modelRates?.values?.() || []) total += debugGraphAgentTokenBucketValue(bucket, {...rate, seconds: agentRate.seconds});
@@ -47794,83 +47892,7 @@ function debugGraphSelectedModelTokenBucketValue(bucket) {
 }
 
 function debugGraphModelTokenSeriesDefs(buckets) {
-  const tokenItems = new Map();
-  for (const bucket of buckets) {
-    const components = debugGraphModelTokenComponentRecords(bucket);
-    if (components.length) {
-      for (const component of components) {
-        const identity = debugGraphModelTokenSeriesIdentity(component);
-        const item = tokenItems.get(identity.key) || {...identity, samples: 0, componentBacked: true};
-        item.samples += 1;
-        tokenItems.set(identity.key, item);
-      }
-      continue;
-    }
-    // The default Output selector always uses the authoritative generated-token
-    // partition, including new buckets with cost atoms, so its stack is exactly
-    // the same total as Agent tokens/min.
-    if (jsDebugGraphModelTokenDimension !== 'output') continue;
-    for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
-      for (const [rawModel, rate] of agentRate?.modelRates?.entries?.() || []) {
-        const model = String(rawModel || 'unknown').trim() || 'unknown';
-        const item = tokenItems.get(`legacy\u0000${model}`) || {key: `legacy\u0000${model}`, model, effort: '', label: model, samples: 0, componentBacked: false};
-        item.samples += Number(rate?.samples || 0) > 0 || Number(rate?.tokens || 0) > 0 ? 1 : 0;
-        tokenItems.set(item.key, item);
-      }
-    }
-  }
-  const displayedItems = [...tokenItems.values()]
-    .filter(item => item.samples > 0)
-    .sort((left, right) => left.label.localeCompare(right.label) || left.key.localeCompare(right.key));
-  const visuals = debugGraphDisplayedTokenVisuals(displayedItems, item => item.key);
-  return displayedItems.map((item, index) => ({
-      key: `${jsDebugGraphModelTokenSeriesPrefix}${item.key}`,
-      label: item.label,
-      descKey: 'debug.graph.series.modelToken.desc',
-      descParams: {model: item.label},
-      unit: 'tokensPerMinute',
-      cssKey: 'agentToken',
-      tokenPatternSeries: true,
-      agentTokenKey: item.key,
-      tokenDimension: 'model',
-      agentTokenPatternIndex: visuals[index].patternIndex,
-      color: visuals[index].color,
-      value: bucket => {
-        const components = debugGraphModelTokenComponentRecords(bucket);
-        if (components.length) {
-          const quantity = components
-            .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key)
-            .reduce((total, component) => total + Math.max(0, Number(component?.quantity) || 0), 0);
-          return quantity / Math.max(1 / 60, Number(bucket?.durationMs || jsDebugGraphAgentTokenBucketSeconds * 1000) / 60000);
-        }
-        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
-        let value = 0;
-        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
-          const rate = agentRate?.modelRates instanceof Map ? agentRate.modelRates.get(item.model) : null;
-          if (rate) value += debugGraphAgentTokenBucketValue(bucket, {...rate, seconds: agentRate.seconds});
-        }
-        return value;
-      },
-      hasData: bucket => {
-        const components = debugGraphModelTokenComponentRecords(bucket);
-        if (components.length) return components.some(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
-        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return false;
-        return [...(bucket?.agentTokenRates?.values?.() || [])].some(agentRate => Number(agentRate?.modelRates?.get(item.model)?.tokens || 0) > 0);
-      },
-      sampleCount: bucket => {
-        const components = debugGraphModelTokenComponentRecords(bucket)
-          .filter(component => debugGraphModelTokenSeriesIdentity(component).key === item.key);
-        if (components.length) {
-          return components.reduce((total, component) => total + Math.max(1, Number(component?.samples ?? component?.sample_count) || 0), 0);
-        }
-        if (item.componentBacked || jsDebugGraphModelTokenDimension !== 'output') return 0;
-        let samples = 0;
-        for (const agentRate of bucket?.agentTokenRates?.values?.() || []) {
-          samples += Math.max(0, Number(agentRate?.modelRates?.get(item.model)?.samples) || 0);
-        }
-        return samples;
-      },
-    }));
+  return debugGraphTokenSeriesDefs(buckets, 'model');
 }
 
 
@@ -48080,6 +48102,7 @@ function debugGraphSeriesData(buckets) {
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const colorValues = typeof def.colorValue === 'function' ? buckets.map(bucket => def.colorValue(bucket)) : null;
     const sampleValues = values.filter((_value, index) => observedDataValues[index]);
     const sampleTimes = provenanceValues
       .filter((_provenance, index) => observedDataValues[index])
@@ -48099,6 +48122,7 @@ function debugGraphSeriesData(buckets) {
       hasDataValues,
       observedDataValues,
       provenanceValues,
+      colorValues,
       movingAverageValues,
       movingAverageTimes: sampleTimes,
       movingAverageSamples,
@@ -48157,11 +48181,8 @@ function debugGraphChartToggleControlsHtml() {
     <div class="js-debug-chart-toggle-menu" role="group" aria-label="${esc(t('debug.graph.control.charts'))}">
     ${jsDebugGraphChartControlItems.map(group => {
       const label = debugGraphLocalizedLabel(group);
-      // Compact labels are an English-only design vocabulary. Other locales keep the existing
-      // localized chart title until their own compact translation exists; never leak English UI.
-      const toggleLabel = i18nActiveLocale === 'en' ? String(group.toggleLabelEn || label) : label;
       const visible = debugGraphChartVisible(group.key);
-      return `<label title="${esc(label)}"><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(toggleLabel)}</label>`;
+      return `<label title="${esc(label)}"><input type="checkbox" data-js-debug-chart-toggle="${esc(group.key)}"${visible ? ' checked' : ''}>${esc(label)}</label>`;
     }).join('')}
     </div>
   </details>`;
@@ -48466,11 +48487,6 @@ function debugGraphNoDataRectsHtml(buckets, domain, seriesItems) {
 function jsDebugHistoryCoverageFamilyForGroup(group) {
   const key = String(group?.key || '');
   if (!key) return '';
-  // modelTokens is the one dimension-dependent chart: the manifest declares
-  // which family backs each dimension instead of an inline family if-chain.
-  if (key === 'modelTokens') {
-    return jsDebugStatsFamilyByModelTokenDimension[jsDebugGraphModelTokenDimension === 'output' ? 'output' : 'default'] || '';
-  }
   return jsDebugStatsFamilyByChartGroup[key] || '';
 }
 
@@ -48663,8 +48679,28 @@ function debugGraphAgentTokenLegendSwatchHtml(series) {
   return `<svg class="js-debug-legend-token-swatch" viewBox="0 0 10 10" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}><defs>${debugGraphAgentTokenPatternDefinitionHtml(series, {legend: true})}</defs><rect width="10" height="10" rx="1.5" fill="url(#${esc(patternId)})"></rect></svg>`;
 }
 
+// Activity Monitor color follows the kernel's semantic pressure state, not a
+// threshold guessed from the separately plotted headroom percentage.
+function debugGraphMacMemoryPressureColor(value) {
+  const level = Number(value);
+  if (level === 1) return 'var(--good)';
+  if (level === 2) return 'var(--warning-border-strong)';
+  if (level >= 4) return 'var(--bad)';
+  return 'var(--muted)';
+}
+
+function debugGraphSeriesDisplayColor(series) {
+  if (typeof series?.colorForValue !== 'function') return String(series?.color || '').trim();
+  const values = Array.isArray(series?.colorValues) ? series.colorValues : debugGraphSeriesPlotValues(series);
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = Number(values[index]);
+    if (Number.isFinite(value)) return String(series.colorForValue(value) || '').trim();
+  }
+  return '';
+}
+
 function debugGraphSeriesStyleAttr(series, {barPattern = false} = {}) {
-  const color = String(series?.color || '').trim();
+  const color = debugGraphSeriesDisplayColor(series);
   const declarations = color ? [`--js-debug-series-color: ${color}`] : [];
   const patternId = barPattern ? debugGraphAgentTokenPatternId(series) : '';
   if (patternId) declarations.push(`fill: url(#${patternId})`);
@@ -49332,27 +49368,15 @@ function debugGraphChartHtml(group, seriesItems, domain, buckets = [], overlayBu
       ? debugGraphCostText('debug.graph.gpuNoWindowSamples', 'No GPU samples in this time window')
       : debugGraphCostText('debug.graph.gpuUnavailableHost', 'GPU telemetry is not available on this host'))
     : '';
-  const agentBillableUnavailable = group.key === 'agentTokens'
-    && jsDebugGraphModelTokenDimension !== 'output'
-    && !buckets.some(bucket => [...(bucket?.agentTokenRates?.values?.() || [])].some(rate => rate?.billableAvailable === true));
-  const chartUnavailable = gpuUnavailable || agentBillableUnavailable;
-  const chartUnavailableText = agentBillableUnavailable
-    ? debugGraphCostText('debug.graph.agentTokens.billableUnavailable', 'No billable breakdown for this window')
-    : gpuUnavailableText;
+  const chartUnavailable = gpuUnavailable;
+  const chartUnavailableText = gpuUnavailableText;
   const scaleAttr = plotScale?.mode === 'broken-linear' ? 'broken-linear' : (plotScale === true ? 'log' : 'linear');
   const breakAttr = plotScale?.mode === 'broken-linear' ? ` data-js-debug-chart-axis-break="${esc(plotScale.threshold)}"` : '';
-  const modelDimensionControl = group.key === 'modelTokens'
-    ? `<label class="js-debug-resolution-label js-debug-model-token-dimension" data-js-debug-model-token-dimension>${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}: <select data-js-debug-model-token-dimension-select aria-label="${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}">${jsDebugGraphModelTokenDimensions.map(item => {
-        const label = debugGraphModelTokenDimensionLabel(item.key);
-        return `<option value="${esc(item.key)}"${item.key === jsDebugGraphModelTokenDimension ? ' selected' : ''}${debugGraphExplainAttrs(label, debugGraphModelTokenDimensionDescriptionKey(item.key), {attribute: 'data-js-debug-model-token-dimension-desc'})}>${esc(label)}</option>`;
-      }).join('')}</select></label>`
-    : '';
   return `<section class="${esc(chartClasses.join(' '))}" data-js-debug-chart="${esc(group.key)}" data-js-debug-chart-kind="${esc(group.kind || 'line')}" data-js-debug-chart-axis-max="${esc(axisMax)}" data-js-debug-chart-unit="${esc(group.unit || '')}"${spikeAxis && (group.key === 'agentTokens' || group.key === 'modelTokens') ? ' data-js-debug-token-axis="shared"' : ''}${breakAttr}${bucketAttr}${group.stacked === true ? ' data-js-debug-chart-stacked="true"' : ''} data-js-debug-chart-scale="${esc(scaleAttr)}">
       <div class="js-debug-chart-head">
       <div class="js-debug-chart-heading-row">
         <span class="js-debug-chart-title"${groupTitleAttrs}>${esc(groupLabel)}</span>
         ${displayedSummaryHtml}
-        ${modelDimensionControl}
         <button type="button" class="js-debug-chart-close control-active-hover" data-js-debug-chart-close="${esc(group.key)}" aria-label="${esc(t('common.close'))} ${esc(groupLabel)}" title="${esc(t('common.close'))}">×</button>
       </div>
       ${group.key === 'activity' ? debugGraphLiveAgentWindowDetailHtml(group.key) : ''}
@@ -49417,8 +49441,7 @@ function debugGraphTokenSpikeAxisDescriptor(buckets) {
   const values = (buckets || []).map(bucket => {
     let total = 0;
     for (const rate of bucket?.agentTokenRates?.values?.() || []) {
-      if (jsDebugGraphModelTokenDimension !== 'output' && rate?.billableAvailable !== true) continue;
-      total += debugGraphAgentTokenBucketDimensionValue(bucket, rate);
+      total += debugGraphAgentTokenBucketValue(bucket, rate);
     }
     // Model input/cache can legitimately exceed generated output. The shared
     // descriptor must include the selected Model chart while remaining one
@@ -49492,20 +49515,56 @@ function debugGraphCostClass(item) {
   return 'other';
 }
 
-// One description owner for the visible usage columns. The wording states exactly what
-// debugGraphCostClass implements (a mutually exclusive projection: Cached bundles cache
-// READS and WRITES and is separated from Input, so nothing is double-counted), not
-// assumed provider semantics. Rendered via the shared explain-attrs (title + aria) owner.
+// One copy owner for the visible usage columns. Cached deliberately bundles cache
+// reads and writes, and every concise legend entry derives from this same key set.
+const debugGraphCostUsageColumnCopy = Object.freeze({
+  input: Object.freeze({description: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'], gloss: ['debug.cost.input.gloss', 'new prompt/context tokens']}),
+  cache_read: Object.freeze({description: ['debug.modelTokens.cacheRead.desc', 'Tokens served from model-cache reads, usually cheaper than uncached input.'], gloss: ['debug.cost.cacheRead.gloss', 'hits and refreshes']}),
+  cache_write: Object.freeze({description: ['debug.modelTokens.cacheWrite.desc', 'Input tokens written into a provider cache. Anthropic records 5-minute and 1-hour lifetimes separately in Cost by Model; OpenAI does not expose a cache-write counter.'], gloss: ['debug.cost.cacheWrite.gloss', '5m/1h cache creation']}),
+  cache_write_5m: Object.freeze({description: ['debug.cost.class.cacheWrite5m', 'Input tokens written into the provider cache for a 5-minute lifetime.'], gloss: ['debug.cost.cacheWrite5m.gloss', '5-minute lifetime']}),
+  cache_write_1h: Object.freeze({description: ['debug.cost.class.cacheWrite1h', 'Input tokens written into the provider cache for a 1-hour lifetime.'], gloss: ['debug.cost.cacheWrite1h.gloss', '1-hour lifetime']}),
+  output: Object.freeze({description: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'], gloss: ['debug.cost.output.gloss', 'generated tokens']}),
+  other: Object.freeze({description: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost by Model without being added to token totals.'], gloss: ['debug.cost.other.gloss', 'non-token units (image/audio/tool)']}),
+  total: Object.freeze({description: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'], gloss: ['debug.cost.total.gloss', 'Input + Cached + Output + Other']}),
+});
+
 function debugGraphCostUsageColumnDescription(key) {
-  const descriptions = {
-    input: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'],
-    cache: ['debug.cost.cached.desc', 'Cumulative prompt-cache token accounting across requests: cache READS (hits/refreshes) and cache WRITES (5m/1h creation) combined. Reused history/tool/system context is counted again on every request, so in long conversations Cached can legitimately dwarf Input. This is billing accounting, not stored cache size or GPU cache occupancy.'],
-    output: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'],
-    other: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'],
-    total: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'],
-  };
-  const entry = descriptions[key];
+  const entry = debugGraphCostUsageColumnCopy[key]?.description;
   return entry ? debugGraphCostText(entry[0], entry[1]) : '';
+}
+
+function debugGraphCostUsageColumnLabel(key) {
+  if (key === 'cache_read') {
+    const providerLabel = debugGraphCostText('debug.modelTokens.cacheRead', 'Cache read');
+    return providerLabel === 'Cache hits & refreshes' ? 'Cache read' : providerLabel;
+  }
+  if (key === 'cache_write') return debugGraphCostText('debug.modelTokens.cacheWrite', 'Cache write');
+  if (key === 'cache_write_5m') return debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write');
+  if (key === 'cache_write_1h') return debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write');
+  return debugGraphCostText(`debug.cost.${key}`, key);
+}
+
+function debugGraphCostUsageColumnGloss(key) {
+  const entry = debugGraphCostUsageColumnCopy[key]?.gloss;
+  if (!entry) return '';
+  return debugGraphCostText(entry[0], entry[1]);
+}
+
+// One always-visible legend for the cost tables' Input/Cached/Output/Other/Total columns, so the
+// meaning is glanceable without hovering or expanding. Reuses the column swatch colors and the
+// shared header explain-attrs (full description as the hover tooltip); the gloss is the terse
+// visible layer. Rendered ONCE per report, above the usage tables.
+function debugGraphCostUsageColumnLegendHtml() {
+  const labels = {
+    input: debugGraphCostText('debug.cost.input', 'Input'),
+    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
+    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
+    output: debugGraphCostText('debug.cost.output', 'Output'),
+    other: debugGraphCostText('debug.cost.other', 'Other'),
+    total: debugGraphCostText('debug.cost.total', 'Total'),
+  };
+  const legendLabel = debugGraphCostText('debug.cost.columnLegend', 'What the columns count');
+  return `<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend aria-label="${esc(legendLabel)}">${['input', 'cache_read', 'cache_write', 'output', 'other', 'total'].map(key => `<div${debugGraphCostUsageColumnHeaderAttrs(key, labels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i><dt>${esc(labels[key])}</dt><dd>${esc(debugGraphCostUsageColumnGloss(key))}</dd></div>`).join('')}</dl>`;
 }
 
 function debugGraphCostUsageColumnHeaderAttrs(key, label) {
@@ -49565,8 +49624,8 @@ function debugGraphCostTokenTotals(summary) {
   return totals;
 }
 
-const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
-const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']);
+const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'cache_read_micro_usd', 'cache_write_micro_usd', 'cache_write_5m_micro_usd', 'cache_write_1h_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'cache_read_api_list_micro_usd', 'cache_write_api_list_micro_usd', 'cache_write_5m_api_list_micro_usd', 'cache_write_1h_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'cache_read_lower_micro_usd', 'cache_write_lower_micro_usd', 'cache_write_5m_lower_micro_usd', 'cache_write_1h_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'cache_read_upper_micro_usd', 'cache_write_upper_micro_usd', 'cache_write_5m_upper_micro_usd', 'cache_write_1h_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
+const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens', 'other_tokens']);
 const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
 const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
 const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
@@ -49710,6 +49769,8 @@ function debugGraphCostModelLabel(row) {
 function debugGraphAgentDisplayLabel(value) {
   const full = String(value || '').trim();
   if (!full) return debugGraphCostText('debug.cost.unknown', 'Unknown');
+  const canonical = globalThis.YOLOmuxStatsCurrent?.canonicalAgentLabel?.(full);
+  if (canonical && canonical !== full) return canonical;
   if (full.startsWith('claude-bg:')) {
     const [, projectValue = '', sessionValue = ''] = full.split(':');
     const projectParts = projectValue.split('-').filter(Boolean);
@@ -49734,7 +49795,7 @@ function debugGraphCostModelIdentityHtml(row, {showProvider = false, secondaryHt
   const provider = String(row?.provider || '').trim();
   const meta = [showProvider ? provider : '', effort].filter(Boolean).join(' · ');
   const kind = debugGraphCostModelAgentKind(row);
-  const icon = kind ? `<span class="js-debug-cost-model-icon" aria-hidden="true">${agentIcon(kind)}</span>` : '';
+  const icon = kind ? `<span class="js-debug-cost-model-icon" title="${esc(provider || kind)}" aria-label="${esc(provider || kind)}">${agentIcon(kind)}</span>` : '';
   const secondary = meta || secondaryHtml ? `<span class="js-debug-cost-model-meta">${meta ? `<small>${esc(meta)}</small>` : ''}${secondaryHtml}</span>` : '';
   return `<span class="js-debug-cost-model-identity">${icon}<span class="js-debug-cost-model-copy"><strong>${esc(model)}</strong>${secondary}</span></span>`;
 }
@@ -49769,19 +49830,49 @@ function debugGraphCostPricePairHtml(microUsd, apiListMicroUsd = null, {basis = 
     : `<small class="js-debug-cost-price-pair"><span>${esc(debugGraphCostUsdText(microUsd))} ${esc(marginalLabel.toLowerCase())}</span><span>${esc(debugGraphCostUsdText(apiListMicroUsd))} list</span></small>`;
 }
 
-function debugGraphCostBreakdownItems(row) {
-  return [
-    ['input', debugGraphCostText('debug.cost.input', 'Input')],
-    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')],
-    ['output', debugGraphCostText('debug.cost.output', 'Output')],
-    ['other', debugGraphCostText('debug.cost.other', 'Other')],
-  ].map(([key, label]) => ({
+const DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS = Object.freeze([
+  'input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other',
+]);
+
+function debugGraphCostUsageColumns() {
+  return DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS.map(key => ({
     key,
-    label,
+    label: key === 'input' ? debugGraphCostText('debug.cost.input', 'Input')
+      : key === 'output' ? debugGraphCostText('debug.cost.output', 'Output')
+        : key === 'other' ? debugGraphCostText('debug.cost.other', 'Other')
+          : debugGraphCostUsageColumnLabel(key),
+  }));
+}
+
+function debugGraphCostUsesLifetimeCacheWrites(row) {
+  return String(row?.provider || '').trim().toLowerCase() === 'anthropic';
+}
+
+function debugGraphCostBreakdownItems(row, {kind = '', total = false} = {}) {
+  const exactCacheWriteTokens = Math.max(0, Number(row?.cache_write_5m_tokens) || 0) + Math.max(0, Number(row?.cache_write_1h_tokens) || 0);
+  const exactCacheWriteMicroUsd = debugGraphCostInteger(row?.cache_write_5m_micro_usd) + debugGraphCostInteger(row?.cache_write_1h_micro_usd);
+  const exactCacheWriteApiListMicroUsd = debugGraphCostInteger(row?.cache_write_5m_api_list_micro_usd) + debugGraphCostInteger(row?.cache_write_1h_api_list_micro_usd);
+  const columns = debugGraphCostUsageColumns();
+  const byKey = Object.fromEntries(columns.map(column => [column.key, column]));
+  const value = key => ({
+    key,
+    label: byKey[key].label,
     tokens: Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
     microUsd: debugGraphCostInteger(row?.[`${key}_micro_usd`]),
     apiListMicroUsd: debugGraphCostApiListMicroUsd({api_list_micro_usd: row?.[`${key}_api_list_micro_usd`]}),
-  }));
+    columnSpan: 1,
+  });
+  const detailedCacheWrites = total || (kind === 'model' && debugGraphCostUsesLifetimeCacheWrites(row));
+  const cacheWrites = detailedCacheWrites
+    ? [value('cache_write_5m'), value('cache_write_1h')]
+    : [{
+      key: 'cache_write', label: debugGraphCostUsageColumnLabel('cache_write'),
+      tokens: Math.max(exactCacheWriteTokens, Number(row?.cache_write_tokens) || 0),
+      microUsd: Math.max(exactCacheWriteMicroUsd, debugGraphCostInteger(row?.cache_write_micro_usd)),
+      apiListMicroUsd: debugGraphCostApiListMicroUsd({api_list_micro_usd: Math.max(exactCacheWriteApiListMicroUsd, Number(row?.cache_write_api_list_micro_usd) || 0)}),
+      columnSpan: 2,
+    }];
+  return [value('input'), value('cache_read'), ...cacheWrites, value('output'), value('other')];
 }
 
 function debugGraphCostPricingSourceEntries(components, modelRow = null) {
@@ -49803,7 +49894,7 @@ function debugGraphCostPricingSourceEntries(components, modelRow = null) {
 function debugGraphCostPricingLinksHtml(components, modelRow = null, {compact = false} = {}) {
   const links = debugGraphCostPricingSourceEntries(components, modelRow);
   if (!links.length) return '';
-  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? debugGraphCostText('debug.cost.pricing', 'pricing') : label)}</a>`).join(' · ')}</span>`;
+  return `<span class="js-debug-cost-pricing-links${compact ? ' js-debug-cost-pricing-links--compact' : ''}">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}" title="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? '$' : label)}</a>`).join(' · ')}</span>`;
 }
 
 function debugGraphCostAllPricingSourcesHtml(components) {
@@ -49815,7 +49906,9 @@ function debugGraphCostAllPricingSourcesHtml(components) {
   </section>`;
 }
 
-function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null} = {}) {
+function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null, unreported = false, notApplicable = false} = {}) {
+  if (notApplicable) return '<span class="js-debug-cost-not-applicable" aria-label="Not applicable">—</span>';
+  if (unreported) return `<span class="js-debug-cost-unreported" title="${esc('OpenAI/Codex telemetry does not report cache-write tokens; this total is a lower bound.')}" aria-label="Unreported cache write; total is a lower bound">unreported</span>`;
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
   const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
   const rowApiListMicroUsd = total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd;
@@ -49823,7 +49916,7 @@ function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row 
   const price = rowApiListMicroUsd === null
     ? `<small>${esc(cost)}</small>`
     : debugGraphCostPricePairHtml(microUsd, rowApiListMicroUsd);
-  return `<span class="js-debug-cost-table-metric" title="${esc(`${exactTokens}; ${debugGraphCostPricePairText(microUsd, rowApiListMicroUsd, {basis: 'inline'})}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong>${price}</span>`;
+  return `<span class="js-debug-cost-table-metric js-debug-cost-table-metric--inline" title="${esc(`${exactTokens}; ${debugGraphCostPricePairText(microUsd, rowApiListMicroUsd, {basis: 'inline'})}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><span aria-hidden="true"> · </span>${price}</span>`;
 }
 
 function debugGraphCostExactTotalRow(summary) {
@@ -49838,38 +49931,47 @@ function debugGraphCostExactTotalRow(summary) {
 
 function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = [], totalRow: exactTotalRow = null} = {}) {
   if (!rows.length) return '';
-  const usageKeys = ['input', 'cache', 'output', 'other'];
-  const usageLabels = {
-    input: debugGraphCostText('debug.cost.input', 'Input'),
-    cache: debugGraphCostText('debug.cost.cached', 'Cached'),
-    output: debugGraphCostText('debug.cost.output', 'Output'),
-    other: debugGraphCostText('debug.cost.other', 'Other'),
-  };
+  const usageColumns = debugGraphCostUsageColumns();
+  const usageLabels = Object.fromEntries(usageColumns.map(({key, label}) => [key, label]));
   const totalRow = exactTotalRow || debugGraphCostAggregateRows(rows, [])[0] || {};
   const rowHtml = row => {
-    const breakdown = debugGraphCostBreakdownItems(row);
+    const breakdown = debugGraphCostBreakdownItems(row, {kind});
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
     const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostPricePairText(item.microUsd, item.apiListMicroUsd)}`).join('; ')}`;
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
     const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphMiddleTruncatedTextHtml(label)}</strong>`;
-    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    const usageCellHtml = item => {
+      const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(components, row, item) : '';
+      return formula || debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {
+        apiListMicroUsd: item.apiListMicroUsd,
+        unreported: kind === 'model' && item.key === 'cache_write' && String(row?.provider || '').toLowerCase() === 'openai' && item.tokens === 0,
+      });
+    };
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${usageCellHtml(item)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
-  const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
+  const totalBreakdown = debugGraphCostBreakdownItems(totalRow, {kind, total: true});
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
   const totalApiListMicroUsd = debugGraphCostApiListMicroUsd(totalRow);
   const grandTotalLabel = totalApiListMicroUsd !== null && totalApiListMicroUsd !== debugGraphCostMicroUsd(totalRow)
     ? debugGraphCostText('debug.cost.grandTotalDual', 'Grand total · marginal / API list prices')
     : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total at API list prices');
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}>${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  const input = usageColumns[0];
+  const cacheRead = usageColumns[1];
+  const cacheWrite5m = usageColumns[2];
+  const cacheWrite1h = usageColumns[3];
+  const output = usageColumns[4];
+  const other = usageColumns[5];
+  const headerCell = (column, {rowSpan = 1, colSpan = 1} = {}) => `<th scope="col"${rowSpan > 1 ? ` rowspan="${rowSpan}"` : ''}${colSpan > 1 ? ` colspan="${colSpan}"` : ''}${debugGraphCostUsageColumnHeaderAttrs(column.key, column.label)}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(column.key)}" aria-hidden="true"></i><span class="js-debug-cost-usage-label">${esc(column.label)}</span></th>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col" rowspan="2">${esc(labelHeading)}</th>${headerCell(input, {rowSpan: 2})}${headerCell(cacheRead, {rowSpan: 2})}${headerCell({key: 'cache_write', label: debugGraphCostUsageColumnLabel('cache_write')}, {colSpan: 2})}${headerCell(output, {rowSpan: 2})}${headerCell(other, {rowSpan: 2})}<th scope="col" rowspan="2"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr><tr>${headerCell(cacheWrite5m)}${headerCell(cacheWrite1h)}</tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
   if (options.report !== true) return '';
   return debugGraphCostUsageTableHtml(rows, {
     kind: 'model',
-    heading: debugGraphCostText('debug.cost.modelUsages', 'Model Usages'),
+    heading: debugGraphCostText('debug.cost.modelUsages', 'Cost by Model'),
     labelHeading: debugGraphCostText('debug.cost.model', 'Model'),
     labelFor: debugGraphCostModelLabel,
     components,
@@ -49877,105 +49979,51 @@ function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
   });
 }
 
-function debugGraphCostComponentLabel(row) {
-  const parts = [row?.provider, row?.model, row?.pricing_profile !== 'default' ? row?.pricing_profile : '', row?.service_tier !== 'default' ? row?.service_tier : '', row?.direction, row?.cache_role, row?.modality, row?.unit]
-    .map(value => String(value || '').trim())
-    .filter(Boolean);
-  return parts.join(' · ') || String(row?.label || row?.key || 'unknown');
-}
-
 function debugGraphCostComponentRateText(row) {
   const exactRate = String(row?.rate_usd || '').trim();
   const scale = Math.max(0, Number(row?.rate_scale) || 0);
-  if (exactRate && scale > 0) return `$${exactRate}/${scale.toLocaleString()} ${String(row?.unit || 'unit')}`;
+  if (exactRate && scale > 0) return `$${exactRate}/${debugGraphTokenNumberText(scale)}${String(row?.unit || 'unit') === 'tokens' ? '' : ` ${String(row?.unit || 'unit')}`}`;
   const quantity = Number(row?.quantity);
   const microUsd = debugGraphCostMicroUsd(row);
   if (!Number.isFinite(quantity) || quantity <= 0 || microUsd <= 0) return '—';
   return `${debugGraphCostUsdText(Math.round((microUsd * 1000000) / quantity))}/${String(row?.unit || 'unit')}`;
 }
 
-function debugGraphCostComponentFormulaText(row) {
-  const quantity = Number(row?.quantity);
-  const rate = debugGraphCostComponentRateText(row);
-  if (!Number.isFinite(quantity) || quantity <= 0 || rate === '—') return '—';
-  return `${quantity.toLocaleString()} ${String(row?.unit || 'unit')} × ${rate}`;
+function debugGraphCostComponentDimension(row) {
+  const role = String(row?.cache_role || '').toLowerCase();
+  if (role === 'read') return 'cache_read';
+  if (role === 'write_5m') return 'cache_write_5m';
+  if (role === 'write_1h') return 'cache_write_1h';
+  if (String(row?.direction || '').toLowerCase() === 'input') return 'input';
+  if (String(row?.direction || '').toLowerCase() === 'output') return 'output';
+  return 'other';
 }
 
-function debugGraphCostComponentSortValue(row, key) {
-  if (key === 'tokens') return Math.max(0, Number(row?.quantity) || 0);
-  if (key === 'rate') {
-    const rate = Number(row?.rate_usd);
-    const scale = Math.max(1, Number(row?.rate_scale) || 1);
-    return Number.isFinite(rate) ? rate / scale : -1;
-  }
-  if (key === 'cost') return debugGraphCostMicroUsd(row);
-  if (key === 'effective') {
-    const timestamp = Date.parse(String(row?.effective_from || ''));
-    return Number.isFinite(timestamp) ? timestamp : 0;
-  }
-  if (key === 'cache') return String(row?.cache_role || '');
-  if (key === 'source') return String(row?.source_url || '');
-  return String(row?.[key] || '');
-}
-
-function debugGraphCostSortedComponentRows(rows) {
-  const {key, direction} = jsDebugCostComponentSortState;
-  const multiplier = direction === 'asc' ? 1 : -1;
-  return [...rows].sort((left, right) => {
-    const leftValue = debugGraphCostComponentSortValue(left, key);
-    const rightValue = debugGraphCostComponentSortValue(right, key);
-    const comparison = typeof leftValue === 'number' && typeof rightValue === 'number'
-      ? leftValue - rightValue
-      : String(leftValue).localeCompare(String(rightValue));
-    return (comparison * multiplier) || debugGraphCostComponentLabel(left).localeCompare(debugGraphCostComponentLabel(right));
+function debugGraphCostModelFormulaCellHtml(components, model, item) {
+  if (Math.max(0, Number(item?.tokens) || 0) <= 0) return '';
+  const cacheWrite = item.key === 'cache_write';
+  const rows = (components || []).filter(row => {
+    if (String(row?.provider || '').trim() !== String(model?.provider || '').trim()) return false;
+    if (String(row?.model || '').trim() !== String(model?.model || '').trim()) return false;
+    const dimension = debugGraphCostComponentDimension(row);
+    return cacheWrite ? dimension === 'cache_write_5m' || dimension === 'cache_write_1h' : dimension === item.key;
   });
-}
-
-function debugGraphCostComponentSortHeaderHtml(key, label) {
-  const active = jsDebugCostComponentSortState.key === key;
-  const ariaSort = active ? (jsDebugCostComponentSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none';
-  const nextDirection = active && jsDebugCostComponentSortState.direction === 'asc' ? 'descending' : 'ascending';
-  return `<th scope="col" aria-sort="${ariaSort}"><button type="button" class="js-debug-cost-sort control-active-hover" data-js-debug-cost-sort="${esc(key)}" data-js-debug-cost-next-sort="${nextDirection}">${esc(label)}</button></th>`;
-}
-
-// Render a usage class with the provider's own conventions (Anthropic's price
-// sheet: Base input, 5m/1h cache write, Cache hits & refreshes, Output) instead
-// of the raw `direction · cache_role`. Anything not covered (other modalities/
-// providers) falls back to the raw joined form so nothing is mislabeled.
-function debugGraphCostUsageClassLabel(direction, cacheRole) {
-  const dir = String(direction || '').trim().toLowerCase();
-  const role = String(cacheRole || '').trim().toLowerCase();
-  if (dir === 'output') return debugGraphCostText('debug.cost.class.output', 'Output');
-  if (dir === 'input' || dir === '') {
-    if (role === 'read') return debugGraphCostText('debug.cost.class.cacheHits', 'Cache hits & refreshes');
-    if (role === 'write_5m') return debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write');
-    if (role === 'write_1h') return debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write');
-    if (role.startsWith('write')) return debugGraphCostText('debug.cost.class.cacheWrite', 'Cache write');
-    if (role === 'none' || role === '') return debugGraphCostText('debug.cost.class.baseInput', 'Base input');
-  }
-  return [direction, cacheRole].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
-}
-
-function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
-  const headers = [
-    ['provider', 'Provider'], ['model', 'Model'], ['direction', debugGraphCostText('debug.cost.usageClass', 'Usage class')],
-    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['cost', debugGraphCostText('debug.cost.rateAndCost', 'Rate / cost')],
-    ['effective', debugGraphCostText('debug.cost.pricing', 'Pricing')],
-  ];
-  return `<section class="js-debug-cost-details-section">
-    <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
-      const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      const usageClass = debugGraphCostUsageClassLabel(row?.direction, row?.cache_role);
-      const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
-      const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
-      return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell">${debugGraphCostPricePairHtml(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}<small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
-    }).join('')}</tbody></table></div>
-  </section>`;
+  const grouped = new Map();
+  for (const row of rows) {
+    const rate = debugGraphCostComponentRateText(row);
+    const current = grouped.get(rate) || {...row, quantity: 0, micro_usd: 0, api_list_micro_usd: 0};
+    current.quantity += Math.max(0, Number(row?.quantity) || 0);
+    current.micro_usd += debugGraphCostMicroUsd(row);
+    current.api_list_micro_usd += debugGraphCostApiListMicroUsd(row) ?? debugGraphCostMicroUsd(row);
+    grouped.set(rate, current);
+  }
+  return [...grouped.values()].map(row => `<span class="js-debug-cost-model-formula" title="${esc(`${Math.max(0, Number(row.quantity) || 0).toLocaleString()} tokens x ${debugGraphCostComponentRateText(row)} = ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}">${esc(debugGraphTokenNumberText(row.quantity))} x ${esc(debugGraphCostComponentRateText(row))} = ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</span>`).join('<br>');
 }
 
 function debugGraphCostSourceLabel(row) {
+  const explicit = String(row?.full_label || row?.agent_label || row?.label || '').trim();
+  if (explicit) return explicit;
   const root = String(row?.root_thread_id || '').trim();
   const agent = String(row?.agent_thread_id || '').trim();
   const tool = String(row?.tool_name || '').trim();
@@ -50011,6 +50059,16 @@ function debugGraphCostTmuxLabel(row) {
   return [session, windowLabel || kind].filter(Boolean).join(':') || debugGraphCostSourceLabel(row);
 }
 
+function debugGraphCostAgentRowsAlphabetically(rows) {
+  const sortLabel = row => debugGraphAgentDisplayLabel(debugGraphCostTmuxLabel(row));
+  return [...(rows || [])].sort((left, right) => {
+    const leftLabel = sortLabel(left);
+    const rightLabel = sortLabel(right);
+    return leftLabel.localeCompare(rightLabel, undefined, {sensitivity: 'base', numeric: true})
+      || leftLabel.localeCompare(rightLabel);
+  });
+}
+
 function debugGraphCostTmuxBreakdownRows(rows) {
   const grouped = new Map();
   for (const row of rows || []) {
@@ -50040,17 +50098,18 @@ function debugGraphCostTmuxBreakdownRows(rows) {
     }
     grouped.set(key, current);
   }
-  return [...grouped.values()].sort((left, right) => debugGraphCostInteger(right?.upper_micro_usd ?? right?.micro_usd) - debugGraphCostInteger(left?.upper_micro_usd ?? left?.micro_usd)
-    || debugGraphCostTmuxLabel(left).localeCompare(debugGraphCostTmuxLabel(right)));
+  return [...grouped.values()];
 }
 
 function debugGraphCostTmuxBreakdownHtml(summary) {
   const directRows = debugGraphCostRows(summary?.tmuxWindows);
-  const rows = directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources);
+  const rows = debugGraphCostAgentRowsAlphabetically(
+    directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources),
+  );
   if (!rows.length) return '';
   return debugGraphCostUsageTableHtml(rows, {
     kind: 'agent',
-    heading: debugGraphCostText('debug.cost.byAgent', 'By Agent'),
+    heading: debugGraphCostText('debug.cost.byAgent', 'Cost by Agent'),
     labelHeading: t('yoagent.action.row.agent'),
     labelFor: debugGraphCostTmuxLabel,
     totalRow: debugGraphCostExactTotalRow(summary),
@@ -50083,9 +50142,27 @@ function debugGraphCostSourceLabelHtml(row) {
 
 function debugGraphCostSourceTreeHtml(rows) {
   if (!rows.length) return '';
+  const usageKeys = ['input', 'cache_read', 'cache_write', 'output', 'other'];
+  const usageLabels = {
+    input: debugGraphCostText('debug.cost.input', 'Input'),
+    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
+    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
+    output: debugGraphCostText('debug.cost.output', 'Output'),
+    other: debugGraphCostText('debug.cost.other', 'Other'),
+  };
+  const rowHtml = row => {
+    const breakdown = debugGraphCostBreakdownItems(row);
+    const byKey = new Map(breakdown.map(item => [item.key, item]));
+    const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
+    const cells = usageKeys.map(key => {
+      const item = byKey.get(key);
+      return `<td data-label="${esc(usageLabels[key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`;
+    }).join('');
+    return `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th>${cells}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+  };
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th><th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th><td>${esc(debugGraphTokensText(row?.token_quantity))}</td><td>${esc(debugGraphCostSubtotalText(row))}</td></tr>`).join('')}</tbody></table></div>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><span class="js-debug-cost-usage-label">${esc(usageLabels[key])}</span></th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody></table></div>
   </section>`;
 }
 
@@ -50197,9 +50274,9 @@ function debugGraphCostReportHtml(summary, domain) {
       <p class="js-debug-cost-report-totals" data-js-debug-cost-report-totals aria-label="${esc(`${estimateSentence}; ${totalsExact}`)}">${esc(totalsLine)}</p>
       ${debugGraphCostUnknownUsageHtml(summary)}
       ${debugGraphCostCatalogDetailsHtml(summary)}
+      ${debugGraphCostUsageColumnLegendHtml()}
       ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true, summary})}
-      ${debugGraphCostComponentDetailsHtml(summary.components)}
       ${debugGraphCostSourceTreeHtml(summary.sources)}
       ${debugGraphCostAllPricingSourcesHtml(summary.components)}
     </div>
@@ -50223,9 +50300,9 @@ function debugGraphCostSummaryHtml(buckets, domain) {
   const accessible = !hasEstimatedUsage
     ? 'No displayed usage has a selected price'
     : summary.apiListMicroUsd !== null
-      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd, {basis: 'inline'})} across displayed usage; open calculation and pricing sources`
+      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd, {basis: 'inline'})} across displayed usage; open model costs and pricing sources`
     : exact
-    ? `Estimated API list-price total ${estimated} across displayed usage; open calculation and pricing sources`
+    ? `Estimated API list-price total ${estimated} across displayed usage; open model costs and pricing sources`
     : `Estimated API list-price range ${estimated}; unknown or incomplete displayed usage widens the range`;
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refreshHtml = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh aria-label="${esc(refreshLabel)}" title="${esc(jsDebugPricingRefreshState.error || refreshLabel)}"${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
@@ -50667,12 +50744,23 @@ function jsDebugCurrentSeriesValue(series, name) {
 }
 
 function jsDebugCurrentCostDimensionRows(dimensions = {}) {
+  const cacheWrite = dimensions.cache_write || {
+    tokens: Number(dimensions.cache_write_5m?.tokens || 0) + Number(dimensions.cache_write_1h?.tokens || 0),
+    micro_usd: Number(dimensions.cache_write_5m?.micro_usd || 0) + Number(dimensions.cache_write_1h?.micro_usd || 0),
+    api_list_micro_usd: Number(dimensions.cache_write_5m?.api_list_micro_usd || 0) + Number(dimensions.cache_write_1h?.api_list_micro_usd || 0),
+  };
   const values = {
     input: dimensions.input,
+    cache_read: dimensions.cache_read,
+    // The shared usage grid spans 5m/1h cache writes. Retain both lifetime
+    // fields so Cost by Model can show the authoritative rate formula.
+    cache_write: cacheWrite,
+    cache_write_5m: dimensions.cache_write_5m || dimensions.cache_write,
+    cache_write_1h: dimensions.cache_write_1h,
     cache: {
-      tokens: Number(dimensions.cache_read?.tokens || 0) + Number(dimensions.cache_write?.tokens || 0),
-      micro_usd: Number(dimensions.cache_read?.micro_usd || 0) + Number(dimensions.cache_write?.micro_usd || 0),
-      api_list_micro_usd: Number(dimensions.cache_read?.api_list_micro_usd || 0) + Number(dimensions.cache_write?.api_list_micro_usd || 0),
+      tokens: Number(dimensions.cache_read?.tokens || 0) + Number(cacheWrite.tokens || 0),
+      micro_usd: Number(dimensions.cache_read?.micro_usd || 0) + Number(cacheWrite.micro_usd || 0),
+      api_list_micro_usd: Number(dimensions.cache_read?.api_list_micro_usd || 0) + Number(cacheWrite.api_list_micro_usd || 0),
     },
     output: dimensions.output,
     other: dimensions.other,
@@ -50811,6 +50899,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
         mac_cached_files_bytes: 'mac_cached_files_total_bytes', mac_swap_used_bytes: 'mac_swap_used_total_bytes',
         mac_app_memory_bytes: 'mac_app_memory_total_bytes', mac_wired_memory_bytes: 'mac_wired_memory_total_bytes',
         mac_compressed_memory_bytes: 'mac_compressed_memory_total_bytes', mac_pressure_percent: 'mac_pressure_total_percent',
+        mac_pressure_level: 'mac_pressure_level',
       };
       const target = macMemorySeries[name];
       if (target) {
@@ -51804,20 +51893,6 @@ function openYoCostTranscriptPreview(event) {
   return true;
 }
 
-function handleYoCostTableSort(event, panel) {
-  const button = event.target?.closest?.('[data-js-debug-cost-sort]');
-  if (!button || !panel?.contains(button)) return false;
-  event.preventDefault();
-  const key = String(button.dataset.jsDebugCostSort || 'cost');
-  const nextDirection = jsDebugCostComponentSortState.key === key && jsDebugCostComponentSortState.direction === 'asc' ? 'desc' : 'asc';
-  jsDebugCostComponentSortState.key = key;
-  jsDebugCostComponentSortState.direction = nextDirection;
-  // Age-label cadence throttles passive panel repainting; a user sort is an
-  // explicit content mutation and must repaint immediately.
-  renderYoCostPanels({force: true});
-  return true;
-}
-
 function bindYoCostPanel(panel) {
   if (!panel || panel.dataset.jsYoCostBound === 'true') return;
   panel.dataset.jsYoCostBound = 'true';
@@ -51845,7 +51920,6 @@ function bindYoCostPanel(panel) {
   panel.addEventListener('click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
-    if (handleYoCostTableSort(event, panel)) return;
     openYoCostTranscriptPreview(event);
   });
 }
@@ -52038,7 +52112,7 @@ function debugGraphFocusedControl(graph) {
   // These controls live outside the replaceable graph body. Keeping either
   // focused must not defer an accepted history paint until focusout.
   if (active.matches?.('[data-js-debug-range-slider], [data-js-debug-resolution-override]')) return null;
-  return active.closest?.('.js-debug-graph-controls, [data-js-debug-model-token-dimension]') || null;
+  return active.closest?.('.js-debug-graph-controls') || null;
 }
 
 function syncDebugGraphControls(graph, nowMs = Date.now()) {
@@ -52101,19 +52175,17 @@ function syncDebugGraphControls(graph, nowMs = Date.now()) {
     const expectedText = [...expectedResolution.childNodes].find(node => node.nodeType === 3);
     if (firstText && expectedText) firstText.textContent = expectedText.textContent;
   }
-  const dimension = graph.querySelector('[data-js-debug-model-token-dimension-select]');
-  if (dimension && document.activeElement !== dimension) dimension.value = jsDebugGraphModelTokenDimension;
 }
 
 function preserveDebugGraphBodyControls(graph, nextBody) {
-  const selectors = ['[data-js-debug-model-token-dimension-select]', '[data-js-debug-chart-close]'];
+  const selectors = ['[data-js-debug-chart-close]'];
   for (const selector of selectors) {
     const currentByKey = new Map([...graph.querySelectorAll(selector)].map(control => [
-      control.dataset.jsDebugChartClose || control.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens',
+      control.dataset.jsDebugChartClose,
       control,
     ]));
     for (const replacement of nextBody.querySelectorAll(selector)) {
-      const key = replacement.dataset.jsDebugChartClose || replacement.getAttribute('data-js-debug-model-token-dimension-select') || 'modelTokens';
+      const key = replacement.dataset.jsDebugChartClose;
       const current = currentByKey.get(key);
       if (!current) continue;
       for (const attribute of [...replacement.attributes]) current.setAttribute(attribute.name, attribute.value);
@@ -52813,7 +52885,7 @@ function handleDebugGraphPointerDown(event, panel) {
   if (ratio == null || event.button > 0) return false;
   const pointerType = event.pointerType || 'mouse';
   if (pointerType !== 'touch') jsDebugGraphLastPointerType = pointerType;
-  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control], [data-js-debug-model-token-dimension]')) document.activeElement.blur?.();
+  if (document.activeElement?.closest?.('.js-debug-graph-controls, [data-js-debug-range-control]')) document.activeElement.blur?.();
   const svg = event.target.closest('.js-debug-line-chart');
   const candidate = {
     panel,
@@ -53003,11 +53075,6 @@ function handleDebugGraphControlEvent(event, panel) {
   const resolutionOverride = event.target.closest('[data-js-debug-resolution-override]');
   if (resolutionOverride && panel.contains(resolutionOverride) && event.type === 'change') {
     setDebugGraphResolutionOverride(resolutionOverride.value);
-    return true;
-  }
-  const modelDimension = event.target.closest('[data-js-debug-model-token-dimension-select]');
-  if (modelDimension && panel.contains(modelDimension) && event.type === 'change') {
-    setDebugGraphModelTokenDimension(modelDimension.value);
     return true;
   }
   const chartLayout = event.target.closest('button[data-js-debug-chart-layout]');
@@ -56011,7 +56078,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
-  renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   renderLinkedFilePreviewPanels(panel, path, state.content);
   updateFilePreviewPopout(path, state.content);
   scheduleFileEditorSplitScrollSync(panel, 'editor');
@@ -56566,6 +56633,37 @@ function scheduleFileEditorPanelViewStateCapture(item, panel) {
   schedulePaneViewStateCapture(item, panel);
 }
 
+// One passive-update owner for a live CodeMirror pane. A refresh or focus may
+// observe a saved search selection, but it must keep the viewport the user has
+// already scrolled to; only explicit navigation is allowed to reveal a target.
+function preserveFileEditorPanelPassiveViewState(item, panel, options = {}) {
+  const view = panel?._cmView;
+  const scrollDOM = view?.scrollDOM;
+  if (!view) return false;
+  if (!scrollDOM) {
+    if (options.focus === true) view.focus?.();
+    return true;
+  }
+  const update = () => {
+    if (options.focus === true) view.focus?.();
+  };
+  if (typeof updateCodeMirrorViewPreservingState === 'function') {
+    updateCodeMirrorViewPreservingState(view, (selection, scrollSnapshot) => {
+      update();
+      if (scrollSnapshot) view.dispatch({effects: scrollSnapshot});
+      return selection;
+    }, {preserveSelection: false});
+  } else {
+    const scrollTop = scrollDOM.scrollTop;
+    const scrollLeft = scrollDOM.scrollLeft;
+    update();
+    scrollDOM.scrollTop = scrollTop;
+    scrollDOM.scrollLeft = scrollLeft;
+  }
+  captureFileEditorPanelViewState(item, panel);
+  return true;
+}
+
 function focusFileEditorPanelIfReady(panel, item) {
   if (!autoFocusCanFollowCursor()) {
     pendingFileEditorFocus.delete(item);
@@ -56573,10 +56671,7 @@ function focusFileEditorPanelIfReady(panel, item) {
   }
   if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
   if (panel?._cmView) {
-    panel._cmView.focus?.();
-    // CodeMirror focus can scroll the cursor into view. Re-apply the saved viewport after focus so
-    // a long file that was only scrolled, not cursor-moved, does not jump back to the cursor line.
-    restorePaneViewState(item, panel);
+    preserveFileEditorPanelPassiveViewState(item, panel, {focus: true});
     pendingFileEditorFocus.delete(item);
     return true;
   }
@@ -56640,53 +56735,27 @@ function restoreFileEditorPanelViewState(item, panel, options = {}) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!state || !view || !scrollDOM) return;
-  // An ordinary rerender (autosave chrome, watch/SSE refresh, session metadata) can finish after
-  // CodeMirror has already advanced a Shift+Arrow selection and scrolled to follow it. The focused
-  // live view is newer than the cached tab-switch snapshot, so refresh that shared snapshot instead
-  // of replaying stale cursor/scroll state into the editor. Explicit disk replacement captures a
-  // pre-reload snapshot and opts back into restoration with restoreFocused.
-  if (options.restoreFocused !== true && view.hasFocus && panel?.isConnected) {
-    captureFileEditorPanelViewState(item, panel);
+  // A live pane owns its current viewport even when it is not focused: the user can scroll it and
+  // a queued capture has not necessarily reached fileEditorViewState yet. Only a just-created view
+  // or explicit disk replacement may replay saved selection/scroll state.
+  if (options.restoreFocused !== true && options.restoreFresh !== true) {
+    preserveFileEditorPanelPassiveViewState(item, panel);
     return;
   }
   const docLength = view.state?.doc?.length || 0;
   const anchor = Math.max(0, Math.min(docLength, Number(state.anchor || 0)));
   const head = Math.max(0, Math.min(docLength, Number(state.head || anchor)));
+  scrollDOM.scrollTop = Number(state.scrollTop || 0);
+  scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
+  const scrollSnapshot = state.scrollSnapshot || (typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null);
   try {
     view.dispatch({
       selection: {anchor, head},
-      ...(state.scrollSnapshot ? {effects: state.scrollSnapshot} : {}),
+      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
     });
   } catch (_) {
     try { view.dispatch({selection: {anchor, head}}); } catch (_) {}
   }
-  const targetTop = Number(state.scrollTop || 0);
-  const targetLeft = Number(state.scrollLeft || 0);
-  const scrollStillAtTarget = () => (
-    Math.abs(Number(scrollDOM.scrollTop || 0) - targetTop) <= 1
-    && Math.abs(Number(scrollDOM.scrollLeft || 0) - targetLeft) <= 1
-  );
-  const restore = () => {
-    scrollDOM.scrollTop = targetTop;
-    scrollDOM.scrollLeft = targetLeft;
-  };
-  const measuredRestore = (guardUserScroll = false) => {
-    if (guardUserScroll && !scrollStillAtTarget()) return;
-    if (typeof view.requestMeasure === 'function') {
-      view.requestMeasure({
-        read: () => null,
-        write: () => {
-          if (!guardUserScroll || scrollStillAtTarget()) restore();
-        },
-      });
-      return;
-    }
-    restore();
-  };
-  restore();
-  measuredRestore();
-  requestAnimationFrame(() => measuredRestore(true));
-  requestAnimationFrame(() => requestAnimationFrame(() => measuredRestore(true)));
 }
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
@@ -60497,30 +60566,14 @@ function codeMirrorContextMenuSelectionExtension(api) {
 
 function updateCodeMirrorViewPreservingState(view, update, options = {}) {
   if (!view || typeof update !== 'function') return false;
-  const scrollDOM = view.scrollDOM;
-  const scrollTop = scrollDOM?.scrollTop || 0;
-  const scrollLeft = scrollDOM?.scrollLeft || 0;
   const selection = options.preserveSelection === false ? null : view.state.selection;
-  update(selection);
+  const scrollSnapshot = typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null;
+  update(selection, scrollSnapshot);
   const currentSelection = view.state.selection;
   const selectionPreserved = !selection || currentSelection === selection || currentSelection?.eq?.(selection) === true;
   if (!selectionPreserved) {
-    try { view.dispatch({selection}); } catch (_) {}
+    try { view.dispatch({selection, ...(scrollSnapshot ? {effects: scrollSnapshot} : {})}); } catch (_) {}
   }
-  const restoreScroll = () => {
-    if (!scrollDOM) return;
-    scrollDOM.scrollTop = scrollTop;
-    scrollDOM.scrollLeft = scrollLeft;
-  };
-  if (typeof view.requestMeasure === 'function') {
-    view.requestMeasure({write: restoreScroll});
-  } else {
-    requestAnimationFrame(restoreScroll);
-  }
-  requestAnimationFrame(() => {
-    restoreScroll();
-    requestAnimationFrame(restoreScroll);
-  });
   return true;
 }
 
@@ -60533,10 +60586,11 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
-  updateCodeMirrorViewPreservingState(view, preservedSelection => {
+  updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
     view.dispatch({
       changes: {from: 0, to: view.state.doc.length, insert: next},
       ...(preservedSelection ? {selection: preservedSelection} : {}),
+      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
     });
   }, {preserveSelection: selectionFits});
 }
@@ -60683,7 +60737,10 @@ function reconfigureCodeMirrorPanelLocale(panel) {
   const effect = compartment.reconfigure(codeMirrorLocaleExtensions(api, null));
   for (const view of views) {
     try {
-      updateCodeMirrorViewPreservingState(view, selection => view.dispatch({effects: effect, selection}));
+      updateCodeMirrorViewPreservingState(view, (selection, scrollSnapshot) => view.dispatch({
+        effects: scrollSnapshot ? [effect, scrollSnapshot] : effect,
+        ...(selection ? {selection} : {}),
+      }));
     } catch (_) {}
   }
   return true;
@@ -61358,7 +61415,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     panel._cmMode = 'diff';
     updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
     scheduleDiffOverviewSettledRebuild(panel);
-    restoreFileEditorPanelViewState(item, panel);
+    restoreFileEditorPanelViewState(item, panel, {restoreFresh: true});
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
     return true;
@@ -61390,7 +61447,8 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   try {
     const api = await loadCodeMirrorApi();
     if (panel._cmGeneration !== generation) return null;
-    if (!panel._cmView) {
+    const created = !panel._cmView;
+    if (created) {
       container.replaceChildren();
       const createdState = createEditableCodeMirrorState(api, panel, path, currentText);
       panel._cmView = new api.EditorView({
@@ -61427,7 +61485,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       updateCodeMirrorCursorStatus(panel);
     }
-    restoreFileEditorPanelViewState(item, panel);
+    restoreFileEditorPanelViewState(item, panel, {restoreFresh: created});
     focusFileEditorPanelIfReady(panel, item);
     applyPendingFileEditorLineTarget(item, panel);
     // if blame is on but this path isn't cached yet (file opened after the toggle), fetch it
@@ -61666,7 +61724,7 @@ function renderMediaEditor(panel, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderEditorPreviewPane(parts.previewPane, path, '', {context: 'preview'});
+    renderFileEditorPreviewSurface(panel, parts.previewPane, path, '', {context: 'preview'});
   }
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
@@ -61686,9 +61744,8 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderEditorPreviewPane(parts.previewPane, path, state.content, {context: 'preview'});
+    renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
   }
-  refreshPreviewFind(panel);
   scheduleShareFileEditorScrollRestore(item, path);
 }
 
@@ -61698,7 +61755,7 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
+    if (mode === 'split') renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'});
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -62450,7 +62507,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
   }
 }
 
@@ -62513,7 +62570,7 @@ function refreshEditorPreviews() {
     const path = fileItemPath(item);
     const state = fileState.get(path);
     if (state?.kind && editorPreviewModeAvailable(path, state)) {
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
       updateFilePreviewPopout(path, state.content || '');
     }
   }
@@ -62542,7 +62599,7 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (rawCode) rawCode.textContent = content;
     const mode = fileEditorPanelMode(openPanel);
     if (mode === 'preview' || mode === 'split') {
-      renderEditorPreviewPane(openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+      renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
     const status = openFileStatus(fileState.get(path));
     setFileEditorPanelStatus(openPanel, status.message, status.level);

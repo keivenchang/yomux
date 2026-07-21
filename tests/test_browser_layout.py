@@ -196,6 +196,46 @@ def test_static_browser_fixtures_have_one_write_and_navigation_owner():
     assert len(re.findall(r"^\s+load_static_html_fixture\(browser, tmp_path,", source, re.MULTILINE)) == 16
 
 
+def test_stats_cost_summary_table_uses_the_shared_content_sized_table_owner(browser, tmp_path):
+    load_static_html_fixture(
+        browser,
+        tmp_path,
+        "stats-cost-summary-table-width.html",
+        page_html(
+            """
+            <section class="js-debug-cost-summary" data-js-debug-summary-group="costSummary">
+              <div class="js-debug-system-table-wrap js-debug-cost-table-wrap">
+                <table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary">
+                  <thead><tr><th>Usage</th><th>Tokens</th><th>Price</th></tr></thead>
+                  <tbody><tr><th>Input</th><td>100</td><td>$0.01</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+            """,
+            extra_css=".js-debug-cost-summary { width: 40rem; }",
+        ),
+    )
+    metrics = browser.execute_script(
+        """
+        const table = document.querySelector('[data-js-debug-cost-table="summary"]');
+        const wrap = table.closest('.js-debug-cost-table-wrap');
+        return {
+          tableWidth: table.getBoundingClientRect().width,
+          wrapWidth: wrap.getBoundingClientRect().width,
+          inlineSize: getComputedStyle(table).inlineSize,
+          minInlineSize: getComputedStyle(table).minInlineSize,
+          maxInlineSize: getComputedStyle(table).maxInlineSize,
+          overflowX: getComputedStyle(wrap).overflowX,
+        };
+        """
+    )
+    assert metrics["tableWidth"] < metrics["wrapWidth"], metrics
+    assert metrics["inlineSize"] != "100%", metrics
+    assert metrics["minInlineSize"] == "0px", metrics
+    assert metrics["maxInlineSize"] == "none", metrics
+    assert metrics["overflowX"] == "auto", metrics
+
+
 def test_tab_minimize_spacing_keeps_its_hit_target_and_gives_titles_the_compact_available_width(browser, tmp_path):
     tab_inner = """
       <span class="pane-tab-core"><span class="session-button-prefix">[yo7771]</span><span class="session-button-text"><span class="session-button-dir tab-inline-detail">Fix an intentionally long tab title before ellipsis truncation</span></span></span>
@@ -799,7 +839,7 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
         "range": True,
         "resolution": True,
         "toggles": 12,
-        "toggleLabels": ["CPU", "Daemons load", "Sys mem", "Agents", "Agent tokens", "Model tokens", "Cost", "GPU", "GPU mem", "Latency", "API&SSE", "Bandwidth"],
+        "toggleLabels": ["CPU", "Daemons load", "System memory", "Agents", "Agent tokens/min", "Model output tokens/min", "Cost summary", "GPU utilization", "GPU memory", "Client latency", "Client API&SSE/sec", "Client bandwidth/sec"],
         "layouts": ["AUTO", "S", "M", "L", "MAX"],
         "cards": metrics["cards"],
         "closeButtons": metrics["cards"],
@@ -1117,7 +1157,8 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
               debugGraphApplyServerRecord({start: Math.floor((now - index * 60000) / 1000), duration: 60, host_metrics: {
                 mac_memory_count: 1, mac_physical_memory_total_bytes: 48 * 1024 ** 3, mac_memory_used_total_bytes: 39.6 * 1024 ** 3,
                 mac_cached_files_total_bytes: 8.3 * 1024 ** 3, mac_swap_used_total_bytes: 6.6 * 1024 ** 3, mac_app_memory_total_bytes: 15.9 * 1024 ** 3,
-                mac_wired_memory_total_bytes: 5.1 * 1024 ** 3, mac_compressed_memory_total_bytes: 17.4 * 1024 ** 3, mac_pressure_total_percent: 20 + index,
+                mac_wired_memory_total_bytes: 5.1 * 1024 ** 3, mac_compressed_memory_total_bytes: 17.4 * 1024 ** 3, mac_pressure_total_percent: index ? 20 + index : 57,
+                mac_pressure_level: index ? 1 : 2,
               }});
             }
             refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
@@ -1128,13 +1169,14 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
             if (!card || !details) return {ready: true, card: Boolean(card), details: Boolean(details)};
             const cardRect = card.getBoundingClientRect();
             const rows = [...card.querySelectorAll('[data-js-debug-mac-memory-details] > div')].map(row => row.getBoundingClientRect());
-            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
+            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), lineColor: card.querySelector('[data-js-debug-series="macMemoryPressure"]')?.style.getPropertyValue('--js-debug-series-color').trim(), facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
         """
     )
     assert result.get("ready", True) and "cards" in result, result
     assert result["cards"] == 1, result
     assert result["title"] == "Memory pressure", result
     assert result["unit"] == "percent" and result["axisMax"] == 100, result
+    assert result["lineColor"] == "var(--warning-border-strong)", result
     assert result["facts"] == ["Physical Memory", "Memory Used", "Cached Files", "Swap Used", "App Memory", "Wired Memory", "Compressed"], result
     assert len(result["values"]) == 7 and all(result["values"]), result
     assert result["bounds"] and result["pageOverflow"], result
@@ -1443,13 +1485,13 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             }],
           };
           const emptyDimensions = () => Object.fromEntries(
-            ['input', 'cache_read', 'cache_write', 'output', 'other'].map(key => [
+            ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [
               key,
               {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
             ]),
           );
           const costReport = () => ({
-            schema_version: 2,
+            schema_version: 3,
             total_micro_usd: 0,
             total_api_list_micro_usd: 0,
             total_tokens: 0,
@@ -10551,6 +10593,10 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const dimensions = {
             input_tokens: 1000, input_micro_usd: 0, input_api_list_micro_usd: 600000,
             cache_tokens: 0, cache_micro_usd: 0, cache_api_list_micro_usd: 0,
+            cache_read_tokens: 0, cache_read_micro_usd: 0, cache_read_api_list_micro_usd: 0,
+            cache_write_tokens: 0, cache_write_micro_usd: 0, cache_write_api_list_micro_usd: 0,
+            cache_write_5m_tokens: 0, cache_write_5m_micro_usd: 0, cache_write_5m_api_list_micro_usd: 0,
+            cache_write_1h_tokens: 0, cache_write_1h_micro_usd: 0, cache_write_1h_api_list_micro_usd: 0,
             output_tokens: 0, output_micro_usd: 0, output_api_list_micro_usd: 0,
             other_tokens: 0, other_micro_usd: 0, other_api_list_micro_usd: 0,
           };
@@ -10560,6 +10606,22 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             source_url: 'https://example.com/pricing',
             lower_micro_usd: 0, upper_micro_usd: 0, ...dimensions,
           };
+          const anthropicDimensions = {
+            ...dimensions,
+            cache_write_5m_tokens: 100, cache_write_5m_micro_usd: 750000, cache_write_5m_api_list_micro_usd: 750000,
+            cache_write_1h_tokens: 200, cache_write_1h_micro_usd: 4000000, cache_write_1h_api_list_micro_usd: 4000000,
+          };
+          const anthropicRow = {
+            ...pricedRow,
+            provider: 'anthropic', model: 'claude-cache-lifetimes', label: 'claude-cache-lifetimes',
+            token_quantity: 300, micro_usd: 4750000, api_list_micro_usd: 4750000,
+            ...anthropicDimensions,
+          };
+          const components = [
+            {...pricedRow, quantity: 1000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'none', pricing_profile: 'subscription', rate_usd: '6.00', rate_scale: 1000000},
+            {...anthropicRow, quantity: 100, micro_usd: 750000, api_list_micro_usd: 750000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'write_5m', rate_usd: '7.50', rate_scale: 1000000},
+            {...anthropicRow, quantity: 200, micro_usd: 4000000, api_list_micro_usd: 4000000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'write_1h', rate_usd: '20.00', rate_scale: 1000000},
+          ];
           debugGraphApplyServerRecord({
             start: now - 60,
             duration: 60,
@@ -10576,8 +10638,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               complete: true,
               unpriced_count: 0,
               unpriced_token_quantity: 0,
-              components: [{...pricedRow, quantity: 1000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'none', pricing_profile: 'subscription'}],
-              models: [pricedRow],
+              components,
+              models: [pricedRow, anthropicRow],
               sources: [{...pricedRow, source: 'codex'}],
               tmux_windows: [{...pricedRow, tmux_label: 'yo8881:0'}],
               catalog_revision: '3', active_catalog_revision: '3', freshness: 'current',
@@ -10598,15 +10660,40 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const expectedScrollLeft = agentWrap.scrollLeft;
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
+          const renderedReport = document.querySelector('.js-yocost-panel .js-debug-cost-report');
           return {
             preferences,
             reportText: report?.textContent?.replace(/\\s+/g, ' ').trim() || '',
+            legend: report ? {
+              count: report.querySelectorAll('[data-js-debug-cost-column-legend]').length,
+              entries: [...report.querySelectorAll('[data-js-debug-cost-column-legend] > div')].map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
+              swatches: [...report.querySelectorAll('[data-js-debug-cost-column-legend] .js-debug-cost-usage-swatch')].map(node => node.className),
+              headerTitles: [...report.querySelectorAll('[data-js-debug-cost-table="agent"] thead th[title]')].map(node => node.title),
+              openaiCacheWrite: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('gpt-subscription'))?.querySelectorAll('td')?.[2]?.textContent.trim() || '',
+              openaiCacheWriteTitle: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('gpt-subscription'))?.querySelectorAll('td')?.[2]?.querySelector('[title]')?.title || '',
+              modelHeaders: [...report.querySelectorAll('[data-js-debug-cost-table="model"] thead th')].map(node => node.textContent.trim()),
+              anthropicCells: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('claude-cache-lifetimes'))?.querySelectorAll('td') ? [...[...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('claude-cache-lifetimes')).querySelectorAll('td')].map(cell => cell.textContent.trim()) : [],
+              modelHeading: report.querySelector('.js-debug-cost-model-usages h2')?.textContent.trim() || '',
+              agentHeading: report.querySelector('.js-debug-cost-agent-usages h2')?.textContent.trim() || '',
+              modelFormulae: [...report.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-formula')].map(node => node.textContent.trim()),
+              pricingText: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.textContent || '',
+              pricingTitle: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.title || '',
+              pricingBefore: getComputedStyle(renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'), '::before').content,
+              pricingAfter: getComputedStyle(renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'), '::after').content,
+              metricsOneLine: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-table-metric, [data-js-debug-cost-table="agent"] .js-debug-cost-table-metric, [data-js-debug-cost-table="source"] .js-debug-cost-table-metric')].every(metric => {
+                const style = getComputedStyle(metric);
+                return style.display === 'inline-flex' && style.whiteSpace === 'nowrap' && style.flexWrap === 'nowrap';
+              }),
+              formulasOneLine: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-formula')].every(formula => getComputedStyle(formula).whiteSpace === 'nowrap'),
+              pricePairDisplays: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-price-pair, [data-js-debug-cost-table="agent"] .js-debug-cost-price-pair, [data-js-debug-cost-table="source"] .js-debug-cost-price-pair')].map(pair => ({display: getComputedStyle(pair).display, parent: pair.parentElement?.className || ''})),
+            } : null,
             grandTotals: [...report?.querySelectorAll('tfoot th') || []].map(node => node.textContent.trim()),
             pairCount: report?.querySelectorAll('.js-debug-cost-price-pair').length || 0,
             pricingOpen: opened,
             pricingDefaultPrevented: pricingEvent.defaultPrevented,
             restoredScrollLeft: document.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap')?.scrollLeft || 0,
             expectedScrollLeft,
+            calculationTables: report?.querySelectorAll('[data-js-debug-cost-table="calculation"]').length || 0,
             errors: window.__bootErrors || [],
             rejections: window.__bootRejections || [],
           };
@@ -10621,11 +10708,41 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert "$0.00 marginal" in result["reportText"], result
     assert "list" in result["reportText"], result
     assert result["reportText"].count("At API list prices") == 1, result
+    assert result["legend"]["count"] == 1, result
+    assert len(result["legend"]["entries"]) == 6, result
+    assert any(entry.startswith("Cache") and "hits and refreshes" in entry for entry in result["legend"]["entries"]), result
+    assert any(entry.startswith("Cache write") and "cache creation" in entry for entry in result["legend"]["entries"]), result
+    assert set(result["legend"]["swatches"]) == {
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--input",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--cache_read",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--cache_write",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--output",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--other",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--total",
+    }, result
+    assert any("cache reads" in title.lower() for title in result["legend"]["headerTitles"]), result
+    assert any("written into the model cache" in title.lower() for title in result["legend"]["headerTitles"]), result
+    assert result["legend"]["openaiCacheWrite"] == "unreported", result
+    assert "lower bound" in result["legend"]["openaiCacheWriteTitle"], result
+    assert result["legend"]["modelHeaders"] == ["Model", "Input", "Cache read", "Cache write", "Output", "Other", "Total", "5m cache write", "1h cache write"], result
+    assert result["legend"]["modelHeading"] == "Cost by Model", result
+    assert result["legend"]["agentHeading"] == "Cost by Agent", result
+    assert result["legend"]["anthropicCells"][2].startswith("100 x $7.50/1M = $0.75"), result
+    assert result["legend"]["anthropicCells"][3].startswith("200 x $20.00/1M = $4.00"), result
+    assert any(formula.startswith("100 x $7.50/1M = $0.75") for formula in result["legend"]["modelFormulae"]), result
+    assert any(formula.startswith("200 x $20.00/1M = $4.00") for formula in result["legend"]["modelFormulae"]), result
+    assert result["legend"]["pricingText"] == "$", result
+    assert "pricing" in result["legend"]["pricingTitle"].lower(), result
+    assert result["legend"]["pricingBefore"] in ("", "none") and result["legend"]["pricingAfter"] in ("", "none"), result
+    assert result["legend"]["metricsOneLine"], result
+    assert result["legend"]["formulasOneLine"], result
+    assert result["legend"]["pricePairDisplays"] and all(item["display"] in ("flex", "inline-flex") for item in result["legend"]["pricePairDisplays"]), result
     assert result["restoredScrollLeft"] == result["expectedScrollLeft"], result
     assert set(result["grandTotals"]) == {"Grand total · marginal / API list prices"}, result
     assert result["pairCount"] >= 2, result
     assert result["pricingOpen"] == [["https://example.com/pricing", "_blank", "noopener,noreferrer"]], result
     assert result["pricingDefaultPrevented"] is True, result
+    assert result["calculationTables"] == 0, result
     assert result["errors"] == [] and result["rejections"] == [], result
     for width in (260, 360, 720, 1200):
         browser.set_window_size(width, 720)
@@ -10633,11 +10750,31 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             """
             const table = document.querySelector('[data-js-debug-cost-table="agent"]');
             const wrap = table?.closest('.js-debug-cost-table-wrap');
-            if (!table || !wrap) return null;
+            const modelTable = document.querySelector('[data-js-debug-cost-table="model"]');
+            const modelWrap = modelTable?.closest('.js-debug-cost-table-wrap');
+                const legend = document.querySelector('[data-js-debug-cost-column-legend]');
+            if (!table || !wrap || !modelTable || !modelWrap) return null;
             wrap.scrollLeft = wrap.scrollWidth;
+            modelWrap.scrollLeft = modelWrap.scrollWidth;
             const tableRect = table.getBoundingClientRect();
             const wrapRect = wrap.getBoundingClientRect();
             const finalCells = [...table.querySelectorAll('tr > :last-child')];
+            const modelRect = modelTable.getBoundingClientRect();
+            const modelWrapRect = modelWrap.getBoundingClientRect();
+            const modelFinalCells = [...modelTable.querySelectorAll('tr > :last-child')];
+            const wideHost = document.createElement('div');
+            wideHost.className = 'js-debug-cost-report-body';
+            wideHost.style.cssText = 'position:fixed; visibility:hidden; inline-size:1200px; inset-inline-start:0; inset-block-start:0;';
+            const wideLegend = legend?.cloneNode(true);
+            wideHost.append(wideLegend);
+            document.body.append(wideHost);
+            const wideLegendRows = wideLegend ? new Set([...wideLegend.children].map(node => Math.round(node.getBoundingClientRect().top))).size : 0;
+            const wideLegendMetrics = {
+              display: wideLegend ? getComputedStyle(wideLegend).display : '',
+              itemsFit: wideLegend ? [...wideLegend.children].every(node => node.scrollWidth <= node.clientWidth + 1) : false,
+              rows: wideLegendRows,
+            };
+            wideHost.remove();
             return {
               overflowX: getComputedStyle(wrap).overflowX,
               scrollWidth: wrap.scrollWidth,
@@ -10646,8 +10783,23 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               wrapRight: wrapRect.right,
               cellsFit: finalCells.every(cell => cell.scrollWidth <= cell.clientWidth + 1),
               finalVisible: finalCells.every(cell => cell.getBoundingClientRect().right <= wrapRect.right + 1),
-              otherHeading: [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === 'Cached')
-                && [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === 'Other'),
+              modelTableRight: modelRect.right,
+              modelWrapRight: modelWrapRect.right,
+              modelCellsFit: modelFinalCells.every(cell => cell.scrollWidth <= cell.clientWidth + 1),
+              modelFinalVisible: modelFinalCells.every(cell => cell.getBoundingClientRect().right <= modelWrapRect.right + 1),
+              modelLifetimeHeadings: ['Cache write', '5m cache write', '1h cache write'].every(label =>
+                [...modelTable.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === label)),
+              cacheHeadings: ['Cache read', 'Cache write', 'Other'].every(label =>
+                [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === label)),
+              legendExists: Boolean(legend),
+              legendDisplay: legend ? getComputedStyle(legend).display : '',
+              legendColumns: legend ? getComputedStyle(legend).gridTemplateColumns : '',
+              legendRows: legend ? new Set([...legend.children].map(node => Math.round(node.getBoundingClientRect().top))).size : 0,
+              legendItemsFit: legend ? [...legend.children].every(node => node.scrollWidth <= node.clientWidth + 1) : false,
+              legendGloss: legend?.querySelector('dd')?.textContent.trim() || '',
+              wideLegendMetrics,
+              modelNamesFit: [...modelTable.querySelectorAll('tbody th .js-debug-cost-model-copy strong')].every(node => node.scrollWidth <= node.clientWidth + 1),
+              reportOverflow: legend ? legend.closest('.js-debug-cost-report')?.scrollWidth <= legend.closest('.js-debug-cost-report')?.clientWidth + 1 : false,
             };
             """
         )
@@ -10655,7 +10807,17 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
         assert metrics["overflowX"] == "auto", (width, metrics)
         assert metrics["cellsFit"] and metrics["finalVisible"], (width, metrics)
         assert metrics["tableRight"] <= metrics["wrapRight"] + 1, (width, metrics)
-        assert metrics["otherHeading"], (width, metrics)
+        assert metrics["modelCellsFit"] and metrics["modelFinalVisible"], (width, metrics)
+        assert metrics["modelTableRight"] <= metrics["modelWrapRight"] + 1, (width, metrics)
+        assert metrics["modelLifetimeHeadings"], (width, metrics)
+        assert metrics["cacheHeadings"], (width, metrics)
+        assert metrics["legendExists"] and metrics["legendItemsFit"] and metrics["modelNamesFit"] and metrics["reportOverflow"], (width, metrics)
+        assert metrics["legendGloss"] == "new prompt/context tokens", (width, metrics)
+        if metrics["legendDisplay"] == "grid":
+            assert metrics["legendColumns"].count("px") == 2 and metrics["legendRows"] == 3, (width, metrics)
+        else:
+            assert metrics["legendDisplay"] == "flex" and metrics["legendRows"] <= 3, (width, metrics)
+        assert metrics["wideLegendMetrics"] == {"display": "flex", "itemsFit": True, "rows": 1}, (width, metrics)
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):
@@ -14003,7 +14165,12 @@ def test_editor_pane_does_not_shift_grid_when_legacy_body_class_is_present(brows
 
 
 def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        settings={"appearance": {"editor_cursor_color": "yellow"}},
+    )
     metrics = browser.execute_script(
         """
         const host = document.createElement('section');
@@ -14043,6 +14210,22 @@ def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_p
           overviewActiveIndex: [...host.querySelectorAll('.file-editor-find-overview-tick')].findIndex(node => node.classList.contains('active')),
           count: host.querySelector('.file-editor-preview-find-count').textContent,
         };
+        const preview = host.querySelector('.file-editor-preview-pane-panel');
+        const textNode = [...preview.childNodes].find(node => node.nodeType === Node.ELEMENT_NODE && node.textContent.includes('second'))?.lastChild;
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.setStart(textNode, Math.max(0, textNode.nodeValue.indexOf('second')));
+        range.setEnd(textNode, textNode.nodeValue.length);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        renderFileEditorPreviewSurface(host, preview, '/tmp/preview-find.md', 'alpha first\\n\\n' + 'filler\\n\\n'.repeat(40) + 'beta alpha second', {context: 'preview'});
+        const refreshed = {
+          selection: window.getSelection().toString(),
+          matches: host.querySelectorAll('.file-editor-preview-find-match').length,
+          active: host.querySelectorAll('.file-editor-preview-find-match.active').length,
+          count: host.querySelector('.file-editor-preview-find-count').textContent,
+          activeBackground: getComputedStyle(host.querySelector('.file-editor-preview-find-match.active')).backgroundColor,
+        };
         closePreviewFind(host);
         const closed = {
           hidden: previewFindPanelForHost(host).hidden,
@@ -14052,14 +14235,16 @@ def test_rendered_preview_find_highlights_navigates_and_cleans_up(browser, tmp_p
           endsWith: host.querySelector('.file-editor-preview-pane-panel').textContent.trim().endsWith('beta alpha second'),
         };
         host.remove();
-        return {opened, moved, closed};
+        return {opened, moved, refreshed, closed};
         """
     )
     opened = {**metrics["opened"], "overviewTops": None, "activeColor": None, "activeBackground": None}
     assert opened == {"visible": True, "matches": 2, "overviewTicks": 2, "overviewVisible": True, "overviewTops": None, "active": 1, "activeColor": None, "activeBackground": None, "count": "1/2", "inputFocused": True}
     assert metrics["opened"]["overviewTops"][0] < metrics["opened"]["overviewTops"][1], metrics
     assert metrics["opened"]["activeColor"] != metrics["opened"]["activeBackground"], metrics
+    assert metrics["opened"]["activeBackground"] == "rgb(255, 234, 0)", metrics
     assert metrics["moved"] == {"activeIndex": 1, "overviewActiveIndex": 1, "count": "2/2"}
+    assert metrics["refreshed"] == {"selection": "second", "matches": 2, "active": 1, "count": "2/2", "activeBackground": "rgb(255, 234, 0)"}, metrics
     assert metrics["closed"] == {"hidden": True, "matches": 0, "overviewHidden": True, "startsWith": True, "endsWith": True}
 
 

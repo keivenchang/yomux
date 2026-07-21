@@ -116,10 +116,11 @@ test('CPU promotes the newest sampled owner instead of covering it with a duplic
   assert.equal(context.result[0].linePattern, 'solid');
 });
 
-test('all established chart controls and semantic renderers remain present', () => {
-  for (const label of ['CPU', 'Daemons load', 'Sys mem', 'Agents', 'Agent tokens', 'Model tokens', 'Cost', 'GPU', 'GPU mem', 'Latency', 'API&SSE', 'Bandwidth']) {
-    assert.ok(source.includes(`toggleLabelEn: '${label}'`), label);
-  }
+test('chart popup uses the full localized chart titles', () => {
+  const controls = sourceFunction('debugGraphChartToggleControlsHtml', 'debugGraphLayoutControlsHtml');
+  assert.match(controls, /const label = debugGraphLocalizedLabel\(group\)/);
+  assert.match(controls, /\$\{esc\(label\)\}<\/label>/);
+  assert.doesNotMatch(source, /toggleLabelEn/);
   for (const token of ['data-js-debug-range-slider', 'data-js-debug-resolution-override', 'data-js-debug-chart-layout', 'data-js-debug-chart-close']) {
     assert.ok(source.includes(token), token);
   }
@@ -129,10 +130,21 @@ test('all established chart controls and semantic renderers remain present', () 
   assert.match(css, /\.js-debug-logs-view/);
 });
 
+test('model output chart is fixed to generated output without a dimension picker', () => {
+  const english = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
+  assert.equal(english['debug.graph.chart.modelTokens'], 'Model output tokens/min');
+  assert.match(source, /key: 'modelTokens'[\s\S]*dynamicTokenDimension: 'model'/);
+  assert.doesNotMatch(source, /data-js-debug-model-token-dimension-select/);
+  assert.doesNotMatch(source, /jsDebugGraphModelTokenDimension/);
+  assert.doesNotMatch(source, /debugGraphAgentTokenBucketDimensionValue/);
+  assert.match(source, /function debugGraphModelTokenSeriesDefs\(buckets\) \{\s*return debugGraphTokenSeriesDefs\(buckets, 'model'\);/);
+});
+
 test('macOS keeps Activity Monitor memory facts and pressure in one card', () => {
   const resolver = sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml');
   const details = sourceFunction('debugGraphMacMemoryDetailsHtml', 'debugGraphLegendSeriesItems');
   const chart = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
+  const pressureColor = sourceFunction('debugGraphMacMemoryPressureColor', 'debugGraphSeriesStyleAttr');
   assert.match(resolver, /key !== 'memory'/);
   assert.match(resolver, /series: \['macMemoryPressure'\]/);
   assert.match(resolver, /fixedMax: 100/);
@@ -140,6 +152,15 @@ test('macOS keeps Activity Monitor memory facts and pressure in one card', () =>
   assert.match(chart, /debugGraphMacMemoryDetailsHtml\(buckets\)/);
   assert.match(css, /\.js-debug-mac-memory-details/);
   assert.match(css, /@container \(max-width: 20rem\)/);
+  assert.doesNotMatch(pressureColor, /pressure </);
+  assert.match(pressureColor, /level === 1/);
+  assert.match(pressureColor, /level === 2/);
+  assert.match(pressureColor, /level >= 4/);
+  const context = {result: null, Number};
+  vm.runInNewContext(`${pressureColor}\nresult = [debugGraphMacMemoryPressureColor(1), debugGraphMacMemoryPressureColor(2), debugGraphMacMemoryPressureColor(4), debugGraphMacMemoryPressureColor(null)];`, context);
+  assert.deepEqual([...context.result], ['var(--good)', 'var(--warning-border-strong)', 'var(--bad)', 'var(--muted)']);
+  assert.match(sourceFunction('debugGraphSeriesStyleAttr', 'debugGraphSeriesClientAttrs'), /debugGraphSeriesDisplayColor\(series\)/);
+  assert.match(sourceFunction('debugGraphSeriesDisplayColor', 'debugGraphSeriesStyleAttr'), /series\?\.colorValues/);
 });
 
 test('Agents keeps per-session revision joins and semantic paint', () => {
@@ -473,7 +494,8 @@ test('the retained YO!cost adapter and totals preserve marginal and API-list pri
     const dimensions = {
       input: {tokens: 600, micro_usd: 0, api_list_micro_usd: 300000},
       cache_read: {tokens: 300, micro_usd: 0, api_list_micro_usd: 60000},
-      cache_write: {tokens: 100, micro_usd: 0, api_list_micro_usd: 40000},
+      cache_write_5m: {tokens: 100, micro_usd: 0, api_list_micro_usd: 40000},
+      cache_write_1h: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
       output: {tokens: 200, micro_usd: 0, api_list_micro_usd: 200000},
       other: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
     };
@@ -1169,11 +1191,13 @@ test('health observations retain measured latency and bytes as original browser 
   assert.equal(context.result.payload.bytes, 456);
 });
 
-test('the Cost summary card renders as a ruled table sharing the report cost-table style, basis stated once', () => {
+test('the Cost summary card renders as a content-sized ruled table with the report cost-table style, basis stated once', () => {
   const summaryFn = sourceFunction('debugGraphCostSummaryHtml', 'scheduleDebugCostPricingStatusRefresh');
   // Shared report table style + scroll-wrap owner reused (no bespoke summary table style).
   assert.match(summaryFn, /<div class="js-debug-system-table-wrap js-debug-cost-table-wrap">/);
   assert.match(summaryFn, /<table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="summary"/);
+  // Tables stay content-sized; their shared wrapper owns narrow horizontal scrolling.
+  assert.match(css, /\.js-debug-cost-usage-table-section \.js-debug-cost-table,\s*\.js-debug-cost-summary \.js-debug-cost-table\s*\{\s*inline-size: max-content;\s*max-inline-size: none;\s*min-inline-size: auto;/);
   // Header row: Usage / Tokens / Price.
   assert.match(summaryFn, /<thead><tr><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.usage', 'Usage'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.modelTokens\.label', 'Tokens'\)\)\}<\/th><th scope="col">\$\{esc\(debugGraphCostText\('debug\.cost\.priceColumn', 'Price'\)\)\}<\/th><\/tr><\/thead>/);
   // Input/Cache/Output in tbody, Total in tfoot, via the shared row shape.
@@ -1199,6 +1223,34 @@ test('the Cost summary card renders as a ruled table sharing the report cost-tab
   assert.doesNotMatch(css, /\.js-debug-cost-token-count/);
 });
 
+test('the YO!cost report renders one shared always-visible column legend with translated terse glosses', () => {
+  const copyStart = source.indexOf('const debugGraphCostUsageColumnCopy = Object.freeze(');
+  const copyEnd = source.indexOf('\nfunction debugGraphCostUsageColumnHeaderAttrs(', copyStart);
+  const report = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const legend = sourceFunction('debugGraphCostUsageColumnLegendHtml', 'debugGraphCostUsageColumnHeaderAttrs');
+  assert.notEqual(copyStart, -1, 'one shared copy owner exists');
+  assert.notEqual(copyEnd, -1, 'shared copy owner precedes header attrs');
+  const copy = source.slice(copyStart, copyEnd);
+  for (const key of ['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h', 'output', 'other', 'total']) {
+    assert.match(copy, new RegExp(`${key}: Object\\.freeze\\(\\{description:`), `${key} has the long description in the shared owner`);
+    const glossKey = key === 'cache_read' ? 'debug.modelTokens.cacheRead' : key === 'cache_write' ? 'debug.cost.cacheWrite.gloss' : key === 'cache_write_5m' ? 'debug.cost.cacheWrite5m.gloss' : key === 'cache_write_1h' ? 'debug.cost.cacheWrite1h.gloss' : `debug.cost.${key}.gloss`;
+    assert.match(copy, new RegExp(glossKey.replaceAll('.', '\\.'), 'u'), `${key} has the terse gloss in the shared owner`);
+    assert.match(legend, new RegExp(`js-debug-cost-usage-swatch--\\$\\{esc\\(key\\)\\}`), 'legend uses the matching swatch');
+  }
+  assert.match(report, /<p class="js-debug-cost-report-totals"[\s\S]*?\$\{debugGraphCostUsageColumnLegendHtml\(\)\}[\s\S]*?\$\{debugGraphCostTmuxBreakdownHtml/);
+  assert.equal((report.match(/debugGraphCostUsageColumnLegendHtml\(\)/g) || []).length, 1, 'report renders the legend once, not per table');
+  assert.match(legend, /<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend/);
+  assert.match(css, /\.js-debug-cost-column-legend \{[\s\S]*?display: flex;[\s\S]*?flex-wrap: wrap;/);
+  assert.match(css, /@container \(max-width: 34rem\) \{[\s\S]*?\.js-debug-cost-column-legend \{[\s\S]*?display: grid;[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/);
+  for (const name of fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'))) {
+    const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${name}`, 'utf8'));
+    for (const key of ['input', 'output', 'other', 'total']) assert.ok(String(catalog[`debug.cost.${key}.gloss`] || '').trim(), `${name} has debug.cost.${key}.gloss`);
+    assert.ok(String(catalog['debug.cost.cacheWrite.gloss'] || '').trim(), `${name} has debug.cost.cacheWrite.gloss`);
+    assert.ok(String(catalog['debug.modelTokens.cacheRead'] || '').trim(), `${name} has debug.modelTokens.cacheRead`);
+    assert.ok(String(catalog['debug.modelTokens.cacheWrite'] || '').trim(), `${name} has debug.modelTokens.cacheWrite`);
+  }
+});
+
 test('the YO!stats Daemons subtab keeps the system key and every locale carries a non-empty label', () => {
   const path = require('node:path');
   // The subtab wiring keeps the internal `system` key; only the human label changed.
@@ -1213,6 +1265,117 @@ test('the YO!stats Daemons subtab keeps the system key and every locale carries 
     assert.doesNotMatch(label, /^Services$/, `${name} debug.tab.services no longer the old "Services" label`);
   }
   assert.equal(JSON.parse(fs.readFileSync(path.join(built, 'en.json'), 'utf8'))['debug.tab.services'], 'Daemons');
+});
+
+test('the YO!cost report shows one always-visible column legend sharing the description owner', () => {
+  // Legend rendered once in the report body, above the usage tables.
+  const reportFn = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const legendCalls = reportFn.match(/debugGraphCostUsageColumnLegendHtml\(\)/g) || [];
+  assert.equal(legendCalls.length, 1, 'legend rendered exactly once per report');
+  // The legend renders a swatch (except Total) + label + terse gloss for each column, and reuses
+  // the shared header explain-attrs so the full description stays as the hover tooltip.
+  const legendFn = sourceFunction('debugGraphCostUsageColumnLegendHtml', 'debugGraphCostUsageColumnHeaderAttrs');
+  assert.match(legendFn, /class="js-debug-cost-column-legend"/);
+  assert.match(legendFn, /\['input', 'cache_read', 'cache_write', 'output', 'other', 'total'\]/);
+  assert.match(legendFn, /js-debug-cost-usage-swatch--\$\{esc\(key\)\}/);
+  assert.match(legendFn, /debugGraphCostUsageColumnHeaderAttrs\(key, labels\[key\]\)/);
+  assert.match(legendFn, /debugGraphCostUsageColumnGloss\(key\)/);
+  assert.match(legendFn, /js-debug-cost-usage-swatch--\$\{esc\(key\)\}/); // Total uses the matching swatch too
+  // Gloss owner shares the same keys as the description owner (one wording source, terse layer).
+  for (const key of ['input', 'cache_read', 'cache_write', 'output', 'other', 'total']) {
+    const translated = key === 'cache_read' ? 'debug\\.modelTokens\\.cacheRead' : key === 'cache_write' ? 'debug\\.cost\\.cacheWrite\\.gloss' : `debug\\.cost\\.${key}\\.gloss`;
+    assert.match(source, new RegExp(`${key}: Object\\.freeze\\(\\{description:[^\\n]+${translated}`), `gloss owner has ${key}`);
+  }
+  // Tight legend CSS: bounded responsive grid, compact font, no fixed width.
+  assert.match(css, /\.js-debug-cost-column-legend \{[\s\S]*?display: flex;[\s\S]*?flex-wrap: wrap;/);
+});
+
+test('YO!cost keeps exact formulas inside Cost by Model and removes the duplicate calculation table', () => {
+  const report = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const usageTable = sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml');
+  const formula = sourceFunction('debugGraphCostModelFormulaCellHtml', 'debugGraphCostSourceLabel');
+  assert.doesNotMatch(report, /debugGraphCostComponentDetailsHtml|data-js-debug-cost-table="calculation"/);
+  assert.match(usageTable, /debugGraphCostModelFormulaCellHtml\(components, row, item\)/);
+  assert.match(formula, /cache_write_5m.*cache_write_1h/);
+  assert.match(formula, /x \$\{esc\(debugGraphCostComponentRateText\(row\)\)\} =/);
+  assert.match(formula, /js-debug-cost-model-formula/);
+});
+
+test('YO!cost keeps Cost by Model and Cost by Agent on one cache-write grid', () => {
+  const gridStart = source.indexOf('const DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS = Object.freeze(');
+  const gridEnd = source.indexOf('\nfunction debugGraphCostPricingSourceEntries(', gridStart);
+  assert.notEqual(gridStart, -1, 'shared cache-write grid exists');
+  assert.notEqual(gridEnd, -1, 'shared cache-write grid ends before the next owner');
+  const sharedGrid = source.slice(gridStart, gridEnd);
+  const context = {result: null};
+  vm.runInNewContext(`
+    const debugGraphCostText = (_key, fallback) => fallback;
+    const debugGraphCostUsageColumnLabel = key => ({cache_read: 'Cache read', cache_write: 'Cache write', cache_write_5m: '5m cache write', cache_write_1h: '1h cache write'})[key] || key;
+    const debugGraphCostInteger = value => Math.max(0, Number(value) || 0);
+    const debugGraphCostApiListMicroUsd = row => Math.max(0, Number(row?.api_list_micro_usd) || 0);
+    ${sharedGrid}
+    const anthro = {provider: 'anthropic', cache_write_5m_tokens: 5, cache_write_1h_tokens: 7, cache_write_5m_micro_usd: 50, cache_write_1h_micro_usd: 140};
+    const openai = {provider: 'openai', cache_write_tokens: 9, cache_write_micro_usd: 90};
+    result = {
+      columns: debugGraphCostUsageColumns().map(column => column.key),
+      anthro: debugGraphCostBreakdownItems(anthro, {kind: 'model'}),
+      openai: debugGraphCostBreakdownItems(openai, {kind: 'model'}),
+      agent: debugGraphCostBreakdownItems(anthro, {kind: 'agent'}),
+      total: debugGraphCostBreakdownItems(anthro, {kind: 'agent', total: true}),
+    };
+  `, context);
+  assert.deepEqual([...context.result.columns], ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']);
+  const byKey = rows => Object.fromEntries(rows.map(row => [row.key, row]));
+  const anthro = byKey(context.result.anthro);
+  const openai = byKey(context.result.openai);
+  const agent = byKey(context.result.agent);
+  const total = byKey(context.result.total);
+  assert.equal(anthro.cache_write_5m.tokens, 5);
+  assert.equal(anthro.cache_write_1h.tokens, 7);
+  assert.equal(openai.cache_write.tokens, 9);
+  assert.equal(openai.cache_write.columnSpan, 2);
+  assert.equal(agent.cache_write.tokens, 12);
+  assert.equal(agent.cache_write.columnSpan, 2);
+  assert.equal(total.cache_write_5m.tokens, 5);
+  assert.equal(total.cache_write_1h.tokens, 7);
+  const usageTable = sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml');
+  assert.match(usageTable, /rowspan="2"/);
+  assert.match(usageTable, /colSpan: 2/);
+  assert.match(usageTable, /item\.columnSpan/);
+  assert.match(sourceFunction('debugGraphCostModelUsageChartHtml', 'debugGraphCostComponentRateText'), /Cost by Model/);
+  assert.match(sourceFunction('debugGraphCostTmuxBreakdownHtml', 'debugGraphCostReportHtml'), /Cost by Agent/);
+});
+
+test('Cost by Agent sorts by the canonical displayed agent name', () => {
+  const sorter = sourceFunction('debugGraphCostAgentRowsAlphabetically', 'debugGraphCostTmuxBreakdownRows');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const debugGraphCostTmuxLabel = row => row.label;
+    const debugGraphAgentDisplayLabel = value => String(value).split('|')[0];
+    ${sorter}
+    result = debugGraphCostAgentRowsAlphabetically([
+      {label: 'zeta|0|codex'},
+      {label: 'Agent-10|0|codex'},
+      {label: 'agent-2|0|codex'},
+      {label: 'Beta|0|codex'},
+    ]).map(row => debugGraphAgentDisplayLabel(row.label));
+  `, context);
+  assert.deepEqual([...context.result], ['agent-2', 'Agent-10', 'Beta', 'zeta']);
+  const table = sourceFunction('debugGraphCostTmuxBreakdownHtml', 'debugGraphCostTranscriptPath');
+  assert.match(table, /debugGraphCostAgentRowsAlphabetically/);
+});
+
+test('YO!cost usage metrics and compact pricing links stay on one line', () => {
+  const cell = sourceFunction('debugGraphCostUsageTableCellHtml', 'debugGraphCostExactTotalRow');
+  const pricing = sourceFunction('debugGraphCostPricingLinksHtml', 'debugGraphCostAllPricingSourcesHtml');
+  assert.match(cell, /js-debug-cost-table-metric js-debug-cost-table-metric--inline/);
+  assert.match(pricing, /js-debug-cost-pricing-links--compact/);
+  assert.match(pricing, /compact \? '\$' : label/);
+  assert.match(pricing, /title="\$\{esc\(`\$\{label\} pricing`\)\}"/);
+  assert.match(css, /\.js-debug-cost-table-metric--inline\s*\{[\s\S]*?display: inline-flex;[\s\S]*?white-space: nowrap;/);
+  assert.match(css, /\.js-debug-cost-table-metric--inline \.js-debug-cost-price-pair\s*\{[\s\S]*?display: inline-flex;/);
+  assert.match(css, /\.js-debug-cost-model-copy\s*\{[\s\S]*?display: flex;[\s\S]*?white-space: nowrap;/);
+  assert.match(css, /\.js-debug-cost-pricing-links--compact::before,[\s\S]*?\.js-debug-cost-pricing-links--compact::after\s*\{[\s\S]*?content: none;/);
 });
 
 Promise.all(pending).then(() => {

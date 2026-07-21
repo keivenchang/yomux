@@ -50,6 +50,7 @@ def test_every_server_final_series_has_one_owner():
     }
     assert families.SERIES_OWNER["model_tokens_per_minute"] == "agent_tokens"
     assert families.SERIES_OWNER["browser_latency_ms"] == "browser"
+    assert families.SERIES_OWNER["mac_pressure_level"] == "system_memory"
     assert "cpu_percent" not in families.SERIES_OWNER
     assert "process_memory_bytes" not in families.SERIES_OWNER
 
@@ -70,6 +71,7 @@ def test_every_server_final_series_has_one_owner():
         ("service_load", {"running": False, "cpu_percent": 0, "rss_bytes": None}),
         ("system_memory", {"used_bytes": 10, "capacity_bytes": 20}),
         ("system_memory", {"used_bytes": 10, "capacity_bytes": 20, "pressure_percent": 35}),
+        ("system_memory", {"used_bytes": 10, "capacity_bytes": 20, "mac_pressure_percent": 35, "mac_pressure_level": 4}),
         ("browser", {"kind": "api", "latency_ms": 15, "bytes": 512}),
         ("browser", {"kind": "sse", "bytes": 256}),
         ("browser", {"kind": "heartbeat"}),

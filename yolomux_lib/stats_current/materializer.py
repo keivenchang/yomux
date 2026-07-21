@@ -43,7 +43,9 @@ LAYER_SECONDS = {
 }
 PriceResolver = Callable[[UsageAtom], UsagePriceProjection]
 MODEL_TOKEN_DIMENSIONS = ("output", "all", "input", "cache_read", "cache_write")
-TOKEN_DETAIL_DIMENSIONS = ("input", "cache_read", "cache_write", "output", "reasoning", "other")
+TOKEN_DETAIL_DIMENSIONS = (
+    "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "reasoning", "other",
+)
 MAX_PRIVATE_BROWSER_CLIENTS = 4
 PUBLIC_EXECUTION_SOURCES = frozenset({
     "claude", "codex", "images", "messages", "responses", "unknown",
@@ -723,6 +725,7 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
             "mac_wired_memory_bytes": "mac_wired_memory_bytes",
             "mac_compressed_memory_bytes": "mac_compressed_memory_bytes",
             "mac_pressure_percent": "mac_pressure_percent",
+            "mac_pressure_level": "mac_pressure_level",
         },
     }.get(observation.family)
     if fields is not None:
@@ -1090,7 +1093,16 @@ def _privacy_safe_execution_source(value: str) -> str:
 
 
 def _privacy_safe_agent_label(agent_id: str, source: str) -> str:
-    if re.fullmatch(r"yo\d{4}\|\d+\|(?:claude|codex|term)", agent_id):
+    # The token-rate series and cost report both originate from this bounded roster key.
+    # Keep it recognisable so the browser can render one canonical tmux-session label on
+    # both surfaces; arbitrary transcript paths and other private identities still hash.
+    parts = agent_id.split("|")
+    if (
+        2 <= len(parts) <= 4
+        and parts[-1] in {"claude", "codex", "term"}
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}", parts[0])
+        and all(0 < len(part) <= 128 and not any(character.isspace() for character in part) for part in parts[1:])
+    ):
         return agent_id
     if agent_id.startswith("claude-bg:"):
         parts = agent_id.split(":", 3)
@@ -1392,7 +1404,15 @@ def build_cost_report(layer: Layer) -> dict[str, object]:
 def _cost_detail_dimension(atom: UsageAtom) -> str:
     if atom.unit != "tokens" or atom.modality != "text":
         return "other"
-    return _model_token_dimension(atom)
+    if atom.direction == "output":
+        return "output"
+    if atom.cache_role == "read":
+        return "cache_read"
+    if atom.cache_role == "write_5m":
+        return "cache_write_5m"
+    if atom.cache_role == "write_1h":
+        return "cache_write_1h"
+    return "input"
 
 
 def _model_token_dimension(atom: UsageAtom) -> str:

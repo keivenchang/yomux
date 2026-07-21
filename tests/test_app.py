@@ -50,7 +50,11 @@ def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch):
     monkeypatch.setattr(app_module.sys, "platform", "darwin")
     monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
     monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: SimpleNamespace(used_bytes=25))
-    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: 80 if name == "kern.memorystatus_level" else None)
+    native_values = {
+        "kern.memorystatus_level": 80,
+        "kern.memorystatus_vm_pressure_level": 2,
+    }
+    monkeypatch.setattr(app_module, "darwin_sysctl_value", lambda name, value_type: native_values.get(name))
 
     assert app_module.current_darwin_system_memory_details() == app_module.DarwinSystemMemoryDetails(
         physical_memory_bytes=1000,
@@ -61,6 +65,7 @@ def test_darwin_memory_details_match_one_native_vm_snapshot(monkeypatch):
         compressed_memory_bytes=200,
         swap_used_bytes=25,
         pressure_percent=20.0,
+        pressure_level=2,
     )
 
 
@@ -76,6 +81,26 @@ def test_darwin_memory_details_leave_unavailable_swap_and_pressure_empty(monkeyp
     assert details is not None
     assert details.swap_used_bytes is None
     assert details.pressure_percent is None
+    assert details.pressure_level is None
+
+
+@pytest.mark.parametrize(("native_level", "expected"), [(1, 1), (2, 2), (4, 4), (0, None), (3, None), (5, None)])
+def test_darwin_memory_details_accept_only_native_pressure_states(monkeypatch, native_level, expected):
+    counters = app_module.DarwinVmStatistics64()
+    monkeypatch.setattr(app_module.sys, "platform", "darwin")
+    monkeypatch.setattr(app_module, "current_darwin_vm_statistics", lambda: (1000, 10, counters))
+    monkeypatch.setattr(app_module, "darwin_sysctl_structure", lambda name, value_type: None)
+    monkeypatch.setattr(
+        app_module,
+        "darwin_sysctl_value",
+        lambda name, value_type: native_level if name == "kern.memorystatus_vm_pressure_level" else 80,
+    )
+
+    details = app_module.current_darwin_system_memory_details()
+
+    assert details is not None
+    assert details.pressure_percent == 20.0
+    assert details.pressure_level == expected
 
 
 def test_wait_for_jobd_product_uses_shared_bounded_cadence_until_ready(monkeypatch):
@@ -949,6 +974,54 @@ def test_runtime_python_profile_reports_named_native_threads():
     current = next(row for row in profile["threads"] if row["native_id"] == threading.get_native_id())
     assert current["name"] == threading.current_thread().name
     assert current["top_stacks"]
+
+
+def test_runtime_control_report_returns_only_safe_in_memory_filesystem_batch_attribution(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        webapp.record_performance_sample(
+            "http-endpoint",
+            "POST /api/fs/batch",
+            compute_ms=17.5,
+            payload_bytes=321,
+            count=1,
+            details={
+                "fs_batch": True,
+                "fs_batch_size": 2,
+                "fs_batch_operations": '{"info": 1, "list": 1}',
+                "fs_batch_path_hashes": '["0123456789abcdef"]',
+                "fs_batch_triggers": '{"watch-diff-fallback": 2}',
+                "fs_batch_client_revision": "1234-5678",
+                "fs_batch_client_scope": "browser",
+                "paths": "/private/credential.txt",
+            },
+        )
+        monkeypatch.setattr(webapp, "runtime_cache_dir_stats", lambda *_args: (_ for _ in ()).throw(AssertionError("control report must not scan cache trees")))
+        monkeypatch.setattr(webapp, "runtime_local_services", lambda: (_ for _ in ()).throw(AssertionError("control report must not probe local services")))
+        monkeypatch.setattr(webapp, "transcripts_payload", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("control report must not scan transcripts")))
+        response = webapp.handle_control_request({"action": "runtime_report"})
+    finally:
+        webapp.control_server.stop()
+
+    assert response["ok"] is True
+    report = response["report"]
+    assert {"state_dir", "owner", "refresh", "caches", "search_index", "local_services", "top_endpoints", "top_background_work", "top_event_types", "client_events", "chat", "login_throttle", "largest_active_transcripts", "transcripts_cache", "filesystem_batch"} <= report.keys()
+    assert report["refresh"]["bounded"] is True
+    assert report["caches"]["session_files"]["truncated"] is True
+    assert len(report["filesystem_batch"]) == 1
+    row = report["filesystem_batch"][0]
+    assert row["time"] > 0
+    assert {key: value for key, value in row.items() if key != "time"} == {
+        "compute_ms": 17.5,
+        "payload_bytes": 321,
+        "batch_size": 2,
+        "operations": '{"info": 1, "list": 1}',
+        "path_hashes": '["0123456789abcdef"]',
+        "triggers": '{"watch-diff-fallback": 2}',
+        "client_revision": "1234-5678",
+        "client_scope": "browser",
+    }
+    assert "credential.txt" not in json.dumps(report, sort_keys=True)
 
 
 def test_runtime_report_payload_reports_owner_cache_endpoints_events_and_transcripts(monkeypatch, tmp_path):

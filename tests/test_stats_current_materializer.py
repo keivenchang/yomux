@@ -64,11 +64,13 @@ def test_system_memory_projection_keeps_mac_details_as_exact_server_series():
         "mac_wired_memory_bytes": 100,
         "mac_compressed_memory_bytes": 200,
         "mac_pressure_percent": 20,
+        "mac_pressure_level": 2,
     })
 
     samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
 
     assert samples["mac_pressure_percent"] == 20
+    assert samples["mac_pressure_level"] == 2
     assert samples["mac_compressed_memory_bytes"] == 200
     assert samples["system_memory_used_bytes"] == 900
 
@@ -610,6 +612,7 @@ def test_cost_detail_series_are_exact_attributed_bounded_and_privacy_safe():
         atom("input", "input", "none", 100, "model-a", "agent-a"),
         atom("read", "input", "read", 40, "model-a", "agent-a"),
         atom("write", "input", "write_5m", 30, "model-a", "agent-a"),
+        atom("write-long", "input", "write_1h", 44, "model-a", "agent-a"),
         atom("output", "output", "none", 20, "model-b", "agent-b", source="claude"),
         atom("image", "output", "none", 5, "image-model", "agent-b", modality="image"),
         atom("request", "output", "none", 1, "image-model", "agent-b", modality="image", unit="requests"),
@@ -630,16 +633,17 @@ def test_cost_detail_series_are_exact_attributed_bounded_and_privacy_safe():
     dimensions = {item.dimension: item for item in detail.dimensions}
 
     assert materializer.TOKEN_DETAIL_DIMENSIONS == (
-        "input", "cache_read", "cache_write", "output", "reasoning", "other",
+        "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "reasoning", "other",
     )
-    assert values["usage_tokens"].value == 202
-    assert values["cost_micro_usd"].value == 1_960
+    assert values["usage_tokens"].value == 246
+    assert values["cost_micro_usd"].value == 2_400
     assert dimensions["input"].tokens == 100
     assert dimensions["cache_read"].tokens == 40
-    assert dimensions["cache_write"].tokens == 30
+    assert dimensions["cache_write_5m"].tokens == 30
+    assert dimensions["cache_write_1h"].tokens == 44
     assert dimensions["output"].tokens == 27
     assert dimensions["other"].tokens == 5
-    assert detail.priced == materializer.CostCoverage(atoms=6, tokens=195)
+    assert detail.priced == materializer.CostCoverage(atoms=7, tokens=239)
     assert detail.unpriced == materializer.CostCoverage(atoms=1, tokens=7)
     assert all(not name.startswith("cost_detail:") for name in values)
 
@@ -650,7 +654,8 @@ def test_cost_detail_series_are_exact_attributed_bounded_and_privacy_safe():
     }
     assert model_a_dimensions["input"].tokens == 100
     assert model_a_dimensions["cache_read"].tokens == 40
-    assert model_a_dimensions["cache_write"].tokens == 30
+    assert model_a_dimensions["cache_write_5m"].tokens == 30
+    assert model_a_dimensions["cache_write_1h"].tokens == 44
     assert model_a_dimensions["input"].micro_usd == 1_000
     unknown_model = materializer.cost_detail_model_key("openai", "unknown-model")
     assert model_values[unknown_model].unpriced == materializer.CostCoverage(
@@ -685,24 +690,25 @@ def test_cost_detail_series_are_exact_attributed_bounded_and_privacy_safe():
     report = materializer.build_cost_report(
         materializer.slice_generation(generation, 300, 10),
     )
-    assert report["total_tokens"] == 202
-    assert report["total_micro_usd"] == 1_960
-    assert report["total_api_list_micro_usd"] == 1_960
+    assert report["total_tokens"] == 246
+    assert report["total_micro_usd"] == 2_400
+    assert report["total_api_list_micro_usd"] == 2_400
     assert report["dimensions"] == {
         "input": {"tokens": 100, "micro_usd": 1_000, "api_list_micro_usd": 1_000},
         "cache_read": {"tokens": 40, "micro_usd": 400, "api_list_micro_usd": 400},
-        "cache_write": {"tokens": 30, "micro_usd": 300, "api_list_micro_usd": 300},
+        "cache_write_5m": {"tokens": 30, "micro_usd": 300, "api_list_micro_usd": 300},
+        "cache_write_1h": {"tokens": 44, "micro_usd": 440, "api_list_micro_usd": 440},
         "output": {"tokens": 27, "micro_usd": 200, "api_list_micro_usd": 200},
         "other": {"tokens": 5, "micro_usd": 60, "api_list_micro_usd": 60},
     }
-    assert report["priced"] == {"atoms": 6, "tokens": 195}
+    assert report["priced"] == {"atoms": 7, "tokens": 239}
     assert report["unpriced"] == {"atoms": 1, "tokens": 7}
     assert report["reasoning_available"] is False
     assert "reasoning" not in report["dimensions"]
     assert report["catalog_revision"] == 3
     assert report["omissions"] == {"models": 0, "agents": 0, "evidence": 0}
     model_rows = {row["model"]: row for row in report["models"]}
-    assert model_rows["model-a"]["total_tokens"] == 170
+    assert model_rows["model-a"]["total_tokens"] == 214
     assert model_rows["unknown-model"]["unpriced"] == {"atoms": 1, "tokens": 7}
     assert model_rows["unknown-model"]["total_micro_usd"] == 0
     assert model_rows["unknown-model"]["total_api_list_micro_usd"] == 0
@@ -827,6 +833,9 @@ def test_cost_agent_labels_preserve_public_tmux_identity_and_bound_background_ag
     assert materializer._privacy_safe_agent_label("yo8881|2|codex", "codex") == (
         "yo8881|2|codex"
     )
+    assert materializer._privacy_safe_agent_label(
+        "122_parser-toolkits|0|%17|codex", "codex"
+    ) == "122_parser-toolkits|0|%17|codex"
     assert first.startswith("claude-bg:")
     assert first != second
     assert len(first.encode()) <= 64
@@ -834,6 +843,11 @@ def test_cost_agent_labels_preserve_public_tmux_identity_and_bound_background_ag
     private = materializer._privacy_safe_agent_label("/Users/private/transcript", "codex")
     assert private.startswith("codex:")
     assert "/Users/private" not in private
+    private_tmux_like = materializer._privacy_safe_agent_label(
+        "/Users/private|0|%17|codex", "codex"
+    )
+    assert private_tmux_like.startswith("codex:")
+    assert "/Users/private" not in private_tmux_like
 
 
 def test_materializer_source_has_no_synthetic_cost_series_or_metadata_codec():
