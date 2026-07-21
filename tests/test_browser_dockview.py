@@ -8094,6 +8094,7 @@ def test_dockview_side_pane_single_yoinfo_keeps_intrinsic_tab_and_minimize_only_
               contentWidth: contentRect?.width || 0,
               labelRight: labelRect?.right || 0,
               tabMinimizeLeft: tabMinimizeRect?.left || 0,
+              tabMinimizePresent: Boolean(tabMinimize),
               customTabWidth: getComputedStyle(side?.querySelector('.dv-tabs-and-actions-container'))
                 .getPropertyValue('--dockview-tab-inline-size').trim(),
               actionButtons: Array.from(actions?.querySelectorAll('button') || []).map(button => ({
@@ -8125,13 +8126,14 @@ def test_dockview_side_pane_single_yoinfo_keeps_intrinsic_tab_and_minimize_only_
 
     browser.execute_script("setTabPinned(infoItemId, true)")
     pinned = WebDriverWait(browser, 5).until(
-        lambda driver: (state if (state := metrics(driver))["item"] == "__info__" and state["visibleActionButtons"] == 1 else False)
+        lambda driver: (state if (state := metrics(driver))["item"] == "__info__" and not state["tabMinimizePresent"] else False)
     )
     assert len(pinned["actionButtons"]) == 1 and pinned["actionButtons"][0]["minimize"] == "__info__", pinned
+    assert pinned["visibleActionButtons"] == 1, pinned
 
     browser.execute_script("setTabPinned(infoItemId, false)")
     unpinned = WebDriverWait(browser, 5).until(
-        lambda driver: (state if (state := metrics(driver))["visibleActionButtons"] == 1 else False)
+        lambda driver: (state if (state := metrics(driver))["visibleActionButtons"] == 1 and state["tabMinimizePresent"] else False)
     )
     assert len(unpinned["actionButtons"]) == 1 and unpinned["actionButtons"][0]["minimize"] == "__info__", unpinned
 

@@ -5294,7 +5294,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostPricePairText(item.microUsd, item.apiListMicroUsd)}`).join('; ')}`;
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
-    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphMiddleTruncatedTextHtml(label)}</strong>`;
+    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphCostAgentLabelHtml(label)}</strong>`;
     const usageCellHtml = item => {
       const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(components, row, item) : '';
       return formula || debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {
@@ -5309,7 +5309,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   const totalApiListMicroUsd = debugGraphCostApiListMicroUsd(totalRow);
   const grandTotalLabel = totalApiListMicroUsd !== null && totalApiListMicroUsd !== debugGraphCostMicroUsd(totalRow)
     ? debugGraphCostText('debug.cost.grandTotalDual', 'Grand total · marginal / API list prices')
-    : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total at API list prices');
+    : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total');
   const input = usageColumns[0];
   const cacheRead = usageColumns[1];
   const cacheWrite5m = usageColumns[2];
@@ -5484,6 +5484,18 @@ function debugGraphMiddleTruncatedTextHtml(value, tailLength = 20) {
   if (characters.length <= tailSize + 1) return `<span class="js-debug-responsive-text">${esc(text)}</span>`;
   const split = characters.length - tailSize;
   return `<span class="js-debug-responsive-text js-debug-responsive-text--middle"><span class="js-debug-responsive-text-prefix" data-middle-truncate-part="prefix">${esc(characters.slice(0, split).join(''))}</span><span class="js-debug-responsive-text-suffix" data-middle-truncate-part="suffix">${esc(characters.slice(split).join(''))}</span></span>`;
+}
+
+function debugGraphCostAgentLabelHtml(value, lineSize = 24) {
+  const text = String(value || '');
+  const characters = Array.from(text);
+  const size = Math.max(12, Math.floor(Number(lineSize) || 24));
+  if (characters.length <= size) return `<span class="js-debug-cost-agent-name">${esc(text)}</span>`;
+  const first = characters.slice(0, size).join('');
+  const second = characters.length <= size * 2
+    ? characters.slice(size).join('')
+    : `…${characters.slice(-(size - 1)).join('')}`;
+  return `<span class="js-debug-cost-agent-name js-debug-cost-agent-name--long" aria-hidden="true"><span>${esc(first)}</span><span>${esc(second)}</span></span>`;
 }
 
 function debugGraphCostSourceLabelHtml(row) {

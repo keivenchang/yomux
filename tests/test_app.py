@@ -4228,6 +4228,37 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     assert calls == [1, 2]
 
 
+def test_transcripts_payload_worker_guard_supersedes_a_stalled_worker():
+    """The single-flight refresh guard must not be pinned forever by a hung build.
+    Within the deadline a second worker is refused; past it the stalled worker is
+    superseded so refreshes resume, and its late finish is a no-op."""
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.activity_transcript_service = SimpleNamespace(
+        transcripts_payload_cache_lock=threading.Lock(),
+        transcripts_payload_cache_record=state_services.TranscriptsPayloadCacheRecord(),
+    )
+    record = webapp.activity_transcript_service.transcripts_payload_cache_record
+
+    stalled = object()
+    gen1 = webapp.begin_transcripts_payload_work(stalled)
+    assert gen1 > 0
+    assert record.worker is stalled
+    # A fresh in-flight worker holds the single-flight guard.
+    assert webapp.begin_transcripts_payload_work(object()) == 0
+
+    # Simulate the worker stalling past the deadline.
+    record.worker_started_at -= app_module.TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS + 1.0
+    successor = object()
+    gen2 = webapp.begin_transcripts_payload_work(successor)
+    assert gen2 > gen1
+    assert record.worker is successor
+
+    # The stalled worker's late finish/commit cannot clobber the successor.
+    assert webapp.finish_transcripts_payload_work(gen1, stalled) is False
+    assert webapp.commit_transcripts_payload_cache({"x": 1}, gen1) is False
+    assert record.worker is successor
+
+
 def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(monkeypatch):
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
     include_metadata_values = []
@@ -7012,6 +7043,13 @@ def test_native_filesystem_metadata_invalidation_ignores_only_modified_watch_roo
     assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root / "src", (str(root),)) is True
     assert webapp.native_filesystem_path_requires_metadata_invalidation(1, root, (str(root),)) is True
     assert webapp.native_filesystem_path_requires_metadata_invalidation(3, root, (str(root),)) is True
+
+    # A repo's own `git status` rewrites `.git/index` and drops lock files; that churn
+    # must NOT invalidate (it self-fed a refresh livelock). Real ref changes still do.
+    for transient in (root / ".git" / "index", root / ".git" / "index.lock", root / ".git" / "refs" / "heads" / "main.lock"):
+        assert webapp.native_filesystem_path_requires_metadata_invalidation(1, transient, (str(root),)) is False, transient
+    for real_change in (root / ".git" / "HEAD", root / ".git" / "refs" / "heads" / "main", root / ".git" / "packed-refs", root / ".git" / "MERGE_HEAD", root / "index"):
+        assert webapp.native_filesystem_path_requires_metadata_invalidation(1, real_change, (str(root),)) is True, real_change
 
 
 def test_native_filesystem_changes_ignore_synthetic_watched_root_added_event(monkeypatch, tmp_path):

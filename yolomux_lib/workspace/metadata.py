@@ -307,22 +307,22 @@ def git_metadata_base(
         status = git(["status", "--short", "--untracked-files=all"], root_text, timeout=10.0)
         value = compute(status)
         with _GIT_METADATA_CACHE_LOCK:
-            current_generation = _GIT_METADATA_GENERATIONS.get(root_text, 0)
-            if current_generation != generation:
-                value = None
-            else:
-                _GIT_METADATA_CACHE[cache_key] = (copy.deepcopy(value), time.monotonic(), generation)
+            # Cache against the generation this value was computed from. If a real
+            # invalidation arrived mid-compute the generation has since advanced, so
+            # the read path (generation mismatch) treats this entry as stale and
+            # refreshes on the NEXT call. We still return the just-computed value now
+            # rather than discarding it and recomputing inline: that discard-and-recurse
+            # livelocked on a repo whose own `git status` index write fed the
+            # invalidation straight back in, and it could drop a busy repo from the
+            # aggregate entirely by returning None.
+            _GIT_METADATA_CACHE[cache_key] = (copy.deepcopy(value), time.monotonic(), generation)
             if len(_GIT_METADATA_CACHE) > 256:
                 _GIT_METADATA_CACHE.pop(next(iter(_GIT_METADATA_CACHE)))
-        if value is not None:
-            return copy.deepcopy(value)
+        return copy.deepcopy(value)
     finally:
         with _GIT_METADATA_CACHE_LOCK:
             _GIT_METADATA_INFLIGHT.pop(cache_key, None)
             inflight.set()
-    # A filesystem event arrived while this owner was computing. Do not expose
-    # or cache that stale snapshot; the next owner reads the new generation.
-    return git_metadata_base(root_text, branch_limit=branch_limit)
 
 
 def invalidate_git_metadata_paths(paths: list[Path] | tuple[Path, ...]) -> set[str]:

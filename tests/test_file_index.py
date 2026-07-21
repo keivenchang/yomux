@@ -1,6 +1,8 @@
 import sqlite3
 import time
 
+import pytest
+
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
@@ -281,6 +283,29 @@ def test_incremental_refresh_replaces_only_dirty_subtree_and_debounces_persisten
     assert index.write_bytes > initial_writes
     with sqlite3.connect(file_index._index_disk_path(root)) as conn:
         assert {row[0] for row in conn.execute("SELECT relative_path FROM entries")} == {"left/new.txt", "right/keep.txt"}
+
+
+def test_run_build_off_list_exception_still_clears_building_flag(tmp_path, monkeypatch):
+    _clear_registry()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    index = file_index.build_now(root, SEARCH_SKIP_DIRS)
+
+    # sqlite3.Error is NOT OSError/RuntimeError/ValueError, so _run_build's except does not
+    # catch it. The finally backstop must still clear `building`, otherwise schedule_refreshes
+    # skips this root forever -- the frozen "indexed / N hrs ago" symptom.
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(file_index, "_persist", boom)
+    (root / "b.txt").write_text("b", encoding="utf-8")
+    file_index.mark_path_dirty(root)
+    index.building = True
+    with pytest.raises(sqlite3.OperationalError):
+        file_index._run_build(index, SEARCH_SKIP_DIRS)
+    assert index.building is False, "an off-list build exception must not leave the root stuck building"
 
 
 def test_single_file_save_is_a_row_delta_not_a_full_index_rewrite(tmp_path, monkeypatch):

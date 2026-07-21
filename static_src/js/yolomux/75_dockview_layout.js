@@ -2106,7 +2106,7 @@ function createDockviewTabRenderer() {
     }
     syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
-      syncPaneTabPinnedIcon(element, item);
+      syncPaneTabPinnedChrome(element, item);
       const popover = paneTabPopoverForAnchor(element);
       if (popover) positionPaneTabPopover(element, popover);
       if (isFileEditorItem(item)) refreshFileTabPopover(element, item);

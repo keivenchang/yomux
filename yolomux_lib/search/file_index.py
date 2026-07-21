@@ -1118,6 +1118,13 @@ def _run_build(
                     ri.last_error = str(exc)
             notify_background_owner_done({"root": str(ri.root), "state": "error", "generation": generation or ri.active_generation, "error": str(exc)})
     finally:
+        with ri.lock:
+            # Backstop: an off-list exception (e.g. a sqlite error from _persist, or a
+            # MemoryError from a huge walk) must not leave `building` stuck True, which
+            # would make schedule_refreshes skip this root forever. Clear only our own
+            # generation's flag so a newer build that already took over is untouched.
+            if generation is None or ri.active_generation == generation:
+                ri.building = False
         if lock_fd is not None:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)

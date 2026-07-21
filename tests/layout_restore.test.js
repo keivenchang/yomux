@@ -2458,6 +2458,8 @@ async function runLayoutRestoreSuite() {
     rawPinnedSlots.left = {tabs: ['2', '1', '3'], active: '3'};
     assert.deepStrictEqual([...api.normalizeLayoutSlots(rawPinnedSlots).left.tabs], ['1', '2', '3'], 'raw layout normalization also enforces pinned-first ordering');
     assert.ok(api.pinnedTabIconHtml('1').includes('pane-tab-pin-icon'), 'pinned tabs render a pin icon helper');
+    assert.equal(api.paneTabDismissControlHtml('1'), '', 'a pinned tmux tab never renders the inline minimize button');
+    assert.ok(api.paneTabDismissControlHtml('2').includes('pc-minimize'), 'an unpinned tmux tab retains the inline minimize button');
     assert.deepStrictEqual([...api.tabsToEvictForCap(['1', '2', '3', '4'], '4')], ['3', '2'], 'LRU eviction skips pinned tabs');
     api.setClientSettingsPatchForTest({appearance: {max_tabs_per_pane: 3}});
     rawPinnedSlots.left = {tabs: ['1', '2', '3'], active: '3'};

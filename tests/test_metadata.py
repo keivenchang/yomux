@@ -207,7 +207,14 @@ def test_git_metadata_cache_reuses_unchanged_state_and_invalidates_dirty_paths(t
     assert len(calls) >= 2, "a native dirty path must rebuild the Git snapshot"
 
 
-def test_git_metadata_invalidation_does_not_restore_an_inflight_snapshot(tmp_path, monkeypatch):
+def test_git_metadata_invalidation_marks_inflight_snapshot_stale_without_recursing(tmp_path, monkeypatch):
+    """An invalidation arriving mid-compute must NOT make the owner discard its
+    result and recompute inline. That discard-and-recurse livelocked when a repo's
+    own `git status` index write fed the invalidation straight back in. The new
+    contract: the owner returns the value it computed (reflecting the change it
+    observed), caches it tagged with the generation it was computed from -- which
+    is now behind the current generation, so the read path treats it as stale and
+    the NEXT call refreshes. No inline recursion, no livelock."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     root = str(repo.resolve())
@@ -231,24 +238,34 @@ def test_git_metadata_invalidation_does_not_restore_an_inflight_snapshot(tmp_pat
         metadata._GIT_METADATA_CACHE.clear()
         metadata._GIT_METADATA_INFLIGHT.clear()
         metadata._GIT_METADATA_GENERATIONS.clear()
-    assert metadata.git_metadata_base(root)
+    assert metadata.git_metadata_base(root)  # warm cache; status subprocess #1
     (repo / "f.txt").write_text("changed\n", encoding="utf-8")
     block_status = True
     result: list[dict | None] = []
     worker = threading.Thread(target=lambda: result.append(metadata.git_metadata_base(root)))
-    metadata.invalidate_git_metadata_paths([repo / "f.txt"])
+    metadata.invalidate_git_metadata_paths([repo / "f.txt"])  # generation -> 1
     worker.start()
-    assert status_started.wait(timeout=5)
-    metadata.invalidate_git_metadata_paths([repo / ".git" / "HEAD"])
+    assert status_started.wait(timeout=5)  # owner blocked inside status subprocess #2
+    metadata.invalidate_git_metadata_paths([repo / ".git" / "HEAD"])  # generation -> 2 mid-compute
     release_status.set()
     worker.join(timeout=10)
 
+    # The owner returned its computed value (it observed f.txt) WITHOUT recursing.
     assert len(result) == 1
     assert result[0] and result[0]["status_lines"] == [" M f.txt"]
-    assert status_calls >= 3, "an invalidated in-flight owner must recompute instead of publishing stale metadata"
+    assert status_calls == 2, "an in-flight owner must not recompute inline (no discard-and-recurse livelock)"
+
+    # The cached entry is tagged with the generation it was computed from (1), now
+    # behind the current generation (2), so it is not served as current.
     with metadata._GIT_METADATA_CACHE_LOCK:
         _value, _stored_at, generation = metadata._GIT_METADATA_CACHE[(root, metadata.OTHER_BRANCH_LIMIT)]
-        assert generation == metadata._GIT_METADATA_GENERATIONS[root]
+        assert generation < metadata._GIT_METADATA_GENERATIONS[root]
+
+    # The next call refreshes (generation mismatch) instead of serving the stale entry forever.
+    block_status = False
+    fresh = metadata.git_metadata_base(root)
+    assert fresh and fresh["status_lines"] == [" M f.txt"]
+    assert status_calls == 3, "a generation-advanced entry must refresh on the next call"
 
 
 def test_indexed_repo_summaries_excludes_remote_only_branches(tmp_path):

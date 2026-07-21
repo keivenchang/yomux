@@ -86,6 +86,7 @@ class TranscriptsPayloadCacheRecord:
     payload: dict[str, Any] | None = None
     generation: int = 0
     worker: object | None = None
+    worker_started_at: float | None = None
 
 
 @dataclass

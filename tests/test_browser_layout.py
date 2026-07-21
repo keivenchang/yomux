@@ -10641,7 +10641,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               components,
               models: [pricedRow, anthropicRow],
               sources: [{...pricedRow, source: 'codex'}],
-              tmux_windows: [{...pricedRow, tmux_label: 'yo8881:0'}],
+              tmux_windows: [{...pricedRow, label: '123_an-extremely-long-project-name-that-needs-a-compact-tail', tmux_label: '123_an-extremely-long-project-name-that-needs-a-compact-tail'}],
               catalog_revision: '3', active_catalog_revision: '3', freshness: 'current',
             },
           });
@@ -10675,6 +10675,17 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               anthropicCells: [...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('claude-cache-lifetimes'))?.querySelectorAll('td') ? [...[...report.querySelectorAll('[data-js-debug-cost-table="model"] tbody tr')].find(row => row.textContent.includes('claude-cache-lifetimes')).querySelectorAll('td')].map(cell => cell.textContent.trim()) : [],
               modelHeading: report.querySelector('.js-debug-cost-model-usages h2')?.textContent.trim() || '',
               agentHeading: report.querySelector('.js-debug-cost-agent-usages h2')?.textContent.trim() || '',
+              agentName: (() => {
+                const node = renderedReport.querySelector('[data-js-debug-cost-table="agent"] tbody .js-debug-cost-agent-name');
+                return node ? {
+                  className: node.className,
+                  lines: node.children.length,
+                  text: node.textContent,
+                  title: node.closest('strong')?.title || '',
+                  display: getComputedStyle(node).display,
+                  maxInlineSize: getComputedStyle(node).maxInlineSize,
+                } : null;
+              })(),
               modelFormulae: [...report.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-model-formula')].map(node => node.textContent.trim()),
               pricingText: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.textContent || '',
               pricingTitle: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.title || '',
@@ -10727,6 +10738,15 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert result["legend"]["modelHeaders"] == ["Model", "Input", "Cache read", "Cache write", "Output", "Other", "Total", "5m cache write", "1h cache write"], result
     assert result["legend"]["modelHeading"] == "Cost by Model", result
     assert result["legend"]["agentHeading"] == "Cost by Agent", result
+    agent_name = result["legend"]["agentName"]
+    assert {key: agent_name[key] for key in ("className", "lines", "text", "title", "display")} == {
+        "className": "js-debug-cost-agent-name js-debug-cost-agent-name--long",
+        "lines": 2,
+        "text": "123_an-extremely-long-pr…at-needs-a-compact-tail",
+        "title": "123_an-extremely-long-project-name-that-needs-a-compact-tail",
+        "display": "inline-grid",
+    }, result
+    assert agent_name["maxInlineSize"].endswith("px") and float(agent_name["maxInlineSize"][:-2]) > 0, result
     assert result["legend"]["anthropicCells"][2].startswith("100 x $7.50/1M = $0.75"), result
     assert result["legend"]["anthropicCells"][3].startswith("200 x $20.00/1M = $4.00"), result
     assert any(formula.startswith("100 x $7.50/1M = $0.75") for formula in result["legend"]["modelFormulae"]), result

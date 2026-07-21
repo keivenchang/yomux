@@ -574,6 +574,22 @@ function syncPaneTabPinnedIcon(tab, item) {
   tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
 }
 
+function syncPaneTabDismissControl(tab, item) {
+  const existing = tab.querySelector(':scope > [data-pane-tab-close]');
+  const nextHtml = paneTabDismissControlHtml(item);
+  if (!nextHtml) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  tab.insertAdjacentHTML('beforeend', nextHtml);
+}
+
+function syncPaneTabPinnedChrome(tab, item) {
+  syncPaneTabPinnedIcon(tab, item);
+  syncPaneTabDismissControl(tab, item);
+}
+
 function syncPreservedPaneTab(tab, fresh) {
   const hoverState = tab.dataset.popoverHoverState || '';
   syncClassListPreserving(tab, fresh.className, ['popover-open', 'dragging']);
@@ -586,7 +602,7 @@ function syncPreservedPaneTab(tab, fresh) {
   const label = fresh.getAttribute('aria-label');
   if (label) tab.setAttribute('aria-label', label);
   else tab.removeAttribute('aria-label');
-  syncPaneTabPinnedIcon(tab, fresh.dataset.paneTab);
+  syncPaneTabPinnedChrome(tab, fresh.dataset.paneTab);
 }
 
 function paneTabPopoverItemToRestore(strip) {
@@ -608,13 +624,30 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + close button +
+function paneTabDismissControlHtml(item) {
+  const type = tabTypeForItem(item);
+  const isLegacyFiles = type?.key === 'files';
+  const isEditor = isFileEditorItem(item);
+  if (isLegacyFiles || (tabIsPinned(item) && !isEditor)) return '';
+  const closeLabel = isEditor
+    ? t('finder.close', {name: itemLabel(item)})
+    : t('finder.hideFromLayout', {name: itemLabel(item)});
+  const controlKind = isEditor ? 'close' : 'minimize';
+  return toolbarButtonHtml({
+    className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
+    action: 'pane-tab-close',
+    dataset: {paneTabClose: ''},
+    title: closeLabel,
+    ariaLabel: closeLabel,
+  });
+}
+
+// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + optional dismiss control +
 // the file/session popover — built once here and shared by BOTH the DOM factory (createPaneTab) and the
 // Dockview string builder (dockviewPaneTabHtml in 75_dockview_layout.js), so pin/close/popover parity is
 // enforced in one place instead of by hand across two renderers.
 function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
-  const isLegacyFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
   const info = transcriptMetadataState.payload.sessions?.[item];
@@ -623,19 +656,7 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
   let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
   html = `${pinnedTabIconHtml(item)}${html}`;
-  if (!isLegacyFiles) {
-    const closeLabel = isEditor
-      ? t('finder.close', {name: itemLabel(item)})
-      : t('finder.hideFromLayout', {name: itemLabel(item)});
-    const controlKind = isEditor ? 'close' : 'minimize';
-    html += toolbarButtonHtml({
-      className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
-      action: 'pane-tab-close',
-      dataset: {paneTabClose: ''},
-      title: closeLabel,
-      ariaLabel: closeLabel,
-    });
-  }
+  html += paneTabDismissControlHtml(item);
   if (isEditor) html += filePopoverHtml(item);
   else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
   return html;

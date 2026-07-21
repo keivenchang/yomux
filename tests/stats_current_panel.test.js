@@ -13,6 +13,7 @@ const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_stat
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
+const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
 let passed = 0;
 let failed = 0;
 const pending = [];
@@ -1363,6 +1364,26 @@ test('Cost by Agent sorts by the canonical displayed agent name', () => {
   assert.deepEqual([...context.result], ['agent-2', 'Agent-10', 'Beta', 'zeta']);
   const table = sourceFunction('debugGraphCostTmuxBreakdownHtml', 'debugGraphCostTranscriptPath');
   assert.match(table, /debugGraphCostAgentRowsAlphabetically/);
+});
+
+test('Cost by Agent keeps names compact and labels the footer succinctly', () => {
+  const helper = sourceFunction('debugGraphCostAgentLabelHtml', 'debugGraphCostSourceLabelHtml');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const esc = value => String(value);
+    ${helper}
+    result = {
+      short: debugGraphCostAgentLabelHtml('122_frontend-crates'),
+      long: debugGraphCostAgentLabelHtml('123_an-extremely-long-project-name-that-needs-a-compact-tail'),
+    };
+  `, context);
+  assert.match(context.result.short, /js-debug-cost-agent-name/);
+  assert.doesNotMatch(context.result.short, /--long/);
+  assert.match(context.result.long, /js-debug-cost-agent-name--long/);
+  assert.match(context.result.long, /…/);
+  assert.match(sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml'), /grandTotalApiList/, 'footer uses the localized succinct label');
+  assert.equal(localeEn['debug.cost.grandTotalApiList'], 'Grand total');
+  assert.match(css, /\.js-debug-cost-agent-name--long\s*\{[\s\S]*display: inline-grid;[\s\S]*line-height: 1\.1;/);
 });
 
 test('YO!cost usage metrics and compact pricing links stay on one line', () => {

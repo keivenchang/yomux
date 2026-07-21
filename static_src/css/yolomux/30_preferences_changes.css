@@ -1217,6 +1217,23 @@
   color: var(--muted);
   font-weight: 500;
 }
+.js-debug-cost-agent-name {
+  display: inline-block;
+  max-inline-size: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.js-debug-cost-agent-name--long {
+  display: inline-grid;
+  line-height: 1.1;
+  text-overflow: clip;
+}
+.js-debug-cost-agent-name--long > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child {
   /* Tables scroll as a whole on narrow panes, so a model identifier must not
      be ellipsized merely to make one column fit. */

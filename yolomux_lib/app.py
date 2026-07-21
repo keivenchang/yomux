@@ -446,6 +446,11 @@ SESSION_FILES_BATCH_MAX_WORKERS = 2
 SESSION_FILES_GIT_SNAPSHOT_MAX_ITEMS = 128
 TRANSCRIPT_TAIL_CACHE_MAX_ITEMS = 128
 TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
+# A single-flight refresh worker that outlives this deadline is treated as stalled and
+# may be superseded, so a hung heavy build cannot pin the guard and refuse every future
+# refresh (which froze the aggregate session-metadata header indefinitely). Far above a
+# healthy build, which is a handful of timeout-bounded git calls per indexed repo.
+TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS = 60.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
 # Bounded synchronous wait the /api/context* consumers give a warm/fast transcript product so it
 # returns in the same request instead of an empty pending shape. Kept well under the HTTP route
@@ -5381,7 +5386,18 @@ class TmuxWebtermApp:
             change_code = int(change)
         except (TypeError, ValueError):
             change_code = 0
-        return change_code != 2 or not any(path == Path(root) for root in roots)
+        if change_code == 2 and any(path == Path(root) for root in roots):
+            return False
+        # A repo's own `git status` rewrites `.git/index` (stat-cache refresh) on every
+        # call, and index/lock churn is never a branch/commit signal on its own. Counting
+        # it as an external invalidation made a status compute bump the very generation
+        # that then discarded its result -- a self-feeding refresh livelock on any repo
+        # under active writes. Real ref changes (`.git/HEAD`, `refs/**`, `packed-refs`,
+        # `MERGE_HEAD`, `logs/**`) still invalidate; the git-metadata TTL backstops a
+        # staging-only change skipped here.
+        if ".git" in path.parts and (path.name == "index" or path.name.endswith(".lock")):
+            return False
+        return True
 
     def publish_native_files_changed(self, changed_paths: list[Path]) -> list[str]:
         watched_files = [*self.files_for_watch(), *self.background_files_for_watch()]
@@ -7975,9 +7991,16 @@ class TmuxWebtermApp:
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
             if record.worker is not None and not replace:
-                return 0
+                started_at = record.worker_started_at
+                # A worker still within the deadline holds the single-flight guard.
+                # Past it, the worker is treated as stalled and superseded so a hung
+                # build cannot refuse every future refresh; the stale worker's later
+                # commit/finish is a no-op because the generation has advanced.
+                if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
+                    return 0
             record.generation += 1
             record.worker = worker
+            record.worker_started_at = time.monotonic()
             return record.generation
 
     def commit_transcripts_payload_cache(self, payload: dict[str, Any], generation: int) -> bool:
@@ -8003,6 +8026,7 @@ class TmuxWebtermApp:
             if invalidate:
                 record.generation += 1
             record.worker = None
+            record.worker_started_at = None
             return True
 
     def set_transcripts_payload_cache(self, payload: dict[str, Any]) -> None:

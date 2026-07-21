@@ -1805,6 +1805,7 @@ globalThis.__layoutTestApi = {
   tabIsPinned,
   orderPaneTabs,
   pinnedTabIconHtml,
+  paneTabDismissControlHtml,
   setTabPinned,
   toggleTabPinned,
   toggleActiveTabPinned,

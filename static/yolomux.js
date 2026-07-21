@@ -35022,7 +35022,7 @@ function createDockviewTabRenderer() {
     }
     syncDockviewTabShell(element, item, api);
     if (paneTabShouldPreserve(element)) {
-      syncPaneTabPinnedIcon(element, item);
+      syncPaneTabPinnedChrome(element, item);
       const popover = paneTabPopoverForAnchor(element);
       if (popover) positionPaneTabPopover(element, popover);
       if (isFileEditorItem(item)) refreshFileTabPopover(element, item);
@@ -35938,6 +35938,22 @@ function syncPaneTabPinnedIcon(tab, item) {
   tab.insertAdjacentHTML('afterbegin', pinnedTabIconHtml(item));
 }
 
+function syncPaneTabDismissControl(tab, item) {
+  const existing = tab.querySelector(':scope > [data-pane-tab-close]');
+  const nextHtml = paneTabDismissControlHtml(item);
+  if (!nextHtml) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  tab.insertAdjacentHTML('beforeend', nextHtml);
+}
+
+function syncPaneTabPinnedChrome(tab, item) {
+  syncPaneTabPinnedIcon(tab, item);
+  syncPaneTabDismissControl(tab, item);
+}
+
 function syncPreservedPaneTab(tab, fresh) {
   const hoverState = tab.dataset.popoverHoverState || '';
   syncClassListPreserving(tab, fresh.className, ['popover-open', 'dragging']);
@@ -35950,7 +35966,7 @@ function syncPreservedPaneTab(tab, fresh) {
   const label = fresh.getAttribute('aria-label');
   if (label) tab.setAttribute('aria-label', label);
   else tab.removeAttribute('aria-label');
-  syncPaneTabPinnedIcon(tab, fresh.dataset.paneTab);
+  syncPaneTabPinnedChrome(tab, fresh.dataset.paneTab);
 }
 
 function paneTabPopoverItemToRestore(strip) {
@@ -35972,13 +35988,30 @@ function restorePaneTabPopover(strip, item) {
   tab.classList.add('popover-open');
 }
 
-// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + close button +
+function paneTabDismissControlHtml(item) {
+  const type = tabTypeForItem(item);
+  const isLegacyFiles = type?.key === 'files';
+  const isEditor = isFileEditorItem(item);
+  if (isLegacyFiles || (tabIsPinned(item) && !isEditor)) return '';
+  const closeLabel = isEditor
+    ? t('finder.close', {name: itemLabel(item)})
+    : t('finder.hideFromLayout', {name: itemLabel(item)});
+  const controlKind = isEditor ? 'close' : 'minimize';
+  return toolbarButtonHtml({
+    className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
+    action: 'pane-tab-close',
+    dataset: {paneTabClose: ''},
+    title: closeLabel,
+    ariaLabel: closeLabel,
+  });
+}
+
+// the inner markup of a pane tab — pin icon + row (virtual rowHtml or tmux) + optional dismiss control +
 // the file/session popover — built once here and shared by BOTH the DOM factory (createPaneTab) and the
 // Dockview string builder (dockviewPaneTabHtml in 75_dockview_layout.js), so pin/close/popover parity is
 // enforced in one place instead of by hand across two renderers.
 function paneTabInnerHtml(item, rowOptions = {}) {
   const type = tabTypeForItem(item);
-  const isLegacyFiles = type?.key === 'files';
   const isEditor = isFileEditorItem(item);
   const isVirtual = Boolean(type);
   const info = transcriptMetadataState.payload.sessions?.[item];
@@ -35987,19 +36020,7 @@ function paneTabInnerHtml(item, rowOptions = {}) {
   const agentKind = isVirtual ? '' : sessionAgentKind(item);
   let html = type?.rowHtml ? type.rowHtml(item, rowOptions) : tmuxPaneTabHtml(item, info, state, auto);
   html = `${pinnedTabIconHtml(item)}${html}`;
-  if (!isLegacyFiles) {
-    const closeLabel = isEditor
-      ? t('finder.close', {name: itemLabel(item)})
-      : t('finder.hideFromLayout', {name: itemLabel(item)});
-    const controlKind = isEditor ? 'close' : 'minimize';
-    html += toolbarButtonHtml({
-      className: `pane-tab-close ${platformWindowControlClass(controlKind)}`,
-      action: 'pane-tab-close',
-      dataset: {paneTabClose: ''},
-      title: closeLabel,
-      ariaLabel: closeLabel,
-    });
-  }
+  html += paneTabDismissControlHtml(item);
   if (isEditor) html += filePopoverHtml(item);
   else if (!isVirtual) html += sessionPopoverHtml(item, info, agentKind, auto, state);
   return html;
@@ -49941,7 +49962,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostPricePairText(item.microUsd, item.apiListMicroUsd)}`).join('; ')}`;
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
-    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphMiddleTruncatedTextHtml(label)}</strong>`;
+    const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphCostAgentLabelHtml(label)}</strong>`;
     const usageCellHtml = item => {
       const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(components, row, item) : '';
       return formula || debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {
@@ -49956,7 +49977,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   const totalApiListMicroUsd = debugGraphCostApiListMicroUsd(totalRow);
   const grandTotalLabel = totalApiListMicroUsd !== null && totalApiListMicroUsd !== debugGraphCostMicroUsd(totalRow)
     ? debugGraphCostText('debug.cost.grandTotalDual', 'Grand total · marginal / API list prices')
-    : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total at API list prices');
+    : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total');
   const input = usageColumns[0];
   const cacheRead = usageColumns[1];
   const cacheWrite5m = usageColumns[2];
@@ -50131,6 +50152,18 @@ function debugGraphMiddleTruncatedTextHtml(value, tailLength = 20) {
   if (characters.length <= tailSize + 1) return `<span class="js-debug-responsive-text">${esc(text)}</span>`;
   const split = characters.length - tailSize;
   return `<span class="js-debug-responsive-text js-debug-responsive-text--middle"><span class="js-debug-responsive-text-prefix" data-middle-truncate-part="prefix">${esc(characters.slice(0, split).join(''))}</span><span class="js-debug-responsive-text-suffix" data-middle-truncate-part="suffix">${esc(characters.slice(split).join(''))}</span></span>`;
+}
+
+function debugGraphCostAgentLabelHtml(value, lineSize = 24) {
+  const text = String(value || '');
+  const characters = Array.from(text);
+  const size = Math.max(12, Math.floor(Number(lineSize) || 24));
+  if (characters.length <= size) return `<span class="js-debug-cost-agent-name">${esc(text)}</span>`;
+  const first = characters.slice(0, size).join('');
+  const second = characters.length <= size * 2
+    ? characters.slice(size).join('')
+    : `…${characters.slice(-(size - 1)).join('')}`;
+  return `<span class="js-debug-cost-agent-name js-debug-cost-agent-name--long" aria-hidden="true"><span>${esc(first)}</span><span>${esc(second)}</span></span>`;
 }
 
 function debugGraphCostSourceLabelHtml(row) {

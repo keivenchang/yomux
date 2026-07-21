@@ -207,7 +207,7 @@
   "debug.copied": "debug snapshot copied",
   "debug.cost.allModels": "All models",
   "debug.cost.atApiListPrices": "At API list prices",
-  "debug.cost.grandTotalApiList": "Grand total at API list prices",
+  "debug.cost.grandTotalApiList": "Grand total",
   "debug.cost.grandTotalDual": "Grand total · marginal / API list prices",
   "debug.cost.marginal": "Marginal",
   "debug.cost.backfillPartial": "Backfill incomplete",
