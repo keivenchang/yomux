@@ -216,6 +216,22 @@ def capture_server_measurements(app) -> dict[str, Any]:
     return {"summary": summary}
 
 
+def wait_for_server_measurements_quiet(app, timeout: float, quiet_seconds: float = 0.5) -> None:
+    deadline = time.monotonic() + timeout
+    stable_since = time.monotonic()
+    previous = None
+    while time.monotonic() < deadline:
+        current = capture_server_measurements(app)["summary"]
+        signature = tuple((row.get("surface"), row.get("count"), row.get("compute_ms_total")) for row in current)
+        if signature != previous:
+            previous = signature
+            stable_since = time.monotonic()
+        elif time.monotonic() - stable_since >= quiet_seconds:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"Timed out after {timeout:.1f}s waiting for Finder server measurements to settle")
+
+
 def wait_for_condition(predicate, timeout: float, description: str) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -334,15 +350,27 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
         search = saved_layout_search(runtime.sessions[0], fixture["root"])
         open_clients(drivers, base_url, search, fixture, event_timeout)
         wait_for_finder_settled(drivers, event_timeout)
+        wait_for_server_measurements_quiet(runtime.app, event_timeout)
 
         phases: dict[str, Any] = {}
 
-        for driver in drivers.values():
-            clear_browser_log(driver)
-        clear_server_measurements(runtime.app)
-        phase_cpu_started = time.process_time()
-        time.sleep(max(0.1, idle_seconds))
-        phases["idle"] = capture_phase(runtime.app, drivers, phase_cpu_started)
+        idle_deadline = time.monotonic() + event_timeout
+        while True:
+            for driver in drivers.values():
+                clear_browser_log(driver)
+            clear_server_measurements(runtime.app)
+            phase_cpu_started = time.process_time()
+            time.sleep(max(0.1, idle_seconds))
+            idle_phase = capture_phase(runtime.app, drivers, phase_cpu_started)
+            no_client_finder_traffic = all(
+                not client["request_counts"]
+                for client in idle_phase["clients"].values()
+            )
+            if no_client_finder_traffic and not idle_phase["server"]["summary"]:
+                phases["idle"] = idle_phase
+                break
+            if time.monotonic() >= idle_deadline:
+                raise RuntimeError(f"Timed out after {event_timeout:.1f}s waiting for a clean Finder idle measurement window")
 
         for driver in drivers.values():
             clear_browser_log(driver)
@@ -382,6 +410,8 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
             driver.get(f"{base_url}/{search}")
             wait_for_app(driver, event_timeout)
             open_root(driver, fixture["root"], fixture["expected_row"], event_timeout)
+        wait_for_finder_settled(drivers, event_timeout)
+        wait_for_server_measurements_quiet(runtime.app, event_timeout)
         phases["reload"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         for driver in drivers.values():

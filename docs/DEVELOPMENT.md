@@ -23,9 +23,9 @@ On externally managed system Python installs (PEP 668), create and activate a vi
 
 ### Version bump policy
 
-`YOLOMUX_VERSION` in `yolomux_lib/infra/common.py` is bumped only when publishing to `origin/main`. LOCAL `cps` / `yolo-cps` lands work on local `main` with no version bump and no push; ORIGIN / REMOTE `cps` rebases onto `origin/main`, increments the patch segment, folds the bump into the work commit, and includes `Version: 0.4.N` in the commit message body. The self-updater compares `YOLOMUX_VERSION` on `origin/main`, so SHA-only published commits do not cue update notifications, but local integration commits must not create fake versions.
+Runtime `YOLOMUX_VERSION` lives in `yolomux_lib/infra/common.py`; the static package-version literal in `yolomux_lib/common.py` must always match it. Both are bumped only when publishing to `origin/main`. LOCAL `cps` / `yolo-cps` lands work on local `main` with no version bump and no push; ORIGIN / REMOTE `cps` rebases onto `origin/main`, increments the patch segment, folds both matching literals into the work commit, and includes `Version: 0.4.N` in the commit message body. The self-updater compares `YOLOMUX_VERSION` on `origin/main`, so SHA-only published commits do not cue update notifications, but local integration commits must not create fake versions. `tests/test_common.py::test_package_and_runtime_versions_match` rejects drift between the two required literals.
 
-To find the latest committed version before ORIGIN publish: `git show origin/main:yolomux_lib/infra/common.py | grep YOLOMUX_VERSION` and add 1 to the patch segment.
+To find the latest committed version before ORIGIN publish: `git show origin/main:yolomux_lib/infra/common.py | grep YOLOMUX_VERSION` and add 1 to the patch segment, then apply that same version to `yolomux_lib/common.py`.
 
 ### Timing constants
 
@@ -322,7 +322,7 @@ ORIGIN-mode sequence from the dev checkout:
 ```bash
 python3 tools/check.py                       # the full gate (see Tests above)
 git fetch origin && git rebase origin/main   # rebase onto the published tip
-# bump YOLOMUX_VERSION in yolomux_lib/infra/common.py, folded into the work commit
+# bump matching YOLOMUX_VERSION literals in yolomux_lib/infra/common.py and yolomux_lib/common.py, folded into the work commit
 git add -- <explicit-files>
 git commit -m "<message including Version: 0.4.N>"
 git -C <production-checkout> merge --ff-only <branch>    # land on local main — its OWN exit-checked command
@@ -333,7 +333,7 @@ LOCAL mode is the same minus the version bump and the final `push` (stop after t
 
 Rules:
 
-- ORIGIN mode MUST bump `YOLOMUX_VERSION` in `yolomux_lib/infra/common.py` in the same commit; the auto-updater checks this value on `origin/main`, not the commit SHA, so SHA-only commits do not cue the update. LOCAL mode does NOT bump.
+- ORIGIN mode MUST bump matching `YOLOMUX_VERSION` literals in `yolomux_lib/infra/common.py` and `yolomux_lib/common.py` in the same commit; the auto-updater checks the runtime value on `origin/main`, not the commit SHA, so SHA-only commits do not cue the update. LOCAL mode does NOT bump.
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
 - The `merge --ff-only` into the production checkout MUST be its own exit-checked command — NOT piped through `tail`/`grep` and NOT `&&`-chained straight into the push. A pipe's exit status is the last stage's, so a DIVERGED ff-merge fails silently and a chained `push origin main` then publishes whatever local `main` already points at, not your commit. Confirm the merge succeeded before pushing.
 - This is a shared multi-worktree: local `main` can advance from another worktree mid-`cps`, so your ff-merge can suddenly refuse (diverged). Recovery: `git fetch origin`, `git rebase origin/main` your dev branch (disjoint files rebase clean), re-run the gate, then ff-merge + push. No force-push, nothing lost — the other commit is usually a sibling off the same base.

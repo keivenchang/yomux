@@ -33,7 +33,13 @@ def test_two_client_measurement_records_idle_change_failure_reload_and_navigatio
     assert phases["forced_watch_diff_failure"]["server"]["summary"] == []
     surfaces_after_reload = {row["surface"] for row in phases["reload"]["server"]["summary"]}
     assert "POST /api/fs/batch" in surfaces_after_reload
-    assert phases["navigation"]["server"]["summary"] == []
+    # Nested navigation may reuse a warm recursive listing or issue one first-time batch,
+    # but it must never fall back to watch-diff polling or multiply listing requests.
+    surfaces_after_navigation = {row["surface"] for row in phases["navigation"]["server"]["summary"]}
+    assert surfaces_after_navigation <= {"POST /api/fs/batch"}
+    for client in phases["navigation"]["clients"].values():
+        assert client["request_counts"].get("/api/fs/watch-diff", 0) == 0
+        assert client["request_counts"].get("/api/fs/batch", 0) <= 1
 
 
 def test_two_client_full_sse_keyframe_converges_without_watch_diff(monkeypatch, tmp_path):

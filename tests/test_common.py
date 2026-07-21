@@ -16,6 +16,13 @@ from yolomux_lib.filesystem import git_ops
 from yolomux_lib.yoagent import conversation
 
 
+def test_package_and_runtime_versions_match():
+    package_source = (Path(common.PROJECT_ROOT) / "yolomux_lib" / "common.py").read_text(encoding="utf-8")
+    package_match = common.YOLOMUX_VERSION_ASSIGNMENT_RE.search(package_source)
+    assert package_match is not None
+    assert package_match.group(1) == common.YOLOMUX_VERSION
+
+
 def test_record_owned_thread_starts_use_shared_rollback_owner():
     root = Path(common.PROJECT_ROOT)
     owners = {
