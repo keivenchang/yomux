@@ -64,11 +64,13 @@ def test_system_memory_projection_keeps_mac_details_as_exact_server_series():
         "mac_wired_memory_bytes": 100,
         "mac_compressed_memory_bytes": 200,
         "mac_pressure_percent": 20,
+        "mac_pressure_level": 2,
     })
 
     samples = {sample.series: sample.value for sample in materializer._observation_samples(observation)}
 
     assert samples["mac_pressure_percent"] == 20
+    assert samples["mac_pressure_level"] == 2
     assert samples["mac_compressed_memory_bytes"] == 200
     assert samples["system_memory_used_bytes"] == 900
 

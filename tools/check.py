@@ -101,12 +101,23 @@ def py_compile_files() -> list[str]:
     ]
 
 
-def check_cpu_capacity() -> int:
-    cpus = max(1, os.cpu_count() or 1)
-    return min(cpus, 8) if platform.system() == "Darwin" else cpus
+def check_cpu_percent(cpu_percent: int | None = None) -> int:
+    """Fraction of host CPUs the pytest pools may claim, 1-100.
+
+    Precedence: explicit --cpu-percent, then YOLOMUX_CHECK_CPU_PERCENT, then
+    the platform default. Linux takes every core; macOS defaults to half
+    because Chrome trees plus Defender/Spotlight scanning of temporary
+    profiles double the effective per-worker cost there.
+    """
+    raw = str(cpu_percent) if cpu_percent is not None else os.environ.get("YOLOMUX_CHECK_CPU_PERCENT", "").strip()
+    if raw:
+        if not raw.isdigit() or not 1 <= int(raw) <= 100:
+            raise ValueError("CPU percent must be an integer 1-100")
+        return int(raw)
+    return 50 if platform.system() == "Darwin" else 100
 
 
-def pytest_worker_counts(*, serial: bool = False) -> tuple[str, str, str]:
+def pytest_worker_counts(*, serial: bool = False, cpu_percent: int | None = None) -> tuple[str, str, str]:
     """Divide a core-derived concurrent worker budget across pytest pools."""
     if serial:
         return "1", "1", "1"
@@ -118,15 +129,11 @@ def pytest_worker_counts(*, serial: bool = False) -> tuple[str, str, str]:
         if len(parts) == 3 and all(part.isdigit() and int(part) > 0 for part in parts):
             return parts[0], parts[1], parts[2]
         raise ValueError("YOLOMUX_PYTEST_WORKERS must be N or nonbrowser,browser,e2e")
-    cpus = check_cpu_capacity()
-    # The three pools run together, and browser workers also own Chrome
-    # processes. Reserve one quarter of the logical CPUs for Chrome, Node,
-    # service daemons, live YOLOmux servers, and the OS. Split the remaining
-    # budget 1/2 non-browser, 1/3 browser, and the remainder E2E.
-    # Browser workers own Chrome process trees and macOS security/indexing
-    # services scan their temporary profiles. Keep the Mac gate to half of the
-    # capped CPU budget; Linux keeps the measured 75% allocation.
-    budget = max(3, cpus // 2) if platform.system() == "Darwin" else max(3, (cpus * 3) // 4)
+    cpus = max(1, os.cpu_count() or 1)
+    percent = check_cpu_percent(cpu_percent)
+    # The three pools run together and split one budget 1/2 non-browser,
+    # 1/3 browser, remainder E2E; the floor of 3 keeps every pool alive.
+    budget = max(3, (cpus * percent) // 100)
     nonbrowser = max(1, budget // 2)
     browser = max(1, budget // 3)
     e2e = max(1, budget - nonbrowser - browser)
@@ -142,8 +149,8 @@ def pytest_xdist_args(workers: str, *, serial: bool = False, worksteal: bool = F
     return args
 
 
-def lanes(*, serial: bool = False) -> list[Lane]:
-    nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial)
+def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]:
+    nonbrowser_workers, browser_workers, e2e_workers = pytest_worker_counts(serial=serial, cpu_percent=cpu_percent)
     return [
         Lane(
             "py-compile",
@@ -420,14 +427,15 @@ def child_usage_delta(before: dict[str, float | int | str], after: dict[str, flo
     }
 
 
-def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False) -> dict[str, object]:
+def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None) -> dict[str, object]:
     """Create stable opt-in machine output without adding noise to normal checks."""
 
-    worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial), strict=True))
+    worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial, cpu_percent=cpu_percent), strict=True))
     return {
         "schema": 1,
         "interrupted": interrupted,
         "mode": "serial" if serial else "parallel",
+        "cpu_percent": None if serial else check_cpu_percent(cpu_percent),
         "wall_seconds": round(elapsed, 6),
         "pytest_workers": worker_counts,
         "child_usage": child_usage,
@@ -479,6 +487,31 @@ def print_result(result: LaneResult) -> None:
         print(result.output, end="" if result.output.endswith("\n") else "\n", flush=True)
 
 
+# Launch order by expected wall-clock, slowest first: the long-pole lanes
+# (Selenium browser, then e2e, then the pytest pools) must start while the
+# machine is unloaded so the gate's makespan is the longest lane, not the
+# longest lane plus whatever queued ahead of it. Unknown lanes sort last.
+LANE_LAUNCH_ORDER = (
+    "pytest-browser",
+    "pytest-browser-behavior",
+    "pytest-e2e",
+    "pytest",
+    "pytest-unit",
+    "pytest-socket",
+    "pytest-boot",
+    "node-layout",
+    "static",
+    "node-syntax",
+    "py-compile",
+    "whitespace",
+)
+
+
+def slowest_first(selected: list[Lane]) -> list[Lane]:
+    rank = {name: index for index, name in enumerate(LANE_LAUNCH_ORDER)}
+    return sorted(selected, key=lambda lane: rank.get(lane.name, len(rank)))
+
+
 def run_parallel(selected: list[Lane]) -> list[LaneResult]:
     results: list[LaneResult] = []
     workers = min(len(selected), 8)
@@ -505,14 +538,20 @@ def main(argv: list[str] | None = None) -> int:
     lane_names = [lane.name for lane in available]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", action="store_true", help="run lanes one at a time instead of in parallel")
+    parser.add_argument("--cpu-percent", type=int, default=None, metavar="1-100", help="fraction of host CPUs the pytest pools may claim (default: 100 on Linux, 50 on macOS; env YOLOMUX_CHECK_CPU_PERCENT)")
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
     parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")
     parser.add_argument("--performance-report", nargs="?", const="", metavar="/tmp/REPORT.json", help="write opt-in timing and child-resource JSON under /tmp")
     args = parser.parse_args(argv)
 
-    if args.serial:
-        available = lanes(serial=True)
+    try:
+        check_cpu_percent(args.cpu_percent)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.serial or args.cpu_percent is not None:
+        available = lanes(serial=args.serial, cpu_percent=args.cpu_percent)
 
     if args.list_lanes:
         for lane in available:
@@ -520,7 +559,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     selected_names = set(args.lane or [lane.name for lane in available if lane.default])
-    selected = [lane for lane in available if lane.name in selected_names]
+    selected = slowest_first([lane for lane in available if lane.name in selected_names])
     if not selected:
         print("no lanes selected", file=sys.stderr)
         return 2
@@ -557,12 +596,12 @@ def main(argv: list[str] | None = None) -> int:
         elapsed = time.monotonic() - started
         print("CHECK INTERRUPTED", file=sys.stderr, flush=True)
         if report_path is not None:
-            write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True))
+            write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True, cpu_percent=args.cpu_percent))
             print(f"Performance report: {report_path}", file=sys.stderr, flush=True)
         return 130
 
     if report_path is not None:
-        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot())))
+        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent))
         print(f"Performance report: {report_path}", flush=True)
 
     failed = [result.label for result in results if not result.ok]

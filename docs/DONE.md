@@ -1981,3 +1981,15 @@ Unless an entry says otherwise, every item shipped with the standard check gate 
 - Completed and removed `DOIT.yostats-cost-summary-table-min-width.md`. The YO!stats Cost summary table now shares the YO!cost report tables' content-sizing selector, eliminating the stretched empty right region while retaining overflow scrolling. Focused source/geometry, Node, static, and canonical gate checks passed; guarded 7772 restart returned `/api/ping` 401.
 
 - Completed and removed `DOIT.yocost-column-legend-inline.md`. YO!cost now renders one report-level Input/Cached/Output/Other/Total legend using a shared description/gloss owner, matching swatches, and Cached's explicit combined reads+writes wording. A report-scoped responsive grid keeps it to one or two rows without overflow; all locale catalogs, Node contracts, browser geometry, static freshness, and the niced eight-lane gate passed. Guarded 7772 restart returned `/api/ping` 401.
+
+### Finder filesystem polling attribution and acceptance
+
+- Completed and removed `DOIT.finder-filesystem-polling.md`. The historic burst came from the retired old-bundle `installRuntimeIntervals()` timer: every tick forced fresh list operations for the root and expanded Finder directories. Current Finder freshness remains event-driven through the existing watch-token/SSE path; no server cache or replacement polling path was added.
+- Safe runtime attribution now records bounded operation/trigger counts, payload size, compute time, and opaque path identities without exposing paths or credentials. The real two-Chrome 60-second acceptance recorded zero idle batch, watch-diff, and endpoint rows; a create/remove keyframe updated both clients with zero browser fetches, while explicit Reload remained one legitimate batch per client.
+- Focused Finder tests, static freshness, and the niced eight-lane gate passed. The authenticated Finder smoke loaded successfully; the final clean 8881 generation returned auth-gated 401 and held 0-1.3% CPU across three samples.
+
+### macOS Activity Monitor memory card
+
+- Completed and removed `DOIT.macos-activity-monitor-memory.md`. The existing Memory card now becomes one Mac-only pressure card with a 0-100% timeline and Physical, Used, Cached, Swap, App, Wired, and Compressed facts. Linux keeps its existing System memory card with no Mac-only rows.
+- The plot height remains inverse `kern.memorystatus_level` headroom, while color now follows the native `kern.memorystatus_vm_pressure_level` state. This fixes the live false-green case: native state 2 at 54% rendered warning yellow, matching Activity Monitor.
+- All seven same-minute live values agreed with Activity Monitor within ±5% or ±512 MiB. Focused Darwin/stats/Node/browser tests, static freshness, the full niced eight-lane gate, live Linux 7772 proof, and live Mac 8881 proof passed.

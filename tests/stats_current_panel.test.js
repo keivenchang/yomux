@@ -144,6 +144,7 @@ test('macOS keeps Activity Monitor memory facts and pressure in one card', () =>
   const resolver = sourceFunction('debugGraphResolvedChartGroup', 'debugGraphMacMemoryDetailsHtml');
   const details = sourceFunction('debugGraphMacMemoryDetailsHtml', 'debugGraphLegendSeriesItems');
   const chart = sourceFunction('debugGraphChartHtml', 'debugGraphUsesLogScale');
+  const pressureColor = sourceFunction('debugGraphMacMemoryPressureColor', 'debugGraphSeriesStyleAttr');
   assert.match(resolver, /key !== 'memory'/);
   assert.match(resolver, /series: \['macMemoryPressure'\]/);
   assert.match(resolver, /fixedMax: 100/);
@@ -151,6 +152,15 @@ test('macOS keeps Activity Monitor memory facts and pressure in one card', () =>
   assert.match(chart, /debugGraphMacMemoryDetailsHtml\(buckets\)/);
   assert.match(css, /\.js-debug-mac-memory-details/);
   assert.match(css, /@container \(max-width: 20rem\)/);
+  assert.doesNotMatch(pressureColor, /pressure </);
+  assert.match(pressureColor, /level === 1/);
+  assert.match(pressureColor, /level === 2/);
+  assert.match(pressureColor, /level >= 4/);
+  const context = {result: null, Number};
+  vm.runInNewContext(`${pressureColor}\nresult = [debugGraphMacMemoryPressureColor(1), debugGraphMacMemoryPressureColor(2), debugGraphMacMemoryPressureColor(4), debugGraphMacMemoryPressureColor(null)];`, context);
+  assert.deepEqual([...context.result], ['var(--good)', 'var(--warning-border-strong)', 'var(--bad)', 'var(--muted)']);
+  assert.match(sourceFunction('debugGraphSeriesStyleAttr', 'debugGraphSeriesClientAttrs'), /debugGraphSeriesDisplayColor\(series\)/);
+  assert.match(sourceFunction('debugGraphSeriesDisplayColor', 'debugGraphSeriesStyleAttr'), /series\?\.colorValues/);
 });
 
 test('Agents keeps per-session revision joins and semantic paint', () => {

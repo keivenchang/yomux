@@ -182,13 +182,15 @@ def test_focused_pytest_lanes_keep_expected_filters():
 def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkeypatch):
     check = load_check_module()
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Linux")
 
+    # Linux default is 100% of the host cores.
     expected = {
-        4: ("1", "1", "1"),
-        10: ("3", "2", "2"),
-        14: ("5", "3", "2"),
-        32: ("12", "8", "4"),
+        4: ("2", "1", "1"),
+        10: ("5", "3", "2"),
+        14: ("7", "4", "3"),
+        32: ("16", "10", "6"),
     }
     for cores, counts in expected.items():
         monkeypatch.setattr(check.os, "cpu_count", lambda cores=cores: cores)
@@ -197,10 +199,55 @@ def test_check_runner_scales_one_concurrent_pytest_budget_from_host_cores(monkey
     monkeypatch.setenv("YOLOMUX_PYTEST_WORKERS", "5,3,1")
     assert check.pytest_worker_counts() == ("5", "3", "1")
 
+    # macOS default is 50% of the host cores.
     monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
     monkeypatch.setattr(check.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
+    monkeypatch.setattr(check.os, "cpu_count", lambda: 8)
     assert check.pytest_worker_counts() == ("2", "1", "1")
+
+
+def test_check_runner_cpu_percent_knob_tunes_the_worker_budget(monkeypatch):
+    check = load_check_module()
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
+    monkeypatch.setattr(check.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(check.os, "cpu_count", lambda: 32)
+
+    # Explicit argument (the --cpu-percent flag path) wins.
+    assert check.pytest_worker_counts(cpu_percent=50) == ("8", "5", "3")
+    assert check.pytest_worker_counts(cpu_percent=100) == ("16", "10", "6")
+
+    # Environment knob applies when no explicit argument is given.
+    monkeypatch.setenv("YOLOMUX_CHECK_CPU_PERCENT", "25")
+    assert check.pytest_worker_counts() == ("4", "2", "2")
+
+    # The floor keeps every pool alive at tiny percentages.
+    monkeypatch.setenv("YOLOMUX_CHECK_CPU_PERCENT", "1")
+    assert check.pytest_worker_counts() == ("1", "1", "1")
+
+    # Serial still forces one worker per pool regardless of percent.
+    assert check.pytest_worker_counts(serial=True, cpu_percent=100) == ("1", "1", "1")
+
+    for invalid in ("0", "101", "abc", "-5"):
+        monkeypatch.setenv("YOLOMUX_CHECK_CPU_PERCENT", invalid)
+        with pytest.raises(ValueError):
+            check.pytest_worker_counts()
+
+
+def test_check_runner_launches_slowest_lanes_first(monkeypatch):
+    check = load_check_module()
+    monkeypatch.delenv("YOLOMUX_PYTEST_WORKERS", raising=False)
+    monkeypatch.delenv("YOLOMUX_CHECK_CPU_PERCENT", raising=False)
+
+    default_lanes = [lane for lane in check.lanes() if lane.default]
+    ordered = [lane.name for lane in check.slowest_first(default_lanes)]
+
+    assert ordered[0] == "pytest-browser"
+    assert ordered[1] == "pytest-e2e"
+    assert ordered[2] == "pytest"
+    assert ordered[-1] == "whitespace"
+    # Every default lane survives the reordering exactly once.
+    assert sorted(ordered) == sorted(lane.name for lane in default_lanes)
 
 
 def test_serial_check_gate_forces_every_pytest_pool_to_one_worker(monkeypatch):
@@ -350,7 +397,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
     assert events[0] == ("lock", True, check.DEFAULT_TOOL_LOCK_PATH)
     assert events[1] == ("nice", [{"port": 7772}, {"port": 7770}])
     assert events[2][0] == "run"
-    assert events[2][1] == ["py-compile", "static", "node-syntax", "node-layout", "pytest", "pytest-browser", "pytest-e2e", "whitespace"]
+    assert events[2][1] == ["pytest-browser", "pytest-e2e", "pytest", "node-layout", "static", "node-syntax", "py-compile", "whitespace"]
     output = capsys.readouterr().out
     assert "Acquiring YOLOmux expensive-tool lock" in output
     assert "lowered check priority by nice +5" in output
@@ -401,6 +448,7 @@ def test_performance_report_captures_steps_resources_and_worker_budget(tmp_path)
 
     assert json.loads(path.read_text(encoding="utf-8")) == {
         "child_usage": {"max_rss": 1024, "max_rss_unit": "KiB", "system_seconds": 0.25, "user_seconds": 0.5},
+        "cpu_percent": check.check_cpu_percent(),
         "interrupted": False,
         "lanes": [{"label": "demo lane", "name": "demo", "ok": True, "steps": [{"command": "python3 -m demo", "label": "demo step", "returncode": 0, "slow_tests": [], "wall_seconds": 0.75}], "wall_seconds": 1.25}],
         "mode": "parallel",

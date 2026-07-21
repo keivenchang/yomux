@@ -732,6 +732,7 @@ class DarwinSystemMemoryDetails:
     compressed_memory_bytes: int
     swap_used_bytes: int | None
     pressure_percent: float | None
+    pressure_level: int | None
 
 
 class DarwinSwapUsage(ctypes.Structure):
@@ -833,6 +834,8 @@ def current_darwin_system_memory_snapshot() -> tuple[tuple[int, int], DarwinSyst
     swap_used = int(swap.used_bytes) if swap is not None else None
     available_percent = darwin_sysctl_value("kern.memorystatus_level", ctypes.c_int)
     pressure_percent = None if available_percent is None else float(100 - max(0, min(100, available_percent)))
+    native_pressure_level = darwin_sysctl_value("kern.memorystatus_vm_pressure_level", ctypes.c_int)
+    pressure_level = native_pressure_level if native_pressure_level in {1, 2, 4} else None
     details = DarwinSystemMemoryDetails(
         physical_memory_bytes=total,
         memory_used_bytes=memory_used,
@@ -842,6 +845,7 @@ def current_darwin_system_memory_snapshot() -> tuple[tuple[int, int], DarwinSyst
         compressed_memory_bytes=compressed_memory,
         swap_used_bytes=swap_used,
         pressure_percent=pressure_percent,
+        pressure_level=pressure_level,
     )
     # The existing cross-platform series intentionally means physical allocation on
     # Darwin. Keep that legacy semantic separate from the pressure display.

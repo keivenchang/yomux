@@ -16416,7 +16416,7 @@ async function openFileExplorerAt(path, options = {}) {
   } else if (options.syncSelection === true) {
     setFileExplorerSelectionPin(false);
   }
-  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true});
+  const entries = await fetchDirectory(root, {user: options.user === true || options.manualSelection === true, trigger: options.trigger});
   if (!openStillCurrent()) return false;
   if (!entries) {
     const error = currentFileExplorerListError(root);
@@ -16470,8 +16470,12 @@ const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
 const fileExplorerFsBatchDelayMs = 8;
+const fileExplorerFsBatchTriggerCountLimit = 64;
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
+const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
+  'tree-render', 'explicit-user', 'fresh-repair', 'watch-diff-fallback', 'deferred-interaction', 'sync-revalidation',
+]);
 let fileExplorerPushRefreshDepth = 0;
 const FILE_TREE_BASE_PAD_PX = 8;
 const FILE_TREE_COMPACT_PAD_PX = 4;
@@ -16603,7 +16607,10 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
     lifecycle.onReuse?.(record.value);
     return Promise.resolve(record.value);
   }
-  if (canReuse && record.request) return record.request;
+  if (canReuse && record.request) {
+    lifecycle.onCoalesce?.();
+    return record.request;
+  }
   if (lifecycle.skipRequest?.() === true) {
     lifecycle.onSkip?.();
     return Promise.resolve(lifecycle.skipValue);
@@ -16651,12 +16658,40 @@ function scheduleFileExplorerFsBatchFlush() {
   fileExplorerFsBatchTimer = setTimeout(flushFileExplorerFsBatch, fileExplorerFsBatchDelayMs);
 }
 
+function fileExplorerFsBatchTrigger(options = {}) {
+  const requested = String(options.trigger || '');
+  if (FILE_EXPLORER_FS_BATCH_TRIGGERS.has(requested)) return requested;
+  if (options.user === true) return 'explicit-user';
+  return options.fresh === true ? 'fresh-repair' : 'tree-render';
+}
+
+function recordFileExplorerFsBatchTrigger(item, trigger) {
+  const count = Number(item.triggerCounts[trigger]) || 0;
+  item.triggerCounts[trigger] = Math.min(fileExplorerFsBatchTriggerCountLimit, count + 1);
+}
+
+function recordPendingFileExplorerFsBatchTrigger(type, path, options = {}) {
+  const pending = fileExplorerFsBatchPending.get(fileExplorerFsBatchKey(type, normalizeDirectoryPath(path)));
+  if (pending?.item && pending.item.sent !== true) recordFileExplorerFsBatchTrigger(pending.item, fileExplorerFsBatchTrigger(options));
+}
+
+function fileExplorerFsBatchClientMetadata() {
+  const revision = String((typeof bootstrap === 'object' && bootstrap?.clientRevision) || '');
+  return {
+    client_revision: /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : '',
+    client_scope: shareViewMode ? 'share' : 'browser',
+  };
+}
+
 function fetchFilesystemBatchItem(type, path, options = {}) {
   const normalized = normalizeDirectoryPath(path);
   const key = fileExplorerFsBatchKey(type, normalized);
   if (options.dedupe !== false) {
     const existing = fileExplorerFsBatchPending.get(key);
-    if (existing) return existing.promise;
+    if (existing) {
+      if (existing.item.sent !== true) recordFileExplorerFsBatchTrigger(existing.item, fileExplorerFsBatchTrigger(options));
+      return existing.promise;
+    }
   }
   let resolve;
   let reject;
@@ -16664,7 +16699,8 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     resolve = ok;
     reject = fail;
   });
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, key, resolve, reject};
+  const trigger = fileExplorerFsBatchTrigger(options);
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, resolve, reject, sent: false};
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
@@ -16701,12 +16737,15 @@ async function flushFileExplorerFsBatch() {
   fileExplorerFsBatchTimer = null;
   const items = fileExplorerFsBatchQueue.splice(0);
   if (!items.length) return;
-  const requests = items.map(item => ({id: item.id, type: item.type, path: item.path}));
+  const requests = items.map(item => {
+    item.sent = true;
+    return {id: item.id, type: item.type, path: item.path, trigger_counts: item.triggerCounts};
+  });
   try {
     const payload = await apiFetchJson('/api/fs/batch', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({requests}),
+      body: JSON.stringify({requests, ...fileExplorerFsBatchClientMetadata()}),
     });
     const responses = new Map((payload.responses || []).map(response => [response.id, response]));
     for (const item of items) {
@@ -16724,10 +16763,11 @@ async function fetchDirectory(path, options = {}) {
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
       // in the same batch window.
-      const payload = await fetchFilesystemBatchItem('list', root);
+      const payload = await fetchFilesystemBatchItem('list', root, {trigger: fileExplorerFsBatchTrigger(options)});
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('list', root, options),
       skipRequest: () => fileExplorerPushRefreshDepth > 0 || suppressBackgroundFilesystemFetch(options),
       onSkip: () => clearFileExplorerListError(root),
       skipValue: null,
@@ -16814,8 +16854,8 @@ async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
     await refreshFileExplorerFromPush(diffPayload);
   } catch (error) {
     console.warn('client fs watch diff refresh failed', error);
-    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true});
-    else await refreshFileExplorerIfChanged();
+    if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
+    else await refreshFileExplorerIfChanged({trigger: 'watch-diff-fallback'});
   }
 }
 
@@ -18164,7 +18204,7 @@ function scheduleFileExplorerSyncRevalidation(plan, renderPaths, signature) {
   requestAnimationFrame(() => {
     const directories = fileExplorerSyncListingDirectories(plan, renderPaths);
     const previousSignatures = new Map(directories.map(path => [path, fileExplorerDirectoryRecord(path)?.signature]));
-    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true}).then(entriesByDir => {
+    void fetchFileExplorerSyncListings(directories, {fresh: true, force: true, trigger: 'sync-revalidation'}).then(entriesByDir => {
       if (
         fileExplorerSyncPlanSignature(plan) !== signature
         || fileExplorerSyncTargetKey(plan.session, plan.root) !== fileExplorerSyncTargetKey(fileExplorerVisibleSyncSession, fileExplorerVisibleSyncRoot)
@@ -18346,7 +18386,7 @@ function deferFileExplorerRefresh() {
   fileExplorerRefreshDeferred = true;
   setTimeout(() => {
     fileExplorerRefreshDeferred = false;
-    refreshFileExplorerIfChanged().catch(error => console.warn('deferred file explorer refresh failed', error));
+    refreshFileExplorerIfChanged({trigger: 'deferred-interaction'}).catch(error => console.warn('deferred file explorer refresh failed', error));
   }, fileExplorerRefreshIdleMs);
 }
 
@@ -21404,8 +21444,12 @@ async function fetchFilePathInfo(path, options = {}) {
     'info',
     normalized,
     options,
-    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true}),
-    {skipRequest: () => suppressBackgroundFilesystemFetch(options), skipValue: null},
+    () => fetchFilesystemBatchItem('info', normalized, {dedupe: options.fresh !== true, trigger: fileExplorerFsBatchTrigger(options)}),
+    {
+      skipRequest: () => suppressBackgroundFilesystemFetch(options),
+      skipValue: null,
+      onCoalesce: () => recordPendingFileExplorerFsBatchTrigger('info', normalized, options),
+    },
   );
 }
 
@@ -22320,7 +22364,7 @@ async function refreshFileExplorerPanelTrees(options = {}) {
   if (scrollPositions) restoreFileExplorerScrollPositions(scrollPositions);
 }
 
-async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot()) {
+async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerRoot(), options = {}) {
   const normalizedRoot = normalizeDirectoryPath(root);
   const entriesByDir = new Map();
   const directories = new Set([normalizedRoot]);
@@ -22329,7 +22373,7 @@ async function fileExplorerEntriesByWatchedDirectory(root = currentFileExplorerR
   }
   const listings = await Promise.all(Array.from(directories).map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory),
+    entries: await fetchDirectory(directory, options),
   })));
   for (const {directory, entries} of listings) {
     if (entries) entriesByDir.set(normalizeDirectoryPath(directory), entries);
@@ -22341,7 +22385,7 @@ async function refreshFileExplorerTreesInPlace(options = {}) {
   const root = normalizeDirectoryPath(options.root || currentFileExplorerRoot());
   const entriesByDir = options.entriesByDir instanceof Map
     ? options.entriesByDir
-    : await fileExplorerEntriesByWatchedDirectory(root);
+    : await fileExplorerEntriesByWatchedDirectory(root, options);
   const rootEntries = Array.isArray(options.entries) ? options.entries : entriesByDir.get(root);
   if (!rootEntries) return false;
   const scrollPositions = options.preserveScroll ? captureFileExplorerScrollPositions() : null;
@@ -23783,7 +23827,7 @@ function syncServerWatchRoots(options = {}) {
   }, delay);
 }
 
-async function refreshFileExplorerIfChanged() {
+async function refreshFileExplorerIfChanged(options = {}) {
   if (!fileExplorerTreePaneIsVisible()) return;
   const directories = watchedFileExplorerDirectories();
   if (!directories.length) return;
@@ -23792,7 +23836,7 @@ async function refreshFileExplorerIfChanged() {
   const signaturesByDir = new Map();
   const listings = await Promise.all(directories.map(async directory => ({
     directory,
-    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true}),
+    entries: await fetchDirectory(directory, {recordSignature: false, fresh: true, trigger: options.trigger}),
   })));
   for (const {directory, entries} of listings) {
     if (!entries) continue;
@@ -44859,8 +44903,9 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
   {
-    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', color: 'var(--good)',
+    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', colorForValue: debugGraphMacMemoryPressureColor,
     value: bucket => bucket.hostMetrics?.macMemoryDetailCount ? bucket.hostMetrics.macMemoryPressureTotalPercent / bucket.hostMetrics.macMemoryDetailCount : 0,
+    colorValue: bucket => bucket.hostMetrics?.macMemoryPressureLevel,
     hasData: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0) > 0 && Number.isFinite(Number(bucket?.hostMetrics?.macMemoryPressureTotalPercent)),
     sampleCount: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0),
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
@@ -45887,6 +45932,7 @@ function debugGraphNewHostMetrics() {
     macWiredMemoryTotalBytes: 0,
     macCompressedMemoryTotalBytes: 0,
     macMemoryPressureTotalPercent: NaN,
+    macMemoryPressureLevel: NaN,
     cpuLabel: '',
     systemMemoryLabel: '',
     cpuProcesses: new Map(),
@@ -46230,6 +46276,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     targetHost.macMemoryDetailCount += Number(sourceHost.macMemoryDetailCount || 0) * scale;
     for (const key of ['macPhysicalMemoryTotalBytes', 'macMemoryUsedTotalBytes', 'macCachedFilesTotalBytes', 'macSwapUsedTotalBytes', 'macAppMemoryTotalBytes', 'macWiredMemoryTotalBytes', 'macCompressedMemoryTotalBytes']) targetHost[key] += Number(sourceHost[key] || 0) * scale;
     if (Number.isFinite(Number(sourceHost.macMemoryPressureTotalPercent))) targetHost.macMemoryPressureTotalPercent = Number(sourceHost.macMemoryPressureTotalPercent);
+    if (Number.isFinite(Number(sourceHost.macMemoryPressureLevel))) targetHost.macMemoryPressureLevel = Math.max(Number(targetHost.macMemoryPressureLevel) || 0, Number(sourceHost.macMemoryPressureLevel));
     if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
     if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
@@ -46684,6 +46731,7 @@ function debugGraphApplyHostMetrics(bucket, source) {
     macCachedFilesTotalBytes: 'mac_cached_files_total_bytes', macSwapUsedTotalBytes: 'mac_swap_used_total_bytes',
     macAppMemoryTotalBytes: 'mac_app_memory_total_bytes', macWiredMemoryTotalBytes: 'mac_wired_memory_total_bytes',
     macCompressedMemoryTotalBytes: 'mac_compressed_memory_total_bytes', macMemoryPressureTotalPercent: 'mac_pressure_total_percent',
+    macMemoryPressureLevel: 'mac_pressure_level',
   };
   let macMemoryDetailSeen = false;
   for (const [targetKey, sourceKey] of Object.entries(macMemoryFields)) {
@@ -47916,6 +47964,7 @@ function debugGraphSeriesData(buckets) {
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const colorValues = typeof def.colorValue === 'function' ? buckets.map(bucket => def.colorValue(bucket)) : null;
     const sampleValues = values.filter((_value, index) => observedDataValues[index]);
     const sampleTimes = provenanceValues
       .filter((_provenance, index) => observedDataValues[index])
@@ -47935,6 +47984,7 @@ function debugGraphSeriesData(buckets) {
       hasDataValues,
       observedDataValues,
       provenanceValues,
+      colorValues,
       movingAverageValues,
       movingAverageTimes: sampleTimes,
       movingAverageSamples,
@@ -48491,8 +48541,28 @@ function debugGraphAgentTokenLegendSwatchHtml(series) {
   return `<svg class="js-debug-legend-token-swatch" viewBox="0 0 10 10" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}><defs>${debugGraphAgentTokenPatternDefinitionHtml(series, {legend: true})}</defs><rect width="10" height="10" rx="1.5" fill="url(#${esc(patternId)})"></rect></svg>`;
 }
 
+// Activity Monitor color follows the kernel's semantic pressure state, not a
+// threshold guessed from the separately plotted headroom percentage.
+function debugGraphMacMemoryPressureColor(value) {
+  const level = Number(value);
+  if (level === 1) return 'var(--good)';
+  if (level === 2) return 'var(--warning-border-strong)';
+  if (level >= 4) return 'var(--bad)';
+  return 'var(--muted)';
+}
+
+function debugGraphSeriesDisplayColor(series) {
+  if (typeof series?.colorForValue !== 'function') return String(series?.color || '').trim();
+  const values = Array.isArray(series?.colorValues) ? series.colorValues : debugGraphSeriesPlotValues(series);
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = Number(values[index]);
+    if (Number.isFinite(value)) return String(series.colorForValue(value) || '').trim();
+  }
+  return '';
+}
+
 function debugGraphSeriesStyleAttr(series, {barPattern = false} = {}) {
-  const color = String(series?.color || '').trim();
+  const color = debugGraphSeriesDisplayColor(series);
   const declarations = color ? [`--js-debug-series-color: ${color}`] : [];
   const patternId = barPattern ? debugGraphAgentTokenPatternId(series) : '';
   if (patternId) declarations.push(`fill: url(#${patternId})`);
@@ -50744,6 +50814,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
         mac_cached_files_bytes: 'mac_cached_files_total_bytes', mac_swap_used_bytes: 'mac_swap_used_total_bytes',
         mac_app_memory_bytes: 'mac_app_memory_total_bytes', mac_wired_memory_bytes: 'mac_wired_memory_total_bytes',
         mac_compressed_memory_bytes: 'mac_compressed_memory_total_bytes', mac_pressure_percent: 'mac_pressure_total_percent',
+        mac_pressure_level: 'mac_pressure_level',
       };
       const target = macMemorySeries[name];
       if (target) {

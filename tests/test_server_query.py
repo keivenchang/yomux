@@ -1711,6 +1711,8 @@ def test_handle_fs_batch_preserves_bounded_coalesced_trigger_counts(monkeypatch)
 
     assert writes[0][1]["responses"][0]["ok"] is True
     assert handler._http_response_performance_details["fs_batch_triggers"] == '{"tree-render": 2, "watch-diff-fallback": 3}'
+    assert handler._http_response_performance_details["fs_batch_client_revision"] == "unknown"
+    assert handler._http_response_performance_details["fs_batch_client_scope"] == "legacy"
 
 
 def test_handle_fs_batch_rejects_arbitrary_trigger_without_recording_it(monkeypatch):

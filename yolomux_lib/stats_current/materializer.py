@@ -725,6 +725,7 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
             "mac_wired_memory_bytes": "mac_wired_memory_bytes",
             "mac_compressed_memory_bytes": "mac_compressed_memory_bytes",
             "mac_pressure_percent": "mac_pressure_percent",
+            "mac_pressure_level": "mac_pressure_level",
         },
     }.get(observation.family)
     if fields is not None:

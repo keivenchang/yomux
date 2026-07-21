@@ -13,12 +13,23 @@ import uuid
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+from tests.browser_helpers.browser_layout import (
+    WebDriverWait,
+    new_chrome_driver,
+    register_browser_new_document_script,
+    start_browser_share_server,
+    start_isolated_browser_share_app,
+    stop_browser_share_server,
+    stop_isolated_browser_share_app,
+)
 
 FETCH_PROBE_SOURCE = """
 (() => {
@@ -85,8 +96,6 @@ def saved_layout_search(session: str, root: str) -> str:
         },
         "scroll": [{"target": "finder:files", "kind": "finder", "top": 0, "left": 0, "mode": "files"}],
     }
-    from urllib.parse import urlencode
-
     return "?" + urlencode({
         "bootCase": "finder-fs-repro",
         "sessions": f"files,{session}",
@@ -116,16 +125,12 @@ def create_fixture_tree(root: Path) -> dict[str, str]:
 
 
 def install_fetch_probe(driver, marker: str) -> None:
-    from tests.browser_helpers.browser_layout import register_browser_new_document_script
-
     source = FETCH_PROBE_SOURCE % json.dumps(marker)
     register_browser_new_document_script(driver, source, reset_after_test=False)
     driver.execute_script(source)
 
 
 def wait_for_app(driver, timeout: float) -> None:
-    from tests.browser_helpers.browser_layout import WebDriverWait
-
     wait = WebDriverWait(driver, timeout)
     wait.until(lambda current: current.execute_script("return typeof openFileExplorerAt === 'function' && typeof refreshFileExplorerPanelTree === 'function' && document.getElementById('grid') !== null"))
 
@@ -235,6 +240,24 @@ def finder_is_settled(driver: Any) -> bool:
     ))
 
 
+def finder_change_state(driver: Any) -> dict[str, str]:
+    """Return browser-visible Finder state that changes for compact and full SSE frames."""
+    return driver.execute_script(
+        """
+        try {
+          const root = currentFileExplorerRoot();
+          const record = fileExplorerDirectoryRecord(root);
+          return {
+            watch_token: String(fileExplorerFilesystemWatchToken || ''),
+            root_signature: String(record?.signature || ''),
+          };
+        } catch (_error) {
+          return {watch_token: '', root_signature: ''};
+        }
+        """,
+    )
+
+
 def wait_for_finder_settled(drivers: dict[str, Any], timeout: float) -> None:
     wait_for_condition(
         lambda: all(finder_is_settled(driver) for driver in drivers.values()),
@@ -251,13 +274,16 @@ def append_line(path: str, text: str) -> None:
         handle.write(text)
 
 
-def capture_phase(app, drivers: dict[str, Any]) -> dict[str, Any]:
+def capture_phase(app, drivers: dict[str, Any], process_cpu_started: float) -> dict[str, Any]:
+    server = capture_server_measurements(app)
+    server["process_cpu_seconds"] = round(max(0.0, time.process_time() - process_cpu_started), 6)
     return {
         "clients": {
             name: summarize_fetch_log(browser_log(driver))
             for name, driver in drivers.items()
         },
-        "server": capture_server_measurements(app),
+        "finder_state": {name: finder_change_state(driver) for name, driver in drivers.items()},
+        "server": server,
     }
 
 
@@ -290,13 +316,7 @@ def trigger_forced_watch_diff_refresh(driver) -> None:
         raise RuntimeError(result.get("error") or "forced watch-diff refresh failed")
 
 
-def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_seconds: float = 2.0, event_timeout: float = 8.0) -> dict[str, Any]:
-    from tests.browser_helpers.browser_layout import new_chrome_driver
-    from tests.browser_helpers.browser_layout import start_browser_share_server
-    from tests.browser_helpers.browser_layout import start_isolated_browser_share_app
-    from tests.browser_helpers.browser_layout import stop_browser_share_server
-    from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
-
+def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_seconds: float = 2.0, event_timeout: float = 8.0, force_full_filesystem_event: bool = False) -> dict[str, Any]:
     runtime = start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1)
     server = thread = None
     drivers: dict[str, Any] = {}
@@ -320,53 +340,63 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
         for driver in drivers.values():
             clear_browser_log(driver)
         clear_server_measurements(runtime.app)
+        phase_cpu_started = time.process_time()
         time.sleep(max(0.1, idle_seconds))
-        phases["idle"] = capture_phase(runtime.app, drivers)
+        phases["idle"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         for driver in drivers.values():
             clear_browser_log(driver)
         clear_server_measurements(runtime.app)
+        phase_cpu_started = time.process_time()
+        file_change_before = {name: finder_change_state(driver) for name, driver in drivers.items()}
+        if force_full_filesystem_event:
+            with runtime.app.client_watch_service.lock:
+                runtime.app.client_watch_service.filesystem_last_full_at = 0.0
         append_line(fixture["watched_file"], "file-change\n")
         wait_for_condition(
             lambda: all(
-                sum(summary["request_counts"].values()) >= 1
-                for summary in (summarize_fetch_log(browser_log(driver)) for driver in drivers.values())
+                finder_change_state(driver) != file_change_before[name]
+                for name, driver in drivers.items()
             ),
             event_timeout,
-            "both Finder clients to react to a real file change",
+            "both Finder clients to apply a real file change",
         )
         time.sleep(0.25)
-        phases["file_change"] = capture_phase(runtime.app, drivers)
+        phases["file_change"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         for driver in drivers.values():
             clear_browser_log(driver)
             set_fail_next_watch_diff(driver, 1)
         clear_server_measurements(runtime.app)
+        phase_cpu_started = time.process_time()
         for driver in drivers.values():
             trigger_forced_watch_diff_refresh(driver)
         time.sleep(0.25)
-        phases["forced_watch_diff_failure"] = capture_phase(runtime.app, drivers)
+        phases["forced_watch_diff_failure"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         for driver in drivers.values():
             clear_browser_log(driver)
         clear_server_measurements(runtime.app)
+        phase_cpu_started = time.process_time()
         for driver in drivers.values():
             driver.get(f"{base_url}/{search}")
             wait_for_app(driver, event_timeout)
             open_root(driver, fixture["root"], fixture["expected_row"], event_timeout)
-        phases["reload"] = capture_phase(runtime.app, drivers)
+        phases["reload"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         for driver in drivers.values():
             clear_browser_log(driver)
         clear_server_measurements(runtime.app)
+        phase_cpu_started = time.process_time()
         for driver in drivers.values():
             open_root(driver, fixture["nested_root"], fixture["nested_row"], event_timeout)
-        phases["navigation"] = capture_phase(runtime.app, drivers)
+        phases["navigation"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         return {
             "version": 2,
             "base_url": base_url,
             "fixture": fixture,
+            "file_change_delivery": "full-sse" if force_full_filesystem_event else "native-watcher",
             "phases": phases,
         }
     finally:

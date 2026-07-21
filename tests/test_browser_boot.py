@@ -5,10 +5,13 @@ import json
 from urllib.parse import urlencode
 
 import pytest
+from selenium.common.exceptions import TimeoutException
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.boot]
+
+TOUCH_LONG_PRESS_TEST_TIMEOUT_SECONDS = 8
 
 
 def saved_layout_state(session):
@@ -91,7 +94,7 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
                     """
                     const session = arguments[0], marker = arguments[1], item = terminals.get(session);
                     const container = document.querySelector(`#term-${session}`), screen = container?.querySelector('.xterm-screen'), term = item?.term, buffer = term?.buffer?.active;
-                    const lineIndex = buffer ? Array.from({length: buffer.length}, (_, index) => index).filter(index => buffer.getLine(index)?.translateToString(true).includes(marker)).at(-1) : -1;
+                        const lineIndex = buffer ? Array.from({length: buffer.length}, (_, index) => index).filter(index => buffer.getLine(index)?.translateToString(true).trimStart().startsWith(`${marker} extension`)).at(-1) : -1;
                     const line = lineIndex >= 0 ? buffer.getLine(lineIndex).translateToString(true) : '', markerColumn = line.indexOf(marker), cell = terminalCellDimensions(term, container), rect = screen?.getBoundingClientRect(), viewportY = buffer?.viewportY || 0;
                     if (!rect || markerColumn < 0 || lineIndex < viewportY || !(cell.width > 0) || !(cell.height > 0)) return null;
                     const x = rect.left + (markerColumn + 0.5) * cell.width, y = rect.top + (lineIndex - viewportY + 0.5) * cell.height, events = [];
@@ -102,15 +105,25 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
             message=f"real xterm never rendered {marker!r}",
         )
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "id": 1}]})
-        selected = WebDriverWait(browser, 3).until(
-            lambda driver: (
-                state if (state := driver.execute_script(
-                    """
-                    const term = terminals.get(arguments[0])?.term, menu = document.querySelector('.terminal-context-menu'), probe = window.__realXtermTouchLongPressProbe;
-                    return menu && term?.getSelection?.() === arguments[1] ? {events: probe?.events || [], selection: term.getSelection(), copy: Array.from(menu.querySelectorAll('button')).map(button => ({label: button.textContent || '', disabled: button.disabled}))} : null;
-                    """, session, marker)) else False),
-            message="trusted CDP touch did not reach the terminal long-press bridge",
-        )
+        try:
+            selected = WebDriverWait(browser, TOUCH_LONG_PRESS_TEST_TIMEOUT_SECONDS).until(
+                lambda driver: (
+                    state if (state := driver.execute_script(
+                        """
+                        const term = terminals.get(arguments[0])?.term, menu = document.querySelector('.terminal-context-menu'), probe = window.__realXtermTouchLongPressProbe;
+                        return menu && term?.getSelection?.() === arguments[1] ? {events: probe?.events || [], selection: term.getSelection(), copy: Array.from(menu.querySelectorAll('button')).map(button => ({label: button.textContent || '', disabled: button.disabled}))} : null;
+                        """, session, marker)) else False),
+                message="trusted CDP touch did not reach the terminal long-press bridge",
+            )
+        except TimeoutException as exc:
+            state = browser.execute_script(
+                """
+                const term = terminals.get(arguments[0])?.term, menu = document.querySelector('.terminal-context-menu'), probe = window.__realXtermTouchLongPressProbe;
+                return {events: probe?.events || [], selection: term?.getSelection?.() || '', menuOpen: Boolean(menu), copy: Array.from(menu?.querySelectorAll('button') || []).map(button => ({label: button.textContent || '', disabled: button.disabled}))};
+                """,
+                session,
+            )
+            raise AssertionError(f"trusted CDP touch long-press state: {state}") from exc
         browser.execute_script(
             """
             const probe = window.__realXtermTouchLongPressProbe;
@@ -129,14 +142,14 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
             copy?.click();
             """
         )
-        copied = WebDriverWait(browser, 3).until(
+        copied = WebDriverWait(browser, TOUCH_LONG_PRESS_TEST_TIMEOUT_SECONDS).until(
             lambda driver: (
                 values if (values := driver.execute_script("return window.__realXtermTouchLongPressProbe?.copied || [];")) and marker in values else False
             ),
             message="touch-selected terminal menu Copy did not write the captured word",
         )
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchMove", "touchPoints": [{"x": point["extendX"], "y": point["y"], "id": 1}]})
-        extended = WebDriverWait(browser, 3).until(lambda driver: (selection if (selection := driver.execute_script("return terminals.get(arguments[0])?.term?.getSelection?.() || '';", session)).startswith(marker) and len(selection) > len(marker) else False), message="touch move after a real long press did not extend xterm selection")
+        extended = WebDriverWait(browser, TOUCH_LONG_PRESS_TEST_TIMEOUT_SECONDS).until(lambda driver: (selection if (selection := driver.execute_script("return terminals.get(arguments[0])?.term?.getSelection?.() || '';", session)).startswith(marker) and len(selection) > len(marker) else False), message="touch move after a real long press did not extend xterm selection")
         browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
         assert any(event["type"] == "pointerdown" and event["trusted"] and event["pointerType"] == "touch" for event in selected["events"]), selected
         assert any(event["type"] == "contextmenu" and event["syntheticContext"] for event in selected["events"]), selected

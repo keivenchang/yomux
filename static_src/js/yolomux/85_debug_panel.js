@@ -395,8 +395,9 @@ const jsDebugGraphSeries = Object.freeze([
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
   },
   {
-    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', color: 'var(--good)',
+    key: 'macMemoryPressure', label: 'Memory pressure', desc: 'macOS kernel memory pressure. Green means the Mac can satisfy memory demand without significant reclamation; yellow and red indicate increasing pressure.', unit: 'percent', linePattern: 'solid', colorForValue: debugGraphMacMemoryPressureColor,
     value: bucket => bucket.hostMetrics?.macMemoryDetailCount ? bucket.hostMetrics.macMemoryPressureTotalPercent / bucket.hostMetrics.macMemoryDetailCount : 0,
+    colorValue: bucket => bucket.hostMetrics?.macMemoryPressureLevel,
     hasData: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0) > 0 && Number.isFinite(Number(bucket?.hostMetrics?.macMemoryPressureTotalPercent)),
     sampleCount: bucket => Number(bucket?.hostMetrics?.macMemoryDetailCount || 0),
     displayHoldMs: jsDebugGraphDisplayHoldExpiryMs.minuteGauge,
@@ -1423,6 +1424,7 @@ function debugGraphNewHostMetrics() {
     macWiredMemoryTotalBytes: 0,
     macCompressedMemoryTotalBytes: 0,
     macMemoryPressureTotalPercent: NaN,
+    macMemoryPressureLevel: NaN,
     cpuLabel: '',
     systemMemoryLabel: '',
     cpuProcesses: new Map(),
@@ -1766,6 +1768,7 @@ function debugGraphMergeBucket(target, source, multiplier = 1) {
     targetHost.macMemoryDetailCount += Number(sourceHost.macMemoryDetailCount || 0) * scale;
     for (const key of ['macPhysicalMemoryTotalBytes', 'macMemoryUsedTotalBytes', 'macCachedFilesTotalBytes', 'macSwapUsedTotalBytes', 'macAppMemoryTotalBytes', 'macWiredMemoryTotalBytes', 'macCompressedMemoryTotalBytes']) targetHost[key] += Number(sourceHost[key] || 0) * scale;
     if (Number.isFinite(Number(sourceHost.macMemoryPressureTotalPercent))) targetHost.macMemoryPressureTotalPercent = Number(sourceHost.macMemoryPressureTotalPercent);
+    if (Number.isFinite(Number(sourceHost.macMemoryPressureLevel))) targetHost.macMemoryPressureLevel = Math.max(Number(targetHost.macMemoryPressureLevel) || 0, Number(sourceHost.macMemoryPressureLevel));
     if (sourceHost.cpuLabel) targetHost.cpuLabel = String(sourceHost.cpuLabel);
     if (sourceHost.systemMemoryLabel) targetHost.systemMemoryLabel = String(sourceHost.systemMemoryLabel);
     for (const [targetMap, sourceMap, valueKey] of [
@@ -2220,6 +2223,7 @@ function debugGraphApplyHostMetrics(bucket, source) {
     macCachedFilesTotalBytes: 'mac_cached_files_total_bytes', macSwapUsedTotalBytes: 'mac_swap_used_total_bytes',
     macAppMemoryTotalBytes: 'mac_app_memory_total_bytes', macWiredMemoryTotalBytes: 'mac_wired_memory_total_bytes',
     macCompressedMemoryTotalBytes: 'mac_compressed_memory_total_bytes', macMemoryPressureTotalPercent: 'mac_pressure_total_percent',
+    macMemoryPressureLevel: 'mac_pressure_level',
   };
   let macMemoryDetailSeen = false;
   for (const [targetKey, sourceKey] of Object.entries(macMemoryFields)) {
@@ -3452,6 +3456,7 @@ function debugGraphSeriesData(buckets) {
   return defs.map(def => {
     const localizedDef = {...def, label: debugGraphLocalizedLabel(def)};
     const {values, hasDataValues, observedDataValues, provenanceValues} = debugGraphProjectSeriesSamples(def, buckets);
+    const colorValues = typeof def.colorValue === 'function' ? buckets.map(bucket => def.colorValue(bucket)) : null;
     const sampleValues = values.filter((_value, index) => observedDataValues[index]);
     const sampleTimes = provenanceValues
       .filter((_provenance, index) => observedDataValues[index])
@@ -3471,6 +3476,7 @@ function debugGraphSeriesData(buckets) {
       hasDataValues,
       observedDataValues,
       provenanceValues,
+      colorValues,
       movingAverageValues,
       movingAverageTimes: sampleTimes,
       movingAverageSamples,
@@ -4027,8 +4033,28 @@ function debugGraphAgentTokenLegendSwatchHtml(series) {
   return `<svg class="js-debug-legend-token-swatch" viewBox="0 0 10 10" aria-hidden="true"${debugGraphSeriesStyleAttr(series)}><defs>${debugGraphAgentTokenPatternDefinitionHtml(series, {legend: true})}</defs><rect width="10" height="10" rx="1.5" fill="url(#${esc(patternId)})"></rect></svg>`;
 }
 
+// Activity Monitor color follows the kernel's semantic pressure state, not a
+// threshold guessed from the separately plotted headroom percentage.
+function debugGraphMacMemoryPressureColor(value) {
+  const level = Number(value);
+  if (level === 1) return 'var(--good)';
+  if (level === 2) return 'var(--warning-border-strong)';
+  if (level >= 4) return 'var(--bad)';
+  return 'var(--muted)';
+}
+
+function debugGraphSeriesDisplayColor(series) {
+  if (typeof series?.colorForValue !== 'function') return String(series?.color || '').trim();
+  const values = Array.isArray(series?.colorValues) ? series.colorValues : debugGraphSeriesPlotValues(series);
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = Number(values[index]);
+    if (Number.isFinite(value)) return String(series.colorForValue(value) || '').trim();
+  }
+  return '';
+}
+
 function debugGraphSeriesStyleAttr(series, {barPattern = false} = {}) {
-  const color = String(series?.color || '').trim();
+  const color = debugGraphSeriesDisplayColor(series);
   const declarations = color ? [`--js-debug-series-color: ${color}`] : [];
   const patternId = barPattern ? debugGraphAgentTokenPatternId(series) : '';
   if (patternId) declarations.push(`fill: url(#${patternId})`);
@@ -6280,6 +6306,7 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
         mac_cached_files_bytes: 'mac_cached_files_total_bytes', mac_swap_used_bytes: 'mac_swap_used_total_bytes',
         mac_app_memory_bytes: 'mac_app_memory_total_bytes', mac_wired_memory_bytes: 'mac_wired_memory_total_bytes',
         mac_compressed_memory_bytes: 'mac_compressed_memory_total_bytes', mac_pressure_percent: 'mac_pressure_total_percent',
+        mac_pressure_level: 'mac_pressure_level',
       };
       const target = macMemorySeries[name];
       if (target) {

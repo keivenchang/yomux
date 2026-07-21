@@ -1157,7 +1157,8 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
               debugGraphApplyServerRecord({start: Math.floor((now - index * 60000) / 1000), duration: 60, host_metrics: {
                 mac_memory_count: 1, mac_physical_memory_total_bytes: 48 * 1024 ** 3, mac_memory_used_total_bytes: 39.6 * 1024 ** 3,
                 mac_cached_files_total_bytes: 8.3 * 1024 ** 3, mac_swap_used_total_bytes: 6.6 * 1024 ** 3, mac_app_memory_total_bytes: 15.9 * 1024 ** 3,
-                mac_wired_memory_total_bytes: 5.1 * 1024 ** 3, mac_compressed_memory_total_bytes: 17.4 * 1024 ** 3, mac_pressure_total_percent: 20 + index,
+                mac_wired_memory_total_bytes: 5.1 * 1024 ** 3, mac_compressed_memory_total_bytes: 17.4 * 1024 ** 3, mac_pressure_total_percent: index ? 20 + index : 57,
+                mac_pressure_level: index ? 1 : 2,
               }});
             }
             refreshDebugGraphElement(graph, {force: true, deferFocusedControl: false});
@@ -1168,13 +1169,14 @@ def test_current_stats_mac_memory_card_keeps_pressure_and_activity_monitor_facts
             if (!card || !details) return {ready: true, card: Boolean(card), details: Boolean(details)};
             const cardRect = card.getBoundingClientRect();
             const rows = [...card.querySelectorAll('[data-js-debug-mac-memory-details] > div')].map(row => row.getBoundingClientRect());
-            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
+            return {cards: graph.querySelectorAll('[data-js-debug-chart="memory"]').length, title: card.querySelector('.js-debug-chart-title')?.textContent.trim(), unit: card.dataset.jsDebugChartUnit, axisMax: Number(card.dataset.jsDebugChartAxisMax), lineColor: card.querySelector('[data-js-debug-series="macMemoryPressure"]')?.style.getPropertyValue('--js-debug-series-color').trim(), facts: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dt')].map(node => node.textContent.trim()), values: [...card.querySelectorAll('[data-js-debug-mac-memory-details] dd')].map(node => node.textContent.trim()), bounds: rows.every(row => row.left >= cardRect.left - 1 && row.right <= cardRect.right + 1), pageOverflow: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1};
         """
     )
     assert result.get("ready", True) and "cards" in result, result
     assert result["cards"] == 1, result
     assert result["title"] == "Memory pressure", result
     assert result["unit"] == "percent" and result["axisMax"] == 100, result
+    assert result["lineColor"] == "var(--warning-border-strong)", result
     assert result["facts"] == ["Physical Memory", "Memory Used", "Cached Files", "Swap Used", "App Memory", "Wired Memory", "Compressed"], result
     assert len(result["values"]) == 7 and all(result["values"]), result
     assert result["bounds"] and result["pageOverflow"], result
