@@ -4847,7 +4847,10 @@ function debugGraphCostClass(item) {
 // reads and writes, and every concise legend entry derives from this same key set.
 const debugGraphCostUsageColumnCopy = Object.freeze({
   input: Object.freeze({description: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'], gloss: ['debug.cost.input.gloss', 'new prompt/context tokens']}),
-  cache: Object.freeze({description: ['debug.cost.cached.desc', 'Cumulative prompt-cache token accounting across requests: cache READS (hits/refreshes) and cache WRITES (5m/1h creation) combined. Reused history/tool/system context is counted again on every request, so in long conversations Cached can legitimately dwarf Input. This is billing accounting, not stored cache size or GPU cache occupancy.'], gloss: ['debug.cost.cache.gloss', 'cache reads + writes, combined']}),
+  cache_read: Object.freeze({description: ['debug.modelTokens.cacheRead.desc', 'Tokens served from model-cache reads, usually cheaper than uncached input.'], gloss: ['debug.cost.cacheRead.gloss', 'hits and refreshes']}),
+  cache_write: Object.freeze({description: ['debug.modelTokens.cacheWrite.desc', 'Input tokens written into a provider cache. Anthropic records 5-minute and 1-hour lifetimes separately in Cost calculation; OpenAI does not expose a cache-write counter.'], gloss: ['debug.modelTokens.cacheWrite', 'cache creation']}),
+  cache_write_5m: Object.freeze({description: ['debug.cost.class.cacheWrite5m', 'Input tokens written into the provider cache for a 5-minute lifetime.'], gloss: ['debug.cost.cacheWrite5m.gloss', '5-minute lifetime']}),
+  cache_write_1h: Object.freeze({description: ['debug.cost.class.cacheWrite1h', 'Input tokens written into the provider cache for a 1-hour lifetime.'], gloss: ['debug.cost.cacheWrite1h.gloss', '1-hour lifetime']}),
   output: Object.freeze({description: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'], gloss: ['debug.cost.output.gloss', 'generated tokens']}),
   other: Object.freeze({description: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'], gloss: ['debug.cost.other.gloss', 'non-token units (image/audio/tool)']}),
   total: Object.freeze({description: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'], gloss: ['debug.cost.total.gloss', 'Input + Cached + Output + Other']}),
@@ -4858,9 +4861,24 @@ function debugGraphCostUsageColumnDescription(key) {
   return entry ? debugGraphCostText(entry[0], entry[1]) : '';
 }
 
+function debugGraphCostUsageColumnLabel(key) {
+  if (key === 'cache_read') {
+    const providerLabel = debugGraphCostText('debug.modelTokens.cacheRead', 'Cache read');
+    return providerLabel === 'Cache hits & refreshes' ? 'Cache read' : providerLabel;
+  }
+  if (key === 'cache_write') return debugGraphCostText('debug.modelTokens.cacheWrite', 'Cache write');
+  if (key === 'cache_write_5m') return debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write');
+  if (key === 'cache_write_1h') return debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write');
+  return debugGraphCostText(`debug.cost.${key}`, key);
+}
+
 function debugGraphCostUsageColumnGloss(key) {
   const entry = debugGraphCostUsageColumnCopy[key]?.gloss;
-  return entry ? debugGraphCostText(entry[0], entry[1]) : '';
+  if (!entry) return '';
+  const gloss = debugGraphCostText(entry[0], entry[1]);
+  // The current locale reuses "Cache write" for this label. Keep the legend's
+  // second line informative instead of repeating the header word-for-word.
+  return key === 'cache_write' && gloss === debugGraphCostUsageColumnLabel(key) ? 'cache creation' : gloss;
 }
 
 // One always-visible legend for the cost tables' Input/Cached/Output/Other/Total columns, so the
@@ -4870,13 +4888,14 @@ function debugGraphCostUsageColumnGloss(key) {
 function debugGraphCostUsageColumnLegendHtml() {
   const labels = {
     input: debugGraphCostText('debug.cost.input', 'Input'),
-    cache: debugGraphCostText('debug.cost.cached', 'Cached'),
+    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
+    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
     output: debugGraphCostText('debug.cost.output', 'Output'),
     other: debugGraphCostText('debug.cost.other', 'Other'),
     total: debugGraphCostText('debug.cost.total', 'Total'),
   };
   const legendLabel = debugGraphCostText('debug.cost.columnLegend', 'What the columns count');
-  return `<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend aria-label="${esc(legendLabel)}">${['input', 'cache', 'output', 'other', 'total'].map(key => `<div${debugGraphCostUsageColumnHeaderAttrs(key, labels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i><dt>${esc(labels[key])}</dt><dd>${esc(debugGraphCostUsageColumnGloss(key))}</dd></div>`).join('')}</dl>`;
+  return `<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend aria-label="${esc(legendLabel)}">${['input', 'cache_read', 'cache_write', 'output', 'other', 'total'].map(key => `<div${debugGraphCostUsageColumnHeaderAttrs(key, labels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i><dt>${esc(labels[key])}</dt><dd>${esc(debugGraphCostUsageColumnGloss(key))}</dd></div>`).join('')}</dl>`;
 }
 
 function debugGraphCostUsageColumnHeaderAttrs(key, label) {
@@ -4936,8 +4955,8 @@ function debugGraphCostTokenTotals(summary) {
   return totals;
 }
 
-const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
-const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'output_tokens', 'other_tokens']);
+const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'cache_read_micro_usd', 'cache_write_micro_usd', 'cache_write_5m_micro_usd', 'cache_write_1h_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'cache_read_api_list_micro_usd', 'cache_write_api_list_micro_usd', 'cache_write_5m_api_list_micro_usd', 'cache_write_1h_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'cache_read_lower_micro_usd', 'cache_write_lower_micro_usd', 'cache_write_5m_lower_micro_usd', 'cache_write_1h_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'cache_read_upper_micro_usd', 'cache_write_upper_micro_usd', 'cache_write_5m_upper_micro_usd', 'cache_write_1h_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
+const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens', 'other_tokens']);
 const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
 const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
 const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
@@ -5105,7 +5124,7 @@ function debugGraphCostModelIdentityHtml(row, {showProvider = false, secondaryHt
   const provider = String(row?.provider || '').trim();
   const meta = [showProvider ? provider : '', effort].filter(Boolean).join(' · ');
   const kind = debugGraphCostModelAgentKind(row);
-  const icon = kind ? `<span class="js-debug-cost-model-icon" aria-hidden="true">${agentIcon(kind)}</span>` : '';
+  const icon = kind ? `<span class="js-debug-cost-model-icon" title="${esc(provider || kind)}" aria-label="${esc(provider || kind)}">${agentIcon(kind)}</span>` : '';
   const secondary = meta || secondaryHtml ? `<span class="js-debug-cost-model-meta">${meta ? `<small>${esc(meta)}</small>` : ''}${secondaryHtml}</span>` : '';
   return `<span class="js-debug-cost-model-identity">${icon}<span class="js-debug-cost-model-copy"><strong>${esc(model)}</strong>${secondary}</span></span>`;
 }
@@ -5141,17 +5160,23 @@ function debugGraphCostPricePairHtml(microUsd, apiListMicroUsd = null, {basis = 
 }
 
 function debugGraphCostBreakdownItems(row) {
+  const exactCacheWriteTokens = Math.max(0, Number(row?.cache_write_5m_tokens) || 0) + Math.max(0, Number(row?.cache_write_1h_tokens) || 0);
+  const exactCacheWriteMicroUsd = debugGraphCostInteger(row?.cache_write_5m_micro_usd) + debugGraphCostInteger(row?.cache_write_1h_micro_usd);
+  const exactCacheWriteApiListMicroUsd = debugGraphCostInteger(row?.cache_write_5m_api_list_micro_usd) + debugGraphCostInteger(row?.cache_write_1h_api_list_micro_usd);
   return [
     ['input', debugGraphCostText('debug.cost.input', 'Input')],
-    ['cache', debugGraphCostText('debug.cost.cache', 'Cache')],
+    ['cache_read', debugGraphCostUsageColumnLabel('cache_read')],
+    ['cache_write', debugGraphCostUsageColumnLabel('cache_write')],
     ['output', debugGraphCostText('debug.cost.output', 'Output')],
     ['other', debugGraphCostText('debug.cost.other', 'Other')],
   ].map(([key, label]) => ({
     key,
     label,
-    tokens: Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
-    microUsd: debugGraphCostInteger(row?.[`${key}_micro_usd`]),
-    apiListMicroUsd: debugGraphCostApiListMicroUsd({api_list_micro_usd: row?.[`${key}_api_list_micro_usd`]}),
+    tokens: key === 'cache_write' ? Math.max(exactCacheWriteTokens, Number(row?.cache_write_tokens) || 0) : Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
+    microUsd: key === 'cache_write' ? Math.max(exactCacheWriteMicroUsd, debugGraphCostInteger(row?.cache_write_micro_usd)) : debugGraphCostInteger(row?.[`${key}_micro_usd`]),
+    apiListMicroUsd: key === 'cache_write'
+      ? debugGraphCostApiListMicroUsd({api_list_micro_usd: Math.max(exactCacheWriteApiListMicroUsd, Number(row?.cache_write_api_list_micro_usd) || 0)})
+      : debugGraphCostApiListMicroUsd({api_list_micro_usd: row?.[`${key}_api_list_micro_usd`]}),
   }));
 }
 
@@ -5174,7 +5199,7 @@ function debugGraphCostPricingSourceEntries(components, modelRow = null) {
 function debugGraphCostPricingLinksHtml(components, modelRow = null, {compact = false} = {}) {
   const links = debugGraphCostPricingSourceEntries(components, modelRow);
   if (!links.length) return '';
-  return `<span class="js-debug-cost-pricing-links">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? debugGraphCostText('debug.cost.pricing', 'pricing') : label)}</a>`).join(' · ')}</span>`;
+  return `<span class="js-debug-cost-pricing-links${compact ? ' js-debug-cost-pricing-links--compact' : ''}">${links.map(({url, label}) => `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer"${compact ? ` aria-label="${esc(`${label} pricing`)}" title="${esc(`${label} pricing`)}"` : ''}>${esc(compact ? '$' : label)}</a>`).join(' · ')}</span>`;
 }
 
 function debugGraphCostAllPricingSourcesHtml(components) {
@@ -5186,7 +5211,8 @@ function debugGraphCostAllPricingSourcesHtml(components) {
   </section>`;
 }
 
-function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null} = {}) {
+function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null, unreported = false} = {}) {
+  if (unreported) return `<span class="js-debug-cost-unreported" title="${esc('OpenAI/Codex telemetry does not report cache-write tokens; this total is a lower bound.')}">—</span>`;
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
   const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
   const rowApiListMicroUsd = total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd;
@@ -5194,7 +5220,7 @@ function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row 
   const price = rowApiListMicroUsd === null
     ? `<small>${esc(cost)}</small>`
     : debugGraphCostPricePairHtml(microUsd, rowApiListMicroUsd);
-  return `<span class="js-debug-cost-table-metric" title="${esc(`${exactTokens}; ${debugGraphCostPricePairText(microUsd, rowApiListMicroUsd, {basis: 'inline'})}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong>${price}</span>`;
+  return `<span class="js-debug-cost-table-metric js-debug-cost-table-metric--inline" title="${esc(`${exactTokens}; ${debugGraphCostPricePairText(microUsd, rowApiListMicroUsd, {basis: 'inline'})}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><span aria-hidden="true"> · </span>${price}</span>`;
 }
 
 function debugGraphCostExactTotalRow(summary) {
@@ -5209,10 +5235,11 @@ function debugGraphCostExactTotalRow(summary) {
 
 function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = [], totalRow: exactTotalRow = null} = {}) {
   if (!rows.length) return '';
-  const usageKeys = ['input', 'cache', 'output', 'other'];
+  const usageKeys = ['input', 'cache_read', 'cache_write', 'output', 'other'];
   const usageLabels = {
     input: debugGraphCostText('debug.cost.input', 'Input'),
-    cache: debugGraphCostText('debug.cost.cached', 'Cached'),
+    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
+    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
     output: debugGraphCostText('debug.cost.output', 'Output'),
     other: debugGraphCostText('debug.cost.other', 'Other'),
   };
@@ -5225,7 +5252,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
     const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphMiddleTruncatedTextHtml(label)}</strong>`;
-    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd, unreported: kind === 'model' && item.key === 'cache_write' && String(row?.provider || '').toLowerCase() === 'openai' && item.tokens === 0})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
   const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
@@ -5233,7 +5260,7 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
   const grandTotalLabel = totalApiListMicroUsd !== null && totalApiListMicroUsd !== debugGraphCostMicroUsd(totalRow)
     ? debugGraphCostText('debug.cost.grandTotalDual', 'Grand total · marginal / API list prices')
     : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total at API list prices');
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i>${esc(usageLabels[key])}</th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}>${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i><span class="js-debug-cost-usage-label">${esc(usageLabels[key])}</span></th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
@@ -5258,7 +5285,7 @@ function debugGraphCostComponentLabel(row) {
 function debugGraphCostComponentRateText(row) {
   const exactRate = String(row?.rate_usd || '').trim();
   const scale = Math.max(0, Number(row?.rate_scale) || 0);
-  if (exactRate && scale > 0) return `$${exactRate}/${scale.toLocaleString()} ${String(row?.unit || 'unit')}`;
+  if (exactRate && scale > 0) return `$${exactRate}/${debugGraphTokenNumberText(scale)}${String(row?.unit || 'unit') === 'tokens' ? '' : ` ${String(row?.unit || 'unit')}`}`;
   const quantity = Number(row?.quantity);
   const microUsd = debugGraphCostMicroUsd(row);
   if (!Number.isFinite(quantity) || quantity <= 0 || microUsd <= 0) return '—';
@@ -5327,26 +5354,66 @@ function debugGraphCostUsageClassLabel(direction, cacheRole) {
   return [direction, cacheRole].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
 }
 
+function debugGraphCostComponentDimension(row) {
+  const role = String(row?.cache_role || '').toLowerCase();
+  if (role === 'read') return 'cache_read';
+  if (role === 'write_5m') return 'cache_write_5m';
+  if (role === 'write_1h') return 'cache_write_1h';
+  if (String(row?.direction || '').toLowerCase() === 'input') return 'input';
+  if (String(row?.direction || '').toLowerCase() === 'output') return 'output';
+  return 'other';
+}
+
+function debugGraphCostCalculationCellHtml(rows) {
+  if (!rows.length) return '—';
+  const grouped = new Map();
+  for (const row of rows) {
+    const rate = debugGraphCostComponentRateText(row);
+    const current = grouped.get(rate) || {...row, quantity: 0, micro_usd: 0, api_list_micro_usd: 0};
+    current.quantity += Math.max(0, Number(row?.quantity) || 0);
+    current.micro_usd += debugGraphCostMicroUsd(row);
+    current.api_list_micro_usd += debugGraphCostApiListMicroUsd(row) ?? debugGraphCostMicroUsd(row);
+    grouped.set(rate, current);
+  }
+  return [...grouped.values()].map(row => `<span class="js-debug-cost-calculation-math" title="${esc(`${Math.max(0, Number(row.quantity) || 0).toLocaleString()} tokens x ${debugGraphCostComponentRateText(row)} = ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}">${esc(debugGraphTokenNumberText(row.quantity))} x ${esc(debugGraphCostComponentRateText(row))} = ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</span>`).join('<br>');
+}
+
 function debugGraphCostComponentDetailsHtml(rows) {
   if (!rows.length) return '';
-  const headers = [
-    ['provider', 'Provider'], ['model', 'Model'], ['direction', debugGraphCostText('debug.cost.usageClass', 'Usage class')],
-    ['tokens', debugGraphCostText('debug.modelTokens.label', 'Tokens')], ['cost', debugGraphCostText('debug.cost.rateAndCost', 'Rate / cost')],
-    ['effective', debugGraphCostText('debug.cost.pricing', 'Pricing')],
+  const dimensions = [
+    ['input', debugGraphCostText('debug.cost.class.baseInput', 'Base input')],
+    ['cache_read', debugGraphCostText('debug.cost.class.cacheHits', 'Cache hits & refreshes')],
+    ['cache_write_5m', debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write')],
+    ['cache_write_1h', debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write')],
+    ['output', debugGraphCostText('debug.cost.class.output', 'Output')],
+    ['other', debugGraphCostText('debug.cost.other', 'Other')],
   ];
+  const models = new Map();
+  for (const row of rows) {
+    const key = `${String(row?.provider || '')}\u0000${String(row?.model || '')}`;
+    const current = models.get(key) || {provider: row?.provider || '', model: row?.model || debugGraphCostText('debug.cost.unknown', 'Unknown'), dimensions: new Map(), total: []};
+    const dimension = debugGraphCostComponentDimension(row);
+    const items = current.dimensions.get(dimension) || [];
+    items.push(row);
+    current.dimensions.set(dimension, items);
+    current.total.push(row);
+    models.set(key, current);
+  }
+  const rowsHtml = [...models.values()].sort((left, right) => String(left.model).localeCompare(String(right.model))).map(model => {
+    const pricing = debugGraphCostPricingLinksHtml(rows, model, {compact: true});
+    const totalTokens = model.total.reduce((sum, row) => sum + Math.max(0, Number(row?.quantity) || 0), 0);
+    const totalCost = model.total.reduce((sum, row) => sum + debugGraphCostMicroUsd(row), 0);
+    return `<tr><th scope="row">${debugGraphCostModelIdentityHtml(model, {secondaryHtml: pricing})}</th>${dimensions.map(([key, label]) => `<td data-label="${esc(label)}">${debugGraphCostCalculationCellHtml(model.dimensions.get(key) || [])}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${esc(debugGraphTokenNumberText(totalTokens))} · ${esc(debugGraphCostUsdText(totalCost))}</td></tr>`;
+  }).join('');
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr>${headers.map(([key, label]) => debugGraphCostComponentSortHeaderHtml(key, label)).join('')}</tr></thead><tbody>${debugGraphCostSortedComponentRows(rows).map(row => {
-      const url = normalizedExternalHttpUrl(row?.source_url, {maxLength: 2048});
-      const usageClass = debugGraphCostUsageClassLabel(row?.direction, row?.cache_role);
-      const usageMeta = [row?.modality, row?.unit].map(value => String(value || '').trim()).filter(Boolean).join(' · ');
-      const exactQuantity = `${Math.max(0, Number(row?.quantity) || 0).toLocaleString()} ${String(row?.unit || 'units')}`;
-      return `<tr><td data-label="Provider">${esc(String(row?.provider || '—'))}</td><td data-label="Model">${debugGraphCostModelIdentityHtml(row)}</td><td data-label="Usage class"><span class="js-debug-cost-stacked-cell"><strong>${esc(usageClass)}</strong>${usageMeta ? `<small>${esc(usageMeta)}</small>` : ''}</span></td><td data-label="Tokens" title="${esc(exactQuantity)}">${esc(debugGraphTokenNumberText(row?.quantity))}</td><td data-label="Rate / cost"><span class="js-debug-cost-stacked-cell">${debugGraphCostPricePairHtml(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}<small>${esc(debugGraphCostComponentRateText(row))}</small></span></td><td data-label="Pricing"><span class="js-debug-cost-stacked-cell"><small>${esc(String(row?.effective_from || '—'))}</small>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(debugGraphCostText('debug.cost.source', 'Pricing source'))}</a>` : '—'}</span></td></tr>`;
-    }).join('')}</tbody></table></div>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.model', 'Model'))}</th>${dimensions.map(([, label]) => `<th scope="col">${esc(label)}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
   </section>`;
 }
 
 function debugGraphCostSourceLabel(row) {
+  const explicit = String(row?.full_label || row?.agent_label || row?.label || '').trim();
+  if (explicit) return explicit;
   const root = String(row?.root_thread_id || '').trim();
   const agent = String(row?.agent_thread_id || '').trim();
   const tool = String(row?.tool_name || '').trim();
@@ -5454,9 +5521,27 @@ function debugGraphCostSourceLabelHtml(row) {
 
 function debugGraphCostSourceTreeHtml(rows) {
   if (!rows.length) return '';
+  const usageKeys = ['input', 'cache_read', 'cache_write', 'output', 'other'];
+  const usageLabels = {
+    input: debugGraphCostText('debug.cost.input', 'Input'),
+    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
+    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
+    output: debugGraphCostText('debug.cost.output', 'Output'),
+    other: debugGraphCostText('debug.cost.other', 'Other'),
+  };
+  const rowHtml = row => {
+    const breakdown = debugGraphCostBreakdownItems(row);
+    const byKey = new Map(breakdown.map(item => [item.key, item]));
+    const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
+    const cells = usageKeys.map(key => {
+      const item = byKey.get(key);
+      return `<td data-label="${esc(usageLabels[key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`;
+    }).join('');
+    return `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th>${cells}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+  };
   return `<section class="js-debug-cost-details-section">
     <h2>${esc(debugGraphCostText('debug.cost.bySource', 'Agent and source attribution'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th><th scope="col">${esc(debugGraphCostText('debug.modelTokens.label', 'Tokens'))}</th><th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${debugGraphCostSourceLabelHtml(row)}</th><td>${esc(debugGraphTokensText(row?.token_quantity))}</td><td>${esc(debugGraphCostSubtotalText(row))}</td></tr>`).join('')}</tbody></table></div>
+    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="source"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.source', 'Source'))}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><span class="js-debug-cost-usage-label">${esc(usageLabels[key])}</span></th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody></table></div>
   </section>`;
 }
 
@@ -6039,12 +6124,24 @@ function jsDebugCurrentSeriesValue(series, name) {
 }
 
 function jsDebugCurrentCostDimensionRows(dimensions = {}) {
+  const cacheWrite = dimensions.cache_write || {
+    tokens: Number(dimensions.cache_write_5m?.tokens || 0) + Number(dimensions.cache_write_1h?.tokens || 0),
+    micro_usd: Number(dimensions.cache_write_5m?.micro_usd || 0) + Number(dimensions.cache_write_1h?.micro_usd || 0),
+    api_list_micro_usd: Number(dimensions.cache_write_5m?.api_list_micro_usd || 0) + Number(dimensions.cache_write_1h?.api_list_micro_usd || 0),
+  };
   const values = {
     input: dimensions.input,
+    cache_read: dimensions.cache_read,
+    // The compact usage tables have one Cache write column. Retain the two
+    // lifetime fields below for Cost calculation, where the distinct rates
+    // remain material to the formula.
+    cache_write: cacheWrite,
+    cache_write_5m: dimensions.cache_write_5m || dimensions.cache_write,
+    cache_write_1h: dimensions.cache_write_1h,
     cache: {
-      tokens: Number(dimensions.cache_read?.tokens || 0) + Number(dimensions.cache_write?.tokens || 0),
-      micro_usd: Number(dimensions.cache_read?.micro_usd || 0) + Number(dimensions.cache_write?.micro_usd || 0),
-      api_list_micro_usd: Number(dimensions.cache_read?.api_list_micro_usd || 0) + Number(dimensions.cache_write?.api_list_micro_usd || 0),
+      tokens: Number(dimensions.cache_read?.tokens || 0) + Number(cacheWrite.tokens || 0),
+      micro_usd: Number(dimensions.cache_read?.micro_usd || 0) + Number(cacheWrite.micro_usd || 0),
+      api_list_micro_usd: Number(dimensions.cache_read?.api_list_micro_usd || 0) + Number(cacheWrite.api_list_micro_usd || 0),
     },
     output: dimensions.output,
     other: dimensions.other,

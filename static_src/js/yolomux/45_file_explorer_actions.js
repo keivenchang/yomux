@@ -2815,8 +2815,8 @@ function codeMirrorThemeExtension(api) {
     },
     '.cm-searchMatch-selected': {
       color: scheme.dark ? '#111827' : '#111827',
-      backgroundColor: scheme.dark ? '#ffd166' : '#ff9f1c',
-      boxShadow: `inset 0 0 0 2px ${scheme.dark ? '#fff2a8' : '#7c2d12'}, 0 0 0 1px ${scheme.dark ? 'rgba(0, 0, 0, 0.46)' : 'rgba(255, 255, 255, 0.68)'}`,
+      backgroundColor: 'var(--editor-cursor)',
+      boxShadow: `inset 0 0 0 2px ${scheme.bg}, 0 0 0 1px var(--editor-cursor)`,
       borderRadius: '2px',
       fontWeight: '800',
     },
@@ -3268,7 +3268,13 @@ function codeMirrorSearchScrollFix(api) {
     if (!update.transactions.some(tr => tr.isUserEvent?.('select.search'))) return;
     const head = update.state.selection.main.head;
     const view = update.view;
+    const scrollTop = view.scrollDOM?.scrollTop || 0;
+    const scrollLeft = view.scrollDOM?.scrollLeft || 0;
     requestAnimationFrame(() => {
+      // Find keeps focus in its panel, so a manual scroll between the search
+      // selection and this deferred centering pass is newer user navigation.
+      if (!view.dom?.isConnected || view.state.selection.main.head !== head) return;
+      if (Math.abs((view.scrollDOM?.scrollTop || 0) - scrollTop) > 1 || Math.abs((view.scrollDOM?.scrollLeft || 0) - scrollLeft) > 1) return;
       try {
         view.dispatch({effects: api.EditorView.scrollIntoView(head, {x: 'center', y: 'nearest'})});
       } catch (_) {}

@@ -4245,11 +4245,29 @@ def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(brow
               await frame();
               await frame();
               await frame();
+              const afterFocused = {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}};
+              const focusedAfterFirstRender = view.hasFocus;
+              const focusSink = document.createElement('input');
+              document.body.append(focusSink);
+              focusSink.focus();
+              const unfocusedStale = fileEditorViewState.get(item);
+              view.dispatch({{selection: {{anchor: 600, head: 840}}}});
+              scroller.scrollTop = Math.min(7600, scroller.scrollHeight - scroller.clientHeight - 10);
+              await frame();
+              const passiveBefore = {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}};
+              fileEditorViewState.set(item, unfocusedStale);
+              renderFileEditorPanel(panel, item, {{updateActiveFile: false, captureViewState: false}});
+              await frame();
+              await frame();
+              await frame();
               return {{
-                focused: panel._cmView.hasFocus,
+                focused: focusedAfterFirstRender,
                 sameView: panel._cmView === view,
                 before,
-                after: {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}},
+                after: afterFocused,
+                passiveFocused: view.hasFocus,
+                passiveBefore,
+                passiveAfter: {{anchor: view.state.selection.main.anchor, head: view.state.selection.main.head, top: scroller.scrollTop}},
                 stale: {{anchor: stale.anchor, head: stale.head, top: stale.scrollTop}},
               }};
             }})();
@@ -4271,3 +4289,10 @@ def test_focused_editor_background_rerender_keeps_live_selection_and_scroll(brow
     assert metrics["after"]["anchor"] == metrics["before"]["anchor"], metrics
     assert metrics["after"]["head"] == metrics["before"]["head"], metrics
     assert abs(metrics["after"]["top"] - metrics["before"]["top"]) < 32, metrics
+    assert metrics["passiveFocused"] is False, metrics
+    assert metrics["passiveBefore"]["anchor"] != metrics["stale"]["anchor"], metrics
+    assert metrics["passiveBefore"]["head"] != metrics["stale"]["head"], metrics
+    assert metrics["passiveBefore"]["top"] > metrics["stale"]["top"], metrics
+    assert metrics["passiveAfter"]["anchor"] == metrics["passiveBefore"]["anchor"], metrics
+    assert metrics["passiveAfter"]["head"] == metrics["passiveBefore"]["head"], metrics
+    assert abs(metrics["passiveAfter"]["top"] - metrics["passiveBefore"]["top"]) < 32, metrics

@@ -49,14 +49,14 @@ function seriesValue(value, at, sourceCount = 1) {
 }
 
 function costDimensions(changes = {}) {
-  return Object.fromEntries(['input', 'cache_read', 'cache_write', 'output', 'other'].map(name => [
+  return Object.fromEntries(['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(name => [
     name, changes[name] || {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
   ]));
 }
 
 function costReport(changes = {}) {
   return {
-    schema_version: 2,
+    schema_version: 3,
     total_micro_usd: 0,
     total_api_list_micro_usd: 0,
     total_tokens: 0,
@@ -286,7 +286,7 @@ function rendererSnapshot({range = 300, requested = 1, resolution = 1, cache = 1
   const dimensions = costDimensions({
     input: {tokens: 600, micro_usd: 120000, api_list_micro_usd: 240000},
     cache_read: {tokens: 300, micro_usd: 30000, api_list_micro_usd: 60000},
-    cache_write: {tokens: 100, micro_usd: 50000, api_list_micro_usd: 100000},
+    cache_write_5m: {tokens: 100, micro_usd: 50000, api_list_micro_usd: 100000},
     output: {tokens: 200, micro_usd: 100000, api_list_micro_usd: 200000},
   });
   const attribution = {
@@ -1749,7 +1749,7 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(html.includes('<strong>$0.30</strong> marginal'));
   assert.ok(html.includes('<strong>$0.60</strong> list'));
   assert.ok(html.includes('Total tokens: <strong>1.2K tokens</strong>'));
-  assert.ok(html.includes('Input=600, Cached=300, Cache write=100, Output=200, Other=0'));
+  assert.ok(html.includes('Input=600, Cache read=300, 5m cache write=100, 1h cache write=0, Output=200, Other=0'));
   assert.ok(html.includes('data-stats-current-cost-more>More Info</button>'));
   assert.equal(html.includes('Model Usages'), false, 'full report details stay out of the compact summary');
 
@@ -1763,6 +1763,7 @@ test('cost mount renders the precomputed summary and explicit scrollable details
   assert.ok(modal.includes('data-stats-current-cost-modal-close'));
   assert.ok(modal.includes('Model Usages'));
   assert.ok(modal.includes('gpt-5.6-sol'));
+  assert.ok(modal.includes('yo8881|0|codex'), 'agent tables use the privacy-safe session label rather than only the generic source');
   assert.ok(modal.includes('By Agent'));
   assert.ok(modal.includes('Pricing attribution'));
   assert.ok(modal.includes('$0.10 marginal · $0.20 list'));

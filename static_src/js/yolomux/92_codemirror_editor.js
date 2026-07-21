@@ -144,30 +144,14 @@ function codeMirrorContextMenuSelectionExtension(api) {
 
 function updateCodeMirrorViewPreservingState(view, update, options = {}) {
   if (!view || typeof update !== 'function') return false;
-  const scrollDOM = view.scrollDOM;
-  const scrollTop = scrollDOM?.scrollTop || 0;
-  const scrollLeft = scrollDOM?.scrollLeft || 0;
   const selection = options.preserveSelection === false ? null : view.state.selection;
-  update(selection);
+  const scrollSnapshot = typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null;
+  update(selection, scrollSnapshot);
   const currentSelection = view.state.selection;
   const selectionPreserved = !selection || currentSelection === selection || currentSelection?.eq?.(selection) === true;
   if (!selectionPreserved) {
-    try { view.dispatch({selection}); } catch (_) {}
+    try { view.dispatch({selection, ...(scrollSnapshot ? {effects: scrollSnapshot} : {})}); } catch (_) {}
   }
-  const restoreScroll = () => {
-    if (!scrollDOM) return;
-    scrollDOM.scrollTop = scrollTop;
-    scrollDOM.scrollLeft = scrollLeft;
-  };
-  if (typeof view.requestMeasure === 'function') {
-    view.requestMeasure({write: restoreScroll});
-  } else {
-    requestAnimationFrame(restoreScroll);
-  }
-  requestAnimationFrame(() => {
-    restoreScroll();
-    requestAnimationFrame(restoreScroll);
-  });
   return true;
 }
 
@@ -180,10 +164,11 @@ function syncCodeMirrorDocument(view, text, options = {}) {
   const selectionFits = selection?.ranges?.every(range => (
     range.anchor <= next.length && range.head <= next.length
   ));
-  updateCodeMirrorViewPreservingState(view, preservedSelection => {
+  updateCodeMirrorViewPreservingState(view, (preservedSelection, scrollSnapshot) => {
     view.dispatch({
       changes: {from: 0, to: view.state.doc.length, insert: next},
       ...(preservedSelection ? {selection: preservedSelection} : {}),
+      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
     });
   }, {preserveSelection: selectionFits});
 }
@@ -330,7 +315,10 @@ function reconfigureCodeMirrorPanelLocale(panel) {
   const effect = compartment.reconfigure(codeMirrorLocaleExtensions(api, null));
   for (const view of views) {
     try {
-      updateCodeMirrorViewPreservingState(view, selection => view.dispatch({effects: effect, selection}));
+      updateCodeMirrorViewPreservingState(view, (selection, scrollSnapshot) => view.dispatch({
+        effects: scrollSnapshot ? [effect, scrollSnapshot] : effect,
+        ...(selection ? {selection} : {}),
+      }));
     } catch (_) {}
   }
   return true;
@@ -1005,7 +993,7 @@ async function ensureCodeMirrorDiffPanel(panel, item, path, state) {
     panel._cmMode = 'diff';
     updateCodeMirrorDiffOverview(panel, container, state, currentText, original);
     scheduleDiffOverviewSettledRebuild(panel);
-    restoreFileEditorPanelViewState(item, panel);
+    restoreFileEditorPanelViewState(item, panel, {restoreFresh: true});
     updateCodeMirrorCursorStatus(panel);
     focusFileEditorPanelIfReady(panel, item);
     return true;
@@ -1037,7 +1025,8 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
   try {
     const api = await loadCodeMirrorApi();
     if (panel._cmGeneration !== generation) return null;
-    if (!panel._cmView) {
+    const created = !panel._cmView;
+    if (created) {
       container.replaceChildren();
       const createdState = createEditableCodeMirrorState(api, panel, path, currentText);
       panel._cmView = new api.EditorView({
@@ -1074,7 +1063,7 @@ async function ensureCodeMirrorPanel(panel, item, path, state, options = {}) {
       });
       updateCodeMirrorCursorStatus(panel);
     }
-    restoreFileEditorPanelViewState(item, panel);
+    restoreFileEditorPanelViewState(item, panel, {restoreFresh: created});
     focusFileEditorPanelIfReady(panel, item);
     applyPendingFileEditorLineTarget(item, panel);
     // if blame is on but this path isn't cached yet (file opened after the toggle), fetch it

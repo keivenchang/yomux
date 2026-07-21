@@ -1483,13 +1483,13 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             }],
           };
           const emptyDimensions = () => Object.fromEntries(
-            ['input', 'cache_read', 'cache_write', 'output', 'other'].map(key => [
+            ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [
               key,
               {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
             ]),
           );
           const costReport = () => ({
-            schema_version: 2,
+            schema_version: 3,
             total_micro_usd: 0,
             total_api_list_micro_usd: 0,
             total_tokens: 0,
@@ -10591,6 +10591,10 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const dimensions = {
             input_tokens: 1000, input_micro_usd: 0, input_api_list_micro_usd: 600000,
             cache_tokens: 0, cache_micro_usd: 0, cache_api_list_micro_usd: 0,
+            cache_read_tokens: 0, cache_read_micro_usd: 0, cache_read_api_list_micro_usd: 0,
+            cache_write_tokens: 0, cache_write_micro_usd: 0, cache_write_api_list_micro_usd: 0,
+            cache_write_5m_tokens: 0, cache_write_5m_micro_usd: 0, cache_write_5m_api_list_micro_usd: 0,
+            cache_write_1h_tokens: 0, cache_write_1h_micro_usd: 0, cache_write_1h_api_list_micro_usd: 0,
             output_tokens: 0, output_micro_usd: 0, output_api_list_micro_usd: 0,
             other_tokens: 0, other_micro_usd: 0, other_api_list_micro_usd: 0,
           };
@@ -10600,6 +10604,10 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             source_url: 'https://example.com/pricing',
             lower_micro_usd: 0, upper_micro_usd: 0, ...dimensions,
           };
+          const components = [
+            {...pricedRow, quantity: 1000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'none', pricing_profile: 'subscription', rate_usd: '6.00', rate_scale: 1000000},
+            {...pricedRow, quantity: 100, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'write_5m', pricing_profile: 'subscription', rate_usd: '7.50', rate_scale: 1000000},
+          ];
           debugGraphApplyServerRecord({
             start: now - 60,
             duration: 60,
@@ -10616,7 +10624,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               complete: true,
               unpriced_count: 0,
               unpriced_token_quantity: 0,
-              components: [{...pricedRow, quantity: 1000, unit: 'tokens', modality: 'text', direction: 'input', cache_role: 'none', pricing_profile: 'subscription'}],
+              components,
               models: [pricedRow],
               sources: [{...pricedRow, source: 'codex'}],
               tmux_windows: [{...pricedRow, tmux_label: 'yo8881:0'}],
@@ -10638,6 +10646,7 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
           const expectedScrollLeft = agentWrap.scrollLeft;
           renderYoCostPanels({force: true});
           await new Promise(resolve => requestAnimationFrame(resolve));
+          const renderedReport = document.querySelector('.js-yocost-panel .js-debug-cost-report');
           return {
             preferences,
             reportText: report?.textContent?.replace(/\\s+/g, ' ').trim() || '',
@@ -10646,6 +10655,17 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               entries: [...report.querySelectorAll('[data-js-debug-cost-column-legend] > div')].map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
               swatches: [...report.querySelectorAll('[data-js-debug-cost-column-legend] .js-debug-cost-usage-swatch')].map(node => node.className),
               headerTitles: [...report.querySelectorAll('[data-js-debug-cost-table="agent"] thead th[title]')].map(node => node.title),
+              openaiCacheWrite: report.querySelector('[data-js-debug-cost-table="model"] tbody tr td:nth-child(4)')?.textContent.trim() || '',
+              openaiCacheWriteTitle: report.querySelector('[data-js-debug-cost-table="model"] tbody tr td:nth-child(4) [title]')?.title || '',
+              pricingText: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.textContent || '',
+              pricingTitle: renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact a')?.title || '',
+              pricingBefore: getComputedStyle(renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'), '::before').content,
+              pricingAfter: getComputedStyle(renderedReport.querySelector('[data-js-debug-cost-table="model"] .js-debug-cost-pricing-links--compact'), '::after').content,
+              metricsOneLine: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-table-metric, [data-js-debug-cost-table="agent"] .js-debug-cost-table-metric, [data-js-debug-cost-table="source"] .js-debug-cost-table-metric')].every(metric => {
+                const style = getComputedStyle(metric);
+                return style.display === 'inline-flex' && style.whiteSpace === 'nowrap' && style.flexWrap === 'nowrap';
+              }),
+              pricePairDisplays: [...renderedReport.querySelectorAll('[data-js-debug-cost-table="model"] .js-debug-cost-price-pair, [data-js-debug-cost-table="agent"] .js-debug-cost-price-pair, [data-js-debug-cost-table="source"] .js-debug-cost-price-pair')].map(pair => ({display: getComputedStyle(pair).display, parent: pair.parentElement?.className || ''})),
             } : null,
             grandTotals: [...report?.querySelectorAll('tfoot th') || []].map(node => node.textContent.trim()),
             pairCount: report?.querySelectorAll('.js-debug-cost-price-pair').length || 0,
@@ -10653,6 +10673,11 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             pricingDefaultPrevented: pricingEvent.defaultPrevented,
             restoredScrollLeft: document.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap')?.scrollLeft || 0,
             expectedScrollLeft,
+            calculation: report ? {
+              rows: report.querySelectorAll('[data-js-debug-cost-table="calculation"] tbody tr').length,
+              headers: [...report.querySelectorAll('[data-js-debug-cost-table="calculation"] thead th')].map(node => node.textContent.trim()),
+              formulas: [...report.querySelectorAll('[data-js-debug-cost-table="calculation"] .js-debug-cost-calculation-math')].map(node => node.textContent.trim()),
+            } : null,
             errors: window.__bootErrors || [],
             rejections: window.__bootRejections || [],
           };
@@ -10668,21 +10693,35 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
     assert "list" in result["reportText"], result
     assert result["reportText"].count("At API list prices") == 1, result
     assert result["legend"]["count"] == 1, result
-    assert len(result["legend"]["entries"]) == 5, result
-    assert any(entry.startswith("Cached") and "cache reads + writes, combined" in entry for entry in result["legend"]["entries"]), result
+    assert len(result["legend"]["entries"]) == 6, result
+    assert any(entry.startswith("Cache") and "hits and refreshes" in entry for entry in result["legend"]["entries"]), result
+    assert any(entry.startswith("Cache write") and "cache creation" in entry for entry in result["legend"]["entries"]), result
     assert set(result["legend"]["swatches"]) == {
         "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--input",
-        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--cache",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--cache_read",
+        "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--cache_write",
         "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--output",
         "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--other",
         "js-debug-cost-usage-swatch js-debug-cost-usage-swatch--total",
     }, result
-    assert any("cache READS" in title and "cache WRITES" in title for title in result["legend"]["headerTitles"]), result
+    assert any("cache reads" in title.lower() for title in result["legend"]["headerTitles"]), result
+    assert any("written into the model cache" in title.lower() for title in result["legend"]["headerTitles"]), result
+    assert result["legend"]["openaiCacheWrite"] == "—", result
+    assert "lower bound" in result["legend"]["openaiCacheWriteTitle"], result
+    assert result["legend"]["pricingText"] == "$", result
+    assert "pricing" in result["legend"]["pricingTitle"].lower(), result
+    assert result["legend"]["pricingBefore"] in ("", "none") and result["legend"]["pricingAfter"] in ("", "none"), result
+    assert result["legend"]["metricsOneLine"], result
+    assert result["legend"]["pricePairDisplays"] and all(item["display"] in ("flex", "inline-flex") for item in result["legend"]["pricePairDisplays"]), result
     assert result["restoredScrollLeft"] == result["expectedScrollLeft"], result
     assert set(result["grandTotals"]) == {"Grand total · marginal / API list prices"}, result
     assert result["pairCount"] >= 2, result
     assert result["pricingOpen"] == [["https://example.com/pricing", "_blank", "noopener,noreferrer"]], result
     assert result["pricingDefaultPrevented"] is True, result
+    assert result["calculation"]["rows"] == 1, result
+    assert result["calculation"]["headers"] == ["Model", "Base input", "Cache hits & refreshes", "5m cache write", "1h cache write", "Output", "Other", "Total"], result
+    assert any(formula.startswith("1.0k x $6.00/1M =") for formula in result["calculation"]["formulas"]), result
+    assert any(formula.startswith("100 x $7.50/1M =") for formula in result["calculation"]["formulas"]), result
     assert result["errors"] == [] and result["rejections"] == [], result
     for width in (260, 360, 720, 1200):
         browser.set_window_size(width, 720)
@@ -10704,9 +10743,11 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
               wrapRight: wrapRect.right,
               cellsFit: finalCells.every(cell => cell.scrollWidth <= cell.clientWidth + 1),
               finalVisible: finalCells.every(cell => cell.getBoundingClientRect().right <= wrapRect.right + 1),
-              otherHeading: [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === 'Cached')
-                && [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === 'Other'),
+              cacheHeadings: ['Cache read', 'Cache write', 'Other'].every(label =>
+                [...table.querySelectorAll('thead th')].some(cell => cell.textContent.trim() === label)),
               legendExists: Boolean(legend),
+              legendDisplay: legend ? getComputedStyle(legend).display : '',
+              legendColumns: legend ? getComputedStyle(legend).gridTemplateColumns : '',
               legendRows: legend ? new Set([...legend.children].map(node => Math.round(node.getBoundingClientRect().top))).size : 0,
               reportOverflow: legend ? legend.closest('.js-debug-cost-report')?.scrollWidth <= legend.closest('.js-debug-cost-report')?.clientWidth + 1 : false,
             };
@@ -10716,8 +10757,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
         assert metrics["overflowX"] == "auto", (width, metrics)
         assert metrics["cellsFit"] and metrics["finalVisible"], (width, metrics)
         assert metrics["tableRight"] <= metrics["wrapRight"] + 1, (width, metrics)
-        assert metrics["otherHeading"], (width, metrics)
-        assert metrics["legendExists"] and metrics["legendRows"] <= 2 and metrics["reportOverflow"], (width, metrics)
+        assert metrics["cacheHeadings"], (width, metrics)
+        assert metrics["legendExists"] and metrics["legendDisplay"] == "grid" and metrics["legendColumns"].count("px") >= 1 and metrics["legendRows"] <= 2 and metrics["reportOverflow"], (width, metrics)
 
 
 def test_preferences_scroll_defers_passive_rerender(browser, tmp_path):

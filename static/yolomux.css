@@ -5281,7 +5281,11 @@ body :is(
 .js-debug-cost-usage-swatch--input {
   background: var(--js-debug-agent-token-cyan);
 }
-.js-debug-cost-usage-swatch--cache {
+.js-debug-cost-usage-swatch--cache,
+.js-debug-cost-usage-swatch--cache_read,
+.js-debug-cost-usage-swatch--cache_write,
+.js-debug-cost-usage-swatch--cache_write_5m,
+.js-debug-cost-usage-swatch--cache_write_1h {
   background: var(--js-debug-agent-token-orange);
 }
 .js-debug-cost-usage-swatch--output {
@@ -5294,7 +5298,7 @@ body :is(
    description stays on the header hover tooltip. Kept compact so it never re-widens the report. */
 .js-debug-cost-column-legend {
   display: grid;
-  grid-template-columns: repeat(5, max-content);
+  grid-template-columns: repeat(6, max-content);
   gap: var(--space-3) var(--space-7);
   max-width: 100%;
   margin: var(--space-5) 0;
@@ -5443,12 +5447,27 @@ body :is(
   display: grid;
   gap: var(--space-1);
 }
+.js-debug-cost-table-metric--inline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.js-debug-cost-table-metric--inline .js-debug-cost-price-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
 .js-debug-cost-table-metric strong,
 .js-debug-cost-table-metric small {
   font-family: var(--mono-font);
 }
 .js-debug-cost-table-metric small {
   color: var(--muted);
+}
+.js-debug-cost-unreported {
+  color: var(--muted);
+  font: 700 var(--ui-font-size-sm)/1 var(--mono-font);
 }
 .js-debug-cost-price-pair {
   display: inline-grid;
@@ -5480,7 +5499,13 @@ body :is(
   inline-size: 1em;
   block-size: 1em;
 }
-.js-debug-cost-model-copy,
+.js-debug-cost-model-copy {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-inline-size: 0;
+  white-space: nowrap;
+}
 .js-debug-cost-stacked-cell {
   display: grid;
   gap: var(--space-1);
@@ -5707,6 +5732,13 @@ body :is(
 .js-debug-cost-pricing-links::after {
   content: "]";
   color: var(--muted);
+}
+.js-debug-cost-pricing-links--compact {
+  margin-inline-start: 0;
+}
+.js-debug-cost-pricing-links--compact::before,
+.js-debug-cost-pricing-links--compact::after {
+  content: none;
 }
 .js-debug-cost-report-total {
   margin: var(--space-6) 0 0;

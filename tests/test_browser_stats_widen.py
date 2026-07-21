@@ -38,13 +38,13 @@ def test_retained_stats_widen_fetches_and_paints_the_full_exact_window(browser, 
             })),
           };
           const emptyDimensions = () => Object.fromEntries(
-            ['input', 'cache_read', 'cache_write', 'output', 'other'].map(key => [
+            ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [
               key,
               {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
             ]),
           );
           const costReport = () => ({
-            schema_version: 2,
+            schema_version: 3,
             total_micro_usd: 0,
             total_api_list_micro_usd: 0,
             total_tokens: 0,

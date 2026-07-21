@@ -43,7 +43,9 @@ LAYER_SECONDS = {
 }
 PriceResolver = Callable[[UsageAtom], UsagePriceProjection]
 MODEL_TOKEN_DIMENSIONS = ("output", "all", "input", "cache_read", "cache_write")
-TOKEN_DETAIL_DIMENSIONS = ("input", "cache_read", "cache_write", "output", "reasoning", "other")
+TOKEN_DETAIL_DIMENSIONS = (
+    "input", "cache_read", "cache_write_5m", "cache_write_1h", "output", "reasoning", "other",
+)
 MAX_PRIVATE_BROWSER_CLIENTS = 4
 PUBLIC_EXECUTION_SOURCES = frozenset({
     "claude", "codex", "images", "messages", "responses", "unknown",
@@ -1392,7 +1394,15 @@ def build_cost_report(layer: Layer) -> dict[str, object]:
 def _cost_detail_dimension(atom: UsageAtom) -> str:
     if atom.unit != "tokens" or atom.modality != "text":
         return "other"
-    return _model_token_dimension(atom)
+    if atom.direction == "output":
+        return "output"
+    if atom.cache_role == "read":
+        return "cache_read"
+    if atom.cache_role == "write_5m":
+        return "cache_write_5m"
+    if atom.cache_role == "write_1h":
+        return "cache_write_1h"
+    return "input"
 
 
 def _model_token_dimension(atom: UsageAtom) -> str:

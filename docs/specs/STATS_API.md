@@ -21,7 +21,7 @@ flowchart LR
     H -->|render-ready values and no-data spans| B
 ```
 
-- `statsd` is the sole SQLite writer and the sole owner of source generations, materialization generations, family aggregation, coverage, usage/cost projection, precomputed Range-level cost reports, and exact snapshot bytes. Current snapshot/delta wire protocol version 2 requires the complete `cost_report`; version 1 is not accepted as a compatibility shape.
+- `statsd` is the sole SQLite writer and the sole owner of source generations, materialization generations, family aggregation, coverage, usage/cost projection, precomputed Range-level cost reports, and exact snapshot bytes. Current snapshot/delta wire protocol version 2 requires the complete `cost_report`; cost-report schema version 3 separately represents 5-minute and 1-hour cache writes, and earlier cost-report schemas are not accepted as compatibility shapes.
 - The SQLite database stores original per-family observations at their real timestamps and cadences, identity-deduplicated usage atoms, covered epochs, explicit unavailable spans, and schema metadata. Explicit unavailable spans are coverage facts used when an old aggregate or a known source outage cannot be represented by an original observation; they are never display buckets.
 - One background materializer reads a consistent database snapshot and builds the four epoch-aligned immutable resolution layers. Full rebuilds, incremental dirty-cell recomputation, coverage generation, and encoding never run on the statsd listener/writer thread or an HTTP request thread.
 - The web process does not open the stats database. It authenticates and validates HTTP, forwards current RPC requests, and returns statsd's pre-encoded JSON bytes without temporal aggregation or decode/re-encode work.
@@ -98,13 +98,14 @@ A successful response contains:
   "buckets": [],
   "no_data": [],
   "cost_report": {
-    "schema_version": 1,
+    "schema_version": 3,
     "total_micro_usd": 0,
     "total_tokens": 0,
     "dimensions": {
       "input": {"tokens": 0, "micro_usd": 0},
       "cache_read": {"tokens": 0, "micro_usd": 0},
-      "cache_write": {"tokens": 0, "micro_usd": 0},
+      "cache_write_5m": {"tokens": 0, "micro_usd": 0},
+      "cache_write_1h": {"tokens": 0, "micro_usd": 0},
       "output": {"tokens": 0, "micro_usd": 0},
       "other": {"tokens": 0, "micro_usd": 0}
     },
@@ -126,7 +127,7 @@ A successful response contains:
 - A measured zero is a real plotted value. Counts, tokens, costs, and usage rates are never repeated or multiplied to fill a finer display grid.
 - Sparse or slow-cadence sources remain sparse in every materialized layer. statsd does not repeat an observation to fill a finer display grid, and Agent/Model tokens, costs, counts, event rates, GPU, status, and memory gain values only from real committed source evidence.
 - All values are materialized once into the shared generation. Browser identities remain private, while browser API/SSE rates, latency, bandwidth, and disconnect values are fair all-client averages: statsd first folds each contributing client's values in the bucket, then averages those client results.
-- `cost_report` is computed once while each exact cached Range/Resolution entry is published, not in HTTP and not in the browser. It contains exact total micro-USD and tokens, mutually exclusive `input/cache_read/cache_write/output/other` dimensions, priced/unpriced atom and token coverage, at most 16 deterministically ranked model rows, 16 agent rows, and 32 pricing-evidence rows, catalog revision and reviewed HTTP(S) source links, and exact omission counts. A missing source rate stays unpriced rather than free; `reasoning_available` is false because the current usage atoms cannot distinguish reasoning from ordinary output without invention.
+- `cost_report` is computed once while each exact cached Range/Resolution entry is published, not in HTTP and not in the browser. It contains exact total micro-USD and tokens, mutually exclusive `input/cache_read/cache_write_5m/cache_write_1h/output/other` dimensions, priced/unpriced atom and token coverage, at most 16 deterministically ranked model rows, 16 agent rows, and 32 pricing-evidence rows, catalog revision and reviewed HTTP(S) source links, and exact omission counts. The two cache-write dimensions stay separate because provider pricing can differ by cache lifetime. A missing source rate stays unpriced rather than free; `reasoning_available` is false because the current usage atoms cannot distinguish reasoning from ordinary output without invention.
 - If a complete older cache generation exists while a rebuild runs, statsd may serve it with honest generation/freshness metadata. If no complete generation exists, it returns `pending`; it never scans SQLite or aggregates synchronously.
 - When `since_generation` is still current and no open bucket or no-data fact changed, the endpoint may return `304 Not Modified` with the current cache generation and no body.
 - The HTTP process forwards statsd's bounded pre-encoded JSON body and may apply the shared HTTP gzip representation. A cache hit performs no SQLite history query, family fold, temporal aggregation, or response encoding.

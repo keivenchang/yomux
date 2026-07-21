@@ -3422,6 +3422,37 @@ function scheduleFileEditorPanelViewStateCapture(item, panel) {
   schedulePaneViewStateCapture(item, panel);
 }
 
+// One passive-update owner for a live CodeMirror pane. A refresh or focus may
+// observe a saved search selection, but it must keep the viewport the user has
+// already scrolled to; only explicit navigation is allowed to reveal a target.
+function preserveFileEditorPanelPassiveViewState(item, panel, options = {}) {
+  const view = panel?._cmView;
+  const scrollDOM = view?.scrollDOM;
+  if (!view) return false;
+  if (!scrollDOM) {
+    if (options.focus === true) view.focus?.();
+    return true;
+  }
+  const update = () => {
+    if (options.focus === true) view.focus?.();
+  };
+  if (typeof updateCodeMirrorViewPreservingState === 'function') {
+    updateCodeMirrorViewPreservingState(view, (selection, scrollSnapshot) => {
+      update();
+      if (scrollSnapshot) view.dispatch({effects: scrollSnapshot});
+      return selection;
+    }, {preserveSelection: false});
+  } else {
+    const scrollTop = scrollDOM.scrollTop;
+    const scrollLeft = scrollDOM.scrollLeft;
+    update();
+    scrollDOM.scrollTop = scrollTop;
+    scrollDOM.scrollLeft = scrollLeft;
+  }
+  captureFileEditorPanelViewState(item, panel);
+  return true;
+}
+
 function focusFileEditorPanelIfReady(panel, item) {
   if (!autoFocusCanFollowCursor()) {
     pendingFileEditorFocus.delete(item);
@@ -3429,10 +3460,7 @@ function focusFileEditorPanelIfReady(panel, item) {
   }
   if (!pendingFileEditorFocus.has(item) || focusedPanelItem !== item) return false;
   if (panel?._cmView) {
-    panel._cmView.focus?.();
-    // CodeMirror focus can scroll the cursor into view. Re-apply the saved viewport after focus so
-    // a long file that was only scrolled, not cursor-moved, does not jump back to the cursor line.
-    restorePaneViewState(item, panel);
+    preserveFileEditorPanelPassiveViewState(item, panel, {focus: true});
     pendingFileEditorFocus.delete(item);
     return true;
   }
@@ -3496,51 +3524,25 @@ function restoreFileEditorPanelViewState(item, panel, options = {}) {
   const view = panel?._cmView;
   const scrollDOM = view?.scrollDOM;
   if (!state || !view || !scrollDOM) return;
-  // An ordinary rerender (autosave chrome, watch/SSE refresh, session metadata) can finish after
-  // CodeMirror has already advanced a Shift+Arrow selection and scrolled to follow it. The focused
-  // live view is newer than the cached tab-switch snapshot, so refresh that shared snapshot instead
-  // of replaying stale cursor/scroll state into the editor. Explicit disk replacement captures a
-  // pre-reload snapshot and opts back into restoration with restoreFocused.
-  if (options.restoreFocused !== true && view.hasFocus && panel?.isConnected) {
-    captureFileEditorPanelViewState(item, panel);
+  // A live pane owns its current viewport even when it is not focused: the user can scroll it and
+  // a queued capture has not necessarily reached fileEditorViewState yet. Only a just-created view
+  // or explicit disk replacement may replay saved selection/scroll state.
+  if (options.restoreFocused !== true && options.restoreFresh !== true) {
+    preserveFileEditorPanelPassiveViewState(item, panel);
     return;
   }
   const docLength = view.state?.doc?.length || 0;
   const anchor = Math.max(0, Math.min(docLength, Number(state.anchor || 0)));
   const head = Math.max(0, Math.min(docLength, Number(state.head || anchor)));
+  scrollDOM.scrollTop = Number(state.scrollTop || 0);
+  scrollDOM.scrollLeft = Number(state.scrollLeft || 0);
+  const scrollSnapshot = state.scrollSnapshot || (typeof view.scrollSnapshot === 'function' ? view.scrollSnapshot() : null);
   try {
     view.dispatch({
       selection: {anchor, head},
-      ...(state.scrollSnapshot ? {effects: state.scrollSnapshot} : {}),
+      ...(scrollSnapshot ? {effects: scrollSnapshot} : {}),
     });
   } catch (_) {
     try { view.dispatch({selection: {anchor, head}}); } catch (_) {}
   }
-  const targetTop = Number(state.scrollTop || 0);
-  const targetLeft = Number(state.scrollLeft || 0);
-  const scrollStillAtTarget = () => (
-    Math.abs(Number(scrollDOM.scrollTop || 0) - targetTop) <= 1
-    && Math.abs(Number(scrollDOM.scrollLeft || 0) - targetLeft) <= 1
-  );
-  const restore = () => {
-    scrollDOM.scrollTop = targetTop;
-    scrollDOM.scrollLeft = targetLeft;
-  };
-  const measuredRestore = (guardUserScroll = false) => {
-    if (guardUserScroll && !scrollStillAtTarget()) return;
-    if (typeof view.requestMeasure === 'function') {
-      view.requestMeasure({
-        read: () => null,
-        write: () => {
-          if (!guardUserScroll || scrollStillAtTarget()) restore();
-        },
-      });
-      return;
-    }
-    restore();
-  };
-  restore();
-  measuredRestore();
-  requestAnimationFrame(() => measuredRestore(true));
-  requestAnimationFrame(() => requestAnimationFrame(() => measuredRestore(true)));
 }

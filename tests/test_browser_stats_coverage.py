@@ -93,7 +93,8 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       return {
         input: {tokens: 900, micro_usd: 100000, api_list_micro_usd: 100000},
         cache_read: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
-        cache_write: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
+        cache_write_5m: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
+        cache_write_1h: {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
         output: {tokens: 120, micro_usd: 150000, api_list_micro_usd: 150000},
         other: {tokens: 120, micro_usd: 0, api_list_micro_usd: 0},
       };
@@ -107,7 +108,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         priced: {atoms: 2, tokens: 1020}, unpriced: {atoms: 1, tokens: 120},
       };
       return {
-        schema_version: 2,
+        schema_version: 3,
         total_micro_usd: 250000,
         total_api_list_micro_usd: 250000,
         total_tokens: 1140,
