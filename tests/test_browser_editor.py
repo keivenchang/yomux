@@ -4077,6 +4077,122 @@ def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browse
     assert metrics["closed"]["bg"] == metrics["before"]["bg"], metrics
 
 
+def test_codemirror_find_scroll_advances_visible_result_without_snapping(browser, tmp_path):
+    css = app_css()
+    bundle_uri = fixture_asset_url("static", "codemirror.js")
+    bootstrap = json.dumps(
+        {
+            "sessions": [],
+            "availableAgents": [],
+            "accessRole": "admin",
+            "homePath": "/home/test",
+            "repoRoot": str(REPO_ROOT),
+            "maxSessionTabs": 99,
+            "serverHostname": "test-host",
+            "settingsPayload": {
+                "settings": {"appearance": {"editor_cursor_color": "yellow"}},
+                "defaults": {},
+                "mtime_ns": 1,
+            },
+            "strings": {"en": dict(app_english_strings())},
+            "codeMirrorAssetUrl": bundle_uri,
+        },
+        separators=(",", ":"),
+    )
+    page = tmp_path / "codemirror-find-scroll.html"
+    load_static_html_fixture(
+        browser,
+        page.parent,
+        page.name,
+        f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
+        <style>
+        body {{ margin: 0; padding: 8px; display: block; min-height: 0; background: #11151d; }}
+        #mount, .file-editor-panel {{ width: 920px; height: 520px; }}
+        .file-editor-codemirror-panel {{ height: 100%; }}
+        </style></head><body class="theme-dark editor-theme-dark">
+          <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script><div id="mount"></div>
+          <script>{app_bundle_before_boot_script()}</script>
+          <script>
+            window.__findScrollReady = (async () => {{
+              // Match the app boot path: the configured preference, rather than a test CSS
+              // override, re-themes the live CodeMirror search extension.
+              applySettingsPayload(clientSettingsPayload, {{initial: true, force: true}});
+              const path = '/home/test/repo/2026.md';
+              const markedLines = new Set([30, 130, 230, 330]);
+              const content = Array.from({{length: 420}}, (_value, index) => (
+                markedLines.has(index + 1) ? `Legal result ${{index + 1}}` : `filler line ${{index + 1}}`
+              )).join('\\n');
+              const item = fileEditorItemFor(path);
+              setFileState(path, {{kind: 'text', content, original: content, dirty: false, language: 'markdown'}});
+              setFileEditorViewMode(path, 'edit', item);
+              addFileEditorTabItem(path, item);
+              const panel = createFileEditorPanel(item);
+              panel.classList.add('active-pane');
+              document.getElementById('mount').append(panel);
+              renderFileEditorPanel(panel, item);
+              const {{frame}} = window.__yolomuxTestHelpers;
+              const waitFor = window.__yolomuxTestWaitFor;
+              const ready = await waitFor(() => panel._cmView?.scrollDOM?.scrollHeight > panel._cmView?.scrollDOM?.clientHeight * 3);
+              if (!ready) return {{error: 'CodeMirror editor did not become scrollable'}};
+              await openEditorFind(panel);
+              const input = panel.querySelector('.cm-search input[name="search"]');
+              input.value = 'Legal';
+              input.dispatchEvent(new InputEvent('input', {{bubbles: true, inputType: 'insertText', data: 'Legal'}}));
+              await new Promise(resolve => setTimeout(resolve, 100));
+              panel.querySelector('.cm-search .cm-button[name="next"]')?.click();
+              await new Promise(resolve => setTimeout(resolve, 50));
+              const view = panel._cmView;
+              const matches = codeMirrorSearchMatches(content, 'Legal');
+              view.dispatch({{selection: {{anchor: matches[0].from, head: matches[0].to}}}});
+              await new Promise(resolve => setTimeout(resolve, 50));
+              const count = panel.querySelector('.cm-search-count');
+              const found = count?.textContent === '1/4' && view.state.selection.main.from === matches[0].from;
+              if (!found) return {{error: `Find did not select the first result (${{count?.textContent || ''}})`, searchHtml: panel.querySelector('.cm-search')?.innerHTML || '', inputName: input?.name || '', inputValue: input?.value || ''}};
+              const scroller = view.scrollDOM;
+              // CodeMirror's viewport can omit the text decoration in headless layout. Probe the
+              // same selected-Find class inside this live view, where the actual theme extension
+              // and configured preference have installed its scoped rule.
+              const selectedMatch = document.createElement('span');
+              selectedMatch.className = 'cm-searchMatch-selected';
+              selectedMatch.textContent = 'Legal';
+              view.contentDOM.append(selectedMatch);
+              const firstBackground = getComputedStyle(selectedMatch).backgroundColor;
+              selectedMatch.remove();
+              const secondBlock = view.lineBlockAt(matches[1].from);
+              scroller.scrollTop = Math.max(0, secondBlock.top - 20);
+              scroller.dispatchEvent(new Event('scroll', {{bubbles: true}}));
+              const manualTop = scroller.scrollTop;
+              const advanced = await waitFor(() => (
+                count?.textContent === '2/4' && view.state.selection.main.from === matches[1].from
+              ));
+              await frame(); await frame(); await frame();
+              return {{
+                advanced,
+                beforeCount: '1/4',
+                afterCount: count.textContent,
+                manualTop,
+                afterTop: scroller.scrollTop,
+                selectedFrom: view.state.selection.main.from,
+                    secondFrom: matches[1].from,
+                    firstBackground,
+                  }};
+            }})();
+          </script></body></html>""",
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        window.__findScrollReady.then(done, error => done({error: String(error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["advanced"] is True, metrics
+    assert metrics["beforeCount"] == "1/4" and metrics["afterCount"] == "2/4", metrics
+    assert metrics["selectedFrom"] == metrics["secondFrom"], metrics
+    assert abs(metrics["afterTop"] - metrics["manualTop"]) < 32, metrics
+    assert metrics["firstBackground"] == "rgb(255, 234, 0)", metrics
+
+
 def test_long_markdown_editor_restores_scroll_after_codemirror_recreate(browser, tmp_path):
     css = app_css()
     bundle_uri = fixture_asset_url("static", "codemirror.js")

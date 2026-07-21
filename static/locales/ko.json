@@ -218,6 +218,7 @@
   "debug.cost.byTokenClass": "비용 계산",
   "debug.cost.cache": "캐시",
   "debug.cost.cache.gloss": "캐시 읽기와 쓰기를 합산",
+  "debug.cost.cacheWrite.gloss": "5분/1시간 캐시 생성",
   "debug.cost.cached": "캐시됨",
   "debug.cost.catalogRevision": "카탈로그 개정",
   "debug.cost.coverage": "가격 적용 범위",

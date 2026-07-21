@@ -231,6 +231,7 @@
   "debug.cost.byTokenClass": "Obliczenie kosztów",
   "debug.cost.cache": "Pamięć podręczna",
   "debug.cost.cache.gloss": "odczyty i zapisy pamięci podręcznej razem",
+  "debug.cost.cacheWrite.gloss": "tworzenie pamięci podręcznej 5 min/1 godz.",
   "debug.cost.cached": "Z pamięci podręcznej",
   "debug.cost.catalogRevision": "Wersja katalogu",
   "debug.cost.coverage": "Zakres z wyceną",

@@ -218,6 +218,7 @@
   "debug.cost.byTokenClass": "Maliyet hesaplaması",
   "debug.cost.cache": "Önbellek",
   "debug.cost.cache.gloss": "önbellek okuma ve yazmaları birlikte",
+  "debug.cost.cacheWrite.gloss": "5 dk./1 saatlik önbellek oluşturma",
   "debug.cost.cached": "Önbelleğe alınmış",
   "debug.cost.catalogRevision": "Katalog düzeltmesi",
   "debug.cost.coverage": "Fiyatlandırılmış kapsam",

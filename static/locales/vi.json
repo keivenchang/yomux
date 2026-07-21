@@ -218,6 +218,7 @@
   "debug.cost.byTokenClass": "Tính toán chi phí",
   "debug.cost.cache": "Bộ nhớ đệm",
   "debug.cost.cache.gloss": "gộp lượt đọc và ghi bộ nhớ đệm",
+  "debug.cost.cacheWrite.gloss": "tạo bộ nhớ đệm 5 phút/1 giờ",
   "debug.cost.cached": "Đã lưu đệm",
   "debug.cost.catalogRevision": "Bản sửa đổi danh mục",
   "debug.cost.coverage": "Phạm vi đã định giá",

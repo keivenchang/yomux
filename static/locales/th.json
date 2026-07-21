@@ -218,6 +218,7 @@
   "debug.cost.byTokenClass": "การคำนวณค่าใช้จ่าย",
   "debug.cost.cache": "แคช",
   "debug.cost.cache.gloss": "รวมการอ่านและเขียนแคช",
+  "debug.cost.cacheWrite.gloss": "การสร้างแคช 5 นาที/1 ชั่วโมง",
   "debug.cost.cached": "แคชแล้ว",
   "debug.cost.catalogRevision": "ฉบับแก้ไขแค็ตตาล็อก",
   "debug.cost.coverage": "ความครอบคลุมที่กำหนดราคา",

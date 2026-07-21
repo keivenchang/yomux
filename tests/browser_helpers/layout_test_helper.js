@@ -969,6 +969,7 @@ globalThis.__layoutTestApi = {
   updateCodeMirrorCursorStatusForTest: updateCodeMirrorCursorStatus,
   codeMirrorSearchMatches,
   codeMirrorSearchMatchSummary,
+  codeMirrorSearchVisibleMatchIndex,
   codeMirrorPhraseValues,
   emptyPlaceholderPaneState,
   emptyLayoutSlots,

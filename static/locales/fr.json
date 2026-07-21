@@ -224,6 +224,7 @@
   "debug.cost.byTokenClass": "Calcul des coûts",
   "debug.cost.cache": "Mémoire cache",
   "debug.cost.cache.gloss": "lectures et écritures de cache combinées",
+  "debug.cost.cacheWrite.gloss": "création de cache 5 min/1 h",
   "debug.cost.cached": "Mis en cache",
   "debug.cost.catalogRevision": "Révision du catalogue",
   "debug.cost.coverage": "Couverture tarifée",

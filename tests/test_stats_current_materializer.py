@@ -833,6 +833,9 @@ def test_cost_agent_labels_preserve_public_tmux_identity_and_bound_background_ag
     assert materializer._privacy_safe_agent_label("yo8881|2|codex", "codex") == (
         "yo8881|2|codex"
     )
+    assert materializer._privacy_safe_agent_label(
+        "122_frontend-crates|0|%17|codex", "codex"
+    ) == "122_frontend-crates|0|%17|codex"
     assert first.startswith("claude-bg:")
     assert first != second
     assert len(first.encode()) <= 64
@@ -840,6 +843,11 @@ def test_cost_agent_labels_preserve_public_tmux_identity_and_bound_background_ag
     private = materializer._privacy_safe_agent_label("/Users/private/transcript", "codex")
     assert private.startswith("codex:")
     assert "/Users/private" not in private
+    private_tmux_like = materializer._privacy_safe_agent_label(
+        "/Users/private|0|%17|codex", "codex"
+    )
+    assert private_tmux_like.startswith("codex:")
+    assert "/Users/private" not in private_tmux_like
 
 
 def test_materializer_source_has_no_synthetic_cost_series_or_metadata_codec():

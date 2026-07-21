@@ -2867,7 +2867,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
-  renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   renderLinkedFilePreviewPanels(panel, path, state.content);
   updateFilePreviewPopout(path, state.content);
   scheduleFileEditorSplitScrollSync(panel, 'editor');

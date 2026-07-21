@@ -2730,7 +2730,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(/async function renderMermaidSourceInto[\s\S]*previewZoomOptionsForKind\(fullPreview \? 'mermaidFull' : 'mermaidInline'/.test(source), 'Mermaid previews use shared renderer zoom policy');
     assert.ok(/function disconnectPreviewZoomSurface\(shell, options = \{\}\)[\s\S]*resetPreviewZoomSurfaceClasses/.test(source), 'visual preview zoom cleanup uses one reset helper');
     assert.ok(/function hydratePreviewZoomSurface[\s\S]*data-preview-zoom-action[\s\S]*setPreviewZoomSurfaceState/.test(source), 'visual preview zoom controls can hydrate existing markup');
-    assert.ok(source.includes("renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'})"), 'Split Preview uses its own preview zoom context');
+    assert.ok(source.includes("renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'})"), 'Split Preview keeps its own preview zoom context through the shared selection/find-preserving renderer');
     assert.ok(source.includes("hydratePreviewZoomSurfaces(doc.querySelector('[data-preview-root]') || doc)"), 'preview pop-out rehydrates zoom controls after snapshot writes');
     assert.ok(source.includes('.file-preview-popout-window .file-editor-preview-pane-panel.file-editor-preview-zoom-shell'), 'preview pop-out preserves zoom-shell layout');
     assert.equal(source.includes('fileEditorImageModeForPath'), false, 'visual previews do not keep the obsolete imageMode state path');
@@ -2932,6 +2932,28 @@ async function runLayoutRestoreSuite() {
     api.renderFileEditorPanel(panel, item, {updateActiveFile: false, captureViewState: false});
     assert.equal(api.fileEditorViewStateForTest(item).scrollTop, 420, 'pane reattach render must not replace saved scroll with detached zero scroll');
     assert.equal(api.fileEditorViewStateForTest(item).scrollLeft, 7);
+  });
+
+  test('Find count follows the first visible result after a manual editor scroll', () => {
+    const api = loadYolomux('', ['1']);
+    const text = 'Legal one\n'.repeat(1) + 'filler\n'.repeat(20) + 'Legal two\n' + 'filler\n'.repeat(20) + 'Legal three\n';
+    const matches = api.codeMirrorSearchMatches(text, 'Legal');
+    assert.equal(matches.length, 3);
+    assert.equal(
+      api.codeMirrorSearchVisibleMatchIndex(matches, {from: matches[0].from, to: matches[0].to}, [{from: matches[0].from, to: matches[0].to + 5}]),
+      0,
+      'the selected match remains current while it is visible',
+    );
+    assert.equal(
+      api.codeMirrorSearchVisibleMatchIndex(matches, {from: matches[0].from, to: matches[0].to}, [{from: matches[1].from, to: matches[1].to + 5}]),
+      1,
+      'manual scroll to another visible Find result advances the current index without a scroll effect',
+    );
+    assert.equal(
+      api.codeMirrorSearchVisibleMatchIndex(matches, {from: 0, to: 0}, [{from: matches[1].from, to: matches[1].to + 5}]),
+      -1,
+      'ordinary non-Find text selections retain ownership rather than being replaced by a visible match',
+    );
   });
 
   test('file editor save hygiene helper respects the two opt-in settings', () => {

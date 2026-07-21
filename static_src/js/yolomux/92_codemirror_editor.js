@@ -1302,7 +1302,7 @@ function renderMediaEditor(panel, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderEditorPreviewPane(parts.previewPane, path, '', {context: 'preview'});
+    renderFileEditorPreviewSurface(panel, parts.previewPane, path, '', {context: 'preview'});
   }
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
@@ -1322,9 +1322,8 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderEditorPreviewPane(parts.previewPane, path, state.content, {context: 'preview'});
+    renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
   }
-  refreshPreviewFind(panel);
   scheduleShareFileEditorScrollRestore(item, path);
 }
 
@@ -1334,7 +1333,7 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
+    if (mode === 'split') renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'});
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -2086,7 +2085,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
   }
 }
 
@@ -2149,7 +2148,7 @@ function refreshEditorPreviews() {
     const path = fileItemPath(item);
     const state = fileState.get(path);
     if (state?.kind && editorPreviewModeAvailable(path, state)) {
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
       updateFilePreviewPopout(path, state.content || '');
     }
   }
@@ -2178,7 +2177,7 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (rawCode) rawCode.textContent = content;
     const mode = fileEditorPanelMode(openPanel);
     if (mode === 'preview' || mode === 'split') {
-      renderEditorPreviewPane(openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+      renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
     const status = openFileStatus(fileState.get(path));
     setFileEditorPanelStatus(openPanel, status.message, status.level);

@@ -976,8 +976,8 @@
 /* Always-visible column legend: one tight row that wraps; the terse gloss is visible, the full
    description stays on the header hover tooltip. Kept compact so it never re-widens the report. */
 .js-debug-cost-column-legend {
-  display: grid;
-  grid-template-columns: repeat(6, max-content);
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3) var(--space-7);
   max-width: 100%;
   margin: var(--space-5) 0;
@@ -989,13 +989,14 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-3);
+  flex: 0 1 auto;
   min-width: 0;
 }
 .js-debug-cost-column-legend dt {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
+  display: block;
+  min-width: 0;
   color: var(--text);
+  font-weight: 700;
   white-space: nowrap;
 }
 .js-debug-cost-column-legend dd {
@@ -1003,6 +1004,9 @@
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
+}
+.js-debug-cost-column-legend dd::before {
+  content: " \00b7 ";
 }
 .js-debug-cost-usage-swatch--total {
   background: var(--text);
@@ -1214,18 +1218,15 @@
   font-weight: 500;
 }
 .js-debug-cost-table[data-js-debug-cost-table="model"] th:first-child {
+  /* Tables scroll as a whole on narrow panes, so a model identifier must not
+     be ellipsized merely to make one column fit. */
   inline-size: auto;
-  max-inline-size: 24ch;
-  white-space: normal;
+  max-inline-size: none;
+  white-space: nowrap;
 }
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(2),
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(3),
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(5),
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
-  text-align: start;
-}
-.js-debug-cost-table[data-js-debug-cost-table="calculation"] td:nth-child(6) {
-  white-space: normal;
+.js-debug-cost-model-formula {
+  display: inline-block;
+  white-space: nowrap;
 }
 .js-debug-cost-transcript-link {
   display: block;
@@ -1319,12 +1320,38 @@
   overscroll-behavior: contain;
   padding-top: var(--space-5);
 }
-/* Five terse column meanings fit on one wide line. Three bounded tracks turn
-   the narrow form into a 3+2 grid instead of a tall five-row list. */
+/* Keep the wide legend as compact inline chips. A two-column grid gives each
+   narrow item enough width for a label plus an indented explanation instead
+   of crushing six meanings into unreadable three-column fragments. */
 @container (max-width: 34rem) {
   .js-debug-cost-column-legend {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     width: 100%;
+  }
+  .js-debug-cost-column-legend > div {
+    display: grid;
+    grid-template-columns: min-content minmax(0, 1fr);
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+    align-items: start;
+  }
+  .js-debug-cost-column-legend > div > .js-debug-cost-usage-swatch {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    align-self: start;
+    margin-block-start: 0.3em;
+  }
+  .js-debug-cost-column-legend dt,
+  .js-debug-cost-column-legend dd {
+    grid-column: 2;
+  }
+  .js-debug-cost-column-legend dt {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .js-debug-cost-column-legend dd::before {
+    content: none;
   }
 }
 .js-yocost-panel .js-yocost-body,

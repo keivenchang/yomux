@@ -219,6 +219,7 @@
   "debug.cost.byTokenClass": "コスト計算",
   "debug.cost.cache": "キャッシュ",
   "debug.cost.cache.gloss": "キャッシュ読み取りと書き込みの合計",
+  "debug.cost.cacheWrite.gloss": "5分/1時間キャッシュの作成",
   "debug.cost.cached": "キャッシュ済み",
   "debug.cost.catalogRevision": "カタログ改訂",
   "debug.cost.coverage": "価格設定済みの対象範囲",

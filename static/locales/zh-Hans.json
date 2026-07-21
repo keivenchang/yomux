@@ -218,6 +218,7 @@
   "debug.cost.byTokenClass": "成本计算",
   "debug.cost.cache": "缓存",
   "debug.cost.cache.gloss": "合并缓存读取和写入",
+  "debug.cost.cacheWrite.gloss": "5 分钟/1 小时缓存创建",
   "debug.cost.cached": "已缓存",
   "debug.cost.catalogRevision": "目录修订版本",
   "debug.cost.coverage": "已定价覆盖范围",

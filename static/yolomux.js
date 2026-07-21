@@ -24639,6 +24639,24 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
 }
 
+// Find owns the selected result, but the viewport is the user's current navigation surface when
+// they scroll manually. Keep the selected match while it remains visible; once it leaves the
+// viewport, adopt the first visible match without requesting another scroll.
+function codeMirrorSearchVisibleMatchIndex(matches, selection = {}, visibleRanges = []) {
+  if (!matches.length) return -1;
+  const selectionFrom = Number(selection.from);
+  const selectionTo = Number(selection.to);
+  const selectedIndex = matches.findIndex(match => match.from === selectionFrom && match.to === selectionTo);
+  if (selectedIndex < 0) return -1;
+  const visible = matches.filter(match => visibleRanges.some(range => (
+    match.from < Number(range?.to) && match.to > Number(range?.from)
+  )));
+  if (!visible.length) return selectedIndex;
+  const selected = matches[selectedIndex];
+  if (visible.some(match => match === selected)) return selectedIndex;
+  return matches.indexOf(visible[0]);
+}
+
 function codeMirrorPhraseValues() {
   return {
     Find: t('common.find'),
@@ -24760,6 +24778,19 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       }
       const query = panel.querySelector?.('input[name="search"]')?.value || '';
       const selection = this.view.state?.selection?.main || {};
+      const matches = codeMirrorSearchMatches(
+        this.view.state?.doc?.toString?.() || '',
+        query,
+        codeMirrorSearchCheckboxState(panel),
+      );
+      const visibleMatchIndex = codeMirrorSearchVisibleMatchIndex(matches, selection, this.view.visibleRanges || []);
+      if (visibleMatchIndex >= 0 && visibleMatchIndex !== matches.findIndex(match => (
+        match.from === Number(selection.from) && match.to === Number(selection.to)
+      ))) {
+        const match = matches[visibleMatchIndex];
+        this.view.dispatch({selection: {anchor: match.from, head: match.to}});
+        return;
+      }
       count.textContent = codeMirrorSearchMatchSummary(
         this.view.state?.doc?.toString?.() || '',
         query,
@@ -25809,7 +25840,7 @@ function refreshOpenEditorThemePanels() {
     if (!path || fileState.get(path)?.kind !== 'text') return;
     const state = fileState.get(path);
     const reconfigured = typeof reconfigureCodeMirrorPanelTheme === 'function' && reconfigureCodeMirrorPanelTheme(panel);
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
     if (!reconfigured) {
       capturePaneViewState(item, panel);
       renderFileEditorPanel(panel, item);
@@ -25979,10 +26010,15 @@ function previewFindSelectMatch(host = null, index = 0) {
   return true;
 }
 
-function previewFindApplyQuery(host = null, query = '') {
+function previewFindApplyQuery(host = null, query = '', options = {}) {
   const preview = host?.querySelector?.('.file-editor-preview-pane-panel');
   const state = previewFindStateForHost(host, true);
   if (!preview || !state) return false;
+  // A refresh rebuilds mark nodes after a preview redraw. Keep the user's active result when
+  // the query itself did not change; an input edit is a new search and intentionally starts at 1.
+  const previousIndex = options.preserveIndex === true && state.query === String(query || '')
+    ? state.index
+    : -1;
   previewFindClearMatches(host);
   state.query = String(query || '');
   state.matches = [];
@@ -26018,7 +26054,7 @@ function previewFindApplyQuery(host = null, query = '') {
       node.replaceWith(fragment);
     }
   }
-  if (state.matches.length) previewFindSelectMatch(host, 0);
+  if (state.matches.length) previewFindSelectMatch(host, previousIndex >= 0 ? previousIndex : 0);
   else previewFindUpdatePanel(host);
   return true;
 }
@@ -26052,7 +26088,86 @@ function closePreviewFind(host = null) {
 
 function refreshPreviewFind(host = null) {
   if (!previewFindOpenForHost(host)) return;
-  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '');
+  previewFindApplyQuery(host, previewFindPanelForHost(host)?.querySelector('input')?.value || '', {preserveIndex: true});
+}
+
+function fileEditorPreviewSelectionOffsets(pane = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  if (!pane.contains(range.startContainer) || !pane.contains(range.endContainer)) return null;
+  const offsetAt = (node, offset) => {
+    const prefix = doc.createRange();
+    prefix.selectNodeContents(pane);
+    prefix.setEnd(node, offset);
+    return prefix.toString().length;
+  };
+  try {
+    return {
+      start: offsetAt(range.startContainer, range.startOffset),
+      end: offsetAt(range.endContainer, range.endOffset),
+      text: range.toString(),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function restoreFileEditorPreviewSelectionOffsets(pane = null, snapshot = null) {
+  const doc = pane?.ownerDocument;
+  const selection = doc?.getSelection?.();
+  if (!pane || !selection || !snapshot) return false;
+  const textNodes = [];
+  const walker = doc.createTreeWalker(pane, 4);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node);
+  const positionAt = value => {
+    let remaining = Math.max(0, Number(value) || 0);
+    for (const node of textNodes) {
+      if (remaining <= node.nodeValue.length) return {node, offset: remaining};
+      remaining -= node.nodeValue.length;
+    }
+    const node = textNodes[textNodes.length - 1];
+    return node ? {node, offset: node.nodeValue.length} : null;
+  };
+  let startOffset = Number(snapshot.start) || 0;
+  let endOffset = Number(snapshot.end) || startOffset;
+  const selectedText = String(snapshot.text || '');
+  if (selectedText) {
+    const text = pane.textContent || '';
+    let best = text.indexOf(selectedText);
+    for (let index = text.indexOf(selectedText, best + 1); index >= 0; index = text.indexOf(selectedText, index + 1)) {
+      if (best >= 0 && Math.abs(index - startOffset) >= Math.abs(best - startOffset)) continue;
+      best = index;
+    }
+    if (best >= 0) {
+      startOffset = best;
+      endOffset = best + selectedText.length;
+    }
+  }
+  const start = positionAt(startOffset);
+  const end = positionAt(endOffset);
+  if (!start || !end) return false;
+  try {
+    const range = doc.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// All preview redraws pass through one owner. Renderer replacement otherwise drops native viewer
+// selection and Find's mark nodes, which makes a theme/settings refresh look like a vanished match.
+function renderFileEditorPreviewSurface(host = null, pane = null, path = '', text = '', options = {}) {
+  if (!pane) return;
+  const selection = fileEditorPreviewSelectionOffsets(pane);
+  renderEditorPreviewPane(pane, path, text, options);
+  refreshPreviewFind(host);
+  restoreFileEditorPreviewSelectionOffsets(pane, selection);
 }
 
 function updateEditorFindButton(button, state, host = null) {
@@ -26184,7 +26299,7 @@ function applyEditorWrapPreference() {
     if (path && state?.kind === 'text') {
       const liveText = typeof codeMirrorCurrentText === 'function' ? codeMirrorCurrentText(panel) : null;
       if (liveText !== null && state.content !== liveText) state.content = liveText;
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
       if (typeof reconfigureCodeMirrorPanelEditorOptions === 'function' && reconfigureCodeMirrorPanelEditorOptions(panel)) {
         return;
       }
@@ -43720,8 +43835,8 @@ function bindPreferencesPanel(panel) {
       '<section><h3>Token and cost breakdown</h3><div class="yo-cost-current-table-scroll"><table><thead><tr><th>Usage</th><th>Tokens</th><th>Marginal / at API list prices</th></tr></thead><tbody>',
       dimensions,
       '</tbody></table></div></section>',
-      currentCostAttributionTable('Model Usages', report.models, 'model'),
-      currentCostAttributionTable('By Agent', report.agents, 'agent'),
+      currentCostAttributionTable('Cost by Model', report.models, 'model'),
+      currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
       '<section><h3>Pricing attribution</h3>',
       evidence ? `<ol class="yo-cost-current-evidence">${evidence}</ol>` : '<p>No priced catalog evidence in this range.</p>',
       '</section>',
@@ -43734,7 +43849,7 @@ function bindPreferencesPanel(panel) {
     const body = rows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
-        : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(row.label || row.source)}</span>`;
+        : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
       const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => (
         `<td>${currentCostDimensionCell(row.dimensions[dimension])}</td>`
       )).join('');
@@ -43960,7 +44075,30 @@ function bindPreferencesPanel(panel) {
   function currentStatsSeriesLabel(name) {
     if (name === 'cost_micro_usd') return 'Marginal';
     if (name === 'api_list_cost_micro_usd') return 'At API list prices';
+    if (name.startsWith('agent_tokens_per_minute:')) {
+      return currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length));
+    }
     return name.replaceAll('_', ' ').replaceAll(':', ' · ');
+  }
+
+  // Usage series retain a stable pane-level key, while the visible identity is the tmux
+  // session. Cost rows carry that same safe key from the server, so both surfaces call this
+  // one owner instead of independently trimming their agent labels.
+  function currentStatsCanonicalAgentLabel(value) {
+    const full = String(value || '').trim();
+    if (!full) return 'Unknown';
+    if (full.startsWith('claude-bg:')) {
+      const [, projectValue = '', sessionValue = ''] = full.split(':');
+      const projectParts = projectValue.split('-').filter(Boolean);
+      const project = projectParts.slice(-2).join('-') || projectValue;
+      const session = sessionValue.slice(0, 8);
+      return ['claude-bg', project, session].filter(Boolean).join(':');
+    }
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
   }
 
   function currentStatsNumber(value) {
@@ -44500,6 +44638,7 @@ function bindPreferencesPanel(panel) {
   }
 
   globalThis.YOLOmuxStatsCurrent = Object.freeze({
+    canonicalAgentLabel: currentStatsCanonicalAgentLabel,
     createBrowserClient,
     createController,
     mount,
@@ -44667,7 +44806,6 @@ let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
-const jsDebugCostComponentSortState = {key: 'cost', direction: 'desc'};
 const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
@@ -49382,11 +49520,11 @@ function debugGraphCostClass(item) {
 const debugGraphCostUsageColumnCopy = Object.freeze({
   input: Object.freeze({description: ['debug.cost.input.desc', 'Newly processed prompt/context tokens, counted after cache reads and writes are separated into Cached. Reused cached context is never double-counted here.'], gloss: ['debug.cost.input.gloss', 'new prompt/context tokens']}),
   cache_read: Object.freeze({description: ['debug.modelTokens.cacheRead.desc', 'Tokens served from model-cache reads, usually cheaper than uncached input.'], gloss: ['debug.cost.cacheRead.gloss', 'hits and refreshes']}),
-  cache_write: Object.freeze({description: ['debug.modelTokens.cacheWrite.desc', 'Input tokens written into a provider cache. Anthropic records 5-minute and 1-hour lifetimes separately in Cost calculation; OpenAI does not expose a cache-write counter.'], gloss: ['debug.modelTokens.cacheWrite', 'cache creation']}),
+  cache_write: Object.freeze({description: ['debug.modelTokens.cacheWrite.desc', 'Input tokens written into a provider cache. Anthropic records 5-minute and 1-hour lifetimes separately in Cost by Model; OpenAI does not expose a cache-write counter.'], gloss: ['debug.cost.cacheWrite.gloss', '5m/1h cache creation']}),
   cache_write_5m: Object.freeze({description: ['debug.cost.class.cacheWrite5m', 'Input tokens written into the provider cache for a 5-minute lifetime.'], gloss: ['debug.cost.cacheWrite5m.gloss', '5-minute lifetime']}),
   cache_write_1h: Object.freeze({description: ['debug.cost.class.cacheWrite1h', 'Input tokens written into the provider cache for a 1-hour lifetime.'], gloss: ['debug.cost.cacheWrite1h.gloss', '1-hour lifetime']}),
   output: Object.freeze({description: ['debug.cost.output.desc', 'Model-generated tokens, including provider-reported reasoning and tool-call output.'], gloss: ['debug.cost.output.gloss', 'generated tokens']}),
-  other: Object.freeze({description: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost calculation without being added to token totals.'], gloss: ['debug.cost.other.gloss', 'non-token units (image/audio/tool)']}),
+  other: Object.freeze({description: ['debug.cost.other.desc', 'Retained usage that fits none of Input / Cached / Output, such as non-text or non-token units. Non-token image, audio, request, and tool units can add cost in Cost by Model without being added to token totals.'], gloss: ['debug.cost.other.gloss', 'non-token units (image/audio/tool)']}),
   total: Object.freeze({description: ['debug.cost.total.desc', 'The reconciliation of the four columns: Input + Cached + Output + Other. The projection is mutually exclusive, so each token is counted in exactly one column and the sum is not double-counted.'], gloss: ['debug.cost.total.gloss', 'Input + Cached + Output + Other']}),
 });
 
@@ -49409,10 +49547,7 @@ function debugGraphCostUsageColumnLabel(key) {
 function debugGraphCostUsageColumnGloss(key) {
   const entry = debugGraphCostUsageColumnCopy[key]?.gloss;
   if (!entry) return '';
-  const gloss = debugGraphCostText(entry[0], entry[1]);
-  // The current locale reuses "Cache write" for this label. Keep the legend's
-  // second line informative instead of repeating the header word-for-word.
-  return key === 'cache_write' && gloss === debugGraphCostUsageColumnLabel(key) ? 'cache creation' : gloss;
+  return debugGraphCostText(entry[0], entry[1]);
 }
 
 // One always-visible legend for the cost tables' Input/Cached/Output/Other/Total columns, so the
@@ -49634,6 +49769,8 @@ function debugGraphCostModelLabel(row) {
 function debugGraphAgentDisplayLabel(value) {
   const full = String(value || '').trim();
   if (!full) return debugGraphCostText('debug.cost.unknown', 'Unknown');
+  const canonical = globalThis.YOLOmuxStatsCurrent?.canonicalAgentLabel?.(full);
+  if (canonical && canonical !== full) return canonical;
   if (full.startsWith('claude-bg:')) {
     const [, projectValue = '', sessionValue = ''] = full.split(':');
     const projectParts = projectValue.split('-').filter(Boolean);
@@ -49693,25 +49830,49 @@ function debugGraphCostPricePairHtml(microUsd, apiListMicroUsd = null, {basis = 
     : `<small class="js-debug-cost-price-pair"><span>${esc(debugGraphCostUsdText(microUsd))} ${esc(marginalLabel.toLowerCase())}</span><span>${esc(debugGraphCostUsdText(apiListMicroUsd))} list</span></small>`;
 }
 
-function debugGraphCostBreakdownItems(row) {
+const DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS = Object.freeze([
+  'input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other',
+]);
+
+function debugGraphCostUsageColumns() {
+  return DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS.map(key => ({
+    key,
+    label: key === 'input' ? debugGraphCostText('debug.cost.input', 'Input')
+      : key === 'output' ? debugGraphCostText('debug.cost.output', 'Output')
+        : key === 'other' ? debugGraphCostText('debug.cost.other', 'Other')
+          : debugGraphCostUsageColumnLabel(key),
+  }));
+}
+
+function debugGraphCostUsesLifetimeCacheWrites(row) {
+  return String(row?.provider || '').trim().toLowerCase() === 'anthropic';
+}
+
+function debugGraphCostBreakdownItems(row, {kind = '', total = false} = {}) {
   const exactCacheWriteTokens = Math.max(0, Number(row?.cache_write_5m_tokens) || 0) + Math.max(0, Number(row?.cache_write_1h_tokens) || 0);
   const exactCacheWriteMicroUsd = debugGraphCostInteger(row?.cache_write_5m_micro_usd) + debugGraphCostInteger(row?.cache_write_1h_micro_usd);
   const exactCacheWriteApiListMicroUsd = debugGraphCostInteger(row?.cache_write_5m_api_list_micro_usd) + debugGraphCostInteger(row?.cache_write_1h_api_list_micro_usd);
-  return [
-    ['input', debugGraphCostText('debug.cost.input', 'Input')],
-    ['cache_read', debugGraphCostUsageColumnLabel('cache_read')],
-    ['cache_write', debugGraphCostUsageColumnLabel('cache_write')],
-    ['output', debugGraphCostText('debug.cost.output', 'Output')],
-    ['other', debugGraphCostText('debug.cost.other', 'Other')],
-  ].map(([key, label]) => ({
+  const columns = debugGraphCostUsageColumns();
+  const byKey = Object.fromEntries(columns.map(column => [column.key, column]));
+  const value = key => ({
     key,
-    label,
-    tokens: key === 'cache_write' ? Math.max(exactCacheWriteTokens, Number(row?.cache_write_tokens) || 0) : Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
-    microUsd: key === 'cache_write' ? Math.max(exactCacheWriteMicroUsd, debugGraphCostInteger(row?.cache_write_micro_usd)) : debugGraphCostInteger(row?.[`${key}_micro_usd`]),
-    apiListMicroUsd: key === 'cache_write'
-      ? debugGraphCostApiListMicroUsd({api_list_micro_usd: Math.max(exactCacheWriteApiListMicroUsd, Number(row?.cache_write_api_list_micro_usd) || 0)})
-      : debugGraphCostApiListMicroUsd({api_list_micro_usd: row?.[`${key}_api_list_micro_usd`]}),
-  }));
+    label: byKey[key].label,
+    tokens: Math.max(0, Number(row?.[`${key}_tokens`]) || 0),
+    microUsd: debugGraphCostInteger(row?.[`${key}_micro_usd`]),
+    apiListMicroUsd: debugGraphCostApiListMicroUsd({api_list_micro_usd: row?.[`${key}_api_list_micro_usd`]}),
+    columnSpan: 1,
+  });
+  const detailedCacheWrites = total || (kind === 'model' && debugGraphCostUsesLifetimeCacheWrites(row));
+  const cacheWrites = detailedCacheWrites
+    ? [value('cache_write_5m'), value('cache_write_1h')]
+    : [{
+      key: 'cache_write', label: debugGraphCostUsageColumnLabel('cache_write'),
+      tokens: Math.max(exactCacheWriteTokens, Number(row?.cache_write_tokens) || 0),
+      microUsd: Math.max(exactCacheWriteMicroUsd, debugGraphCostInteger(row?.cache_write_micro_usd)),
+      apiListMicroUsd: debugGraphCostApiListMicroUsd({api_list_micro_usd: Math.max(exactCacheWriteApiListMicroUsd, Number(row?.cache_write_api_list_micro_usd) || 0)}),
+      columnSpan: 2,
+    }];
+  return [value('input'), value('cache_read'), ...cacheWrites, value('output'), value('other')];
 }
 
 function debugGraphCostPricingSourceEntries(components, modelRow = null) {
@@ -49745,8 +49906,9 @@ function debugGraphCostAllPricingSourcesHtml(components) {
   </section>`;
 }
 
-function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null, unreported = false} = {}) {
-  if (unreported) return `<span class="js-debug-cost-unreported" title="${esc('OpenAI/Codex telemetry does not report cache-write tokens; this total is a lower bound.')}">—</span>`;
+function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null, unreported = false, notApplicable = false} = {}) {
+  if (notApplicable) return '<span class="js-debug-cost-not-applicable" aria-label="Not applicable">—</span>';
+  if (unreported) return `<span class="js-debug-cost-unreported" title="${esc('OpenAI/Codex telemetry does not report cache-write tokens; this total is a lower bound.')}" aria-label="Unreported cache write; total is a lower bound">unreported</span>`;
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
   const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
   const rowApiListMicroUsd = total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd;
@@ -49769,51 +49931,52 @@ function debugGraphCostExactTotalRow(summary) {
 
 function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelFor, components = [], totalRow: exactTotalRow = null} = {}) {
   if (!rows.length) return '';
-  const usageKeys = ['input', 'cache_read', 'cache_write', 'output', 'other'];
-  const usageLabels = {
-    input: debugGraphCostText('debug.cost.input', 'Input'),
-    cache_read: debugGraphCostUsageColumnLabel('cache_read'),
-    cache_write: debugGraphCostUsageColumnLabel('cache_write'),
-    output: debugGraphCostText('debug.cost.output', 'Output'),
-    other: debugGraphCostText('debug.cost.other', 'Other'),
-  };
+  const usageColumns = debugGraphCostUsageColumns();
+  const usageLabels = Object.fromEntries(usageColumns.map(({key, label}) => [key, label]));
   const totalRow = exactTotalRow || debugGraphCostAggregateRows(rows, [])[0] || {};
   const rowHtml = row => {
-    const breakdown = debugGraphCostBreakdownItems(row);
+    const breakdown = debugGraphCostBreakdownItems(row, {kind});
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
     const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
     const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostPricePairText(item.microUsd, item.apiListMicroUsd)}`).join('; ')}`;
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
     const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphMiddleTruncatedTextHtml(label)}</strong>`;
-    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd, unreported: kind === 'model' && item.key === 'cache_write' && String(row?.provider || '').toLowerCase() === 'openai' && item.tokens === 0})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
+    const usageCellHtml = item => {
+      const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(components, row, item) : '';
+      return formula || debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {
+        apiListMicroUsd: item.apiListMicroUsd,
+        unreported: kind === 'model' && item.key === 'cache_write' && String(row?.provider || '').toLowerCase() === 'openai' && item.tokens === 0,
+      });
+    };
+    return `<tr aria-label="${esc(accessible)}"><th scope="row">${identity}</th>${breakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${usageCellHtml(item)}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(row), {total: true, row})}</td></tr>`;
   };
-  const totalBreakdown = debugGraphCostBreakdownItems(totalRow);
+  const totalBreakdown = debugGraphCostBreakdownItems(totalRow, {kind, total: true});
   const totalTokens = Math.max(0, Number(totalRow?.token_quantity) || 0);
   const totalApiListMicroUsd = debugGraphCostApiListMicroUsd(totalRow);
   const grandTotalLabel = totalApiListMicroUsd !== null && totalApiListMicroUsd !== debugGraphCostMicroUsd(totalRow)
     ? debugGraphCostText('debug.cost.grandTotalDual', 'Grand total · marginal / API list prices')
     : debugGraphCostText('debug.cost.grandTotalApiList', 'Grand total at API list prices');
-  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col">${esc(labelHeading)}</th>${usageKeys.map(key => `<th scope="col"${debugGraphCostUsageColumnHeaderAttrs(key, usageLabels[key])}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(key)}" aria-hidden="true"></i><span class="js-debug-cost-usage-label">${esc(usageLabels[key])}</span></th>`).join('')}<th scope="col"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td data-label="${esc(usageLabels[item.key])}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
+  const input = usageColumns[0];
+  const cacheRead = usageColumns[1];
+  const cacheWrite5m = usageColumns[2];
+  const cacheWrite1h = usageColumns[3];
+  const output = usageColumns[4];
+  const other = usageColumns[5];
+  const headerCell = (column, {rowSpan = 1, colSpan = 1} = {}) => `<th scope="col"${rowSpan > 1 ? ` rowspan="${rowSpan}"` : ''}${colSpan > 1 ? ` colspan="${colSpan}"` : ''}${debugGraphCostUsageColumnHeaderAttrs(column.key, column.label)}><i class="js-debug-cost-usage-swatch js-debug-cost-usage-swatch--${esc(column.key)}" aria-hidden="true"></i><span class="js-debug-cost-usage-label">${esc(column.label)}</span></th>`;
+  return `<section class="js-debug-cost-${esc(kind)}-usages js-debug-cost-details-section js-debug-cost-usage-table-section"><h2>${esc(heading)}</h2><div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table" data-js-debug-cost-table="${esc(kind)}"><thead><tr><th scope="col" rowspan="2">${esc(labelHeading)}</th>${headerCell(input, {rowSpan: 2})}${headerCell(cacheRead, {rowSpan: 2})}${headerCell({key: 'cache_write', label: debugGraphCostUsageColumnLabel('cache_write')}, {colSpan: 2})}${headerCell(output, {rowSpan: 2})}${headerCell(other, {rowSpan: 2})}<th scope="col" rowspan="2"${debugGraphCostUsageColumnHeaderAttrs('total', debugGraphCostText('debug.cost.total', 'Total'))}><span class="js-debug-cost-usage-label">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</span></th></tr><tr>${headerCell(cacheWrite5m)}${headerCell(cacheWrite1h)}</tr></thead><tbody>${rows.map(rowHtml).join('')}</tbody><tfoot><tr><th scope="row">${esc(grandTotalLabel)}</th>${totalBreakdown.map(item => `<td${item.columnSpan > 1 ? ` colspan="${item.columnSpan}"` : ''} data-label="${esc(usageLabels[item.key] || item.label)}">${debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {apiListMicroUsd: item.apiListMicroUsd})}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${debugGraphCostUsageTableCellHtml(totalTokens, debugGraphCostMicroUsd(totalRow), {total: true, row: totalRow})}</td></tr></tfoot></table></div></section>`;
 }
 
 function debugGraphCostModelUsageChartHtml(rows, components, options = {}) {
   if (options.report !== true) return '';
   return debugGraphCostUsageTableHtml(rows, {
     kind: 'model',
-    heading: debugGraphCostText('debug.cost.modelUsages', 'Model Usages'),
+    heading: debugGraphCostText('debug.cost.modelUsages', 'Cost by Model'),
     labelHeading: debugGraphCostText('debug.cost.model', 'Model'),
     labelFor: debugGraphCostModelLabel,
     components,
     totalRow: debugGraphCostExactTotalRow(options.summary),
   });
-}
-
-function debugGraphCostComponentLabel(row) {
-  const parts = [row?.provider, row?.model, row?.pricing_profile !== 'default' ? row?.pricing_profile : '', row?.service_tier !== 'default' ? row?.service_tier : '', row?.direction, row?.cache_role, row?.modality, row?.unit]
-    .map(value => String(value || '').trim())
-    .filter(Boolean);
-  return parts.join(' · ') || String(row?.label || row?.key || 'unknown');
 }
 
 function debugGraphCostComponentRateText(row) {
@@ -49826,68 +49989,6 @@ function debugGraphCostComponentRateText(row) {
   return `${debugGraphCostUsdText(Math.round((microUsd * 1000000) / quantity))}/${String(row?.unit || 'unit')}`;
 }
 
-function debugGraphCostComponentFormulaText(row) {
-  const quantity = Number(row?.quantity);
-  const rate = debugGraphCostComponentRateText(row);
-  if (!Number.isFinite(quantity) || quantity <= 0 || rate === '—') return '—';
-  return `${quantity.toLocaleString()} ${String(row?.unit || 'unit')} × ${rate}`;
-}
-
-function debugGraphCostComponentSortValue(row, key) {
-  if (key === 'tokens') return Math.max(0, Number(row?.quantity) || 0);
-  if (key === 'rate') {
-    const rate = Number(row?.rate_usd);
-    const scale = Math.max(1, Number(row?.rate_scale) || 1);
-    return Number.isFinite(rate) ? rate / scale : -1;
-  }
-  if (key === 'cost') return debugGraphCostMicroUsd(row);
-  if (key === 'effective') {
-    const timestamp = Date.parse(String(row?.effective_from || ''));
-    return Number.isFinite(timestamp) ? timestamp : 0;
-  }
-  if (key === 'cache') return String(row?.cache_role || '');
-  if (key === 'source') return String(row?.source_url || '');
-  return String(row?.[key] || '');
-}
-
-function debugGraphCostSortedComponentRows(rows) {
-  const {key, direction} = jsDebugCostComponentSortState;
-  const multiplier = direction === 'asc' ? 1 : -1;
-  return [...rows].sort((left, right) => {
-    const leftValue = debugGraphCostComponentSortValue(left, key);
-    const rightValue = debugGraphCostComponentSortValue(right, key);
-    const comparison = typeof leftValue === 'number' && typeof rightValue === 'number'
-      ? leftValue - rightValue
-      : String(leftValue).localeCompare(String(rightValue));
-    return (comparison * multiplier) || debugGraphCostComponentLabel(left).localeCompare(debugGraphCostComponentLabel(right));
-  });
-}
-
-function debugGraphCostComponentSortHeaderHtml(key, label) {
-  const active = jsDebugCostComponentSortState.key === key;
-  const ariaSort = active ? (jsDebugCostComponentSortState.direction === 'asc' ? 'ascending' : 'descending') : 'none';
-  const nextDirection = active && jsDebugCostComponentSortState.direction === 'asc' ? 'descending' : 'ascending';
-  return `<th scope="col" aria-sort="${ariaSort}"><button type="button" class="js-debug-cost-sort control-active-hover" data-js-debug-cost-sort="${esc(key)}" data-js-debug-cost-next-sort="${nextDirection}">${esc(label)}</button></th>`;
-}
-
-// Render a usage class with the provider's own conventions (Anthropic's price
-// sheet: Base input, 5m/1h cache write, Cache hits & refreshes, Output) instead
-// of the raw `direction · cache_role`. Anything not covered (other modalities/
-// providers) falls back to the raw joined form so nothing is mislabeled.
-function debugGraphCostUsageClassLabel(direction, cacheRole) {
-  const dir = String(direction || '').trim().toLowerCase();
-  const role = String(cacheRole || '').trim().toLowerCase();
-  if (dir === 'output') return debugGraphCostText('debug.cost.class.output', 'Output');
-  if (dir === 'input' || dir === '') {
-    if (role === 'read') return debugGraphCostText('debug.cost.class.cacheHits', 'Cache hits & refreshes');
-    if (role === 'write_5m') return debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write');
-    if (role === 'write_1h') return debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write');
-    if (role.startsWith('write')) return debugGraphCostText('debug.cost.class.cacheWrite', 'Cache write');
-    if (role === 'none' || role === '') return debugGraphCostText('debug.cost.class.baseInput', 'Base input');
-  }
-  return [direction, cacheRole].map(value => String(value || '').trim()).filter(Boolean).join(' · ') || '—';
-}
-
 function debugGraphCostComponentDimension(row) {
   const role = String(row?.cache_role || '').toLowerCase();
   if (role === 'read') return 'cache_read';
@@ -49898,8 +49999,16 @@ function debugGraphCostComponentDimension(row) {
   return 'other';
 }
 
-function debugGraphCostCalculationCellHtml(rows) {
-  if (!rows.length) return '—';
+function debugGraphCostModelFormulaCellHtml(components, model, item) {
+  if (Math.max(0, Number(item?.tokens) || 0) <= 0) return '';
+  const cacheWrite = item.key === 'cache_write';
+  const rows = (components || []).filter(row => {
+    if (String(row?.provider || '').trim() !== String(model?.provider || '').trim()) return false;
+    if (String(row?.model || '').trim() !== String(model?.model || '').trim()) return false;
+    const dimension = debugGraphCostComponentDimension(row);
+    return cacheWrite ? dimension === 'cache_write_5m' || dimension === 'cache_write_1h' : dimension === item.key;
+  });
+  if (!rows.length) return '';
   const grouped = new Map();
   for (const row of rows) {
     const rate = debugGraphCostComponentRateText(row);
@@ -49909,40 +50018,7 @@ function debugGraphCostCalculationCellHtml(rows) {
     current.api_list_micro_usd += debugGraphCostApiListMicroUsd(row) ?? debugGraphCostMicroUsd(row);
     grouped.set(rate, current);
   }
-  return [...grouped.values()].map(row => `<span class="js-debug-cost-calculation-math" title="${esc(`${Math.max(0, Number(row.quantity) || 0).toLocaleString()} tokens x ${debugGraphCostComponentRateText(row)} = ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}">${esc(debugGraphTokenNumberText(row.quantity))} x ${esc(debugGraphCostComponentRateText(row))} = ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</span>`).join('<br>');
-}
-
-function debugGraphCostComponentDetailsHtml(rows) {
-  if (!rows.length) return '';
-  const dimensions = [
-    ['input', debugGraphCostText('debug.cost.class.baseInput', 'Base input')],
-    ['cache_read', debugGraphCostText('debug.cost.class.cacheHits', 'Cache hits & refreshes')],
-    ['cache_write_5m', debugGraphCostText('debug.cost.class.cacheWrite5m', '5m cache write')],
-    ['cache_write_1h', debugGraphCostText('debug.cost.class.cacheWrite1h', '1h cache write')],
-    ['output', debugGraphCostText('debug.cost.class.output', 'Output')],
-    ['other', debugGraphCostText('debug.cost.other', 'Other')],
-  ];
-  const models = new Map();
-  for (const row of rows) {
-    const key = `${String(row?.provider || '')}\u0000${String(row?.model || '')}`;
-    const current = models.get(key) || {provider: row?.provider || '', model: row?.model || debugGraphCostText('debug.cost.unknown', 'Unknown'), dimensions: new Map(), total: []};
-    const dimension = debugGraphCostComponentDimension(row);
-    const items = current.dimensions.get(dimension) || [];
-    items.push(row);
-    current.dimensions.set(dimension, items);
-    current.total.push(row);
-    models.set(key, current);
-  }
-  const rowsHtml = [...models.values()].sort((left, right) => String(left.model).localeCompare(String(right.model))).map(model => {
-    const pricing = debugGraphCostPricingLinksHtml(rows, model, {compact: true});
-    const totalTokens = model.total.reduce((sum, row) => sum + Math.max(0, Number(row?.quantity) || 0), 0);
-    const totalCost = model.total.reduce((sum, row) => sum + debugGraphCostMicroUsd(row), 0);
-    return `<tr><th scope="row">${debugGraphCostModelIdentityHtml(model, {secondaryHtml: pricing})}</th>${dimensions.map(([key, label]) => `<td data-label="${esc(label)}">${debugGraphCostCalculationCellHtml(model.dimensions.get(key) || [])}</td>`).join('')}<td data-label="${esc(debugGraphCostText('debug.cost.total', 'Total'))}">${esc(debugGraphTokenNumberText(totalTokens))} · ${esc(debugGraphCostUsdText(totalCost))}</td></tr>`;
-  }).join('');
-  return `<section class="js-debug-cost-details-section">
-    <h2>${esc(debugGraphCostText('debug.cost.byTokenClass', 'Cost calculation'))}</h2>
-    <div class="js-debug-system-table-wrap js-debug-cost-table-wrap"><table class="js-debug-system-table js-debug-cost-table js-debug-cost-component-table" data-js-debug-cost-table="calculation"><thead><tr><th scope="col">${esc(debugGraphCostText('debug.cost.model', 'Model'))}</th>${dimensions.map(([, label]) => `<th scope="col">${esc(label)}</th>`).join('')}<th scope="col">${esc(debugGraphCostText('debug.cost.total', 'Total'))}</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
-  </section>`;
+  return [...grouped.values()].map(row => `<span class="js-debug-cost-model-formula" title="${esc(`${Math.max(0, Number(row.quantity) || 0).toLocaleString()} tokens x ${debugGraphCostComponentRateText(row)} = ${debugGraphCostUsdText(debugGraphCostMicroUsd(row))}`)}">${esc(debugGraphTokenNumberText(row.quantity))} x ${esc(debugGraphCostComponentRateText(row))} = ${esc(debugGraphCostUsdText(debugGraphCostMicroUsd(row)))}</span>`).join('<br>');
 }
 
 function debugGraphCostSourceLabel(row) {
@@ -49983,6 +50059,16 @@ function debugGraphCostTmuxLabel(row) {
   return [session, windowLabel || kind].filter(Boolean).join(':') || debugGraphCostSourceLabel(row);
 }
 
+function debugGraphCostAgentRowsAlphabetically(rows) {
+  const sortLabel = row => debugGraphAgentDisplayLabel(debugGraphCostTmuxLabel(row));
+  return [...(rows || [])].sort((left, right) => {
+    const leftLabel = sortLabel(left);
+    const rightLabel = sortLabel(right);
+    return leftLabel.localeCompare(rightLabel, undefined, {sensitivity: 'base', numeric: true})
+      || leftLabel.localeCompare(rightLabel);
+  });
+}
+
 function debugGraphCostTmuxBreakdownRows(rows) {
   const grouped = new Map();
   for (const row of rows || []) {
@@ -50012,17 +50098,18 @@ function debugGraphCostTmuxBreakdownRows(rows) {
     }
     grouped.set(key, current);
   }
-  return [...grouped.values()].sort((left, right) => debugGraphCostInteger(right?.upper_micro_usd ?? right?.micro_usd) - debugGraphCostInteger(left?.upper_micro_usd ?? left?.micro_usd)
-    || debugGraphCostTmuxLabel(left).localeCompare(debugGraphCostTmuxLabel(right)));
+  return [...grouped.values()];
 }
 
 function debugGraphCostTmuxBreakdownHtml(summary) {
   const directRows = debugGraphCostRows(summary?.tmuxWindows);
-  const rows = directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources);
+  const rows = debugGraphCostAgentRowsAlphabetically(
+    directRows.length ? directRows : debugGraphCostTmuxBreakdownRows(summary.sources),
+  );
   if (!rows.length) return '';
   return debugGraphCostUsageTableHtml(rows, {
     kind: 'agent',
-    heading: debugGraphCostText('debug.cost.byAgent', 'By Agent'),
+    heading: debugGraphCostText('debug.cost.byAgent', 'Cost by Agent'),
     labelHeading: t('yoagent.action.row.agent'),
     labelFor: debugGraphCostTmuxLabel,
     totalRow: debugGraphCostExactTotalRow(summary),
@@ -50190,7 +50277,6 @@ function debugGraphCostReportHtml(summary, domain) {
       ${debugGraphCostUsageColumnLegendHtml()}
       ${debugGraphCostTmuxBreakdownHtml(summary)}
       ${debugGraphCostModelUsageChartHtml(summary.models, summary.components, {report: true, summary})}
-      ${debugGraphCostComponentDetailsHtml(summary.components)}
       ${debugGraphCostSourceTreeHtml(summary.sources)}
       ${debugGraphCostAllPricingSourcesHtml(summary.components)}
     </div>
@@ -50214,9 +50300,9 @@ function debugGraphCostSummaryHtml(buckets, domain) {
   const accessible = !hasEstimatedUsage
     ? 'No displayed usage has a selected price'
     : summary.apiListMicroUsd !== null
-      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd, {basis: 'inline'})} across displayed usage; open calculation and pricing sources`
+      ? `${debugGraphCostPricePairText(summary.totalMicroUsd, summary.apiListMicroUsd, {basis: 'inline'})} across displayed usage; open model costs and pricing sources`
     : exact
-    ? `Estimated API list-price total ${estimated} across displayed usage; open calculation and pricing sources`
+    ? `Estimated API list-price total ${estimated} across displayed usage; open model costs and pricing sources`
     : `Estimated API list-price range ${estimated}; unknown or incomplete displayed usage widens the range`;
   const refreshLabel = debugGraphCostText('common.refresh', 'Refresh');
   const refreshHtml = readOnlyMode ? '' : `<button type="button" class="js-debug-cost-refresh control-active-hover" data-js-debug-cost-refresh aria-label="${esc(refreshLabel)}" title="${esc(jsDebugPricingRefreshState.error || refreshLabel)}"${jsDebugPricingRefreshState.inFlight ? ' disabled aria-busy="true"' : ''}>${esc(jsDebugPricingRefreshState.inFlight ? `${refreshLabel}…` : refreshLabel)}</button>`;
@@ -50666,9 +50752,8 @@ function jsDebugCurrentCostDimensionRows(dimensions = {}) {
   const values = {
     input: dimensions.input,
     cache_read: dimensions.cache_read,
-    // The compact usage tables have one Cache write column. Retain the two
-    // lifetime fields below for Cost calculation, where the distinct rates
-    // remain material to the formula.
+    // The shared usage grid spans 5m/1h cache writes. Retain both lifetime
+    // fields so Cost by Model can show the authoritative rate formula.
     cache_write: cacheWrite,
     cache_write_5m: dimensions.cache_write_5m || dimensions.cache_write,
     cache_write_1h: dimensions.cache_write_1h,
@@ -51808,20 +51893,6 @@ function openYoCostTranscriptPreview(event) {
   return true;
 }
 
-function handleYoCostTableSort(event, panel) {
-  const button = event.target?.closest?.('[data-js-debug-cost-sort]');
-  if (!button || !panel?.contains(button)) return false;
-  event.preventDefault();
-  const key = String(button.dataset.jsDebugCostSort || 'cost');
-  const nextDirection = jsDebugCostComponentSortState.key === key && jsDebugCostComponentSortState.direction === 'asc' ? 'desc' : 'asc';
-  jsDebugCostComponentSortState.key = key;
-  jsDebugCostComponentSortState.direction = nextDirection;
-  // Age-label cadence throttles passive panel repainting; a user sort is an
-  // explicit content mutation and must repaint immediately.
-  renderYoCostPanels({force: true});
-  return true;
-}
-
 function bindYoCostPanel(panel) {
   if (!panel || panel.dataset.jsYoCostBound === 'true') return;
   panel.dataset.jsYoCostBound = 'true';
@@ -51849,7 +51920,6 @@ function bindYoCostPanel(panel) {
   panel.addEventListener('click', event => {
     if (handleDebugGraphControlEvent(event, panel)) return;
     if (typeof openExternalLinkFromEvent === 'function' && openExternalLinkFromEvent(event, panel)) return;
-    if (handleYoCostTableSort(event, panel)) return;
     openYoCostTranscriptPreview(event);
   });
 }
@@ -56008,7 +56078,7 @@ function handleFileEditorContentChanged(panel, path, content, options = {}) {
   updateFileEditorPanelChrome(panel, path);
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
-  renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
+  renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content);
   renderLinkedFilePreviewPanels(panel, path, state.content);
   updateFilePreviewPopout(path, state.content);
   scheduleFileEditorSplitScrollSync(panel, 'editor');
@@ -61654,7 +61724,7 @@ function renderMediaEditor(panel, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderEditorPreviewPane(parts.previewPane, path, '', {context: 'preview'});
+    renderFileEditorPreviewSurface(panel, parts.previewPane, path, '', {context: 'preview'});
   }
   const status = openFileStatus(state);
   setFileEditorPanelStatus(panel, status.message, status.level);
@@ -61674,9 +61744,8 @@ function renderTextPreviewMode(panel, item, path, state, parts) {
   panel.classList.remove('syntax-highlighted');
   if (parts.previewPane) {
     parts.previewPane.hidden = false;
-    renderEditorPreviewPane(parts.previewPane, path, state.content, {context: 'preview'});
+    renderFileEditorPreviewSurface(panel, parts.previewPane, path, state.content, {context: 'preview'});
   }
-  refreshPreviewFind(panel);
   scheduleShareFileEditorScrollRestore(item, path);
 }
 
@@ -61686,7 +61755,7 @@ function renderTextCodeMode(panel, item, path, state, parts, mode) {
   if (rawPane) rawPane.hidden = true;
   if (previewPane) {
     previewPane.hidden = mode !== 'split';
-    if (mode === 'split') renderEditorPreviewPane(previewPane, path, state.content, {context: 'split'});
+    if (mode === 'split') renderFileEditorPreviewSurface(panel, previewPane, path, state.content, {context: 'split'});
   }
   panel.classList.remove('syntax-highlighted');
   ensureCodeMirrorPanel(panel, item, path, state).then(loaded => {
@@ -62438,7 +62507,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
     if (panel === sourcePanel) continue;
     const mode = fileEditorPanelMode(panel);
     if (mode !== 'preview' && mode !== 'split') continue;
-    renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+    renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
   }
 }
 
@@ -62501,7 +62570,7 @@ function refreshEditorPreviews() {
     const path = fileItemPath(item);
     const state = fileState.get(path);
     if (state?.kind && editorPreviewModeAvailable(path, state)) {
-      renderEditorPreviewPane(panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
+      renderFileEditorPreviewSurface(panel, panel.querySelector('.file-editor-preview-pane-panel'), path, state.content || '', {context: fileEditorPanelMode(panel)});
       updateFilePreviewPopout(path, state.content || '');
     }
   }
@@ -62530,7 +62599,7 @@ function syncFileEditorNormalizedContentToPanels(path, content) {
     if (rawCode) rawCode.textContent = content;
     const mode = fileEditorPanelMode(openPanel);
     if (mode === 'preview' || mode === 'split') {
-      renderEditorPreviewPane(openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
+      renderFileEditorPreviewSurface(openPanel, openPanel.querySelector('.file-editor-preview-pane-panel'), path, content, {context: mode});
     }
     const status = openFileStatus(fileState.get(path));
     setFileEditorPanelStatus(openPanel, status.message, status.level);

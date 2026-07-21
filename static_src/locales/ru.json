@@ -231,6 +231,7 @@
   "debug.cost.byTokenClass": "Расчет стоимости",
   "debug.cost.cache": "Кэш",
   "debug.cost.cache.gloss": "чтения и записи кэша вместе",
+  "debug.cost.cacheWrite.gloss": "создание кэша на 5 мин/1 ч",
   "debug.cost.cached": "Кэшировано",
   "debug.cost.catalogRevision": "Версия каталога",
   "debug.cost.coverage": "Покрытие с ценой",

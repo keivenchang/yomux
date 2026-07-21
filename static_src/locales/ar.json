@@ -243,6 +243,7 @@
   "debug.cost.byTokenClass": "حساب التكلفة",
   "debug.cost.cache": "ذاكرة التخزين المؤقت",
   "debug.cost.cache.gloss": "قراءات وكتابات التخزين المؤقت مجتمعة",
+  "debug.cost.cacheWrite.gloss": "إنشاء ذاكرة مؤقتة لمدة 5 دقائق/ساعة واحدة",
   "debug.cost.cached": "مخزن مؤقتًا",
   "debug.cost.catalogRevision": "مراجعة الكتالوج",
   "debug.cost.coverage": "تغطية مسعّرة",

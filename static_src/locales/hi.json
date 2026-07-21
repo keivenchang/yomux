@@ -219,6 +219,7 @@
   "debug.cost.byTokenClass": "लागत गणना",
   "debug.cost.cache": "कैश",
   "debug.cost.cache.gloss": "कैश रीड और राइट, संयुक्त",
+  "debug.cost.cacheWrite.gloss": "5 मिनट/1 घंटे का कैश निर्माण",
   "debug.cost.cached": "कैश्ड",
   "debug.cost.catalogRevision": "कैटलॉग संशोधन",
   "debug.cost.coverage": "मूल्यांकित कवरेज",

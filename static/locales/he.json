@@ -224,6 +224,7 @@
   "debug.cost.byTokenClass": "חישוב עלות",
   "debug.cost.cache": "מטמון",
   "debug.cost.cache.gloss": "קריאות וכתיבות מטמון יחד",
+  "debug.cost.cacheWrite.gloss": "יצירת מטמון ל-5 דק׳/שעה",
   "debug.cost.cached": "במטמון",
   "debug.cost.catalogRevision": "גרסת קטלוג",
   "debug.cost.coverage": "כיסוי מתומחר",

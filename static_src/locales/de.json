@@ -219,6 +219,7 @@
   "debug.cost.byTokenClass": "Kostenberechnung",
   "debug.cost.cache": "Zwischenspeicher",
   "debug.cost.cache.gloss": "Cache-Lese- und Schreibvorgänge zusammen",
+  "debug.cost.cacheWrite.gloss": "5-Min./1-Std.-Cache-Erstellung",
   "debug.cost.cached": "Zwischengespeichert",
   "debug.cost.catalogRevision": "Katalogrevision",
   "debug.cost.coverage": "Bepreiste Abdeckung",

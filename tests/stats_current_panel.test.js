@@ -1233,7 +1233,7 @@ test('the YO!cost report renders one shared always-visible column legend with tr
   const copy = source.slice(copyStart, copyEnd);
   for (const key of ['input', 'cache_read', 'cache_write', 'cache_write_5m', 'cache_write_1h', 'output', 'other', 'total']) {
     assert.match(copy, new RegExp(`${key}: Object\\.freeze\\(\\{description:`), `${key} has the long description in the shared owner`);
-    const glossKey = key === 'cache_read' ? 'debug.modelTokens.cacheRead' : key === 'cache_write' ? 'debug.modelTokens.cacheWrite' : key === 'cache_write_5m' ? 'debug.cost.cacheWrite5m.gloss' : key === 'cache_write_1h' ? 'debug.cost.cacheWrite1h.gloss' : `debug.cost.${key}.gloss`;
+    const glossKey = key === 'cache_read' ? 'debug.modelTokens.cacheRead' : key === 'cache_write' ? 'debug.cost.cacheWrite.gloss' : key === 'cache_write_5m' ? 'debug.cost.cacheWrite5m.gloss' : key === 'cache_write_1h' ? 'debug.cost.cacheWrite1h.gloss' : `debug.cost.${key}.gloss`;
     assert.match(copy, new RegExp(glossKey.replaceAll('.', '\\.'), 'u'), `${key} has the terse gloss in the shared owner`);
     assert.match(legend, new RegExp(`js-debug-cost-usage-swatch--\\$\\{esc\\(key\\)\\}`), 'legend uses the matching swatch');
   }
@@ -1241,10 +1241,11 @@ test('the YO!cost report renders one shared always-visible column legend with tr
   assert.equal((report.match(/debugGraphCostUsageColumnLegendHtml\(\)/g) || []).length, 1, 'report renders the legend once, not per table');
   assert.match(legend, /<dl class="js-debug-cost-column-legend" data-js-debug-cost-column-legend/);
   assert.match(css, /\.js-debug-cost-column-legend \{[\s\S]*?display: flex;[\s\S]*?flex-wrap: wrap;/);
-  assert.match(css, /@container \(max-width: 34rem\) \{[\s\S]*?\.js-debug-cost-column-legend \{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@container \(max-width: 34rem\) \{[\s\S]*?\.js-debug-cost-column-legend \{[\s\S]*?display: grid;[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/);
   for (const name of fs.readdirSync('static_src/locales').filter(name => name.endsWith('.json'))) {
     const catalog = JSON.parse(fs.readFileSync(`static_src/locales/${name}`, 'utf8'));
     for (const key of ['input', 'output', 'other', 'total']) assert.ok(String(catalog[`debug.cost.${key}.gloss`] || '').trim(), `${name} has debug.cost.${key}.gloss`);
+    assert.ok(String(catalog['debug.cost.cacheWrite.gloss'] || '').trim(), `${name} has debug.cost.cacheWrite.gloss`);
     assert.ok(String(catalog['debug.modelTokens.cacheRead'] || '').trim(), `${name} has debug.modelTokens.cacheRead`);
     assert.ok(String(catalog['debug.modelTokens.cacheWrite'] || '').trim(), `${name} has debug.modelTokens.cacheWrite`);
   }
@@ -1282,26 +1283,86 @@ test('the YO!cost report shows one always-visible column legend sharing the desc
   assert.match(legendFn, /js-debug-cost-usage-swatch--\$\{esc\(key\)\}/); // Total uses the matching swatch too
   // Gloss owner shares the same keys as the description owner (one wording source, terse layer).
   for (const key of ['input', 'cache_read', 'cache_write', 'output', 'other', 'total']) {
-    const translated = key === 'cache_read' ? 'debug\\.modelTokens\\.cacheRead' : key === 'cache_write' ? 'debug\\.modelTokens\\.cacheWrite' : `debug\\.cost\\.${key}\\.gloss`;
+    const translated = key === 'cache_read' ? 'debug\\.modelTokens\\.cacheRead' : key === 'cache_write' ? 'debug\\.cost\\.cacheWrite\\.gloss' : `debug\\.cost\\.${key}\\.gloss`;
     assert.match(source, new RegExp(`${key}: Object\\.freeze\\(\\{description:[^\\n]+${translated}`), `gloss owner has ${key}`);
   }
   // Tight legend CSS: bounded responsive grid, compact font, no fixed width.
   assert.match(css, /\.js-debug-cost-column-legend \{[\s\S]*?display: flex;[\s\S]*?flex-wrap: wrap;/);
 });
 
-test('the YO!cost calculation table is one model row with separated cache-write formula columns', () => {
-  const calculation = sourceFunction('debugGraphCostComponentDetailsHtml', 'debugGraphCostSourceLabel');
-  assert.match(calculation, /cache_write_5m/);
-  assert.match(calculation, /cache_write_1h/);
-  assert.match(calculation, /debugGraphCostCalculationCellHtml\(model\.dimensions\.get\(key\) \|\| \[\]\)/);
-  assert.match(calculation, /debugGraphCostModelIdentityHtml\(model, \{secondaryHtml: pricing\}\)/);
-  assert.match(calculation, /data-js-debug-cost-table="calculation"/);
-  assert.doesNotMatch(calculation, /debugGraphCostComponentSortHeaderHtml/);
-  const sourceLabel = sourceFunction('debugGraphCostSourceLabel', 'debugGraphCostRowRangeUsdText');
-  assert.match(sourceLabel, /row\?\.full_label \|\| row\?\.agent_label \|\| row\?\.label/);
-  const cell = sourceFunction('debugGraphCostCalculationCellHtml', 'debugGraphCostComponentDetailsHtml');
-  assert.match(cell, /x \$\{esc\(debugGraphCostComponentRateText\(row\)\)\} =/);
-  assert.match(cell, /js-debug-cost-calculation-math/);
+test('YO!cost keeps exact formulas inside Cost by Model and removes the duplicate calculation table', () => {
+  const report = sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml');
+  const usageTable = sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml');
+  const formula = sourceFunction('debugGraphCostModelFormulaCellHtml', 'debugGraphCostSourceLabel');
+  assert.doesNotMatch(report, /debugGraphCostComponentDetailsHtml|data-js-debug-cost-table="calculation"/);
+  assert.match(usageTable, /debugGraphCostModelFormulaCellHtml\(components, row, item\)/);
+  assert.match(formula, /cache_write_5m.*cache_write_1h/);
+  assert.match(formula, /x \$\{esc\(debugGraphCostComponentRateText\(row\)\)\} =/);
+  assert.match(formula, /js-debug-cost-model-formula/);
+});
+
+test('YO!cost keeps Cost by Model and Cost by Agent on one cache-write grid', () => {
+  const gridStart = source.indexOf('const DEBUG_GRAPH_COST_USAGE_COLUMN_KEYS = Object.freeze(');
+  const gridEnd = source.indexOf('\nfunction debugGraphCostPricingSourceEntries(', gridStart);
+  assert.notEqual(gridStart, -1, 'shared cache-write grid exists');
+  assert.notEqual(gridEnd, -1, 'shared cache-write grid ends before the next owner');
+  const sharedGrid = source.slice(gridStart, gridEnd);
+  const context = {result: null};
+  vm.runInNewContext(`
+    const debugGraphCostText = (_key, fallback) => fallback;
+    const debugGraphCostUsageColumnLabel = key => ({cache_read: 'Cache read', cache_write: 'Cache write', cache_write_5m: '5m cache write', cache_write_1h: '1h cache write'})[key] || key;
+    const debugGraphCostInteger = value => Math.max(0, Number(value) || 0);
+    const debugGraphCostApiListMicroUsd = row => Math.max(0, Number(row?.api_list_micro_usd) || 0);
+    ${sharedGrid}
+    const anthro = {provider: 'anthropic', cache_write_5m_tokens: 5, cache_write_1h_tokens: 7, cache_write_5m_micro_usd: 50, cache_write_1h_micro_usd: 140};
+    const openai = {provider: 'openai', cache_write_tokens: 9, cache_write_micro_usd: 90};
+    result = {
+      columns: debugGraphCostUsageColumns().map(column => column.key),
+      anthro: debugGraphCostBreakdownItems(anthro, {kind: 'model'}),
+      openai: debugGraphCostBreakdownItems(openai, {kind: 'model'}),
+      agent: debugGraphCostBreakdownItems(anthro, {kind: 'agent'}),
+      total: debugGraphCostBreakdownItems(anthro, {kind: 'agent', total: true}),
+    };
+  `, context);
+  assert.deepEqual([...context.result.columns], ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']);
+  const byKey = rows => Object.fromEntries(rows.map(row => [row.key, row]));
+  const anthro = byKey(context.result.anthro);
+  const openai = byKey(context.result.openai);
+  const agent = byKey(context.result.agent);
+  const total = byKey(context.result.total);
+  assert.equal(anthro.cache_write_5m.tokens, 5);
+  assert.equal(anthro.cache_write_1h.tokens, 7);
+  assert.equal(openai.cache_write.tokens, 9);
+  assert.equal(openai.cache_write.columnSpan, 2);
+  assert.equal(agent.cache_write.tokens, 12);
+  assert.equal(agent.cache_write.columnSpan, 2);
+  assert.equal(total.cache_write_5m.tokens, 5);
+  assert.equal(total.cache_write_1h.tokens, 7);
+  const usageTable = sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml');
+  assert.match(usageTable, /rowspan="2"/);
+  assert.match(usageTable, /colSpan: 2/);
+  assert.match(usageTable, /item\.columnSpan/);
+  assert.match(sourceFunction('debugGraphCostModelUsageChartHtml', 'debugGraphCostComponentRateText'), /Cost by Model/);
+  assert.match(sourceFunction('debugGraphCostTmuxBreakdownHtml', 'debugGraphCostReportHtml'), /Cost by Agent/);
+});
+
+test('Cost by Agent sorts by the canonical displayed agent name', () => {
+  const sorter = sourceFunction('debugGraphCostAgentRowsAlphabetically', 'debugGraphCostTmuxBreakdownRows');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const debugGraphCostTmuxLabel = row => row.label;
+    const debugGraphAgentDisplayLabel = value => String(value).split('|')[0];
+    ${sorter}
+    result = debugGraphCostAgentRowsAlphabetically([
+      {label: 'zeta|0|codex'},
+      {label: 'Agent-10|0|codex'},
+      {label: 'agent-2|0|codex'},
+      {label: 'Beta|0|codex'},
+    ]).map(row => debugGraphAgentDisplayLabel(row.label));
+  `, context);
+  assert.deepEqual([...context.result], ['agent-2', 'Agent-10', 'Beta', 'zeta']);
+  const table = sourceFunction('debugGraphCostTmuxBreakdownHtml', 'debugGraphCostTranscriptPath');
+  assert.match(table, /debugGraphCostAgentRowsAlphabetically/);
 });
 
 test('YO!cost usage metrics and compact pricing links stay on one line', () => {

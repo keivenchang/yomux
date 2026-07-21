@@ -3235,6 +3235,24 @@ function codeMirrorSearchMatchSummary(text, query, selection = {}, options = {})
   return {current: index + 1, total: matches.length, text: `${index + 1}/${matches.length}`};
 }
 
+// Find owns the selected result, but the viewport is the user's current navigation surface when
+// they scroll manually. Keep the selected match while it remains visible; once it leaves the
+// viewport, adopt the first visible match without requesting another scroll.
+function codeMirrorSearchVisibleMatchIndex(matches, selection = {}, visibleRanges = []) {
+  if (!matches.length) return -1;
+  const selectionFrom = Number(selection.from);
+  const selectionTo = Number(selection.to);
+  const selectedIndex = matches.findIndex(match => match.from === selectionFrom && match.to === selectionTo);
+  if (selectedIndex < 0) return -1;
+  const visible = matches.filter(match => visibleRanges.some(range => (
+    match.from < Number(range?.to) && match.to > Number(range?.from)
+  )));
+  if (!visible.length) return selectedIndex;
+  const selected = matches[selectedIndex];
+  if (visible.some(match => match === selected)) return selectedIndex;
+  return matches.indexOf(visible[0]);
+}
+
 function codeMirrorPhraseValues() {
   return {
     Find: t('common.find'),
@@ -3356,6 +3374,19 @@ function codeMirrorSearchPanelEnhancementExtension(api) {
       }
       const query = panel.querySelector?.('input[name="search"]')?.value || '';
       const selection = this.view.state?.selection?.main || {};
+      const matches = codeMirrorSearchMatches(
+        this.view.state?.doc?.toString?.() || '',
+        query,
+        codeMirrorSearchCheckboxState(panel),
+      );
+      const visibleMatchIndex = codeMirrorSearchVisibleMatchIndex(matches, selection, this.view.visibleRanges || []);
+      if (visibleMatchIndex >= 0 && visibleMatchIndex !== matches.findIndex(match => (
+        match.from === Number(selection.from) && match.to === Number(selection.to)
+      ))) {
+        const match = matches[visibleMatchIndex];
+        this.view.dispatch({selection: {anchor: match.from, head: match.to}});
+        return;
+      }
       count.textContent = codeMirrorSearchMatchSummary(
         this.view.state?.doc?.toString?.() || '',
         query,

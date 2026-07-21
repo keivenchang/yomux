@@ -218,6 +218,7 @@
   "debug.cost.byTokenClass": "Kostenberekening",
   "debug.cost.cache": "Tussenopslag",
   "debug.cost.cache.gloss": "cachelezingen en -schrijvingen samen",
+  "debug.cost.cacheWrite.gloss": "5 min./1 uur cachecreatie",
   "debug.cost.cached": "In cache",
   "debug.cost.catalogRevision": "Catalogusrevisie",
   "debug.cost.coverage": "Geprijsde dekking",

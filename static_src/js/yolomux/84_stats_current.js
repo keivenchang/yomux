@@ -1355,8 +1355,8 @@
       '<section><h3>Token and cost breakdown</h3><div class="yo-cost-current-table-scroll"><table><thead><tr><th>Usage</th><th>Tokens</th><th>Marginal / at API list prices</th></tr></thead><tbody>',
       dimensions,
       '</tbody></table></div></section>',
-      currentCostAttributionTable('Model Usages', report.models, 'model'),
-      currentCostAttributionTable('By Agent', report.agents, 'agent'),
+      currentCostAttributionTable('Cost by Model', report.models, 'model'),
+      currentCostAttributionTable('Cost by Agent', report.agents, 'agent'),
       '<section><h3>Pricing attribution</h3>',
       evidence ? `<ol class="yo-cost-current-evidence">${evidence}</ol>` : '<p>No priced catalog evidence in this range.</p>',
       '</section>',
@@ -1369,7 +1369,7 @@
     const body = rows.map(row => {
       const identity = kind === 'model'
         ? `<span class="yo-cost-current-model"><span><span aria-hidden="true">✦</span> ${currentStatsEscape(row.provider)}</span><strong>${currentStatsEscape(row.model)}</strong></span>`
-        : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(row.label || row.source)}</span>`;
+        : `<span class="yo-cost-current-agent" title="${currentStatsEscape(row.label || row.source)}">${currentStatsEscape(currentStatsCanonicalAgentLabel(row.label || row.source))}</span>`;
       const dimensions = CURRENT_COST_DIMENSIONS.map(dimension => (
         `<td>${currentCostDimensionCell(row.dimensions[dimension])}</td>`
       )).join('');
@@ -1595,7 +1595,30 @@
   function currentStatsSeriesLabel(name) {
     if (name === 'cost_micro_usd') return 'Marginal';
     if (name === 'api_list_cost_micro_usd') return 'At API list prices';
+    if (name.startsWith('agent_tokens_per_minute:')) {
+      return currentStatsCanonicalAgentLabel(name.slice('agent_tokens_per_minute:'.length));
+    }
     return name.replaceAll('_', ' ').replaceAll(':', ' · ');
+  }
+
+  // Usage series retain a stable pane-level key, while the visible identity is the tmux
+  // session. Cost rows carry that same safe key from the server, so both surfaces call this
+  // one owner instead of independently trimming their agent labels.
+  function currentStatsCanonicalAgentLabel(value) {
+    const full = String(value || '').trim();
+    if (!full) return 'Unknown';
+    if (full.startsWith('claude-bg:')) {
+      const [, projectValue = '', sessionValue = ''] = full.split(':');
+      const projectParts = projectValue.split('-').filter(Boolean);
+      const project = projectParts.slice(-2).join('-') || projectValue;
+      const session = sessionValue.slice(0, 8);
+      return ['claude-bg', project, session].filter(Boolean).join(':');
+    }
+    const parts = full.split('|');
+    if (parts.length >= 2 && parts.length <= 4 && ['claude', 'codex', 'term'].includes(parts.at(-1))) {
+      return parts[0] || full;
+    }
+    return full;
   }
 
   function currentStatsNumber(value) {
@@ -2135,6 +2158,7 @@
   }
 
   globalThis.YOLOmuxStatsCurrent = Object.freeze({
+    canonicalAgentLabel: currentStatsCanonicalAgentLabel,
     createBrowserClient,
     createController,
     mount,
