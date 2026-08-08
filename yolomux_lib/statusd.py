@@ -15,24 +15,29 @@ from typing import Any
 from .app import TmuxWebtermApp
 from .tmux.sessions import discover_status_sessions
 from .tmux.tmux_utils import list_tmux_session_names
+from .local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from .local_services.runtime import acquire_client_lease
 from .local_services.runtime import apply_service_process_priority
 from .local_services.runtime import LocalRpcServiceState
 from .local_services.runtime import reap_dead_client_leases
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
+from .local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
 from .statusd_protocol import STATUSD_CODE_REVISION
 from .statusd_protocol import STATUSD_SERVICE_NAME
 from .statusd_protocol import StatusProtocolError
 from .statusd_protocol import StatusSnapshotMetadata
+from .statusd_protocol import activity_summary_disabled_response
+from .statusd_protocol import activity_summary_enabled
+from .statusd_protocol import decode_activity_work_body
 from .statusd_protocol import validate_request
 from .statusd_client import STATUSD_DEFAULT_IDLE_SECONDS
 from .statusd_client import default_socket_path
 
 
 STATUSD_MAX_SESSIONS = 256
-STATUSD_CONCURRENT_HANDLER_LIMIT = 8
+STATUSD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 
 # Working/idle classification changes on every agent turn transition, and nothing about that
 # transition (no approval prompt, no attention-ack) triggers an explicit invalidate() call. Without
@@ -49,20 +54,37 @@ class PersistentStatusService(LocalRpcServiceState):
         super().__init__(socket_path, prefix="yolomux-statusd", idle_seconds=idle_seconds)
         self.lock = threading.Condition(threading.RLock())
         self.build_lock = threading.Lock()
+        self.activity_lock = threading.Lock()
         self.app: TmuxWebtermApp | None = None
+        self.activity_app: TmuxWebtermApp | None = None
+        self.activity_profile: dict[str, Any] = {}
         self.session_names: tuple[str, ...] = ()
         self.snapshot: tuple[StatusSnapshotMetadata, bytes] | None = None
+        # The roster the retained snapshot was actually BUILT for. `session_names` is bound to the
+        # in-flight build's roster by `_ensure_app` before that build commits, so it cannot answer
+        # "does this snapshot cover this session". Reading a session through the wrong roster is how
+        # a session created one second earlier was reported as a definitive `unknown session` 404.
+        self.snapshot_session_names: tuple[str, ...] = ()
         self.snapshot_payload: dict[str, Any] | None = None
         self.snapshot_signature: str | None = None
         self.generation = 0
         self.build_count = 0
         self.encode_count = 0
+        self.snapshot_build_conflicts = 0
+        # Retention is bounded to ONE latest roster, so a newer divergent demand replaces an
+        # older pending one. Count those replacements: the superseded roster is still owed a
+        # build, and a starved roster must be measurable here rather than disappearing silently.
+        self.snapshot_refresh_supersessions = 0
         self.invalidation_reason = "startup"
+        self.invalidation_generation = 0
         self.last_error = ""
         self.inventory: tuple[dict[str, object], bytes] | None = None
         self.inventory_generation = 0
         self.inventory_signature: str | None = None
         self.refresh_worker: threading.Thread | None = None
+        self.refresh_requested_sessions: tuple[str, ...] | None = None
+        self.refresh_build_sessions: tuple[str, ...] | None = None
+        self.refresh_retry_at = 0.0
 
     def _sessions(self, request: dict[str, Any]) -> tuple[str, ...]:
         raw = request.get("sessions", [])
@@ -82,7 +104,15 @@ class PersistentStatusService(LocalRpcServiceState):
         self.session_names = sessions
         return self.app
 
+    def _ensure_activity_app(self, sessions: tuple[str, ...]) -> TmuxWebtermApp:
+        if self.activity_app is None:
+            self.activity_app = TmuxWebtermApp(list(sessions), status_service_mode=True)
+        self.activity_app.sessions = list(sessions)
+        return self.activity_app
+
     def _build(self, sessions: tuple[str, ...]) -> tuple[StatusSnapshotMetadata, bytes]:
+        with self.lock:
+            build_invalidation_generation = self.invalidation_generation
         app = self._ensure_app(sessions)
         timings: dict[str, float] = {}
         payload, status = app.build_auto_approve_status(timings=timings, sync_workers=False)
@@ -99,7 +129,19 @@ class PersistentStatusService(LocalRpcServiceState):
         # for a snapshot that cannot yet be read.
         with self.lock:
             if self.snapshot is not None and not self.invalidation_reason and source_signature == self.snapshot_signature:
-                return self.snapshot
+                metadata, body = self.snapshot
+                refreshed = StatusSnapshotMetadata(
+                    metadata.generation,
+                    metadata.status,
+                    False,
+                    time.time(),
+                    metadata.content_type,
+                )
+                self.snapshot = (refreshed, body)
+                self.snapshot_session_names = sessions
+                self.last_error = ""
+                self.lock.notify_all()
+                return refreshed, body
             generation = self.generation + 1
         payload["agent_window_snapshot_revision"] = generation
         body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -114,9 +156,14 @@ class PersistentStatusService(LocalRpcServiceState):
                 built_at=time.time(),
             )
             self.snapshot = (metadata, body)
+            self.snapshot_session_names = sessions
             self.snapshot_payload = payload
             self.snapshot_signature = source_signature
-            self.invalidation_reason = ""
+            # An invalidate accepted while the expensive build was outside the lock belongs
+            # to a later generation. Preserve it so the refresh loop immediately rebuilds
+            # instead of letting this older result erase newer producer state.
+            if self.invalidation_generation == build_invalidation_generation:
+                self.invalidation_reason = ""
             self.last_error = ""
             self.lock.notify_all()
         return metadata, body
@@ -175,32 +222,130 @@ class PersistentStatusService(LocalRpcServiceState):
             self.inventory = (metadata, body)
         return metadata, body
 
+    def _activity_summary(self, request: dict[str, Any], request_binary: bytes) -> tuple[dict[str, object], bytes]:
+        if not activity_summary_enabled():
+            return activity_summary_disabled_response()
+        activity_started = time.perf_counter()
+        sessions = self._sessions(request)
+        decode_started = time.perf_counter()
+        work_by_session = decode_activity_work_body(request_binary, sessions)
+        timings = {"decode_ms": round((time.perf_counter() - decode_started) * 1000, 1)}
+        with self.lock:
+            self.activity_profile = {
+                "in_progress": True,
+                "phase": "waiting",
+                "sessions": len(sessions),
+                "work_sessions": len(work_by_session),
+                "request_bytes": len(request_binary),
+                "timings": dict(timings),
+                "error": "",
+            }
+        with self.activity_lock:
+            try:
+                app = self._ensure_activity_app(sessions)
+                # The web process owns the summary worker, but every completed update is durable.
+                # Reload immediately before assembly so the daemon never attaches its startup copy.
+                with self.lock:
+                    self.activity_profile["phase"] = "load_summaries"
+                started = time.perf_counter()
+                app.yoagent_controller.load_yoagent_session_summaries()
+                timings["load_summaries_ms"] = round((time.perf_counter() - started) * 1000, 1)
+                with self.lock:
+                    self.activity_profile["phase"] = "assemble"
+                    self.activity_profile["timings"] = dict(timings)
+                payload = app.assemble_activity_summary_payload(
+                    force=request["force"],
+                    locale=request["locale"],
+                    session_scope=request["session_scope"],
+                    hours=request["hours"],
+                    work_by_session=work_by_session,
+                    timings=timings,
+                )
+                with self.lock:
+                    self.activity_profile["phase"] = "encode"
+                    self.activity_profile["timings"] = dict(timings)
+                started = time.perf_counter()
+                body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                timings["encode_ms"] = round((time.perf_counter() - started) * 1000, 1)
+                if len(body) > LOCAL_RPC_MAX_BINARY_BYTES:
+                    raise StatusProtocolError("activity body too large")
+            except Exception as error:
+                with self.lock:
+                    self.activity_profile.update({
+                        "in_progress": False,
+                        "phase": "failed",
+                        "total_ms": round((time.perf_counter() - activity_started) * 1000, 1),
+                        "error": str(error)[:256],
+                    })
+                raise
+            with self.lock:
+                self.activity_profile.update({
+                    "in_progress": False,
+                    "phase": "complete",
+                    "total_ms": round((time.perf_counter() - activity_started) * 1000, 1),
+                    "response_bytes": len(body),
+                    "timings": dict(timings),
+                })
+        return {
+            "ok": True,
+            "protocol_version": STATUSD_PROTOCOL_VERSION,
+            "status": int(HTTPStatus.OK),
+            "built_at": time.time(),
+            "content_type": "application/json; charset=utf-8",
+        }, body
+
+    def _retain_refresh_request(self, sessions: tuple[str, ...]) -> None:
+        """Retain the one roster the refresh loop must build next. Caller holds ``self.lock``.
+
+        Single owner for "statusd owes this roster a build". A divergent roster demanded while
+        another roster is mid-build used to be dropped here, which made the bounded `refreshing`
+        response unresolvable: the age-based reconciler in `refresh_loop` rebuilds
+        `self.session_names` -- the roster that just built -- so nothing else remembered the
+        divergent one, and only a later independent demand for it could ever make progress.
+
+        Retaining it does not race the in-flight build. `refresh_loop` consumes this slot and
+        assigns `refresh_build_sessions` in one locked step, so a roster retained during an
+        active build cannot be picked up until that build has committed its generation and
+        notified its waiters inside `_build`.
+
+        Bounded to one latest request, never a queue: three divergent rosters arriving during a
+        single build leave only the third retained, and the two superseded ones are counted in
+        `snapshot_refresh_supersessions` and re-register on their next demand.
+        """
+        if self.refresh_build_sessions == sessions or self.refresh_requested_sessions == sessions:
+            return
+        if self.refresh_requested_sessions is not None:
+            self.snapshot_refresh_supersessions += 1
+        self.refresh_requested_sessions = sessions
+        self.lock.notify_all()
+
     def _snapshot(self, request: dict[str, Any]) -> tuple[dict[str, object], bytes]:
         sessions = self._sessions(request)
         session = request.get("session")
         if session is not None and (not isinstance(session, str) or not session):
             raise StatusProtocolError("invalid session")
-        with self.build_lock:
-            with self.lock:
-                reusable = self.snapshot if sessions == self.session_names and not self.invalidation_reason else None
-                if reusable is not None and time.time() - reusable[0].built_at > STATUSD_SNAPSHOT_MAX_AGE_SECONDS:
-                    reusable = None
-            if reusable is None:
-                try:
-                    metadata, body = self._build(sessions)
-                except Exception as error:
-                    with self.lock:
-                        self.last_error = str(error)[:256]
-                        retained = self.snapshot
-                    if retained is None:
-                        return {"ok": False, "status": int(HTTPStatus.SERVICE_UNAVAILABLE), "error": "unavailable"}, b""
-                    metadata, body = retained
-                    return {"ok": True, **StatusSnapshotMetadata(metadata.generation, metadata.status, True, metadata.built_at, metadata.content_type).to_dict()}, body
-            else:
-                metadata, body = reusable
+        with self.lock:
+            # Only the roster this snapshot was built for may be answered from it. `session_names`
+            # adopts the roster of a build the moment that build STARTS, so matching on it served the
+            # previous roster's snapshot as an authoritative answer for a session it never covered:
+            # the unscoped read reported `stale: False`, and the session-scoped read reported a
+            # definitive `unknown session` 404 for a session that existed.
+            retained = self.snapshot if sessions == self.snapshot_session_names else None
+            payload = self.snapshot_payload if retained is not None else None
+            expired = bool(retained and time.time() - retained[0].built_at > STATUSD_SNAPSHOT_MAX_AGE_SECONDS)
+            needs_refresh = retained is None or bool(self.invalidation_reason) or expired
+            if needs_refresh:
+                if retained is None and self.refresh_build_sessions not in (None, sessions):
+                    # A divergent roster demanded while another roster builds. It still answers
+                    # with the bounded transient `refreshing` outcome below -- this counter only
+                    # records that the demand arrived mid-build, it never suppresses scheduling.
+                    self.snapshot_build_conflicts += 1
+                self._retain_refresh_request(sessions)
+            if retained is None:
+                return {"ok": False, "status": int(HTTPStatus.SERVICE_UNAVAILABLE), "error": "refreshing"}, b""
+            metadata, body = retained
+            served_stale = needs_refresh
         if session is not None:
-            with self.lock:
-                payload = self.snapshot_payload
             if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), dict) or session not in payload["sessions"]:
                 return {"ok": False, "status": int(HTTPStatus.NOT_FOUND), "error": "unknown session"}, b""
             session_payload = payload["sessions"][session]
@@ -209,7 +354,14 @@ class PersistentStatusService(LocalRpcServiceState):
             # Session-scoped reads are still statusd snapshots; retain the source revision so
             # a client cannot merge this state with Tabber data from a different generation.
             body = json.dumps({**session_payload, "agent_window_snapshot_revision": metadata.generation}, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return {"ok": True, **metadata.to_dict()}, body
+        response_metadata = metadata if not served_stale else StatusSnapshotMetadata(
+            metadata.generation,
+            metadata.status,
+            True,
+            metadata.built_at,
+            metadata.content_type,
+        )
+        return {"ok": True, **response_metadata.to_dict()}, body
 
     def _wait_generation(self, request: dict[str, Any]) -> tuple[dict[str, object], bytes]:
         after = int(request.get("after_generation") or 0)
@@ -233,22 +385,40 @@ class PersistentStatusService(LocalRpcServiceState):
         """
         while not self.stop_event.is_set():
             with self.lock:
-                while not self.stop_event.is_set() and (not self.leases or self.snapshot is None):
+                while True:
+                    if self.stop_event.is_set():
+                        return
+                    requested = self.refresh_requested_sessions
+                    if requested is not None:
+                        sessions = requested
+                        self.refresh_requested_sessions = None
+                        break
+                    if self.leases and self.snapshot is not None:
+                        metadata, _body = self.snapshot
+                        invalidated = bool(self.invalidation_reason)
+                        remaining = 0.0 if invalidated else max(0.0, STATUSD_SNAPSHOT_MAX_AGE_SECONDS - (time.time() - metadata.built_at))
+                        remaining = max(remaining, self.refresh_retry_at - time.monotonic())
+                        if remaining <= 0:
+                            sessions = self.session_names
+                            break
+                        self.lock.wait(remaining)
+                        continue
                     self.lock.wait(0.1)
-                if self.stop_event.is_set():
-                    return
-                metadata, _body = self.snapshot
-                invalidated = bool(self.invalidation_reason)
-                remaining = 0.0 if invalidated else max(0.0, STATUSD_SNAPSHOT_MAX_AGE_SECONDS - (time.time() - metadata.built_at))
-                if remaining > 0:
-                    self.lock.wait(remaining)
-                    continue
-                sessions = list(self.session_names)
+                self.refresh_build_sessions = sessions
             try:
-                self._snapshot({"sessions": sessions})
+                with self.build_lock:
+                    self._build(sessions)
+                with self.lock:
+                    self.refresh_retry_at = 0.0
             except (OSError, RuntimeError, StatusProtocolError) as error:
                 with self.lock:
                     self.last_error = str(error)[:256]
+                    self.refresh_retry_at = time.monotonic() + 1.0
+            finally:
+                with self.lock:
+                    if self.refresh_build_sessions == sessions:
+                        self.refresh_build_sessions = None
+                    self.lock.notify_all()
 
     def start_refresh_worker(self) -> None:
         with self.lock:
@@ -273,12 +443,19 @@ class PersistentStatusService(LocalRpcServiceState):
                 "ok": True, "service": STATUSD_SERVICE_NAME, "pid": os.getpid(), "version": STATUSD_PROTOCOL_VERSION, "code_revision": STATUSD_CODE_REVISION, "build_revision": 1,
                 "socket": str(self.socket_path), "started_at": self.started_at, "clients": len(self.leases),
                 "generation": self.generation, "build_count": self.build_count, "encode_count": self.encode_count,
+                "snapshot_build_conflicts": self.snapshot_build_conflicts,
+                "snapshot_refresh_supersessions": self.snapshot_refresh_supersessions,
+                "invalidation_generation": self.invalidation_generation,
                 "inventory_generation": self.inventory_generation,
                 "cache": {"ready": snapshot is not None, "stale": False}, "invalidation_reason": self.invalidation_reason,
-                "last_error": self.last_error, "sessions": len(self.session_names), "queue_depth": 0,
+                "last_error": self.last_error, "sessions": len(self.session_names), "queue_depth": int(self.refresh_requested_sessions is not None),
+                "activity_summary": {
+                    **self.activity_profile,
+                    "timings": dict(self.activity_profile.get("timings") or {}),
+                },
             }
 
-    def handle(self, request: dict[str, Any], _payload: bytes = b"") -> tuple[dict[str, object], bytes]:
+    def handle(self, request: dict[str, Any], request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
         self.last_client_at = time.monotonic()
         try:
             request = validate_request(request)
@@ -299,10 +476,16 @@ class PersistentStatusService(LocalRpcServiceState):
                 return self._inventory(request)
             except StatusProtocolError as error:
                 return {"ok": False, "status": int(HTTPStatus.BAD_REQUEST), "error": str(error)}, b""
+        if action == "activity_summary":
+            try:
+                return self._activity_summary(request, request_binary)
+            except StatusProtocolError as error:
+                return {"ok": False, "status": int(HTTPStatus.BAD_REQUEST), "error": str(error)}, b""
         if action == "wait_generation":
             return self._wait_generation(request)
         if action == "invalidate":
             with self.lock:
+                self.invalidation_generation += 1
                 self.invalidation_reason = str(request.get("reason") or "external")[:80]
                 self.lock.notify_all()
             return {"ok": True, "generation": self.generation}, b""

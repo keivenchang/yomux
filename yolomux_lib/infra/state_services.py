@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http import HTTPStatus
 import threading
 from typing import Any
+from typing import Callable
 
 from .types import SessionFilesPayload
 
@@ -18,6 +20,7 @@ class ClientWatchDescriptor:
     """One browser's watch demand, owned by its client-event stream lifecycle."""
 
     expires_at: float
+    descriptor_generation: int = 1
     roots: tuple[str, ...] = ()
     files: tuple[str, ...] = ()
     background_files: tuple[str, ...] = ()
@@ -29,24 +32,36 @@ class ClientWatchDescriptor:
 @dataclass
 class ClientEventWatcherRecord:
     worker: threading.Thread | None = None
-    directory_poll_worker: threading.Thread | None = None
-    filesystem_worker: threading.Thread | None = None
     snapshot_worker: threading.Thread | None = None
     status_generation_worker: threading.Thread | None = None
     status_generation_stop_event: threading.Event = field(default_factory=threading.Event)
     status_generation_lease_id: str = ""
     status_generation: int = 0
     status_generation_retry_at: float = 0.0
+    watchd_worker: threading.Thread | None = None
+    watchd_stop_event: threading.Event = field(default_factory=threading.Event)
+    watchd_lease_id: str = ""
+    watchd_pid: int = 0
+    watchd_epoch: str = ""
+    watchd_revision: int = 0
+    watchd_synced_generation: int = 0
+    watchd_applied_generation: int = 0
+    watchd_active_generation: int = 0
+    watchd_descriptor_ids: set[str] = field(default_factory=set)
+    watchd_descriptor_generations: dict[str, int] = field(default_factory=dict)
+    watchd_state: str = "starting"
+    watchd_next_failure_episode: int = 1
+    watchd_failure_episode: int = 0
+    watchd_failure_started_at: float = 0.0
+    watchd_failure_count: int = 0
+    watchd_failure_delivery: str = ""
+    watchd_failure_action: str = ""
+    watchd_failure_error_code: str = ""
+    watchd_failure_published: bool = False
     wake_event: threading.Event = field(default_factory=threading.Event)
     stop_event: threading.Event = field(default_factory=threading.Event)
-    filesystem_stop_event: threading.Event = field(default_factory=threading.Event)
-    filesystem_reconfigure_event: threading.Event = field(default_factory=threading.Event)
     filesystem_healthy: bool = False
     filesystem_roots: tuple[str, ...] = ()
-    filesystem_watch_paths: tuple[str, ...] = ()
-    filesystem_transcripts: tuple[str, ...] = ()
-    filesystem_skip_dirs: frozenset[str] = field(default_factory=frozenset)
-    next_filesystem_retry_at: float = 0.0
     next_signature_poll_at: float = 0.0
     next_file_poll_at: float = 0.0
     next_background_file_poll_at: float = 0.0
@@ -58,6 +73,27 @@ class ClientEventWatcherRecord:
     # Fixed-vocabulary recurring-work diagnostics. Keys are supplied only by the
     # app's static catalog, so a caller can never create path/user/cardinality state.
     recurring_work: dict[str, dict[str, float | int]] = field(default_factory=dict)
+
+    def watchd_rebuild_window_open(self) -> bool:
+        """Whether watchd owes this client an activation for a generation it bumped.
+
+        watchd activates a watch generation only after the native registration
+        for it has completed, and that registration is one call which holds the
+        daemon's interpreter lock and answers nothing while it runs. A synced
+        generation the daemon has not yet activated is therefore exactly the
+        interval in which any request will be answered late, and it is knowable
+        from responses this client has already received: it does not have to
+        wait to be told by a daemon that cannot currently reply.
+        """
+        return self.watchd_active_generation < self.watchd_synced_generation
+
+
+@dataclass
+class FilesystemWatchReadyProductRecord:
+    """One latest watch product with every equivalent stable cache key."""
+
+    keys: frozenset[str] = field(default_factory=frozenset)
+    products: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -78,6 +114,12 @@ class CpuBudgetRecord:
     warning_emitted: bool = False
     current_percent: float = 0.0
     top_consumers: list[dict[str, Any]] = field(default_factory=list)
+    # CPU actually consumed since exceeded_since, integrated from the same 1 Hz samples that
+    # decide the breach. The warning needs it as the denominator for its own attribution: a
+    # consumer list without one reads as an explanation even when it covers a fraction of a
+    # percent of the CPU being reported.
+    cpu_ms_since_exceeded: float = 0.0
+    last_sample_at: float = 0.0
 
 
 @dataclass
@@ -87,6 +129,24 @@ class TranscriptsPayloadCacheRecord:
     generation: int = 0
     worker: object | None = None
     worker_started_at: float | None = None
+    publish_requested: bool = False
+    # One queued follow-up build for callers the in-flight build started too early to answer. It is
+    # a single flag, not a queue: repeated forced refreshes during one build cost one extra build.
+    rebuild_requested: bool = False
+    rebuild_publish: bool = False
+
+    def release_worker(self) -> None:
+        """Release the single-flight build guard and every intent scoped to that worker.
+
+        The three fields move together or not at all: ``worker_started_at`` decides whether a later
+        caller may adopt the in-flight build, and ``publish_requested`` decides whether that build
+        publishes. Leaving either behind when the worker goes away hands the next worker an intent
+        belonging to a caller that has already been answered. Callers hold the cache lock.
+        """
+
+        self.worker = None
+        self.worker_started_at = None
+        self.publish_requested = False
 
 
 @dataclass
@@ -259,6 +319,74 @@ class SessionFilesService:
 
 
 @dataclass
+class JobdOperationService:
+    """Bound accepted-operation completion work independently of HTTP handler threads."""
+
+    worker_limit: int = 4
+    operation_limit: int = 64
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    executor: ThreadPoolExecutor | None = None
+    futures: set[Future[Any]] = field(default_factory=set)
+    _slots: threading.BoundedSemaphore = field(init=False)
+    _idle_condition: threading.Condition = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.worker_limit = max(1, int(self.worker_limit))
+        self.operation_limit = max(self.worker_limit, int(self.operation_limit))
+        self._slots = threading.BoundedSemaphore(self.operation_limit)
+        self._idle_condition = threading.Condition(self.lock)
+
+    def reserve(self) -> bool:
+        with self.lock:
+            if self.stop_event.is_set():
+                return False
+            return self._slots.acquire(blocking=False)
+
+    def release_reservation(self) -> None:
+        self._slots.release()
+
+    def submit_reserved(self, function: Callable[..., Any], *args: Any) -> bool:
+        with self.lock:
+            if self.stop_event.is_set():
+                self.release_reservation()
+                return False
+            if self.executor is None:
+                self.executor = ThreadPoolExecutor(
+                    max_workers=self.worker_limit,
+                    thread_name_prefix="jobd-operation",
+                )
+            try:
+                future = self.executor.submit(function, *args)
+            except RuntimeError:
+                self.release_reservation()
+                return False
+            self.futures.add(future)
+            future.add_done_callback(self._finish)
+            return True
+
+    def _finish(self, future: Future[Any]) -> None:
+        with self._idle_condition:
+            self.futures.discard(future)
+            self.release_reservation()
+            self._idle_condition.notify_all()
+
+    def wait_for_idle(self, timeout: float) -> bool:
+        """Wait for accepted completion work without cancelling its producers."""
+
+        with self._idle_condition:
+            return self._idle_condition.wait_for(lambda: not self.futures, timeout=max(0.0, float(timeout)))
+
+    def stop(self) -> None:
+        with self.lock:
+            self.stop_event.set()
+            executor = self.executor
+            self.executor = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+
+@dataclass
 class IndexedRepoDiscoveryRecord:
     """Last completed jobd repository discovery plus one in-flight job."""
 
@@ -280,7 +408,9 @@ class ActivityTranscriptService:
     tabber_cache_record: TabberActivityCacheRecord = field(default_factory=TabberActivityCacheRecord)
     tabber_warmer_record: TabberActivityWarmerRecord = field(default_factory=TabberActivityWarmerRecord)
     activity_summary_lock: threading.RLock = field(default_factory=threading.RLock)
+    activity_summary_compute_lock: threading.Lock = field(default_factory=threading.Lock)
     activity_summary_cache: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+    activity_summary_futures: dict[tuple[Any, ...], Future[dict[str, Any]]] = field(default_factory=dict)
     transcripts_payload_cache_lock: threading.RLock = field(default_factory=threading.RLock)
     transcripts_payload_cache_record: TranscriptsPayloadCacheRecord = field(default_factory=TranscriptsPayloadCacheRecord)
     transcript_tail_cache_lock: threading.RLock = field(default_factory=threading.RLock)
@@ -307,12 +437,22 @@ class ClientWatchService:
     descriptors: dict[str, ClientWatchDescriptor] = field(default_factory=dict)
     initialized: bool = False
     settings_signature: tuple[Any, ...] | None = None
+    # The transcript set the watchd descriptors carry, with the tmux topology signature it was
+    # derived from and the monotonic time it was derived. The revision loop rebuilds descriptors
+    # on every revision, and its own watched transcripts generate those revisions, so deriving
+    # this set per revision was a feedback loop worth ~26ms of CPU a pass.
+    watchd_transcripts: list[str] = field(default_factory=list)
+    watchd_transcripts_signature: str = ""
+    watchd_transcripts_at: float = 0.0
     transcripts_signature: tuple[Any, ...] | None = None
     transcript_content_signature: tuple[Any, ...] | None = None
     filesystem_signature: tuple[Any, ...] | None = None
+    filesystem_event_generation: int = 0
+    watchd_repo_generations: dict[str, int] = field(default_factory=dict)
     file_signature: tuple[Any, ...] | None = None
     background_file_signature: tuple[Any, ...] | None = None
     auto_approve_signature: str = ""
+    auto_approve_payload: dict[str, Any] | None = None
     attention_ack_rev: int = -1
     tmux_signal_signature: str = ""
     tmux_signal_payload: dict[str, Any] | None = None
@@ -323,8 +463,10 @@ class ClientWatchService:
     transcripts_payload_signature: str = ""
     activity_summary_signature: str = ""
     filesystem_payload_signature: str = ""
+    filesystem_full_inflight_token: str = ""
     filesystem_history: list[dict[str, Any]] = field(default_factory=list)
     filesystem_last_full_at: float = 0.0
+    filesystem_ready_product: FilesystemWatchReadyProductRecord = field(default_factory=FilesystemWatchReadyProductRecord)
     event_watcher_record: ClientEventWatcherRecord = field(default_factory=ClientEventWatcherRecord)
     # Bounded (one entry per trigger reason, not per event) count of jobd-product-backed refreshes
     # actually published by the server-side watch loop, keyed by the same `trigger` strings already
