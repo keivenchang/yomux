@@ -410,19 +410,25 @@ release_port_restart_lock() {
   rmdir "$lock_dir" 2>/dev/null || true
 }
 
+# Probe the public liveness route, never an authenticated one. These probes run before any
+# operator cookie exists, so polling a protected route made every restart log one server ERROR
+# per probe (authentication_required), which then failed release soaks that require zero server
+# log errors. /healthz is registered PUBLIC and answers 200 from the HTTP listener alone, so 200
+# is the only acceptable code here: a 401 now means the auth boundary changed, not that the
+# server is up.
 wait_for_port() {
   local port="$1"
   local code
   local attempt
   for ((attempt = 0; attempt < 20; attempt++)); do
-    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/api/ping" 2>/dev/null || true)"
-    if [[ "$code" == "200" || "$code" == "401" ]]; then
-      printf 'port %s ready: /api/ping -> %s\n' "$port" "$code"
+    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/healthz" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then
+      printf 'port %s ready: /healthz -> %s\n' "$port" "$code"
       return 0
     fi
     sleep 1
   done
-  printf 'port %s did not become ready: /api/ping -> %s\n' "$port" "${code:-curl failed}" >&2
+  printf 'port %s did not become ready: /healthz -> %s\n' "$port" "${code:-curl failed}" >&2
   return 1
 }
 
@@ -434,9 +440,9 @@ verify_port_stable() {
   for ((attempt = 0; attempt < 4; attempt++)); do
     sleep 1
     pids="$(port_listener_pids "$port" | tr '\n' ' ')"
-    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/api/ping" 2>/dev/null || true)"
-    if [[ -z "$pids" || ! "$code" =~ ^(200|401)$ ]]; then
-      printf 'port %s became unstable after readiness: listener=%s /api/ping -> %s\n' "$port" "${pids:-none}" "${code:-curl failed}" >&2
+    code="$(curl -sk -o /dev/null -w '%{http_code}' "https://localhost:${port}/healthz" 2>/dev/null || true)"
+    if [[ -z "$pids" || "$code" != "200" ]]; then
+      printf 'port %s became unstable after readiness: listener=%s /healthz -> %s\n' "$port" "${pids:-none}" "${code:-curl failed}" >&2
       return 1
     fi
   done

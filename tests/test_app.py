@@ -1,3 +1,4 @@
+from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 import copy
 import hashlib
@@ -6,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import threading
 import time
@@ -44,6 +46,14 @@ from _git_helpers import init_repo
 
 PROMPT_STATE_KEYS = set(app_module.blank_prompt_state())
 PROMOTED_CAPTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "prompt_corpus" / "captures"
+# The browser abandons an accepted operation at `apiFetchDefaultDeadlineMs`, not at the backend's
+# 120s budget, so that is the deadline a user-visible editor open has to beat.  Read from the
+# checked-in source rather than restated, so raising one and not the other cannot pass silently.
+BROWSER_OPERATION_DEADLINE_SECONDS = int(re.search(
+    r"^const apiFetchDefaultDeadlineMs = (\d+);$",
+    (Path(__file__).resolve().parents[1] / "static_src" / "js" / "yolomux" / "10_core_utils.js").read_text(encoding="utf-8"),
+    re.MULTILINE,
+).group(1)) / 1000.0
 pytestmark = pytest.mark.usefixtures("no_control_socket", "isolated_yoagent_conversation_state", "isolated_tmux_socket")
 
 
@@ -9441,6 +9451,413 @@ def test_cold_filesystem_operation_non_filesystem_failures_terminalize_generic(m
     assert replay == published[-1]
     assert replay["result"] == result
     assert replay["status"] == result_status
+
+
+class _RecordingFilesystemJob:
+    """Record every produce submission and answer with one caller-supplied product script."""
+
+    def __init__(self, product_script):
+        self.produced = []
+        self.product_calls = []
+        self._product_script = list(product_script)
+
+    def produce(self, task, payload, **kwargs):
+        self.produced.append((task, payload, kwargs))
+        return {
+            "ok": True,
+            "state": "queued",
+            "job": {"job_id": f"job-{len(self.produced)}", "status": "running", "generation": kwargs["generation"]},
+            "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+        }, b""
+
+    def product(self, product_key):
+        self.product_calls.append(product_key)
+        return self._product_script.pop(0) if self._product_script else ({"ok": True, "state": "pending", "generation": 0, "inflight": True}, b"")
+
+    def result(self, job_id):
+        return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
+
+
+def _ready_filesystem_product(payload, *, schedule=None):
+    body = json.dumps(payload).encode("utf-8")
+    metadata = {
+        "ok": True,
+        "state": "ready",
+        "generation": 1,
+        "inflight": False,
+        "product": _filesystem_json_product(body),
+    }
+    if schedule is not None:
+        metadata["schedule"] = dict(schedule)
+    return metadata, body
+
+
+def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_do_not():
+    assert app_module.FILESYSTEM_POINT_OPERATIONS == {"read", "info", "index_status"}
+    assert app_module.FILESYSTEM_POINT_OPERATIONS < app_module.FILESYSTEM_RETAINED_READ_OPERATIONS
+    for operation in sorted(app_module.FILESYSTEM_POINT_OPERATIONS):
+        assert app_module.filesystem_operation_priority(operation) == "point"
+    for operation in sorted(app_module.FILESYSTEM_RETAINED_READ_OPERATIONS - app_module.FILESYSTEM_POINT_OPERATIONS):
+        assert app_module.filesystem_operation_priority(operation) == "interactive"
+    assert app_module.filesystem_operation_priority("raw") == "interactive"
+    # Every priority this module can emit must be one jobd accepts and owns with a bounded lane.
+    emitted = {app_module.filesystem_operation_priority(operation) for operation in app_module.FILESYSTEM_RETAINED_READ_OPERATIONS | {"raw"}}
+    assert emitted == {"point", "interactive"}
+    assert emitted <= set(jobd.JOBD_PRIORITIES)
+    assert {jobd.JOBD_PRIORITY_LANES[priority] for priority in emitted} == {"point", "interactive"}
+
+
+@pytest.mark.parametrize("operation", ["read", "info", "index_status"])
+def test_stat_derived_point_keys_submit_fresh_only_and_watchd_keys_do_not(monkeypatch, tmp_path, operation):
+    """Every point operation, not just `read`, must refuse a retained product for a stat key.
+
+    A stat identity cannot see a rewrite that lands inside one filesystem timestamp tick without
+    changing size.  A watchd generation can -- its revision advances on any observed change -- so
+    only the stat-derived submissions carry `fresh_only`.
+    """
+    target = tmp_path / "point-target.md"
+    target.write_bytes(b"p" * 12_353)
+    path = str(tmp_path if operation == "index_status" else target)
+    job = _RecordingFilesystemJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        assert webapp.filesystem_operation_product_generation() == ""
+        stat_response = webapp.filesystem_operation_http_payload(
+            route=f"GET /api/fs/{operation}", operation=operation, path=path,
+        )
+        monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+        watchd_response = webapp.filesystem_operation_http_payload(
+            route=f"GET /api/fs/{operation}", operation=operation, path=path,
+        )
+        missing = webapp.filesystem_operation_http_payload(
+            route=f"GET /api/fs/{operation}", operation=operation, path=str(tmp_path / "nope" / "absent.md"),
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert stat_response.status == HTTPStatus.ACCEPTED
+    assert watchd_response.status == HTTPStatus.ACCEPTED
+    assert missing.status == HTTPStatus.ACCEPTED
+    stat_kwargs, watchd_kwargs, missing_kwargs = [kwargs for _task, _payload, kwargs in job.produced]
+    assert stat_kwargs["priority"] == "point" and stat_kwargs["fresh_only"] is True
+    assert watchd_kwargs["priority"] == "point" and watchd_kwargs["fresh_only"] is False
+    assert stat_kwargs["coalesce_key"] != watchd_kwargs["coalesce_key"]
+    # An unstatable path coalesces with nothing, so there is no retained product to refuse.
+    assert missing_kwargs["fresh_only"] is False
+    assert missing_kwargs["coalesce_key"] not in {stat_kwargs["coalesce_key"], watchd_kwargs["coalesce_key"]}
+
+
+def test_identical_point_reads_coalesce_on_content_identity_and_change_with_the_file(monkeypatch, tmp_path):
+    target = tmp_path / "note.md"
+    target.write_bytes(b"a" * 12_353)
+    job = _RecordingFilesystemJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
+    try:
+        # No watchd generation is available here, which is exactly the state that used to mint a
+        # fresh uuid coalesce key per request and defeat coalescing entirely.
+        assert webapp.filesystem_operation_product_generation() == ""
+        first = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        second = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert first.status == HTTPStatus.ACCEPTED and second.status == HTTPStatus.ACCEPTED
+        os.utime(target, (1_700_000_000, 1_700_000_000))
+        third = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert third.status == HTTPStatus.ACCEPTED
+        missing = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read", operation="read", path=str(tmp_path / "absent.md"),
+        )
+        assert missing.status == HTTPStatus.ACCEPTED
+        listing = webapp.filesystem_operation_http_payload(route="GET /api/fs/list", operation="list", path=str(tmp_path))
+        assert listing.status == HTTPStatus.ACCEPTED
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    keys = [kwargs["coalesce_key"] for _task, _payload, kwargs in job.produced]
+    priorities = [kwargs["priority"] for _task, _payload, kwargs in job.produced]
+    assert priorities == ["point", "point", "point", "point", "interactive"]
+    assert keys[0] == keys[1], "two identical in-flight point reads must share one coalesce key"
+    assert keys[2] != keys[0], "a changed file must never be answered by the retained product"
+    # Fail closed: an unstatable path gets an uncoalescable key rather than a guessed identity.
+    assert keys[3].startswith("filesystem-operation:") and keys[3] not in keys[:3]
+    assert app_module.filesystem_point_content_generation(str(tmp_path / "absent.md")) == ("", "stat_failed:ENOENT")
+    identity, reason = app_module.filesystem_point_content_generation(str(target))
+    assert reason == "" and identity.startswith("stat:")
+
+
+def test_transient_product_metadata_is_retried_inside_the_operation_budget(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "note.md"
+    target.write_bytes(b"b" * 12_353)
+    terminal = threading.Event()
+    published = []
+    job = _RecordingFilesystemJob([
+        ({"ok": False, "error": "peer handler slow", "_transport_error": "timeout"}, b""),
+        ({"ok": False, "error": "service busy", "status": int(HTTPStatus.SERVICE_UNAVAILABLE)}, b""),
+        _ready_filesystem_product(
+            {"path": str(target), "content": "recovered"},
+            schedule={"task": "filesystem_operation", "priority": "point", "lane": "point", "queue_wait_ms": 4.5, "execution_ms": 3.25, "running_started_at": 17.0},
+        ),
+    ])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        response = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert response.status == HTTPStatus.ACCEPTED
+        operation_id = response.payload["operation"]["id"]
+        assert terminal.wait(10.0)
+        terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert len(job.product_calls) == 3, "both transient product reads must be retried, not terminalized"
+    assert terminal_status == HTTPStatus.OK
+    assert terminal_result["data"] == {"path": str(target), "content": "recovered"}
+    accepted = {row["id"]: row for row in diagnostics["accepted_operations"]}[operation_id]
+    assert accepted["kind"] == "filesystem_operation"
+    assert accepted["subtype"] == "read"
+    assert accepted["uncoalesced"] == ""
+    assert accepted["schedule"] == {
+        "task": "filesystem_operation",
+        "priority": "point",
+        "lane": "point",
+        "queue_wait_ms": 4.5,
+        "execution_ms": 3.25,
+        "running_started_at": 17.0,
+        "transient_polls": 2.0,
+    }
+
+
+@pytest.mark.parametrize("producer_state", ["failed", "cancelled", "superseded", "timed_out"])
+def test_real_producer_terminal_states_still_fail_the_operation_immediately(monkeypatch, tmp_path, producer_state):
+    """The transient retry must not swallow a producer that genuinely ended."""
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "note.md"
+    target.write_bytes(b"c" * 12_353)
+    terminal = threading.Event()
+
+    class TerminalProducerJob(_RecordingFilesystemJob):
+        def product(self, product_key):
+            self.product_calls.append(product_key)
+            return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+        def result(self, job_id):
+            return {"ok": True, "job": {"job_id": job_id, "status": producer_state, "error": "producer ended"}}
+
+    job = TerminalProducerJob([])
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **_kwargs: terminal.set() if event_type == "operation_terminal" else None,
+    )
+    try:
+        response = webapp.filesystem_operation_http_payload(route="GET /api/fs/read", operation="read", path=str(target))
+        assert response.status == HTTPStatus.ACCEPTED
+        operation_id = response.payload["operation"]["id"]
+        assert terminal.wait(10.0)
+        _terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert len(job.product_calls) == 1, "a real producer terminal must not be polled again"
+    assert terminal_status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+def test_editor_open_of_a_12353_byte_file_completes_while_bulk_lanes_are_saturated(monkeypatch, tmp_path):
+    """The reported user shape: open one 12,353-byte file while batch/watch fanout holds the
+    bulk lanes.  The read must terminalize ready, with content, while every bulk holder is still
+    occupied -- and inside the browser's own 15s operation deadline, not the backend's 120s budget.
+    """
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "DOIT.release-audit.md"
+    content = "".join(f"line {index:04d} of the release audit\n" for index in range(68))
+    content += "x" * (12_353 - len(content.encode("utf-8")))
+    target.write_text(content, encoding="utf-8")
+    assert len(target.read_bytes()) == 12_353
+
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=30.0, workers=2)
+    real_executor = service._executor
+    held_futures: list[Future] = []
+
+    class HeldExecutor:
+        def submit(self, *_args):
+            future = Future()
+            held_futures.append(future)
+            return future
+
+    def lane_executor(priority="freshness"):
+        if jobd.PersistentJobBroker._lane_for_priority(priority) == "point":
+            return real_executor(priority)
+        return HeldExecutor()
+
+    service._executor = lane_executor  # type: ignore[method-assign]
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    ready = time.monotonic() + 5.0
+    while not client.registry.healthy() and time.monotonic() < ready:
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = client
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **_kwargs: terminal.set() if event_type == "operation_terminal" else None,
+    )
+    try:
+        # Saturate every bulk and interactive slot the way a Finder batch plus a watch-diff
+        # fanout does. None of these futures ever completes during this test.
+        for index in range(service.general_worker_count + jobd.JOBD_INTERACTIVE_WORKERS):
+            priority = "freshness" if index < service.general_worker_count else "interactive"
+            assert client.submit("json_compact", {"holder": index}, priority=priority, coalesce_key=f"holder-{index}")["ok"] is True
+        saturated = time.monotonic() + 5.0
+        while time.monotonic() < saturated:
+            lanes = client.request({"action": "status"}).get("lanes") or {}
+            if lanes.get("bulk", {}).get("active") == service.general_worker_count and lanes.get("interactive", {}).get("active") == jobd.JOBD_INTERACTIVE_WORKERS:
+                break
+            time.sleep(0.02)
+        lanes_while_held = client.request({"action": "status"})["lanes"]
+        assert lanes_while_held["bulk"]["active"] == service.general_worker_count
+        assert lanes_while_held["interactive"]["active"] == jobd.JOBD_INTERACTIVE_WORKERS
+
+        started = time.monotonic()
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read", operation="read", path=str(target),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert response.payload["operation"]["kind"] == "filesystem_operation"
+        assert terminal.wait(BROWSER_OPERATION_DEADLINE_SECONDS)
+        elapsed = time.monotonic() - started
+        operation_id = response.payload["operation"]["id"]
+        terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+        acknowledged = webapp.queued_delivery_ledger.acknowledge_operation_delivery(operation_id, replay["operation"]["cursor"])
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+        lanes_after = client.request({"action": "status"})["lanes"]
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+        client.request({"action": "shutdown"})
+        worker.join(timeout=5.0)
+
+    assert terminal_status == HTTPStatus.OK, terminal_result
+    assert terminal_result["state"] == "ready"
+    assert terminal_result["data"]["content"] == content
+    assert elapsed < BROWSER_OPERATION_DEADLINE_SECONDS, f"editor open took {elapsed:.3f}s, past the browser deadline"
+    # The holders never completed, so the read was served by the reserved point lane, not by
+    # capacity that happened to free up.
+    assert lanes_after["bulk"]["active"] == service.general_worker_count
+    assert lanes_after["interactive"]["active"] == jobd.JOBD_INTERACTIVE_WORKERS
+    assert len(held_futures) == service.general_worker_count + jobd.JOBD_INTERACTIVE_WORKERS
+    assert all(not future.done() for future in held_futures)
+    assert acknowledged is True
+    accepted = {row["id"]: row for row in diagnostics["accepted_operations"]}[operation_id]
+    assert accepted["subtype"] == "read"
+    assert accepted["schedule"]["lane"] == "point"
+    assert accepted["schedule"]["task"] == "filesystem_operation"
+    assert accepted["schedule"]["execution_ms"] > 0.0
+    assert accepted["schedule"]["queue_wait_ms"] >= 0.0
+
+
+def test_editor_open_still_stalls_when_the_point_lane_itself_is_held(monkeypatch, tmp_path):
+    """Negative control for the reserved lane.
+
+    The same 12,353-byte open, but with the point lane's own capacity held instead of the bulk
+    lanes.  It must NOT terminalize, and must recover the moment point capacity is released.  A
+    lane that could never stall would make the positive test above pass for free.
+    """
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    target = tmp_path / "DOIT.release-audit.md"
+    target.write_bytes(b"n" * 12_353)
+
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=30.0, workers=2)
+    real_executor = service._executor
+    held_point_futures: list[Future] = []
+    hold_point = threading.Event()
+    hold_point.set()
+
+    class HeldExecutor:
+        def submit(self, *_args):
+            future = Future()
+            held_point_futures.append(future)
+            return future
+
+    def lane_executor(priority="freshness"):
+        if jobd.PersistentJobBroker._lane_for_priority(priority) == "point" and hold_point.is_set():
+            return HeldExecutor()
+        return real_executor(priority)
+
+    service._executor = lane_executor  # type: ignore[method-assign]
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    ready = time.monotonic() + 5.0
+    while not client.registry.healthy() and time.monotonic() < ready:
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = client
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **_kwargs: terminal.set() if event_type == "operation_terminal" else None,
+    )
+    try:
+        for index in range(jobd.JOBD_POINT_WORKERS):
+            assert client.submit("json_compact", {"point_holder": index}, priority="point", coalesce_key=f"point-holder-{index}")["ok"] is True
+        held = time.monotonic() + 5.0
+        while time.monotonic() < held:
+            if (client.request({"action": "status"}).get("lanes") or {}).get("point", {}).get("active") == jobd.JOBD_POINT_WORKERS:
+                break
+            time.sleep(0.02)
+        assert client.request({"action": "status"})["lanes"]["point"]["active"] == jobd.JOBD_POINT_WORKERS
+
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read", operation="read", path=str(target),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        stalled = not terminal.wait(1.5)
+        queued_while_held = client.request({"action": "status"})["lanes"]["point"]["queued"]
+
+        hold_point.clear()
+        for future in held_point_futures:
+            future.set_result(b'{"released":true}')
+        recovered = terminal.wait(BROWSER_OPERATION_DEADLINE_SECONDS)
+        operation_id = response.payload["operation"]["id"]
+        _terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+        client.request({"action": "shutdown"})
+        worker.join(timeout=5.0)
+
+    assert stalled is True, "a fully held point lane must be able to stall an editor open"
+    assert queued_while_held >= 1
+    assert recovered is True
+    assert terminal_status == HTTPStatus.OK
 
 
 def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receipt():

@@ -81,6 +81,75 @@ def test_bundle_vm_uses_product_js_debug_failure_classifier(gate_bundle_vm):
         for event in result.js_debug_errors
     ) == expected, result
 
+def test_bundle_vm_late_operation_terminal_still_settles_after_the_ui_waiter_gave_up(gate_bundle_vm):
+    """The late-terminal contract the backend fix must not break.
+
+    A UI waiter that gives up detaches only itself: the accepted operation stays pending, and a
+    terminal that arrives afterwards still settles the record, invokes the product handler and
+    queues its delivery acknowledgement.  That is why the measured 29.9s and 16.0s operations were
+    delivered and acknowledged on a page that stayed alive.  A page reload is what loses them, not
+    the transport, so this must keep passing while the scheduler work removes the slowness.
+    """
+    result = gate_bundle_vm.execute(
+        """
+        const controller = new AbortController();
+        const receipt = {
+          state: 'queued',
+          request: {id: 'req-late-terminal'},
+          operation: {
+            id: 'op-late-terminal',
+            kind: 'filesystem_operation',
+            deadline_at: '2026-08-08T00:02:00Z',
+            status_url: '/api/operations/op-late-terminal',
+            events_url: '/api/client-events?operation_id=op-late-terminal',
+            cursor: {epoch: 'epoch-late', seq: 0},
+            context: {operation: 'read', path: '/repo/DOIT.release-audit.md'},
+          },
+        };
+        const waited = api.waitForApiOperationResultForTest(receipt, {
+          kind: 'filesystem_operation',
+          operation: 'read',
+          url: '/api/fs/read?path=%2Frepo%2FDOIT.release-audit.md',
+          signal: controller.signal,
+        });
+        let waiterError = '';
+        const settled = waited.then(
+          () => { waiterError = 'resolved'; },
+          error => { waiterError = String(error?.name || error?.message || error); },
+        );
+        // Detach the UI waiter through the same path the deadline timer uses.
+        controller.abort();
+        await settled;
+        const afterGaveUp = api.apiOperationStateForTest();
+
+        const applied = api.applyApiOperationTerminalForTest({
+          operation: {id: 'op-late-terminal', cursor: {epoch: 'epoch-late', seq: 1}},
+          status: 200,
+          result: {state: 'ready', data: {path: '/repo/DOIT.release-audit.md', content: 'late but real'}},
+        });
+        const afterTerminal = api.apiOperationStateForTest();
+        return {
+          waiterError,
+          afterGaveUp,
+          applied,
+          afterTerminal,
+          ack: api.operationTerminalAckStateForTest(),
+          retained: api.apiOperationTerminalForTest('op-late-terminal')?.result?.data ?? null,
+        };
+        """,
+    )
+    assert result.operation_error is None, result
+    assert result.value["waiterError"] == "AbortError", result
+    # Giving up on the wait must not retire the operation, or the late terminal would be unmatched.
+    assert result.value["afterGaveUp"]["pending"] == 1, result
+    assert result.value["afterGaveUp"]["waiters"] == 0, result
+    assert result.value["applied"] is True, result
+    assert result.value["afterTerminal"]["pending"] == 0, result
+    assert result.value["afterTerminal"]["handlerInvocations"] == 1, result
+    assert result.value["ack"]["queued"] + int(result.value["ack"]["requestPending"]) >= 1, result
+    assert result.value["retained"] == {"path": "/repo/DOIT.release-audit.md", "content": "late but real"}, result
+
+
 def test_n6_branch_popout_orders_branches_newest_first(gate_bundle_vm):
     """The rendered branch pop-out puts the newest transcript branch before older branch rows."""
     result = gate_bundle_vm.execute(

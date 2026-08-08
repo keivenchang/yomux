@@ -792,7 +792,12 @@ def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path
     assert result["job"]["result"] == {"a": [2], "z": 1}
     assert produced["state"] == "ready"
     assert json.loads(produced_body) == {"a": [2], "z": 1}
-    assert status["queues"] == {"interactive": 0, "freshness": 0, "maintenance": 0}
+    assert status["queues"] == {"point": 0, "interactive": 0, "freshness": 0, "maintenance": 0}
+    assert status["lanes"] == {
+        "point": {"capacity": jobd.JOBD_POINT_WORKERS, "active": 0, "queued": 0},
+        "interactive": {"capacity": jobd.JOBD_INTERACTIVE_WORKERS, "active": 0, "queued": 0},
+        "bulk": {"capacity": 1, "active": 0, "queued": 0},
+    }
     assert status["cache"]["records"] == 1
     assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
     worker.join(timeout=2.0)
@@ -1149,6 +1154,212 @@ def test_jobd_interactive_saturation_queues_until_reserved_capacity_is_released(
     assert len(submitted_futures) == 2
 
 
+def test_jobd_point_lane_dispatches_while_every_bulk_and_interactive_slot_is_held(tmp_path, monkeypatch):
+    """A held bulk job must not put an editor open or an index probe behind it."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    holders = []
+    for number in range(service.general_worker_count):
+        holder = service._queue_record("text_facts", {"text": f"bulk-{number}"}, "freshness", number, f"bulk-{number}")
+        holder.status = "running"
+        holder.future = Future()
+        holders.append(holder)
+    for number in range(jobd.JOBD_INTERACTIVE_WORKERS):
+        holder = service._queue_record("text_facts", {"text": f"batch-{number}"}, "interactive", number, f"batch-{number}")
+        holder.status = "running"
+        holder.future = Future()
+        holders.append(holder)
+    lanes_by_submission: list[str] = []
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": (
+        lanes_by_submission.append(jobd.PersistentJobBroker._lane_for_priority(priority)) or Executor()
+    ))
+    read = service._queue_record("filesystem_operation", {"op": "read"}, "point", 1, "point-read")
+    index_status = service._queue_record("filesystem_operation", {"op": "index_status"}, "point", 1, "point-index")
+
+    service._pump()
+
+    assert [holder.status for holder in holders] == ["running"] * len(holders)
+    assert read.status == "running"
+    assert index_status.status == "running"
+    assert lanes_by_submission == ["point", "point"]
+    status = service.common_status()
+    assert status["lanes"]["point"] == {"capacity": jobd.JOBD_POINT_WORKERS, "active": 2, "queued": 0}
+    assert status["lanes"]["bulk"]["active"] == service.general_worker_count
+    assert status["lanes"]["interactive"]["active"] == jobd.JOBD_INTERACTIVE_WORKERS
+
+
+def test_jobd_point_lane_capacity_is_bounded_and_releases_in_order(tmp_path, monkeypatch):
+    """Point capacity is explicitly bounded: one slow point read cannot strand the rest, and
+    point work cannot become unbounded process capacity of its own."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    points = [
+        service._queue_record("json_compact", {"order": order}, "point", 1, f"point-{order}")
+        for order in range(jobd.JOBD_POINT_WORKERS + 1)
+    ]
+
+    service._pump()
+
+    assert [record.status for record in points[:jobd.JOBD_POINT_WORKERS]] == ["running"] * jobd.JOBD_POINT_WORKERS
+    assert points[-1].status == "queued"
+    assert len(submitted_futures) == jobd.JOBD_POINT_WORKERS
+    assert service.common_status()["lanes"]["point"] == {
+        "capacity": jobd.JOBD_POINT_WORKERS,
+        "active": jobd.JOBD_POINT_WORKERS,
+        "queued": 1,
+    }
+
+    submitted_futures[0].set_result(b'{"order":0}')
+    service._pump()
+
+    assert points[0].status == "completed"
+    assert points[-1].status == "running"
+    assert len(submitted_futures) == jobd.JOBD_POINT_WORKERS + 1
+
+
+def test_jobd_every_declared_priority_is_owned_by_exactly_one_bounded_lane(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+
+    assert set(jobd.JOBD_PRIORITIES) == set(jobd.JOBD_PRIORITY_LANES)
+    assert jobd.JOBD_PRIORITIES == tuple(jobd.JOBD_PRIORITY_LANES)
+    assert set(jobd.JOBD_PRIORITY_LANES.values()) == set(jobd.JOBD_LANE_PRIORITIES)
+    assert all(service._lane_capacity(lane) >= 1 for lane in jobd.JOBD_LANE_PRIORITIES)
+    with pytest.raises(ValueError, match="no jobd lane owns priority"):
+        jobd.PersistentJobBroker._lane_for_priority("nonexistent")
+    assert service._submit({"task": "text_facts", "payload": {"text": "x"}, "priority": "nonexistent"}) == {
+        "ok": False,
+        "error": "invalid priority",
+    }
+
+
+def test_jobd_fresh_only_joins_in_flight_work_but_never_serves_a_stored_product(tmp_path, monkeypatch):
+    """The mtime-granularity case: one coalesce key, two different contents.
+
+    A stat identity is only as fine as the filesystem timestamp tick, so a rewrite inside one tick
+    that keeps the same size produces an identical key for different bytes.  A `fresh_only`
+    submission must therefore refuse the stored product while still joining in-flight work.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    key = "filesystem-operation:same-tick-same-size"
+    submission = {
+        "task": "json_compact", "payload": {"op": "read", "path": "/repo/note.md"},
+        "priority": "point", "generation": 1, "coalesce_key": key, "delivery": "ready_or_receipt",
+    }
+
+    # First read completes and stores a product under the key.
+    first, _first_body = service._produce(dict(submission))
+    service._pump()
+    submitted_futures[0].set_result(b'{"content":"before"}')
+    service._pump()
+    stored_metadata, stored_body = service._product({"coalesce_key": key})
+    assert first["coalesced"] is False
+    assert stored_metadata["state"] == "ready" and stored_body == b'{"content":"before"}'
+
+    # The file is rewritten inside the same mtime tick with the same size, so the key is unchanged.
+    reused, reused_body = service._produce(dict(submission))
+    assert reused["state"] == "ready", "the default path deliberately reuses a retained product"
+    assert reused_body == b'{"content":"before"}'
+
+    fresh, fresh_body = service._produce(dict(submission, fresh_only=True))
+    assert fresh_body == b"", "fresh_only must not hand back the retained product"
+    assert fresh["state"] == "queued"
+    assert fresh["coalesced"] is False, "a completed record must not satisfy a fresh_only submission"
+    service._pump()
+    assert len(submitted_futures) == 2, "fresh_only must run the work again"
+
+    # A second fresh_only submission while that work is in flight still coalesces: in-flight work
+    # has produced nothing, so it cannot be stale.
+    joined, _joined_body = service._produce(dict(submission, fresh_only=True))
+    assert joined["coalesced"] is True
+    assert joined["job"]["job_id"] == fresh["job"]["job_id"]
+    service._pump()
+    assert len(submitted_futures) == 2
+
+    # While the fresh job is in flight the waiter must not accept the older stored bytes.
+    inflight_metadata, _inflight_body = service._product({"coalesce_key": key})
+    assert inflight_metadata["state"] == "stale" and inflight_metadata["inflight"] is True
+
+    submitted_futures[1].set_result(b'{"content":"after"}')
+    service._pump()
+    final_metadata, final_body = service._product({"coalesce_key": key})
+    assert final_metadata["state"] == "ready"
+    assert final_body == b'{"content":"after"}'
+
+
+def test_jobd_coalesces_identical_in_flight_point_reads_into_one_execution(tmp_path, monkeypatch):
+    """Repeated identical point reads share one execution and every receipt names that job."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    submission = {
+        "task": "json_compact",
+        "payload": {"op": "read", "path": "/repo/note.md"},
+        "priority": "point",
+        "generation": 1,
+        "coalesce_key": "filesystem-operation:content-identity",
+        "delivery": "receipt",
+    }
+
+    first, _first_body = service._produce(dict(submission))
+    service._pump()
+    second, _second_body = service._produce(dict(submission))
+    third, _third_body = service._produce(dict(submission))
+
+    assert first["coalesced"] is False
+    assert second["coalesced"] is True and third["coalesced"] is True
+    job_ids = {response["job"]["job_id"] for response in (first, second, third)}
+    assert len(job_ids) == 1
+    assert len(submitted_futures) == 1
+    assert service.product_counters["json_compact"]["accepted"] == 1
+    assert service.product_counters["json_compact"]["coalesced"] == 2
+
+    submitted_futures[0].set_result(b'{"content":"body"}')
+    service._pump()
+
+    metadata, body = service._product({"coalesce_key": submission["coalesce_key"]})
+    assert metadata["state"] == "ready"
+    assert body == b'{"content":"body"}'
+    assert metadata["schedule"]["lane"] == "point"
+    assert metadata["schedule"]["task"] == "json_compact"
+    assert metadata["schedule"]["queue_wait_ms"] >= 0.0
+    assert metadata["schedule"]["execution_ms"] >= 0.0
+    assert metadata["schedule"]["running_started_at"] > 0.0
+
+    # A changed content identity is a different key, so it can never be answered by the retained
+    # product above -- coalescing never serves bytes for content that has since changed.
+    changed = dict(submission, coalesce_key="filesystem-operation:content-identity-2")
+    changed_metadata, changed_body = service._product({"coalesce_key": changed["coalesce_key"]})
+    assert changed_metadata["state"] == "none" and changed_body == b""
+
+
 def test_jobd_rejects_malformed_worker_result_and_bounds_retained_records(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     malformed = service._queue_record("text_facts", {"text": "bad"}, "interactive", 1, "bad")
@@ -1220,12 +1431,12 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
         def shutdown(self, **_kwargs):
             return None
 
-    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
 
     assert broken.status == "failed"
     assert broken.error == "worker crashed"
-    assert service.interactive_executor is None
+    assert service.executors["interactive"] is None
 
 
 def test_jobd_rejects_newer_protocol_before_dispatch(tmp_path):
@@ -1329,7 +1540,7 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
         def shutdown(self, **_kwargs):
             return None
 
-    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     recovered = service._queue_record("json_compact", {"z": 1, "a": 2}, "interactive", 2, "recovered")
     deadline = time.monotonic() + 5.0
@@ -1348,8 +1559,8 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, and v18 adds byte-product relay requests for browser filesystem consumers.
-    assert jobd.JOBD_PROTOCOL_VERSION == 18
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, and v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority.
+    assert jobd.JOBD_PROTOCOL_VERSION == 19
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
     assert "session_files_view" in jobd.REGISTERED_TASKS
@@ -1719,7 +1930,7 @@ def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_pa
         def shutdown(self, **_kwargs):
             return None
 
-    service.executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["bulk"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     assert failing.status == "failed"
     assert json.loads(service.latest_product["k"][1]) == {"gen": 2}
@@ -1770,7 +1981,7 @@ def test_jobd_status_lists_all_running_records_without_product_payloads(tmp_path
     assert status["worker_pids"] == []
 
 
-def test_jobd_status_and_shutdown_cover_general_and_interactive_executors(tmp_path):
+def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
     shutdown_pids: list[int] = []
 
@@ -1786,17 +1997,18 @@ def test_jobd_status_and_shutdown_cover_general_and_interactive_executors(tmp_pa
         def shutdown(self, **_kwargs):
             shutdown_pids.append(self.pid)
 
-    service.executor = Executor(101)  # type: ignore[assignment]
-    service.interactive_executor = Executor(102)  # type: ignore[assignment]
+    service.executors["bulk"] = Executor(101)  # type: ignore[assignment]
+    service.executors["interactive"] = Executor(102)  # type: ignore[assignment]
+    service.executors["point"] = Executor(103)  # type: ignore[assignment]
 
     status = service.common_status()
     service._on_shutdown()
 
-    assert status["worker_count"] == 3
-    assert status["worker_pids"] == [101, 102]
-    assert sorted(shutdown_pids) == [101, 102]
-    assert service.executor is None
-    assert service.interactive_executor is None
+    assert status["worker_count"] == 2 + jobd.JOBD_INTERACTIVE_WORKERS + jobd.JOBD_POINT_WORKERS
+    assert status["worker_pids"] == [101, 102, 103]
+    assert sorted(shutdown_pids) == [101, 102, 103]
+    assert set(service.executors) == set(jobd.JOBD_LANE_PRIORITIES)
+    assert all(executor is None for executor in service.executors.values())
 
 
 def test_jobd_status_exposes_bounded_request_action_counters(tmp_path):

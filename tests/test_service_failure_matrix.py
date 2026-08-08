@@ -189,7 +189,7 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
         def shutdown(self, **_kwargs):
             return None
 
-    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
+    service.executors["interactive"] = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     for number in range(jobd.JOBD_MAX_QUEUE):
         queued = service._queue_record("text_facts", {"text": str(number)}, "freshness", number, f"queue-{number}")

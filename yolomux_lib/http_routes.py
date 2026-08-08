@@ -373,6 +373,18 @@ def get_share_shell(request: Any, parsed: Any, route: Route) -> bool:
     return request.handle_share_shell(parsed)
 
 
+def get_healthz(request: Any, parsed: Any, route: Route) -> None:
+    """Answer the process supervisor's unauthenticated liveness probe from the HTTP listener alone.
+
+    boot.sh polls this while restarting, before any operator cookie exists. It must never consult
+    tmux, jobd, watchd, statusd, the filesystem, or any local service: this is liveness for the
+    listener, not readiness for the system. Reporting anything richer would both leak system state
+    to an unauthenticated caller and make an unrelated subsystem able to fail a restart.
+    """
+    del parsed, route
+    request.write_json({"ok": True})
+
+
 def get_ping(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     request.write_json({"ok": True, "time": time.time()})
@@ -1543,6 +1555,7 @@ CORE_ROUTES = (
     Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/login", PUBLIC, get_login, protocol=RESPONSE_HTML, group="core"),
     Route("GET", "/logout", PUBLIC, get_logout, protocol=RESPONSE_REDIRECT, group="core"),
+    Route("GET", "/healthz", PUBLIC, get_healthz, protocol=RESPONSE_JSON, group="core"),
     Route("GET", "/api/ping", "readonly", get_ping, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY),
     Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
     Route("GET", "/api/stats-delta", "readonly", get_stats_delta, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),

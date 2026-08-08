@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import copy
 import ctypes
+import errno
 import hashlib
 import hmac
 import json
@@ -1646,6 +1647,35 @@ def filesystem_batch_submission(
 FILESYSTEM_RETAINED_READ_OPERATIONS = frozenset({
     "list", "read", "info", "search", "index_status", "count", "diff", "blame",
 })
+
+# Bounded single-target reads: one path in, a small answer out, and a browser waiting on the
+# result right now (an editor open, a file probe, an index badge).  These are the only filesystem
+# operations that take jobd's `point` lane.  Everything else -- recursive `list`, `search`,
+# `count`, `diff`, `blame`, Finder batches, watch-diff fanouts, forced session-files transforms --
+# stays on the bulk lanes, because its cost is unbounded in the input and it is exactly the work
+# that used to put an editor open behind it head-of-line on the single shared interactive slot.
+FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status"})
+
+
+def filesystem_operation_priority(operation: str) -> str:
+    """Return the one jobd lane priority that owns a filesystem operation."""
+    return "point" if str(operation) in FILESYSTEM_POINT_OPERATIONS else "interactive"
+
+
+def filesystem_point_content_generation(path: str) -> tuple[str, str]:
+    """Return one point read's content identity plus the reason it could not be derived.
+
+    A point read's coalesce key must be deterministic, or two browsers opening the same file
+    submit two jobs into a lane bounded at two.  It must also change the instant the file changes,
+    or coalescing would hand back a retained product for content that no longer exists on disk.
+    The file's own inode/size/mtime identity satisfies both, and the caller falls back to a
+    non-coalescing key when it cannot be read rather than guessing at freshness.
+    """
+    try:
+        stat = os.stat(os.path.normpath(os.path.expanduser(str(path))))
+    except OSError as error:
+        return "", f"stat_failed:{errno.errorcode.get(error.errno, error.errno)}"
+    return f"stat:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}", ""
 
 
 def filesystem_operation_submission(
@@ -13765,20 +13795,51 @@ class TmuxWebtermApp:
         self,
         producer: JobdProductOperation,
         deadline_at: float,
-    ) -> tuple[dict[str, Any], bytes]:
+    ) -> tuple[dict[str, Any], bytes, dict[str, Any]]:
         """Read one retained filesystem product without interpreting opaque bytes."""
         poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
+        transient_polls = 0
+        last_transient: dict[str, Any] = {}
         while not self.jobd_operation_service.stop_event.is_set():
             metadata, body = self.job_client.product(producer.product_key)
             state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
             if not isinstance(metadata, dict) or metadata.get("ok") is not True:
-                raise JobdOperationUnavailable(
-                    str(metadata.get("error") or "jobd product unavailable") if isinstance(metadata, dict) else "jobd product unavailable",
-                    dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"},
-                )
+                failure = dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"}
+                # A transient transport blip on one poll is not the producer failing.  Treating the
+                # first non-OK product read as terminal turned a recoverable RPC timeout into a
+                # failed editor open even though the operation still had most of its 120s budget
+                # and the worker went on to produce the bytes.  Genuine producer terminal states
+                # are handled below and still fail immediately.
+                if not local_service_failure_is_transient(failure):
+                    raise JobdOperationUnavailable(
+                        str(failure.get("error") or "jobd product unavailable"),
+                        failure,
+                    )
+                transient_polls += 1
+                last_transient = failure
+                remaining = deadline_at - time.time()
+                if remaining <= 0:
+                    raise JobdOperationUnavailable(
+                        "jobd product deadline expired",
+                        {
+                            "error": "jobd product deadline expired",
+                            "status": "deadline_expired",
+                            "transient_polls": transient_polls,
+                            "last_transient_error": str(last_transient.get("error") or ""),
+                            "last_transient_transport": str(last_transient.get("_transport_error") or ""),
+                        },
+                        code="deadline_expired",
+                        status=HTTPStatus.GATEWAY_TIMEOUT,
+                    )
+                self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+                poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+                continue
             product = metadata.get("product") if isinstance(metadata.get("product"), dict) else None
             if body and state == "ready" and int(metadata.get("generation") or 0) == producer.generation and product is not None:
-                return dict(product), body
+                schedule = dict(metadata.get("schedule") or {}) if isinstance(metadata.get("schedule"), dict) else {}
+                if transient_polls:
+                    schedule["transient_polls"] = transient_polls
+                return dict(product), body, schedule
             if state == "none" and metadata.get("inflight") is not True:
                 response = self.job_client.result(producer.job_id)
                 job = response.get("job") if isinstance(response.get("job"), dict) else {}
@@ -13802,7 +13863,11 @@ class TmuxWebtermApp:
             if remaining <= 0:
                 raise JobdOperationUnavailable(
                     "jobd product deadline expired",
-                    {"error": "jobd product deadline expired", "status": "deadline_expired"},
+                    {
+                        "error": "jobd product deadline expired",
+                        "status": "deadline_expired",
+                        "transient_polls": transient_polls,
+                    },
                     code="deadline_expired",
                     status=HTTPStatus.GATEWAY_TIMEOUT,
                 )
@@ -13824,7 +13889,8 @@ class TmuxWebtermApp:
         deadline_at: float,
     ) -> None:
         try:
-            product, body = self.wait_for_filesystem_operation_product(producer, deadline_at)
+            product, body, schedule = self.wait_for_filesystem_operation_product(producer, deadline_at)
+            self.queued_delivery_ledger.record_operation_schedule(operation_id, schedule)
             if product.get("format") != "json":
                 raise JobdOperationUnavailable(
                     "filesystem operation returned an unsupported product format",
@@ -13902,7 +13968,22 @@ class TmuxWebtermApp:
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
         operation_args = dict(args or {})
+        priority = filesystem_operation_priority(operation)
         generation = self.filesystem_operation_product_generation()
+        uncoalesced_reason = ""
+        # A watchd generation is authoritative: its revision advances on any observed change, so a
+        # completed product carrying that generation is safe to reuse.  A stat identity is not --
+        # `st_mtime_ns` is only as fine as the filesystem's timestamp tick, so two writes inside one
+        # tick that keep the same size produce the same key for different bytes.  Such a submission
+        # may still join in-flight work (which has produced nothing yet and so cannot be stale), but
+        # it must never accept an already-stored product.
+        fresh_only = False
+        if not generation and priority == "point":
+            # watchd cannot invalidate retained reads right now, and a random key would make every
+            # concurrent open of the same file its own job in a lane bounded at two.  The file's own
+            # content identity coalesces the concurrent duplicates without pinning a stale product.
+            generation, uncoalesced_reason = filesystem_point_content_generation(path)
+            fresh_only = bool(generation)
         if operation in FILESYSTEM_RETAINED_READ_OPERATIONS and generation:
             job_payload, product_key = filesystem_operation_submission(
                 operation,
@@ -13914,24 +13995,28 @@ class TmuxWebtermApp:
         else:
             job_payload = {"op": operation, "path": path, "args": operation_args}
             product_key = f"filesystem-operation:{uuid.uuid4().hex}"
+            if priority == "point" and not uncoalesced_reason:
+                uncoalesced_reason = "operation_not_retained"
         generation = 1
         try:
             response, body = self.job_client.produce(
                 "filesystem_operation",
                 job_payload,
-                priority="interactive",
+                priority=priority,
                 generation=generation,
                 coalesce_key=product_key,
                 deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
                 delivery="ready_or_receipt",
+                fresh_only=fresh_only,
             )
         except Exception:
             self.jobd_operation_service.release_reservation()
             raise
         if response.get("_transport_error") == "timeout":
             response, body = self.job_client.produce(
-                "filesystem_operation", job_payload, priority="interactive", generation=generation,
+                "filesystem_operation", job_payload, priority=priority, generation=generation,
                 coalesce_key=product_key, deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000), delivery="receipt",
+                fresh_only=fresh_only,
             )
         if body and response.get("ok") is True:
             product = response.get("product") if isinstance(response.get("product"), dict) else None
@@ -13956,7 +14041,9 @@ class TmuxWebtermApp:
         payload, status = self.accept_jobd_product_operation(
             route=route,
             kind="filesystem_operation",
-            context={"operation": operation, "path": path, "product_key": product_key},
+            # `uncoalesced` names why a point read had to take a non-coalescing key, so a lane full
+            # of duplicate reads of one file is attributable instead of merely visible.
+            context={"operation": operation, "path": path, "product_key": product_key, "uncoalesced": uncoalesced_reason},
             producer=producer,
             deadline_seconds=FS_BATCH_OPERATION_DEADLINE_SECONDS,
             completion=self.complete_filesystem_operation,

@@ -25786,7 +25786,39 @@ function markOpenFileExternalError(path, error) {
   renderOpenFilePath(path);
 }
 
+// One in-flight disk reload per open file. Every reload funnels through
+// replaceOpenFileStateFromDisk() -- the explicit reloadOpenFileFromDisk(), the files_changed push
+// refresh, and the visible-tab poll -- so this is the single place where two requests for one file
+// can collapse into one /api/fs/read.
+//
+// The duplicate was always there; it was hidden by accident. Before filesystem reads had their own
+// jobd lane, a read could not be dispatched while the explicit reload's directory batch held the
+// single shared interactive worker, so the explicit reload's read always went first and the push
+// refresh found nothing left to do. Once reads got a reserved lane the two ran concurrently and the
+// same file was fetched twice. Serialization is not deduplication, so the dedup is explicit here.
+const openFileReloadFlights = new Map();
+
 async function replaceOpenFileStateFromDisk(path, entry = null) {
+  const flight = openFileReloadFlights.get(path);
+  if (flight) {
+    const joined = await flight;
+    // Only an entry-bearing caller knows which content it was told to fetch. If the shared reload
+    // did not reach that content, fall through and run exactly one more -- never assume the read
+    // somebody else started was new enough. An entry-less explicit reload has no such reference
+    // point and accepts the shared result, which is the same race any single read already has.
+    if (!entry || !fileEntryChanged(fileState.get(path), entry)) return joined;
+  }
+  const started = loadOpenFileStateFromDisk(path, entry);
+  openFileReloadFlights.set(path, started);
+  try {
+    return await started;
+  } finally {
+    // Only retire our own flight; a joiner that fell through has already replaced it.
+    if (openFileReloadFlights.get(path) === started) openFileReloadFlights.delete(path);
+  }
+}
+
+async function loadOpenFileStateFromDisk(path, entry = null) {
   const previous = fileState.get(path);
   const viewStates = fileEditorTabItemsForPath(path).map(item => {
     const panel = panelNodes.get(item);

@@ -17,6 +17,7 @@ import uuid
 from http import HTTPStatus
 from typing import Any
 from typing import Callable
+from typing import Mapping
 
 from ..infra.atomic_file import append_fsync_text
 from ..infra.atomic_file import atomic_write_text
@@ -348,6 +349,32 @@ class QueuedDeliveryLedger:
             self._append_operation_locked(record)
             return copy.deepcopy(event)
 
+    # Exactly the scheduling facts needed to attribute a slow operation, and nothing else. A
+    # completed operation's total wall time cannot distinguish "the task was slow" from "the task
+    # waited behind a lane holder"; queue_wait_ms versus execution_ms can, and lane/task name which
+    # holder to look at. Values are numbers and short identifiers only -- no paths.
+    OPERATION_SCHEDULE_FIELDS: tuple[str, ...] = (
+        "task", "priority", "lane",
+        "submitted_at", "running_started_at", "completed_at",
+        "queue_wait_ms", "execution_ms", "transient_polls",
+    )
+
+    def record_operation_schedule(self, operation_id: str, schedule: Mapping[str, object]) -> bool:
+        """Retain one operation's bounded lane/wait/execution facts for later attribution."""
+        bounded = {
+            key: (round(float(value), 3) if isinstance(value, (int, float)) and not isinstance(value, bool) else str(value)[:64])
+            for key, value in schedule.items()
+            if key in self.OPERATION_SCHEDULE_FIELDS
+        }
+        if not bounded:
+            return False
+        with self._lock:
+            record = self._operations.get(str(operation_id))
+            if record is None:
+                return False
+            record["schedule"] = bounded
+            return True
+
     def acknowledge_operation_deliveries(self, acknowledgments: list[dict[str, Any]]) -> list[str]:
         """Retire exact replay bytes only after the browser processed each terminal."""
 
@@ -518,6 +545,13 @@ class QueuedDeliveryLedger:
                         "route": str(record.get("route") or ""),
                         "created_at": float(record.get("created_at") or 0.0),
                         "terminal_at": float(record.get("terminal_at") or 0.0),
+                        "kind": str(record.get("kind") or ""),
+                        # Subtype and the uncoalesced reason come from the accept-time context, so
+                        # they are present for an operation that is still stuck -- which is the one
+                        # whose holder somebody actually needs to name.
+                        "subtype": str((record.get("context") or {}).get("operation") or ""),
+                        "uncoalesced": str((record.get("context") or {}).get("uncoalesced") or ""),
+                        "schedule": dict(record.get("schedule") or {}),
                     }
                     for record in sorted(
                         self._operations.values(),

@@ -680,6 +680,157 @@ def test_a3_clean_buffer_converges_after_external_rewrite(gate_browser_runtime, 
     assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
 
 
+_SHARED_RELOAD_SCRIPT = """
+const path = arguments[0];
+const expected = arguments[1];
+const replacementPayload = arguments[2];
+const pushSignature = arguments[3];
+const done = arguments[arguments.length - 1];
+(async () => {
+  const nativeFetch = window.fetch.bind(window);
+  const operationId = 'op-gate-shared-reload';
+  const requestId = 'r-gate-shared-reload';
+  let reads = 0;
+  window.fetch = async (input, options = {}) => {
+    const url = new URL(String(input), location.href);
+    if (url.pathname !== '/api/fs/read' || url.searchParams.get('path') !== path) {
+      return nativeFetch(input, options);
+    }
+    reads += 1;
+    if (reads === 1) {
+      return new Response(JSON.stringify({
+        state: 'queued',
+        request: {id: requestId},
+        operation: {
+          id: operationId,
+          kind: 'filesystem_operation',
+          status_url: `/api/operations/${operationId}`,
+          events_url: `/api/client-events?operation_id=${operationId}`,
+          cursor: {epoch: 'gate-shared', seq: 0},
+          context: {operation: 'read', path, product_key: `gate-shared:${path}`},
+        },
+      }), {status: 202, headers: {'Content-Type': 'application/json'}});
+    }
+    return nativeFetch(input, options);
+  };
+  try {
+    const reload = reloadOpenFileFromDisk(path, {force: true});
+    await window.__yolomuxTestWaitFor(() => reads === 1, {
+      timeoutMs: 5000,
+      description: `queued explicit reload for ${path}`,
+    });
+    // The push refresh lands while the explicit reload is still waiting on its operation. Both
+    // want the same file; only one /api/fs/read should exist unless the push knows about content
+    // the shared reload cannot reach.
+    const pushed = refreshOpenFilesFromPush({files: [{path, signature: pushSignature}]});
+    handleClientPushEventNow('operation_terminal', {
+      operation: {id: operationId, kind: 'filesystem_operation', cursor: {epoch: 'gate-shared', seq: 1}},
+      result: {
+        state: 'ready',
+        request: {id: requestId},
+        data: replacementPayload,
+        quality: {complete: true, stale: false},
+        warnings: [],
+      },
+    });
+    await reload;
+    await pushed;
+    await window.__yolomuxTestWaitFor(() => {
+      const state = fileState.get(path);
+      const panel = fileEditorPanelsForPath(path)[0];
+      return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
+    }, {timeoutMs: 10000, description: `shared reload settle for ${path}`});
+    // Give any follow-up read the push may have decided it still needs time to be issued.
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const state = fileState.get(path);
+    done({
+      reads,
+      text: fileEditorPanelsForPath(path)[0]?._cmView?.state?.doc?.toString?.() || '',
+      original: state?.original || '',
+      errors: jsDebugFailureEvents('error'),
+      rejections: jsDebugFailureEvents('rejection'),
+    });
+  } catch (error) {
+    done({error: String(error?.stack || error), reads});
+  } finally {
+    window.fetch = nativeFetch;
+  }
+})();
+"""
+
+
+@pytest.mark.browser
+def test_explicit_reload_and_push_refresh_for_one_path_share_one_read(gate_browser_runtime, tmp_path):
+    """An explicit reload and a files_changed push for the same file issue one /api/fs/read.
+
+    Before filesystem reads had their own jobd lane this held by accident: a read could not be
+    dispatched while the explicit reload's directory batch held the single shared interactive
+    worker.  With a reserved point lane the two run concurrently, so the deduplication has to be
+    explicit.  Serialization is not deduplication.
+    """
+    target = tmp_path / "shared-reload.txt"
+    original = "content before shared reload\n"
+    replacement = "fresh external bytes after shared reload\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    target.write_text(replacement, encoding="utf-8")
+    replacement_payload = filesystem.read_file(str(target))
+    # The push describes exactly the rewrite the explicit reload is already fetching.
+    push_signature = [
+        str(target),
+        "file",
+        int(replacement_payload.get("mtime_ns") or 0),
+        len(replacement.encode("utf-8")),
+    ]
+    metrics = gate_browser_runtime.browser.execute_async_script(
+        _SHARED_RELOAD_SCRIPT,
+        str(target),
+        replacement,
+        replacement_payload,
+        push_signature,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["reads"] == 1, metrics
+    assert metrics["text"] == replacement and metrics["original"] == replacement, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
+def test_push_refresh_naming_newer_content_than_the_shared_reload_still_reads_again(gate_browser_runtime, tmp_path):
+    """Negative control: the shared reload is only reused when it reaches the pushed content.
+
+    The push names an mtime and size the explicit reload's result does not satisfy, so joining it
+    would leave the editor behind the filesystem.  Exactly one additional read must follow.  A
+    dedup that could never fall through would silently pin stale bytes.
+    """
+    target = tmp_path / "shared-reload-newer.txt"
+    original = "content before newer push\n"
+    replacement = "fresh external bytes after newer push\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    target.write_text(replacement, encoding="utf-8")
+    replacement_payload = filesystem.read_file(str(target))
+    # A strictly newer change than the one the explicit reload will return: later mtime, larger
+    # size. Well outside FILE_MTIME_NS_CHANGE_TOLERANCE so it cannot be read as precision drift.
+    push_signature = [
+        str(target),
+        "file",
+        int(replacement_payload.get("mtime_ns") or 0) + 5_000_000_000,
+        len(replacement.encode("utf-8")) + 4096,
+    ]
+    metrics = gate_browser_runtime.browser.execute_async_script(
+        _SHARED_RELOAD_SCRIPT,
+        str(target),
+        replacement,
+        replacement_payload,
+        push_signature,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["reads"] == 2, metrics
+    assert metrics["text"] == replacement and metrics["original"] == replacement, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
 @pytest.mark.browser
 def test_a3_explicit_reload_waits_for_exact_bytes_after_external_rewrite(gate_browser_runtime, tmp_path):
     """A3 amend: an explicit reload renders exact bytes from its queued operation terminal."""

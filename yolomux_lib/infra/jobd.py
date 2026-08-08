@@ -79,7 +79,11 @@ from ..web import html_preview_document
 # v16: dispatches cold process starts from a scheduler thread so RPC handlers stay available.
 # v17: moves durable session-files cache pruning out of the web process.
 # v18: adds byte-product relay requests for browser-owned filesystem consumers.
-JOBD_PROTOCOL_VERSION = 18
+# v19: adds the bounded `point` scheduler lane, plus `fresh_only` submissions that join in-flight
+# work but never accept an already-stored product. A v18 daemon rejects `priority="point"` as an
+# invalid priority and would silently ignore `fresh_only`, serving a retained product for content
+# that may have changed, so the fence must retire it.
+JOBD_PROTOCOL_VERSION = 19
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 # jobd is the one local service with a handler that waits by contract: `_relay` blocks on
 # `record.completion_event` for up to JOBD_MAX_DEADLINE_MS.  On a serial listener that wait is
@@ -88,10 +92,34 @@ JOBD_DEFAULT_IDLE_SECONDS = 60.0
 # every mutation runs under `state_lock` and `_relay` drops it around the wait -- so it takes
 # the same shared concurrency limit as watchd and statusd.
 JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
-# General work keeps the existing pool capacity. Interactive work has one dedicated slot so a
-# long background transform cannot consume every process available to a browser request.
+# One scheduler owner, three explicitly bounded lanes.  Every declared priority maps to exactly
+# one executor through JOBD_PRIORITY_LANES, and JOBD_PRIORITIES is derived from that same table so
+# a priority can never exist without a lane that runs it.
+#
+# `point` exists because bounded single-target filesystem work (an editor open's `read`, an `info`
+# probe, an `index_status` check) previously shared the single `interactive` slot with Finder
+# batches, watch-diff batches and forced session-files transforms.  One slow bulk holder then put
+# every editor open behind it head-of-line: measured backend terminal latencies for one 12,353-byte
+# file were 29.9s, 11.3s, 51.3s and 16.0s during a batch/watch fanout, and 0.02s once the lane
+# drained.  Point capacity is deliberately bounded at two -- enough that one slow NFS stat cannot
+# strand every other editor open, small enough that point work cannot become unbounded CPU itself.
 JOBD_MAX_WORKERS = 2
 JOBD_INTERACTIVE_WORKERS = 1
+JOBD_POINT_WORKERS = 2
+JOBD_LANE_PRIORITIES: dict[str, tuple[str, ...]] = {
+    "point": ("point",),
+    "interactive": ("interactive",),
+    "bulk": ("freshness", "maintenance"),
+}
+JOBD_PRIORITY_LANES: dict[str, str] = {
+    priority: lane for lane, priorities in JOBD_LANE_PRIORITIES.items() for priority in priorities
+}
+# Fixed per-lane worker capacity.  `bulk` is deliberately absent: its capacity is the instance's
+# general worker count, derived from the host CPU count when the broker is constructed.
+JOBD_LANE_WORKERS: dict[str, int] = {
+    "point": JOBD_POINT_WORKERS,
+    "interactive": JOBD_INTERACTIVE_WORKERS,
+}
 JOBD_SESSION_FILES_REQUESTERS = frozenset({
     "api-session-files", "api-session-files-batch", "background-refresh",
     "background-info-refresh", "metadata-cache-miss", "metadata-follower-fallback",
@@ -109,7 +137,7 @@ JOBD_MAX_SOURCE_DIAGNOSTICS = 256
 JOBD_MAX_DEADLINE_MS = 120_000
 JOBD_SCHEDULER_POLL_SECONDS = 0.05
 JOBD_SOCKET_NAME = "jobd.sock"
-JOBD_PRIORITIES = ("interactive", "freshness", "maintenance")
+JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
 JOBD_REQUEST_ACTIONS = frozenset({
     "ping", "status", "profile", "submit", "result", "product", "produce", "relay", "cancel",
     "lease", "release", "shutdown", "shutdown_if_idle",
@@ -494,6 +522,11 @@ class PersistentJobBroker:
         # web route can serve a prior complete product while a newer generation is still building.
         self.latest_product: dict[str, tuple[int, bytes, float]] = {}
         self.latest_product_metadata: dict[str, dict[str, object]] = {}
+        # Scheduling facts retained beside each stored product so a completed operation can say
+        # which lane ran it, how long it waited to be dispatched and how long it executed.  Without
+        # this the only visible number is total wall time, which cannot distinguish a slow task from
+        # a task that sat behind a lane holder -- the exact question a stalled editor open raises.
+        self.latest_product_schedule: dict[str, dict[str, object]] = {}
         self.product_counters: dict[str, dict[str, int]] = {}
         # Per-task pure execution duration (excludes queue wait): count/total/max in milliseconds,
         # bounded per task name (not per job) so this dict cannot grow with job volume.
@@ -509,8 +542,7 @@ class PersistentJobBroker:
         self.request_counters: dict[str, int] = {}
         self.scheduler_pump_failures = 0
         self.scheduler_pump_last_failure: dict[str, str] = {}
-        self.executor: ProcessPoolExecutor | None = None
-        self.interactive_executor: ProcessPoolExecutor | None = None
+        self.executors: dict[str, ProcessPoolExecutor | None] = {lane: None for lane in JOBD_LANE_PRIORITIES}
         self.state_lock = threading.RLock()
         self.scheduler_event = threading.Event()
         self.scheduler_thread: threading.Thread | None = None
@@ -614,6 +646,7 @@ class PersistentJobBroker:
         stored_at = time.time()
         self.latest_product[record.coalesce_key] = (record.generation, record.result, stored_at)
         self.latest_product_metadata[record.coalesce_key] = dict(record.product)
+        self.latest_product_schedule[record.coalesce_key] = self._record_schedule(record)
         while (
             len(self.latest_product) > JOBD_MAX_PRODUCTS
             or sum(len(body) for _generation, body, _stored_at in self.latest_product.values()) > JOBD_MAX_RETAINED_RESULT_BYTES
@@ -621,31 +654,58 @@ class PersistentJobBroker:
             oldest_key = min(self.latest_product, key=lambda key: self.latest_product[key][2])
             self.latest_product.pop(oldest_key, None)
             self.latest_product_metadata.pop(oldest_key, None)
+            self.latest_product_schedule.pop(oldest_key, None)
 
     @staticmethod
-    def _uses_interactive_capacity(priority: str) -> bool:
-        return priority == "interactive"
+    def _record_schedule(record: JobRecord) -> dict[str, object]:
+        """Return one record's bounded lane/wait/execution facts for retained diagnostics."""
+        queue_wait_ms = max(0.0, (record.running_started_at - record.submitted_at) * 1000.0) if record.running_started_at > 0 else 0.0
+        execution_ms = max(0.0, (record.completed_at - record.running_started_at) * 1000.0) if record.running_started_at > 0 and record.completed_at > 0 else 0.0
+        return {
+            "task": record.task,
+            "priority": record.priority,
+            "lane": PersistentJobBroker._lane_for_priority(record.priority),
+            "submitted_at": round(record.submitted_at, 6),
+            "running_started_at": round(record.running_started_at, 6),
+            "completed_at": round(record.completed_at, 6),
+            "queue_wait_ms": round(queue_wait_ms, 3),
+            "execution_ms": round(execution_ms, 3),
+        }
+
+    @staticmethod
+    def _lane_for_priority(priority: str) -> str:
+        """Map one declared priority onto its single owning executor lane."""
+        lane = JOBD_PRIORITY_LANES.get(str(priority))
+        if lane is None:
+            # `_validated_submission` rejects unknown priorities, so reaching here means a caller
+            # built a JobRecord directly with a priority no lane runs.  Name it rather than
+            # silently dispatching the work onto whichever pool happens to be first.
+            raise ValueError(f"no jobd lane owns priority {priority!r}")
+        return lane
+
+    def _lane_capacity(self, lane: str) -> int:
+        """Return one lane's bounded worker capacity, refusing a lane no table describes."""
+        if lane not in JOBD_LANE_PRIORITIES:
+            raise ValueError(f"unknown jobd lane {lane!r}")
+        if lane in JOBD_LANE_WORKERS:
+            return JOBD_LANE_WORKERS[lane]
+        return self.general_worker_count
 
     @staticmethod
     def _new_executor(worker_count: int) -> ProcessPoolExecutor:
         return ProcessPoolExecutor(max_workers=worker_count, mp_context=multiprocessing.get_context("spawn"))
 
     def _executor(self, priority: str = "freshness") -> ProcessPoolExecutor:
-        if self._uses_interactive_capacity(priority):
-            if self.interactive_executor is None:
-                self.interactive_executor = self._new_executor(JOBD_INTERACTIVE_WORKERS)
-            return self.interactive_executor
-        if self.executor is None:
-            self.executor = self._new_executor(self.general_worker_count)
-        return self.executor
+        lane = self._lane_for_priority(priority)
+        executor = self.executors[lane]
+        if executor is None:
+            executor = self._new_executor(self._lane_capacity(lane))
+            self.executors[lane] = executor
+        return executor
 
-    def _shutdown_executor(self, *, interactive: bool) -> None:
-        if interactive:
-            executor = self.interactive_executor
-            self.interactive_executor = None
-        else:
-            executor = self.executor
-            self.executor = None
+    def _shutdown_executor(self, *, lane: str) -> None:
+        executor = self.executors.get(lane)
+        self.executors[lane] = None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
 
@@ -681,14 +741,14 @@ class PersistentJobBroker:
         record.completed_at = time.time()
         record.completion_event.set()
 
-    def _future_slots(self, *, interactive: bool) -> int:
-        """Count executor work, including timed-out work that cannot be killed safely."""
+    def _future_slots(self, *, lane: str) -> int:
+        """Count executor work in one lane, including timed-out work that cannot be killed safely."""
         return sum(
             1
             for record in self.records.values()
             if record.future is not None
             and not record.future.done()
-            and self._uses_interactive_capacity(record.priority) is interactive
+            and self._lane_for_priority(record.priority) == lane
         )
 
     def _expire_deadlines(self, now: float) -> None:
@@ -705,7 +765,7 @@ class PersistentJobBroker:
             self._bump_counter(record.task, "timed_out")
 
     def _handle_finished_futures(self) -> None:
-        restart_executors: set[bool] = set()
+        restart_executors: set[str] = set()
         for record in self.records.values():
             if record.future is None or not record.future.done():
                 continue
@@ -751,7 +811,7 @@ class PersistentJobBroker:
                     self._bump_counter(record.task, "failed")
                     if record.running_started_monotonic > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
-                restart_executors.add(self._uses_interactive_capacity(record.priority))
+                restart_executors.add(self._lane_for_priority(record.priority))
             except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 if record.status != "timed_out":
                     self._mark_terminal(
@@ -777,8 +837,8 @@ class PersistentJobBroker:
                     self._bump_counter(record.task, "failed")
                     if record.running_started_monotonic > 0:
                         self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
-        for interactive in restart_executors:
-            self._shutdown_executor(interactive=interactive)
+        for lane in restart_executors:
+            self._shutdown_executor(lane=lane)
 
     def _next_queued_record(self, priorities: tuple[str, ...]) -> JobRecord | None:
         for priority in priorities:
@@ -815,12 +875,9 @@ class PersistentJobBroker:
         with self.state_lock:
             self._refresh_records()
             now = time.monotonic()
-            executor_queues = (
-                (True, (JOBD_PRIORITIES[0],), JOBD_INTERACTIVE_WORKERS),
-                (False, JOBD_PRIORITIES[1:], self.general_worker_count),
-            )
-            for interactive, priorities, capacity in executor_queues:
-                active = self._future_slots(interactive=interactive)
+            for lane, priorities in JOBD_LANE_PRIORITIES.items():
+                capacity = self._lane_capacity(lane)
+                active = self._future_slots(lane=lane)
                 while active < capacity:
                     record = self._next_queued_record(priorities)
                     if record is None:
@@ -852,7 +909,7 @@ class PersistentJobBroker:
                     )
                     self._bump_counter(record.task, "failed")
                     if isinstance(exc, BrokenProcessPool):
-                        self._shutdown_executor(interactive=self._uses_interactive_capacity(record.priority))
+                        self._shutdown_executor(lane=self._lane_for_priority(record.priority))
                 continue
             with self.state_lock:
                 record.future = future
@@ -921,6 +978,12 @@ class PersistentJobBroker:
             "deadline_ms": requested_deadline_ms,
             "deadline_at": time.monotonic() + (requested_deadline_ms / 1000.0) if requested_deadline_ms else 0.0,
             "coalesce_key": coalesce_key,
+            # `fresh_only` means the caller's coalesce key is only as trustworthy as its own
+            # granularity, so a completed product carrying that key may describe content that has
+            # since changed underneath it. Such a submission still joins in-flight work for the same
+            # key -- that work has not produced anything yet, so it cannot be stale -- but it never
+            # accepts an already-stored product.
+            "fresh_only": request.get("fresh_only") is True,
         }, None
 
     def _submit_validated(self, submission: dict[str, Any]) -> dict[str, Any]:
@@ -930,9 +993,11 @@ class PersistentJobBroker:
         generation = int(submission["generation"])
         deadline_at = float(submission["deadline_at"])
         coalesce_key = str(submission["coalesce_key"])
+        fresh_only = submission.get("fresh_only") is True
+        reusable_states = {"queued", "running"} if fresh_only else {"queued", "running", "completed"}
         existing_id = self.coalesced.get((task, coalesce_key))
         existing = self.records.get(existing_id or "")
-        if existing is not None and existing.generation >= generation and existing.status in {"queued", "running", "completed"}:
+        if existing is not None and existing.generation >= generation and existing.status in reusable_states:
             self._bump_counter(task, "coalesced")
             return {"ok": True, "coalesced": True, "job": self._record_payload(existing)}
         if self._queued_count() >= JOBD_MAX_QUEUE:
@@ -978,6 +1043,7 @@ class PersistentJobBroker:
             "stored_at": stored_at,
             "inflight": inflight,
             "product": dict(product),
+            "schedule": dict(self.latest_product_schedule.get(coalesce_key) or {}),
         }, body
 
     def _produce(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
@@ -999,7 +1065,7 @@ class PersistentJobBroker:
             return error or {"ok": False, "error": "invalid submission"}, b""
         coalesce_key = str(submission["coalesce_key"])
         stored = self.latest_product.get(coalesce_key)
-        if delivery == "ready_or_receipt" and stored is not None and stored[0] >= int(submission["generation"]):
+        if submission.get("fresh_only") is not True and delivery == "ready_or_receipt" and stored is not None and stored[0] >= int(submission["generation"]):
             product_response, body = self._product({"coalesce_key": coalesce_key})
             state = str(product_response.get("state") or "")
             if body and (state == "ready" or request.get("allow_stale") is True):
@@ -1023,6 +1089,7 @@ class PersistentJobBroker:
                     "coalesced": True,
                     "job": job,
                     "product": dict(product_response.get("product") or {}),
+                    "schedule": dict(product_response.get("schedule") or {}),
                 }, body
         submitted = self._submit_validated(submission)
         if submitted.get("ok") is not True:
@@ -1055,6 +1122,7 @@ class PersistentJobBroker:
         if body and (state == "ready" or (allow_stale and state == "stale")):
             response["state"] = state
             response["product"] = dict(product_response.get("product") or {})
+            response["schedule"] = dict(product_response.get("schedule") or {})
             return response, body
         return response, b""
 
@@ -1093,7 +1161,7 @@ class PersistentJobBroker:
         ]
         worker_pids = sorted({
             int(process.pid)
-            for executor in (self.interactive_executor, self.executor)
+            for executor in self.executors.values()
             if executor is not None
             for process in executor._processes.values()
             if process.pid is not None
@@ -1106,7 +1174,23 @@ class PersistentJobBroker:
             "source_epoch": self.source_epoch,
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "worker_count": self.general_worker_count + JOBD_INTERACTIVE_WORKERS,
+            "worker_count": sum(self._lane_capacity(lane) for lane in JOBD_LANE_PRIORITIES),
+            # One row per scheduler lane: its bounded capacity and the work actually occupying it.
+            # A lane at capacity with a nonzero queue is head-of-line blocking, which total wall
+            # time alone cannot show.
+            "lanes": {
+                lane: {
+                    "capacity": self._lane_capacity(lane),
+                    "active": self._future_slots(lane=lane),
+                    "queued": sum(
+                        1
+                        for priority in priorities
+                        for job_id in self.queues[priority]
+                        if (self.records.get(job_id) is not None and self.records[job_id].status == "queued")
+                    ),
+                }
+                for lane, priorities in JOBD_LANE_PRIORITIES.items()
+            },
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
             "active_records": active_records,
@@ -1242,8 +1326,8 @@ class PersistentJobBroker:
         self.scheduler_event.set()
         if self.scheduler_thread is not None:
             self.scheduler_thread.join(timeout=0.5)
-        self._shutdown_executor(interactive=True)
-        self._shutdown_executor(interactive=False)
+        for lane in JOBD_LANE_PRIORITIES:
+            self._shutdown_executor(lane=lane)
 
     def run(self) -> int:
         return run_local_rpc_service(
@@ -1322,6 +1406,7 @@ class JobClient(LocalServiceClient):
         deadline_ms: int = 0,
         delivery: str = "ready_or_receipt",
         allow_stale: bool = False,
+        fresh_only: bool = False,
         timeout: float = 0.5,
     ) -> tuple[dict[str, Any], bytes]:
         """Submit once and forward ready product bytes without waiting for cold work."""
@@ -1335,6 +1420,7 @@ class JobClient(LocalServiceClient):
             "deadline_ms": deadline_ms,
             "delivery": delivery,
             "allow_stale": bool(allow_stale),
+            "fresh_only": bool(fresh_only),
         }, timeout=timeout)
 
     def relay(
