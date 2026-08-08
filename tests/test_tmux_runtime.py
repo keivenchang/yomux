@@ -1,9 +1,163 @@
 from pathlib import Path
+import os
+import shlex
+import subprocess
+import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from tests import tmux_runtime
+
+
+def test_stop_isolated_tmux_runtime_declares_private_socket_for_kill_server(monkeypatch, tmp_path):
+    calls = []
+    socket_dir = tmp_path / "tmux-runtime"
+    socket_dir.mkdir()
+    socket_path = socket_dir / "private.sock"
+    runtime = SimpleNamespace(tmux_binary="tmux", socket_path=socket_path, socket_dir=socket_dir, stopped=False)
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(tmux_runtime.subprocess, "run", fake_run)
+
+    tmux_runtime.stop_isolated_tmux_runtime(runtime)
+
+    assert calls == [
+        ["tmux", "-S", str(socket_path), "list-panes", "-a", "-F", "#{pane_pid}"],
+        ["tmux", "-S", str(socket_path), "kill-server"],
+    ]
+
+
+def test_stop_isolated_tmux_runtime_refuses_failed_kill_with_live_private_socket(monkeypatch, tmp_path):
+    socket_dir = tmp_path / "tmux-runtime"
+    socket_dir.mkdir()
+    socket_path = socket_dir / "private.sock"
+    socket_path.touch()
+    runtime = SimpleNamespace(
+        tmux_binary="tmux",
+        socket_path=socket_path,
+        socket_dir=socket_dir,
+        stopped=False,
+    )
+    results = iter((
+        subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+        subprocess.CompletedProcess([], 1, stdout="", stderr="permission denied"),
+    ))
+    monkeypatch.setattr(tmux_runtime.subprocess, "run", lambda *_args, **_kwargs: next(results))
+
+    with pytest.raises(AssertionError, match="isolated tmux kill-server failed: permission denied"):
+        tmux_runtime.stop_isolated_tmux_runtime(runtime)
+
+    assert socket_dir.exists()
+    assert runtime.stopped is False
+
+
+def test_stop_isolated_tmux_runtime_refuses_live_pane_without_start_identity(monkeypatch, tmp_path):
+    socket_dir = tmp_path / "tmux-runtime"
+    socket_dir.mkdir()
+    socket_path = socket_dir / "private.sock"
+    socket_path.touch()
+    runtime = SimpleNamespace(
+        tmux_binary="tmux",
+        socket_path=socket_path,
+        socket_dir=socket_dir,
+        stopped=False,
+    )
+    calls = []
+
+    def fake_run(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout="43210\n", stderr="")
+
+    monkeypatch.setattr(tmux_runtime.subprocess, "run", fake_run)
+    monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: True)
+
+    with pytest.raises(AssertionError, match="cannot establish isolated tmux pane start identity for PID 43210"):
+        tmux_runtime.stop_isolated_tmux_runtime(runtime)
+
+    assert calls == [
+        ["tmux", "-S", str(socket_path), "list-panes", "-a", "-F", "#{pane_pid}"],
+    ]
+    assert socket_dir.exists()
+    assert runtime.stopped is False
+
+
+def test_wait_for_isolated_tmux_pane_exit_refuses_unavailable_identity_for_live_pid(monkeypatch):
+    monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: True)
+
+    with pytest.raises(AssertionError, match="cannot prove isolated tmux pane PID 43211 exited"):
+        tmux_runtime.wait_for_isolated_tmux_pane_exit(((43211, "proc:123"),))
+
+
+def test_wait_for_isolated_tmux_pane_exit_accepts_proven_absent_pid(monkeypatch):
+    monkeypatch.setattr(tmux_runtime, "process_start_identity", lambda _pid: None)
+    monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: False)
+
+    tmux_runtime.wait_for_isolated_tmux_pane_exit(((43212, "proc:124"),))
+
+
+def test_stop_isolated_tmux_runtime_waits_for_the_exact_pane_exit_side_effect(monkeypatch, tmp_path):
+    entered_fifo = tmp_path / "pane-retiring.fifo"
+    release_fifo = tmp_path / "pane-release.fifo"
+    os.mkfifo(entered_fifo)
+    os.mkfifo(release_fifo)
+    command_source = "\n".join((
+        "import signal",
+        f"entered = {str(entered_fifo)!r}",
+        f"release = {str(release_fifo)!r}",
+        "def retire(*_args):",
+        "    with open(entered, 'wb', buffering=0) as stream:",
+        "        stream.write(b'1')",
+        "    with open(release, 'rb', buffering=0) as stream:",
+        "        stream.read(1)",
+        "signal.signal(signal.SIGHUP, retire)",
+        "print('READY', flush=True)",
+        "signal.pause()",
+    ))
+    session = "fixture-retirement"
+    runtime = tmux_runtime.start_isolated_tmux_runtime(
+        monkeypatch,
+        tmp_path,
+        session_commands={session: f"{shlex.quote(sys.executable)} -c {shlex.quote(command_source)}"},
+    )
+    ready, panes = tmux_runtime.wait_for_isolated_tmux_panes(
+        runtime,
+        (session,),
+        lambda values: "READY" in values[session],
+        timeout=5,
+    )
+    assert ready, panes
+
+    errors = []
+    stopper = threading.Thread(
+        target=lambda: _capture_stop_error(runtime, errors),
+        name="fixture-tmux-stop",
+        daemon=True,
+    )
+    stopper.start()
+    with entered_fifo.open("rb", buffering=0) as stream:
+        assert stream.read(1) == b"1"
+    returned_before_release = not stopper.is_alive()
+    with release_fifo.open("wb", buffering=0) as stream:
+        stream.write(b"1")
+    stopper.join(timeout=5)
+
+    assert returned_before_release is False
+    assert not stopper.is_alive()
+    assert errors == []
+
+
+def _capture_stop_error(runtime, errors):
+    try:
+        tmux_runtime.stop_isolated_tmux_runtime(runtime)
+    except BaseException as error:
+        errors.append(error)
 
 
 def test_adaptive_tmux_poll_interval_keeps_a_fast_observation_window_then_caps():
@@ -17,7 +171,11 @@ def test_wait_for_isolated_tmux_panes_returns_immediately_without_sleep(monkeypa
     captures = []
     sleeps = []
     runtime = SimpleNamespace()
-    monkeypatch.setattr(tmux_runtime, "capture_isolated_tmux_pane", lambda _runtime, session: captures.append(session) or "ready")
+    monkeypatch.setattr(
+        tmux_runtime,
+        "capture_isolated_tmux_pane",
+        lambda _runtime, session, *, join_wrapped_lines: captures.append(session) or "ready",
+    )
 
     ready, panes = tmux_runtime.wait_for_isolated_tmux_panes(
         runtime,
@@ -40,7 +198,7 @@ def test_wait_for_isolated_tmux_panes_adapts_then_caps_and_captures_all_sessions
     passes = [0]
     runtime = SimpleNamespace()
 
-    def capture(_runtime, session):
+    def capture(_runtime, session, *, join_wrapped_lines):
         capture_count[0] += 1
         if session == "one":
             passes[0] += 1
@@ -72,7 +230,7 @@ def test_wait_for_isolated_tmux_panes_honors_a_fixed_interval_and_returns_last_c
     captures = []
     runtime = SimpleNamespace()
 
-    def capture(_runtime, session):
+    def capture(_runtime, session, *, join_wrapped_lines):
         captures.append(session)
         return "still-waiting"
 

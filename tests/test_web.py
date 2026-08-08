@@ -7,6 +7,7 @@ session names) embedded in the page must not be able to break out of the bootstr
 """
 
 import json
+from pathlib import Path
 import re
 
 from yolomux_lib import common
@@ -42,6 +43,20 @@ def test_html_page_bootstrap_uses_unicode_escapes_not_html_entities():
     # leaving literal &lt; inside parsed strings).
     bootstrap = _bootstrap_json(web.html_page([]))
     assert "&lt;" not in bootstrap and "&gt;" not in bootstrap and "&amp;" not in bootstrap
+
+
+def test_html_page_declares_inline_favicon_before_browser_can_request_default():
+    page = web.html_page([])
+
+    # One inline favicon, declared before any stylesheet, so the browser never probes the
+    # authenticated /favicon.ico. Assert the intent rather than one literal href: a9b24fc4b
+    # and be136e9aa each fixed this independently with different hrefs, and pinning the
+    # exact string is what made those two fixes look like a conflict.
+    favicons = re.findall(r'<link rel="icon"[^>]*>', page)
+    assert len(favicons) == 1, favicons
+    assert 'data-yolomux-favicon' in favicons[0]
+    assert 'href="data:' in favicons[0]
+    assert page.index(favicons[0]) < page.index('/static/yolomux.css')
 
 
 def test_html_page_bootstraps_the_server_owned_stats_writer_fence():
@@ -103,17 +118,22 @@ def test_html_page_bootstrap_preserves_server_ranked_recent_sessions():
     assert bootstrap["recentSessions"] == ["new", "old"]
 
 
-def test_xterm_unicode11_addon_asset_resolves_from_sibling_package(monkeypatch, tmp_path):
-    xterm_root = tmp_path / "@xterm" / "xterm"
-    addon_path = tmp_path / "@xterm" / "addon-unicode11" / "lib" / "addon-unicode11.js"
-    xterm_root.mkdir(parents=True)
-    addon_path.parent.mkdir(parents=True)
-    addon_path.write_text("window.Unicode11Addon = {};", encoding="utf-8")
+def test_xterm_assets_have_one_vendor_owner_even_with_root_contamination(monkeypatch, tmp_path):
+    static_dir = tmp_path / "static"
+    vendor_dir = static_dir / "vendor"
+    vendor_dir.mkdir(parents=True)
+    names = ("xterm.js", "xterm.css", "xterm-addon-unicode11.js")
+    for name in names:
+        (vendor_dir / name).write_text(f"vendor-{name}", encoding="utf-8")
+        (static_dir / name).write_text(f"contaminated-{name}", encoding="utf-8")
+    monkeypatch.setattr(common, "STATIC_DIR", static_dir)
+    monkeypatch.setattr(web, "STATIC_DIR", static_dir)
 
-    monkeypatch.setattr(common, "XTERM_ASSET_ROOTS", [xterm_root])
-
-    assert common.xterm_asset_path("xterm-addon-unicode11.js") == addon_path
-    assert web.static_content_type("xterm-addon-unicode11.js") == "application/javascript; charset=utf-8"
+    for name in names:
+        assert common.xterm_asset_path(name) == vendor_dir / name
+        assert web.static_asset_path(name) == vendor_dir / name
+        assert web.static_asset_path(f"vendor/{name}") == vendor_dir / name
+        assert web.static_asset_version(name) == web.static_asset_version(f"vendor/{name}")
 
 
 def test_emoji_catalog_is_a_served_lazy_javascript_asset():
@@ -121,22 +141,74 @@ def test_emoji_catalog_is_a_served_lazy_javascript_asset():
     assert web.static_asset_path("emoji-data.js") == common.STATIC_DIR / "emoji-data.js"
 
 
-def test_xterm_asset_path_prefers_packaged_static_asset(monkeypatch, tmp_path):
+def test_xterm_asset_path_requires_tracked_vendor_asset(monkeypatch, tmp_path):
     static_dir = tmp_path / "static"
-    static_dir.mkdir()
-    packaged_asset = static_dir / "xterm.js"
+    vendor_dir = static_dir / "vendor"
+    vendor_dir.mkdir(parents=True)
+    packaged_asset = vendor_dir / "xterm.js"
     packaged_asset.write_text("window.Terminal = {};", encoding="utf-8")
     monkeypatch.setattr(common, "STATIC_DIR", static_dir)
 
     assert common.xterm_asset_path("xterm.js") == packaged_asset
+    packaged_asset.unlink()
+    assert common.xterm_asset_path("xterm.js") is None
+
+
+def test_tracked_xterm_vendor_assets_match_pinned_package_fixture():
+    package_root = Path("/opt/xterm/node_modules")
+    package_paths = {
+        "xterm.js": package_root / "@xterm" / "xterm" / "lib" / "xterm.js",
+        "xterm.css": package_root / "@xterm" / "xterm" / "css" / "xterm.css",
+        "xterm-addon-unicode11.js": package_root / "@xterm" / "addon-unicode11" / "lib" / "addon-unicode11.js",
+    }
+    assert all(path.is_file() for path in package_paths.values())
+    assert {
+        name: (common.STATIC_DIR / "vendor" / name).read_bytes()
+        for name in package_paths
+    } == {
+        name: path.read_bytes()
+        for name, path in package_paths.items()
+    }
 
 
 def test_html_page_loads_xterm_unicode11_addon_after_xterm():
     page = web.html_page([])
 
-    xterm_index = page.index("/static/xterm.js")
-    addon_index = page.index("/static/xterm-addon-unicode11.js")
+    xterm_index = page.index("/static/vendor/xterm.js")
+    addon_index = page.index("/static/vendor/xterm-addon-unicode11.js")
     bootstrap_index = page.index('id="yolomux-bootstrap"')
 
     assert xterm_index < addon_index < bootstrap_index
-    assert "cdn.jsdelivr.net/npm/@xterm/addon-unicode11/lib/addon-unicode11.js" in page
+    assert "/static/vendor/xterm.css" in page
+    assert "cdn.jsdelivr.net/npm/@xterm" not in page
+    assert web.static_content_type("vendor/xterm.css") == "text/css; charset=utf-8"
+    assert web.static_content_type("vendor/xterm.js") == "application/javascript; charset=utf-8"
+    assert web.static_content_type("vendor/xterm-addon-unicode11.js") == "application/javascript; charset=utf-8"
+    assert web.static_asset_path("vendor/xterm.js") == common.STATIC_DIR / "vendor" / "xterm.js"
+
+
+def test_html_page_declares_an_initial_favicon_without_a_network_request():
+    """The browser must not probe the authenticated root /favicon.ico before boot code runs."""
+    page = web.html_page([])
+
+    favicons = re.findall(r'<link rel="icon"[^>]*>', page)
+    assert len(favicons) == 1, favicons
+    assert 'href="data:' in favicons[0], favicons[0]
+
+
+def test_every_page_head_declares_the_one_inline_favicon():
+    """Pre-auth pages need this most: there a /favicon.ico probe returns 401.
+
+    a9b24fc4b and be136e9aa each fixed html_page() only, so the login page kept
+    emitting the 401 through both fixes. Cover every head-bearing template.
+    """
+    pages = {
+        "html_page": web.html_page([]),
+        "login_html": web.login_html(),
+        "setup_auth_html": web.setup_auth_html(),
+    }
+    for name, page in pages.items():
+        favicons = re.findall(r'<link rel="icon"[^>]*>', page)
+        assert len(favicons) == 1, (name, favicons)
+        assert favicons[0] == web.INLINE_FAVICON_LINK, name
+        assert page.index(favicons[0]) < page.index("</head>"), name

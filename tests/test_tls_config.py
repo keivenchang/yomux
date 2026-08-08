@@ -223,27 +223,52 @@ def test_print_runtime_report_degrades_to_bounded_ledger_records(monkeypatch, ca
     _forbid_app_construction(monkeypatch)
     monkeypatch.setattr(cli, "read_background_owner_debug_status", lambda: {"current_owner": None})
     monkeypatch.setattr(cli, "send_yolomux_control_request", lambda owner, request: {"ok": False, "error": "no owner"})
-    monkeypatch.setattr(cli, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(cli, "RUNTIME_DIR", tmp_path)
     lease_dir = tmp_path / "server-leases"
+    lease_dir = lease_dir / cli_registry.current_host_identity().stable_host_id
     lease_dir.mkdir(parents=True)
-    (lease_dir / "8881.lock").write_text(json.dumps({"pid": 400, "port": 8881}), encoding="utf-8")
+    identity = cli_registry.current_host_identity()
+    lease_record = {
+        **identity.process_record_fields(pid=400, start_identity="proc:5"),
+        "port": 8881,
+    }
+    (lease_dir / "8881.lock").write_text(json.dumps(lease_record), encoding="utf-8")
     monkeypatch.setattr(
         cli,
         "bounded_process_table",
-        lambda: {400: cli_registry.ProcessTableEntry(1, 400, 5.0, "python3 -u yolomux.py 8880 /tmp/log --port 8881 --dang")},
+        lambda: {
+            400: cli_registry.ProcessTableEntry(
+                1,
+                400,
+                5.0,
+                "python3 -u yolomux.py 8880 /tmp/log --port 8881 --dang",
+                start_time=5,
+            )
+        },
     )
 
     assert cli.print_runtime_report([], dangerously_yolo=False) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["mode"] == "bounded-records"
-    assert payload["port_groups"] == [{"port": 8881, "pid": 400, "pgid": 400, "member_pids": [400]}]
+    assert len(payload["port_groups"]) == 1
+    port_group = payload["port_groups"][0]
+    assert {key: port_group[key] for key in ("port", "pid", "pgid", "member_pids")} == {
+        "port": 8881,
+        "pid": 400,
+        "pgid": 400,
+        "member_pids": [400],
+    }
+    expected_process_record = cli_registry.process_fence_record(lease_record)
+    assert port_group["process_record"] == expected_process_record
+    assert port_group["member_records"] == {"400": expected_process_record}
     assert payload["local_service_groups"] == []
 
 
 def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     captured = {}
     monkeypatch.setenv("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT", "19001")
+    monkeypatch.setattr(cli, "is_managed_instance_port", lambda port: port == 19001)
     args = argparse.Namespace(
         host="0.0.0.0",
         port=19001,
@@ -267,9 +292,10 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
         def restore_auto_approve(self):
             return []
 
-        def start_background_owner(self, port=None, priority=0):
+        def start_background_owner(self, port=None, priority=0, managed_instance=False):
             captured["background_owner_port"] = port
             captured["background_owner_priority"] = priority
+            captured["managed_instance"] = managed_instance
             return True
 
         def start_yoagent_backend_prewarm(self, **kwargs):
@@ -297,6 +323,17 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (tls_marker, "Using self-signed HTTPS certificate /tmp/cert.pem"))
     monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
     monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
+    monkeypatch.setattr(
+        cli,
+        "startup_path_line",
+        lambda _port: (
+            "YOLOmux paths: YOLOMUX_ROOT=/tmp/test (auto-derived); config=/tmp/config; "
+            "state=/tmp/state; cache=/tmp/cache; runtime=/tmp/runtime"
+        ),
+    )
+    monkeypatch.setattr(cli, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: None))
+    monkeypatch.setattr(cli, "set_local_service_launch_context", lambda _port: None)
+    monkeypatch.setattr(cli, "start_startup_overload_watchdog", lambda _port: None)
     monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
 
     assert cli.main() == 0
@@ -309,14 +346,76 @@ def test_main_maps_cli_flags_to_app_and_server(monkeypatch, capsys):
     assert captured["dev"] is False  # dev mode off by default
     assert captured["background_owner_port"] == 19001
     assert captured["background_owner_priority"] == 100
+    assert captured["managed_instance"] is True
     assert captured["yoagent_prewarm"] == {"reason": "server_start"}
     assert captured["served"] is True
     assert captured["stopped"] is True
     assert captured["closed"] is True
+    assert output.count("YOLOmux paths: YOLOMUX_ROOT=") == 1
     assert "DANGEROUS YOLO mode is enabled" in output
     assert "Serving YOLOmux on https://localhost:19001/" in output
     assert "Using self-signed HTTPS certificate /tmp/cert.pem" in output
     assert "Highly recommend" not in output
+
+
+def test_main_closes_server_when_app_shutdown_raises(monkeypatch):
+    """Native watcher teardown must survive an earlier application cleanup error."""
+    events = []
+    args = argparse.Namespace(
+        host="127.0.0.1",
+        port=19004,
+        sessions=[],
+        dangerously_yolo=False,
+        self_signed=False,
+        http=True,
+        cert=None,
+        key=None,
+        print_transcripts=False,
+        print_background_owner=False,
+        print_runtime_report=False,
+        dev=False,
+    )
+
+    class FakeApp:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start_background_owner(self, **_kwargs):
+            return True
+
+        def start_yoagent_backend_prewarm(self, **_kwargs):
+            return {"ok": True}, 202
+
+        def restore_auto_approve(self):
+            return []
+
+        def stop_auto_approve_all(self):
+            events.append("app-stop")
+            raise RuntimeError("injected app cleanup failure")
+
+    class FakeServer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def serve_forever(self):
+            return None
+
+        def server_close(self):
+            events.append("server-close")
+
+    monkeypatch.setattr(cli, "parse_args", lambda: args)
+    monkeypatch.setattr(cli, "tls_context_for_args", lambda _args: (None, ""))
+    monkeypatch.setattr(cli, "TmuxWebtermApp", FakeApp)
+    monkeypatch.setattr(cli, "TmuxWebtermHTTPServer", FakeServer)
+    monkeypatch.setattr(cli, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: events.append("lease-release")))
+    monkeypatch.setattr(cli, "set_local_service_launch_context", lambda _port: None)
+    monkeypatch.setattr(cli, "start_startup_overload_watchdog", lambda _port: None)
+    monkeypatch.setattr(cli, "auth_setup_required", lambda: False)
+
+    with pytest.raises(RuntimeError, match="injected app cleanup failure"):
+        cli.main()
+
+    assert events == ["app-stop", "server-close", "lease-release"]
 
 
 def test_main_rejects_duplicate_port_before_constructing_the_app(monkeypatch, capsys):

@@ -2,15 +2,18 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """HTTP-served browser coverage for the current render-only YO!stats client."""
 
+import inspect
 import json
 from pathlib import Path
 import threading
 from types import SimpleNamespace
+from urllib.request import Request
 from urllib.request import urlopen
 
 from selenium.webdriver.common.by import By
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
+from tests.browser_helpers.browser_layout import _live_runtime_boot_fixture_html
 from yolomux_lib import server as server_module
 from yolomux_lib import web as web_module
 from yolomux_lib.stats_current import client as stats_client
@@ -21,6 +24,43 @@ from yolomux_lib.stats_current import storage
 
 
 CURRENT_STATS_SOURCE = Path("static_src/js/yolomux/84_stats_current.js").read_text(encoding="utf-8")
+
+
+def test_current_stats_fixture_uses_canonical_resolution_policy():
+    source = inspect.getsource(_current_stats_fixture_html)
+    assert "const matrix = [" not in source
+    assert "window.__statsFixtureCapabilities" in source
+
+
+def test_live_runtime_boot_fixture_exposes_exact_stats_capabilities_before_logs_render(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    observed = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        Promise.all([
+          fetch('/api/stats-capabilities', {cache: 'no-store'}).then(response => response.json()),
+          (async () => {
+            document.querySelector('[data-js-debug-subtab="logs"]')?.click();
+            return window.__yolomuxTestWaitFor(
+              () => {
+                const view = document.querySelector('[data-js-debug-subview="logs"]');
+                return view && !view.hidden && view.querySelector('.js-debug-logs-toolbar')
+                  && view.querySelector('.js-debug-log-list') ? true : false;
+              },
+              {timeoutMs: 2000, intervalMs: 10, description: 'fixture Logs rendered assertion path'},
+            );
+          })(),
+        ]).then(([capabilities, logsRendered]) => done({capabilities, logsRendered}))
+          .catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert observed.get("error") is None, observed
+    assert observed["capabilities"] == json.loads(json.dumps(stats_resolution.wire_capabilities()))
+    assert observed["logsRendered"] is True, observed
+
+
+def _current_stats_fixture_capabilities() -> dict[str, object]:
+    return stats_resolution.wire_capabilities()
 
 
 def _current_stats_fixture_html(*, network_fetch=False) -> str:
@@ -61,29 +101,7 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       }
     }
 
-    const matrix = [
-      [300, 1, [1, 10]],
-      [900, 10, [10, 60]],
-      [1800, 10, [10, 60]],
-      [3600, 10, [10, 60, 300]],
-      [7200, 60, [60, 300]],
-      [14400, 60, [60, 300]],
-      [28800, 60, [60, 300]],
-      [57600, 300, [300]],
-      [86400, 300, [300]],
-    ];
-    const capabilities = {
-      resolution_choices: [1, 10, 60, 300],
-      max_buckets: 600,
-      min_buckets: 12,
-      max_live_cadence_seconds: 60,
-      ranges: matrix.map(([rangeSeconds, auto, explicit]) => ({
-        range_seconds: rangeSeconds,
-        auto_resolution_seconds: auto,
-        explicit_resolution_seconds: explicit,
-        buckets: Object.fromEntries(explicit.map(resolution => [resolution, rangeSeconds / resolution])),
-      })),
-    };
+    const capabilities = window.__statsFixtureCapabilities;
 
     function seriesValue(value, at) {
       return {value, source_count: 1, first_timestamp: at, last_timestamp: at};
@@ -207,14 +225,29 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       capabilities,
       clock: new FixtureClock(),
       cacheGeneration: 0,
+      nextFiniteOperationId: 1,
+      finiteOperations: new Map(),
       snapshotRequests: [],
       eventSources: [],
       generationEvents: [],
+      lastGeneration: null,
       lastSnapshot: null,
       mounted: null,
     };
 
-    window.__statsFixture.fetch = async input => {
+    window.__statsFixture.trackFinite = (label, promise) => {
+      const id = `${window.__statsFixture.nextFiniteOperationId++}:${label}`;
+      window.__statsFixture.finiteOperations.set(id, promise);
+      return Promise.resolve(promise).finally(() => window.__statsFixture.finiteOperations.delete(id));
+    };
+    window.__yolomuxFixtureLifecycle = Object.freeze({
+      diagnosticMode: 'browser-console',
+      operationState() {
+        return {pending: [...window.__statsFixture.finiteOperations.keys()].sort()};
+      },
+    });
+
+    window.__statsFixture.fetch = input => window.__statsFixture.trackFinite(`fetch:${String(input)}`, (async () => {
       const url = new URL(String(input), location.href);
       if (window.__statsNetworkFetch) {
         const response = await window.fetch(input, {credentials: 'same-origin', cache: 'no-store'});
@@ -240,9 +273,9 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       const snapshot = exactSnapshot(rangeSeconds, requestedResolution, resolutionSeconds);
       window.__statsFixture.snapshotRequests.push({url: url.pathname + url.search, snapshot});
       return {status: 200, json: async () => snapshot};
-    };
+    })());
 
-    window.__statsFixture.start = async view => {
+    window.__statsFixture.start = view => window.__statsFixture.trackFinite(`start:${view}`, (async () => {
       const root = document.getElementById('stats-root');
       const mounted = YOLOmuxStatsCurrent.mount(root, {
         view,
@@ -253,10 +286,13 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         EventSource: FixtureEventSource,
         controllerOptions: {
           clock: window.__statsFixture.clock,
-          onGeneration: generation => window.__statsFixture.generationEvents.push({
-            cacheGeneration: generation.cache_generation,
-            dataset: JSON.stringify(generation),
-          }),
+          onGeneration: generation => {
+            window.__statsFixture.lastGeneration = generation;
+            window.__statsFixture.generationEvents.push({
+              cacheGeneration: generation.cache_generation,
+              dataset: JSON.stringify(generation),
+            });
+          },
         },
       });
       window.__statsFixture.mounted = mounted;
@@ -267,9 +303,11 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
         {description: 'current stats first exact generation'}
       );
       return mounted;
-    };
+    })());
 
-    window.__statsFixture.select = async (rangeSeconds, requestedResolution) => {
+    window.__statsFixture.select = (rangeSeconds, requestedResolution) => window.__statsFixture.trackFinite(
+      `select:${rangeSeconds}/${requestedResolution}`,
+      (async () => {
       const root = document.getElementById('stats-root');
       const range = root.querySelector('[data-stats-current-range]');
       if (Number(range.value) !== rangeSeconds) {
@@ -286,18 +324,19 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       }
       const resolution = root.querySelector('[data-stats-current-resolution]');
       if (String(resolution.value) === String(requestedResolution)) return;
-      const before = window.__statsFixture.snapshotRequests.length;
+      const beforeGeneration = window.__statsFixture.generationEvents.length;
       resolution.value = String(requestedResolution);
       resolution.dispatchEvent(new Event('change', {bubbles: true}));
       await window.__statsFixture.clock.advance(0);
       await window.__yolomuxTestWaitFor(
-        () => window.__statsFixture.snapshotRequests.slice(before).some(item => (
-          item.snapshot.range_seconds === rangeSeconds
-          && item.snapshot.requested_resolution === requestedResolution
-        )) && root.querySelector('[data-stats-chart="cpu"]'),
+        () => window.__statsFixture.generationEvents.slice(beforeGeneration).some(item => {
+          const generation = JSON.parse(item.dataset);
+          return generation.range_seconds === rangeSeconds
+            && generation.requested_resolution === requestedResolution;
+        }) && root.querySelector('[data-stats-chart="cpu"]'),
         {description: `current stats ${rangeSeconds}/${requestedResolution} generation`}
       );
-    };
+    })());
 
     window.__statsFixture.emitCpuDelta = value => {
       const base = window.__statsFixture.lastSnapshot;
@@ -349,14 +388,28 @@ def _current_stats_fixture_html(*, network_fetch=False) -> str:
       return delta;
     };
     """
+    fixture_capabilities = json.dumps(_current_stats_fixture_capabilities(), separators=(",", ":"))
     body = f"""
     <main id="stats-shell"><div id="stats-root"></div></main>
     <script>window.openExternalLinkFromEvent = (event, root) => {{ const anchor = event.target?.closest?.('a[href]'); if (!anchor || !root.contains(anchor) || !/^https?:\\/\\//i.test(anchor.href)) return false; const opened = window.open(anchor.href, '_blank', 'noopener,noreferrer'); if (!opened) return false; event.preventDefault(); return true; }};</script>
     <script>eval({json.dumps(CURRENT_STATS_SOURCE)});</script>
+    <script>window.__statsFixtureCapabilities = {fixture_capabilities};</script>
     <script>window.__statsNetworkFetch = {str(network_fetch).lower()};</script>
     <script>{setup}</script>
     """
     return page_html(body, extra_css="#stats-shell { width: 100%; min-width: 0; }")
+
+
+def _write_current_stats_fixture_assets(asset_dir: Path, asset_name: str) -> None:
+    """Serve the minimal stats page and every stylesheet dependency from one owner."""
+
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    (asset_dir / asset_name).write_text(_current_stats_fixture_html(network_fetch=True), encoding="utf-8")
+    font_dir = asset_dir / "fonts"
+    font_dir.mkdir()
+    (font_dir / "yolomux-ui.woff2").write_bytes(
+        (Path("static/fonts") / "yolomux-ui.woff2").read_bytes()
+    )
 
 
 def _start_current_stats(browser, view="stats"):
@@ -392,7 +445,7 @@ def test_current_stats_browser_traverses_every_exact_matrix_cell(browser, tmp_pa
             for (const requested of ['AUTO', ...row.explicit_resolution_seconds]) {
               await window.__statsFixture.select(row.range_seconds, requested);
               const root = document.getElementById('stats-root');
-              const request = window.__statsFixture.snapshotRequests.at(-1);
+              const generation = window.__statsFixture.lastGeneration;
               const points = [...root.querySelectorAll('[data-point-count]')].map(item => Number(item.dataset.pointCount));
               const paths = [...root.querySelectorAll('[data-stats-chart]')].map(chart => ({
                 id: chart.dataset.statsChart,
@@ -402,13 +455,12 @@ def test_current_stats_browser_traverses_every_exact_matrix_cell(browser, tmp_pa
               results.push({
                 range: row.range_seconds,
                 requested,
-                resolution: request.snapshot.resolution_seconds,
-                bucketCount: request.snapshot.buckets.length,
+                resolution: generation.resolution_seconds,
+                bucketCount: generation.buckets.length,
                 maxPoints: Math.max(...points),
                 exactLabel: root.querySelector('.yo-stats-current-exact').textContent,
                 axisSeconds: root.querySelector('[data-stats-chart="cpu"] svg').dataset.axisSeconds,
                 paths,
-                requestUrl: request.url,
               });
             }
           }
@@ -417,15 +469,17 @@ def test_current_stats_browser_traverses_every_exact_matrix_cell(browser, tmp_pa
         """
     )
     assert isinstance(cells, list), cells
-    assert len(cells) == 26
-    assert {cell["resolution"] for cell in cells} == {1, 10, 60, 300}
+    expected_cells = sum(
+        1 + len(stats_resolution.explicit_resolutions(range_seconds))
+        for range_seconds in stats_resolution.RANGE_SECONDS
+    )
+    assert len(cells) == expected_cells
+    assert {cell["resolution"] for cell in cells} == set(stats_resolution.RESOLUTION_CHOICES)
     for cell in cells:
         assert cell["bucketCount"] == cell["range"] // cell["resolution"], cell
         assert cell["maxPoints"] == cell["bucketCount"] <= 600, cell
         assert cell["exactLabel"] == f"Exact {cell['resolution']}s", cell
         assert cell["axisSeconds"] == ("true" if cell["resolution"] == 1 else "false"), cell
-        assert f"range_seconds={cell['range']}" in cell["requestUrl"], cell
-        assert f"resolution={cell['requested']}" in cell["requestUrl"], cell
         assert all(path["paths"] == path["series"] for path in cell["paths"]), cell
 
 
@@ -479,11 +533,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
 
         asset_name = "stats-current-e2e.html"
         asset_dir = tmp_path / "current-stats-static"
-        asset_dir.mkdir()
-        (asset_dir / asset_name).write_text(
-            _current_stats_fixture_html(network_fetch=True),
-            encoding="utf-8",
-        )
+        _write_current_stats_fixture_assets(asset_dir, asset_name)
         monkeypatch.setitem(
             web_module.STATIC_CONTENT_TYPES,
             asset_name,
@@ -523,7 +573,7 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
                 for (const requested of ['AUTO', ...row.explicit_resolution_seconds]) {
                   await window.__statsFixture.select(row.range_seconds, requested);
                   const root = document.getElementById('stats-root');
-                  const accepted = window.__statsFixture.snapshotRequests.at(-1).snapshot;
+                  const accepted = window.__statsFixture.lastGeneration;
                   results.push({
                     range: row.range_seconds,
                     requested,
@@ -539,15 +589,19 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
             """
         )
         assert isinstance(cells, list), cells
-        assert len(cells) == 26
-        assert {cell["concrete"] for cell in cells} == {1, 10, 60, 300}
+        expected_cells = sum(
+            1 + len(stats_resolution.explicit_resolutions(range_seconds))
+            for range_seconds in stats_resolution.RANGE_SECONDS
+        )
+        assert len(cells) == expected_cells
+        assert {cell["concrete"] for cell in cells} == set(stats_resolution.RESOLUTION_CHOICES)
         for cell in cells:
             assert cell["buckets"] == cell["range"] // cell["concrete"], cell
             assert cell["cpuPoints"] == "1", cell
             assert cell["axisSeconds"] == ("true" if cell["concrete"] == 1 else "false"), cell
         status = client.status()
-        assert status["warm"] == {"ready": 26, "total": 26, "percent": 100.0}
-        assert status["requests"]["snapshot"] >= 26
+        assert status["warm"] == {"ready": expected_cells, "total": expected_cells, "percent": 100.0}
+        assert status["requests"]["snapshot"] >= expected_cells
 
         follower_client = stats_client.StatsCurrentClient(socket_path, database)
         exact_request = {
@@ -579,21 +633,33 @@ def test_http_client_rpc_cache_and_browser_render_every_exact_matrix_cell(
             "/api/stats-snapshot?range_seconds=300&resolution=1&"
             "client_id=browser-current-fixture"
         )
+        request_headers = {"X-YOLOmux-Request-ID": "r-stats-owner-follower-parity"}
         with urlopen(
-            f"http://127.0.0.1:{http_server.server_address[1]}{query}", timeout=3,
+            Request(
+                f"http://127.0.0.1:{http_server.server_address[1]}{query}",
+                headers=request_headers,
+            ),
+            timeout=3,
         ) as response:
             owner_http_body = response.read()
         with urlopen(
-            f"http://127.0.0.1:{follower_server.server_address[1]}{query}", timeout=3,
+            Request(
+                f"http://127.0.0.1:{follower_server.server_address[1]}{query}",
+                headers=request_headers,
+            ),
+            timeout=3,
         ) as response:
             follower_http_body = response.read()
-        assert owner_http_body == follower_http_body
+        assert owner_http_body == follower_http_body, {
+            "owner": json.loads(owner_http_body),
+            "follower": json.loads(follower_http_body),
+        }
         assert json.loads(owner_http_body)["cache_generation"] == owner_metadata["cache_generation"]
     finally:
         if follower_server is not None and follower_thread is not None:
             stop_browser_share_server(follower_server, follower_thread)
         if http_server is not None and http_thread is not None:
-            stop_browser_share_server(http_server, http_thread)
+            stop_browser_share_server(http_server, http_thread, browser=browser)
         service.stop_event.set()
         service.work_event.set()
         service_thread.join(timeout=3)

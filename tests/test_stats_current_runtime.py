@@ -29,6 +29,9 @@ class FakeClient:
         self.releases.append(lease_id)
         return {"ok": True}
 
+    def register_collector_context(self, *, pid, port, owner_generation):
+        return {"ok": True, "pid": pid, "port": port, "owner_generation": owner_generation}
+
     def append(self, **groups):
         self.appends.append(groups)
         return {"ok": True}
@@ -38,7 +41,7 @@ class FakeClient:
 
 
 def complete_collectors(callback):
-    return {family: callback for family in scheduler.COLLECTED_FAMILIES}
+    return {family: callback for family in runtime.WEB_COLLECTED_FAMILIES}
 
 
 def wait_until(predicate, timeout=1.0):
@@ -51,28 +54,83 @@ def wait_until(predicate, timeout=1.0):
     return bool(predicate())
 
 
-def test_runtime_requires_every_manifest_owned_collector_exactly_once():
+def test_runtime_requires_every_web_owned_collector_exactly_once():
     with pytest.raises(runtime.CurrentRuntimeError, match="collector set mismatch"):
         runtime.StatsCurrentRuntime(
             FakeClient(),
-            {"cpu": lambda _attempt: collectors.CollectorFacts()},
+            {"agent_status": lambda _attempt: collectors.CollectorFacts()},
             owner_generation=lambda: 1,
             token_cadence_seconds=lambda: 10,
         )
 
 
-def test_runtime_uses_one_demand_cadence_parent_for_every_scheduled_family():
+def test_runtime_uses_one_demand_cadence_parent_for_every_web_scheduled_family():
     current = runtime.StatsCurrentRuntime(
         FakeClient(),
         complete_collectors(lambda _attempt: collectors.CollectorFacts()),
         owner_generation=lambda: 1,
         token_cadence_seconds=lambda: 10,
-        family_cadence_seconds=lambda family: 1 if family == "cpu" else 60,
+        family_cadence_seconds=lambda family: 60,
     )
 
-    assert current.scheduler._cadence(current.scheduler._workers["cpu"].job) == 1
-    assert current.scheduler._cadence(current.scheduler._workers["gpu"].job) == 60
+    assert "cpu" not in current.scheduler._workers
+    assert "gpu" not in current.scheduler._workers
     assert current.scheduler._cadence(current.scheduler._workers["agent_tokens"].job) == 60
+
+
+def test_runtime_persists_scheduler_deadline_misses_for_known_sources():
+    client = FakeClient()
+    current = runtime.StatsCurrentRuntime(
+        client,
+        complete_collectors(lambda _attempt: collectors.CollectorFacts()),
+        owner_generation=lambda: 7,
+        token_cadence_seconds=lambda: 10,
+    )
+    current._append_facts("agent_status", collectors.CollectorFacts(
+        coverage_epochs=(storage.CoverageEpoch("agent_status", "port:7443", "7:agent_status:1", 100, 110, 10, 7),),
+    ))
+
+    current._missed_deadline_callback("agent_status")(scheduler.CollectorMiss(
+        "agent_status", "7:agent_status:1", 110, 160, 10, 7,
+    ))
+
+    assert client.appends[-1]["unavailable_spans"] == (
+        storage.UnavailableSpan(
+            "agent_status", "port:7443", "7:agent_status:1", 110, 160, 10,
+            "scheduler_deadline_missed", 7,
+        ),
+    )
+
+
+def test_runtime_registers_owner_identity_before_starting_collectors():
+    events = []
+
+    class ContextClient(FakeClient):
+        def register_collector_context(self, *, pid, port, owner_generation):
+            events.append(("context", pid, port, owner_generation))
+            return super().register_collector_context(
+                pid=pid, port=port, owner_generation=owner_generation,
+            )
+
+    client = ContextClient()
+
+    def collect(_attempt):
+        events.append(("collect",))
+        return collectors.CollectorFacts()
+
+    current = runtime.StatsCurrentRuntime(
+        client,
+        complete_collectors(collect),
+        owner_generation=lambda: 7,
+        token_cadence_seconds=lambda: 60,
+        collector_context=lambda: {"pid": 1234, "port": 7443, "owner_generation": 7},
+    )
+
+    assert current.start() is True
+    assert wait_until(lambda: any(event[0] == "collect" for event in events))
+    current.stop()
+
+    assert events[0] == ("context", 1234, 7443, 7)
 
 
 def test_runtime_leases_before_append_and_releases_after_workers_stop():
@@ -81,16 +139,15 @@ def test_runtime_leases_before_append_and_releases_after_workers_stop():
 
     def collect(attempt):
         collected.set()
-        return collectors.cpu_success(
+        return collectors.agent_status_success(
             epoch_id=attempt.epoch_id,
             epoch_started_at=attempt.epoch_started_at,
             observed_at=attempt.scheduled_at,
-            cadence_seconds=1,
+                cadence_seconds=10,
             owner_generation=attempt.owner_generation,
             source_id="web",
-            process_percent=2,
-            system_percent=3,
-        ) if attempt.family == "cpu" else collectors.CollectorFacts(
+            states={"web": "run"},
+        ) if attempt.family == "agent_status" else collectors.CollectorFacts(
             coverage_epochs=(storage.CoverageEpoch(
                 attempt.family,
                 "web",
@@ -392,11 +449,11 @@ def test_budget_exhaustion_follow_up_wakes_same_family_after_append_and_commit(m
         owner_generation=lambda: 1,
         token_cadence_seconds=lambda: 10,
     )
-    monkeypatch.setattr(
-        current.scheduler,
-        "wake",
-        lambda family: events.append(f"wake:{family}") or True,
-    )
+    def record_wake(family, *, min_interval_seconds=0.0):
+        events.append(f"wake:{family}:{min_interval_seconds}")
+        return True
+
+    monkeypatch.setattr(current.scheduler, "wake", record_wake)
     coverage = storage.CoverageEpoch(
         "agent_tokens", "web", "epoch", 1, 2, 10, 1,
     )
@@ -411,7 +468,14 @@ def test_budget_exhaustion_follow_up_wakes_same_family_after_append_and_commit(m
 
     current._append_facts("agent_tokens", exhausted)
 
-    assert events == ["append", "commit", "wake:agent_tokens"]
+    # The follow-up must carry its rate floor: an unfloored self-wake let the
+    # live agent_tokens worker free-run at 41 cycles in 30s against a 10s cadence.
+    assert events == [
+        "append",
+        "commit",
+        f"wake:agent_tokens:{runtime.BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS}",
+    ]
+    assert runtime.BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS > 0
 
     events.clear()
     normal = collectors.CollectorFacts(

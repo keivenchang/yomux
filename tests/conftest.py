@@ -8,6 +8,7 @@ copy-pasted across ~11 test files, and ensuring no test (e.g. the login-locale p
 general.language) can leave a *persistent* shared config dir mutated across runs.
 """
 
+import importlib
 import os
 from pathlib import Path
 import re
@@ -33,6 +34,18 @@ os.environ.setdefault("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "1")
 
 from yolomux_lib import app as app_module
 from yolomux_lib import file_index
+from yolomux_lib import statusd_protocol
+
+
+@pytest.fixture
+def legacy_activity_summary_enabled(monkeypatch):
+    """Explicitly admit the retired synchronous algorithm for its isolated contract tests."""
+
+    monkeypatch.setattr(
+        statusd_protocol,
+        "ACTIVITY_SUMMARY_ADMISSION",
+        statusd_protocol.ActivitySummaryAdmission(enabled=True, reason=""),
+    )
 
 
 SLOWEST_FIRST_TESTS = (
@@ -45,6 +58,9 @@ SLOWEST_FIRST_TESTS = (
 )
 
 SLOWEST_FIRST_RANK = {nodeid: index for index, nodeid in enumerate(SLOWEST_FIRST_TESTS)}
+NONBROWSER_TEST_TIMEOUT_SECONDS = 180
+BROWSER_TEST_TIMEOUT_SECONDS = 300
+E2E_TEST_TIMEOUT_SECONDS = 600
 
 _SOCKET_AVAILABILITY: tuple[bool, str] | None = None
 _SELENIUM_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+selenium(?:\.|\s|$)|pytest\.importorskip\([\"']selenium", re.MULTILINE)
@@ -65,9 +81,11 @@ def _test_path_imports_selenium(path: Path) -> bool:
 
 
 @pytest.fixture
-def no_control_socket(monkeypatch):
+def no_control_socket(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module.YolomuxControlServer, "start", lambda self: None)
     monkeypatch.setattr(app_module.YolomuxControlServer, "stop", lambda self: None)
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations" / "session-files.json")
 
 
 @pytest.fixture
@@ -139,15 +157,29 @@ def isolated_file_index_background_hooks(monkeypatch):
     monkeypatch.setattr(app_module.SearchIndexerClient, "ensure_started", lambda self: False)
     file_index.set_background_owner_checker(None)
     file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_index_search_requester(None)
     file_index.set_background_owner_bytes_recorder(None)
     file_index.set_background_owner_done_notifier(None)
     file_index.clear_memory_indexes()
     yield
     file_index.set_background_owner_checker(None)
     file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_index_search_requester(None)
     file_index.set_background_owner_bytes_recorder(None)
     file_index.set_background_owner_done_notifier(None)
     file_index.clear_memory_indexes()
+
+
+@pytest.fixture(autouse=True)
+def reset_worker_reused_browser(request):
+    """Run the shared browser reset for every consumer, independent of module imports."""
+
+    yield
+    if request.node.funcargs.get("browser") is None:
+        return
+    # Load lazily so collection of non-browser tests does not require Selenium.
+    browser_layout = importlib.import_module("tests.browser_helpers.browser_layout")
+    browser_layout.reset_reused_browser_after_test(request)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -155,8 +187,30 @@ def pytest_collection_modifyitems(config, items):
         path = _test_path(item)
         for marker_name in _automatic_test_markers(path):
             item.add_marker(getattr(pytest.mark, marker_name))
-        if _test_path_imports_selenium(path) and item.get_closest_marker("browser") is None:
-            raise pytest.UsageError(f"{path}: Selenium tests must carry the browser marker")
+
+    selenium_paths = {_test_path(item) for item in items if _test_path_imports_selenium(_test_path(item))}
+    for item in items:
+        path = _test_path(item)
+        browser_marker = item.get_closest_marker("browser")
+        no_browser_marker = item.get_closest_marker("no_browser")
+        if path in selenium_paths and (browser_marker is None) == (no_browser_marker is None):
+            raise pytest.UsageError(
+                f"{item.nodeid}: Selenium-module tests must carry exactly one of the browser or no_browser markers"
+            )
+        if (
+            "browser" in getattr(item, "fixturenames", ())
+            and browser_marker is None
+        ):
+            raise pytest.UsageError(f"{item.nodeid}: tests using the browser fixture must carry the browser marker")
+        timeout_seconds = (
+            E2E_TEST_TIMEOUT_SECONDS
+            if item.get_closest_marker("e2e") is not None
+            else BROWSER_TEST_TIMEOUT_SECONDS
+            if item.get_closest_marker("browser") is not None
+            else NONBROWSER_TEST_TIMEOUT_SECONDS
+        )
+        timeout_options = {"method": "thread"} if item.get_closest_marker("node_vm") is not None else {}
+        item.add_marker(pytest.mark.timeout(timeout_seconds, **timeout_options), append=False)
 
     indexed = list(enumerate(items))
 

@@ -12,11 +12,13 @@ import re
 import shutil
 import socketserver
 import subprocess
+import sys
 import threading
 import time
 from types import MappingProxyType
 from types import SimpleNamespace
 import uuid
+from urllib.parse import parse_qs
 from urllib.parse import parse_qsl
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
@@ -35,6 +37,23 @@ from yolomux_lib import server_auth
 from yolomux_lib.locales import locale_registry_payload
 from yolomux_lib.app import TmuxWebtermApp
 from yolomux_lib.server import TmuxWebtermHTTPServer
+from yolomux_lib.server_logs import SERVER_LOGS
+from yolomux_lib.stats_current import resolution as stats_resolution
+from yolomux_lib.stats_current import storage as stats_storage
+from tests.browser_helpers.browser_console import assert_browser_console_error_free
+from tests.browser_helpers.browser_console import assert_browser_journey_error_free
+from tests.browser_helpers.browser_console import read_browser_console_log
+from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
+from tests.gate_harness import finish_browser_fixture_boundary
+from tests.gate_harness import patch_imported_writable_constants
+from tests.gate_harness import prepare_fixture_http_app
+from tests.gate_harness import rollback_failed_fixture_http_start
+from tests.gate_harness import run_fixture_cleanup_phases
+from tests.gate_harness import stop_fixture_app_runtime
+from tests.gate_harness import stop_fixture_http_app
+from tests.gate_harness import track_fixture_http_requests
+from tests.gate_harness import wait_for_fixture_api_quiescence
+from tests.gate_harness import wait_for_fixture_client_event_demand
 from tests.tmux_runtime import capture_isolated_tmux_pane
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import start_isolated_tmux_runtime
@@ -209,6 +228,10 @@ LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
 _FIXTURE_HTTP_BASE: str | None = None
 _FIXTURE_HTTP_LOCK = threading.Lock()
 _FIXTURE_PAGE_SEQ = 0
+_EMPTY_FAVICON_HTML = '<link rel="icon" data-yolomux-favicon href="data:,">'
+_FIXTURE_PIXEL_GIF = bytes.fromhex(
+    "47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"
+)
 
 
 def _fixture_http_base() -> str:
@@ -228,6 +251,46 @@ def _fixture_http_base() -> str:
 
 
 class _QuietHttpFixtureHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 - inherited HTTP handler API
+        parsed = urlsplit(self.path)
+        if parsed.path == "/favicon.ico":
+            self.send_response(HTTPStatus.NO_CONTENT)
+            self.end_headers()
+            return
+        if parsed.path == "/login":
+            body = f"<!doctype html><html><head>{_EMPTY_FAVICON_HTML}</head><body>fixture login</body></html>".encode()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == "/api/fs/raw":
+            requested_path = parse_qs(parsed.query).get("path", [""])[-1]
+            suffix = Path(requested_path).suffix.lower()
+            if suffix == ".svg":
+                body = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+                content_type = "image/svg+xml"
+            elif suffix in {".mp3", ".wav", ".ogg"}:
+                body = b""
+                content_type = "audio/mpeg"
+            elif suffix in {".mp4", ".webm", ".mov"}:
+                body = b""
+                content_type = "video/mp4"
+            elif suffix == ".pdf":
+                body = b"%PDF-1.4\n%%EOF\n"
+                content_type = "application/pdf"
+            else:
+                body = _FIXTURE_PIXEL_GIF
+                content_type = "image/gif"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        super().do_GET()
+
     def log_message(self, *args):  # keep the pytest output clean
         pass
 
@@ -524,6 +587,7 @@ def page_html(body: str, *, extra_css: str = "") -> str:
     <html>
       <head>
         <meta charset="utf-8">
+        {_EMPTY_FAVICON_HTML}
         <style>{app_css()}</style>{extra}
       </head>
       <body>
@@ -619,10 +683,19 @@ class BrowserFakeTlsContext:
 def isolate_browser_runtime_paths(monkeypatch, tmp_path):
     config_dir = tmp_path / "yolomux-config"
     state_dir = tmp_path / "yolomux-state"
+    runtime_base_dir = tmp_path / "yolomux-runtime"
+    runtime_dir = runtime_base_dir / "yolomux"
     config_dir.mkdir(exist_ok=True)
     state_dir.mkdir(exist_ok=True)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    old_roots = {
+        common.CONFIG_DIR: config_dir,
+        common.STATE_DIR: state_dir,
+        common.RUNTIME_DIR: runtime_dir,
+    }
     monkeypatch.setenv("YOLOMUX_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("YOLOMUX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("YOLOMUX_RUNTIME_DIR", str(runtime_base_dir))
     state_path = config_dir / "state.json"
     event_log_path = state_dir / "events.jsonl"
     activity_path = state_dir / "activity.json"
@@ -634,6 +707,7 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
     for module in (common,):
         monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
         monkeypatch.setattr(module, "STATE_DIR", state_dir)
+        monkeypatch.setattr(module, "RUNTIME_DIR", runtime_dir)
         monkeypatch.setattr(module, "STATE_PATH", state_path)
         monkeypatch.setattr(module, "EVENT_LOG_PATH", event_log_path)
         monkeypatch.setattr(module, "ACTIVITY_PATH", activity_path)
@@ -641,6 +715,7 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
         monkeypatch.setattr(module, "WATCH_INDEX_PATH", watch_index_path)
         monkeypatch.setattr(module, "AUTO_APPROVE_LOCK_DIR", auto_approve_lock_dir)
         monkeypatch.setattr(module, "CONTROL_SOCKET_DIR", control_socket_dir)
+    patch_imported_writable_constants(monkeypatch, old_roots)
     monkeypatch.setattr(app_module, "ACTIVITY_PATH", activity_path)
     monkeypatch.setattr(app_module, "ACTIVITY_HEARTBEATS_PATH", activity_heartbeats_path)
     monkeypatch.setattr(app_module, "EVENT_LOG_PATH", event_log_path)
@@ -652,7 +727,7 @@ def isolate_browser_runtime_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(settings_module, "SETTINGS_PATH", config_dir / "settings.yaml")
     monkeypatch.setattr(app_module, "SETTINGS_PATH", config_dir / "settings.yaml")
     monkeypatch.setattr(yolo_rules_module, "YOLO_RULES_PATH", config_dir / "yolo-rules.yaml")
-    return SimpleNamespace(config_dir=config_dir, state_dir=state_dir, control_socket_dir=control_socket_dir)
+    return SimpleNamespace(config_dir=config_dir, state_dir=state_dir, runtime_dir=runtime_dir, control_socket_dir=control_socket_dir)
 
 
 def cleanup_isolated_browser_runtime_paths(paths):
@@ -661,12 +736,12 @@ def cleanup_isolated_browser_runtime_paths(paths):
     shutil.rmtree(paths.control_socket_dir, ignore_errors=True)
 
 
-def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True):
+def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, dangerously_yolo=True, session_cwd=None):
     paths = None
     tmux_runtime = None
     try:
         paths = isolate_browser_runtime_paths(monkeypatch, tmp_path)
-        tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=session_count)
+        tmux_runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path, session_count=session_count, session_cwd=session_cwd)
         app = TmuxWebtermApp(list(tmux_runtime.sessions), dangerously_yolo=dangerously_yolo)
         return SimpleNamespace(app=app, sessions=list(tmux_runtime.sessions), tmux=tmux_runtime, paths=paths)
     except Exception:
@@ -678,9 +753,11 @@ def start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, *, 
 def stop_isolated_browser_share_app(runtime):
     if runtime is None:
         return
-    runtime.app.control_server.stop()
-    stop_isolated_tmux_runtime(runtime.tmux)
-    cleanup_isolated_browser_runtime_paths(runtime.paths)
+    run_fixture_cleanup_phases("isolated browser app", (
+        ("app runtime", lambda: stop_fixture_app_runtime(runtime.app, label="isolated browser app")),
+        ("tmux runtime", lambda: stop_isolated_tmux_runtime(runtime.tmux)),
+        ("runtime paths", lambda: cleanup_isolated_browser_runtime_paths(runtime.paths)),
+    ))
 
 
 def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, auth_bypass=False):
@@ -690,18 +767,58 @@ def start_browser_share_server(monkeypatch, tmp_path, app, *, tls_context=None, 
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     if auth_bypass:
         monkeypatch.setenv(common.TEST_AUTH_BYPASS_ENV, "1")
-    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server_log_boundary = SERVER_LOGS.payload()
+    prepare_fixture_http_app(monkeypatch, app)
+    server = None
+    thread = None
+    try:
+        server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
+        server._fixture_server_log_boundary = server_log_boundary
+        track_fixture_http_requests(server)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+    except BaseException as start_error:
+        try:
+            rollback_failed_fixture_http_start(app, server, thread, label="isolated browser")
+        except BaseException as rollback_error:
+            raise start_error.with_traceback(start_error.__traceback__) from rollback_error
+        raise
     return server, thread
 
 
-def stop_browser_share_server(server, thread):
-    server.shutdown()
-    server.server_close()
-    thread.join(timeout=2)
-    if "control_server" in vars(server.app):
-        server.app.control_server.stop()
+def stop_browser_share_server(
+    server,
+    thread,
+    *,
+    browser=None,
+    browsers=(),
+    server_log_reader=None,
+    wait_for_api_quiescence=True,
+):
+    invalid_browser_arguments = browser is not None and browsers
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    owned_browsers = (browser, *tuple(browsers)) if invalid_browser_arguments else (tuple(browsers) if browsers else browser)
+    validation_error = (
+        ValueError("pass either browser or browsers to stop_browser_share_server, not both")
+        if invalid_browser_arguments
+        else None
+    )
+    try:
+        finish_browser_fixture_boundary(
+            owned_browsers,
+            base_url,
+            lambda: stop_fixture_http_app(server.app, server, thread, label="isolated browser"),
+            server_log_reader=server_log_reader,
+            server_log_boundary=getattr(server, "_fixture_server_log_boundary", None),
+            wait_for_api_quiescence=wait_for_api_quiescence,
+            require_owned_browsers=bool(browsers) or browser is not None,
+        )
+    except BaseException as cleanup_error:
+        if validation_error is not None:
+            raise validation_error from cleanup_error
+        raise
+    if validation_error is not None:
+        raise validation_error
 
 
 def install_browser_websocket_tracker(driver):
@@ -809,11 +926,13 @@ def _reset_browser_windows(driver):
     driver.switch_to.window(primary)
 
 
-def _reset_reused_browser_state(driver):
+def _reset_reused_browser_state(driver, *, retired_origin=None):
     """Return a worker-reused browser to a known blank, profile-clean state."""
     _reset_browser_windows(driver)
     remove_browser_test_new_document_scripts(driver)
-    origin = driver.execute_script("return location.origin;")
+    origin = retired_origin
+    if origin is None:
+        origin = driver.execute_script("return location.origin;")
     origins = set(getattr(driver, "_yolomux_test_origins", set()))
     if origin and origin != "null":
         origins.add(origin)
@@ -823,12 +942,13 @@ def _reset_reused_browser_state(driver):
     for storage_origin in sorted(origins):
         driver.execute_cdp_cmd("Storage.clearDataForOrigin", {"origin": storage_origin, "storageTypes": "all"})
     driver._yolomux_test_origins = set()
+    driver._yolomux_server_log_boundary = None
     driver.delete_all_cookies()
     driver.execute_cdp_cmd("Browser.resetPermissions", {})
     driver.execute_cdp_cmd("Browser.setDownloadBehavior", {"behavior": "deny"})
     driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
     driver.execute_cdp_cmd("Emulation.setEmulatedMedia", {"features": []})
-    driver.get_log("browser")
+    read_browser_console_log(driver)
     driver.get("about:blank")
     driver.execute_script("document.body.tabIndex = -1; document.body.focus();")
     driver.set_window_size(*DEFAULT_BROWSER_WINDOW_SIZE)
@@ -846,10 +966,40 @@ def _invalid_browser_session(error):
     ))
 
 
+_BUNDLE_FRESHNESS_CHECKED = False
+
+
+def _require_current_generated_bundle() -> None:
+    """Refuse to run a browser gate against a stale generated bundle.
+
+    Most browser gates serve the checked-in `static/yolomux.js` rather than
+    building from `static_src/`. If that bundle is stale they exercise the
+    previous build: a fixed source can stay red, and a broken source can stay
+    green. `tools/check.py` has a `static_build --check` lane, but agents are
+    told never to run the full gate because it starves the box, so nothing
+    catches it in the focused runs we actually use. This does.
+
+    Checked once per process rather than per test -- it shells out, and the
+    bundle cannot change mid-run.
+    """
+
+    global _BUNDLE_FRESHNESS_CHECKED
+    if _BUNDLE_FRESHNESS_CHECKED:
+        return
+    completed = subprocess.run(
+        [sys.executable, "tools/static_build.py", "--check"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    )
+    output = f"{completed.stdout}{completed.stderr}"
+    assert completed.returncode == 0, output
+    _BUNDLE_FRESHNESS_CHECKED = True
+
+
 @pytest.fixture(scope=_browser_fixture_scope)
 def browser():
     # Session scope creates exactly one lease per pytest-xdist worker, while the autouse teardown
     # removes cross-test state after every test.
+    _require_current_generated_bundle()
     lease = _BrowserDriverLease(new_chrome_driver())
     try:
         yield lease
@@ -857,16 +1007,25 @@ def browser():
         lease.quit()
 
 
-@pytest.fixture(autouse=True)
-def _reset_browser_state(request):
-    # Reset the reused driver after each test so a module- or session-scoped lease cannot leak state.
-    # No-op for tests that don't use the browser.
-    yield
+def reset_reused_browser_after_test(request):
+    """Reset the worker browser after one consumer, regardless of its test module."""
+
     lease = request.node.funcargs.get("browser")
     if lease is None:
         return
     try:
-        _reset_reused_browser_state(lease)
+        retired_origin = lease.execute_script("return location.origin;")
+        retirement_error = None
+        try:
+            retire_browser_after_strict_diagnostic_gate(
+                lease,
+                require_js_debug_store=False,
+            )
+        except BaseException as error:
+            retirement_error = error
+        _reset_reused_browser_state(lease, retired_origin=retired_origin)
+        if retirement_error is not None:
+            raise retirement_error.with_traceback(retirement_error.__traceback__)
     except WebDriverException as error:
         if not _invalid_browser_session(error):
             raise
@@ -875,6 +1034,14 @@ def _reset_browser_state(request):
             "Chrome became invalid during this test; replaced the worker-local driver for later tests "
             f"without concealing the failure: {error}"
         )
+
+
+@pytest.fixture
+def _reset_browser_state(request):
+    """Compatibility fixture for direct reset lifecycle tests."""
+
+    yield
+    reset_reused_browser_after_test(request)
 
 
 def pane_fixture_html(width):
@@ -2099,6 +2266,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
     dockview_script_uri = fixture_asset_url("static", "vendor", "dockview-core.noStyle.js")
     settings = settings or {}
     sessions = sessions or ["1"]
+    stats_capabilities = stats_resolution.wire_capabilities()
     session_files_payload = session_files_payload or {"session": sessions[0], "files": [], "repos": [], "errors": [], "loaded": True}
     fs_entries = fs_entries or {}
     bootstrap = {
@@ -2117,6 +2285,10 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
             "settings": settings,
             "defaults": settings_module.default_settings(),
             "mtime_ns": 0,
+        },
+        "statsWriterFence": {
+            "protocol_version": stats_storage.MIN_WRITER_PROTOCOL,
+            "schema_generation": stats_storage.SCHEMA_VERSION,
         },
         "yoloRulesPayload": {
             "path": "/home/test/.config/yolomux/yolo-rules.yaml",
@@ -2143,25 +2315,24 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
     app_root_open = '<div id="appRoot" class="app-root">' if wrap_app_root else ""
     app_root_close = "</div>" if wrap_app_root else ""
     stub_script = """
-      window.__bootErrors = [];
-      window.__bootRejections = [];
       window.__bootFetches = [];
       window.__bootSockets = [];
       window.__bootSocketInstances = [];
       window.__eventSources = [];
+      window.__fixtureStatsModels = new Map();
       window.__bootTerminalInstances = [];
       window.__terminalOpened = 0;
       window.__terminalResizeCalls = [];
       window.__settingsMtime = 0;
       window.__settingsPayload = JSON.parse(document.getElementById('yolomux-bootstrap').textContent).settingsPayload;
-      window.addEventListener('error', event => window.__bootErrors.push({
-        message: event.message || String(event.error || event),
-        filename: event.filename || '',
-        lineno: event.lineno || 0,
-        colno: event.colno || 0,
-        stack: event.error?.stack || '',
-      }));
-      window.addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
+      window.__fixtureServerLogsPayload = {
+        ok: true,
+        epoch: 'fixture-server-log-epoch',
+        logs: [],
+        sequence: 0,
+        capacity: 500,
+        dropped: {count: 0, first_id: null, last_id: null, by_level: {}},
+      };
       window.marked = {parse(text) {
         return String(text || '').replace(/`\\/yo <query>`/g, '<code>/yo &lt;query&gt;</code>');
       }};
@@ -2230,12 +2401,46 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         }
       }
       window.WebSocket = FakeWebSocket;
-      window.EventSource = class {
-        constructor(url) { this.url = String(url); this.listeners = {}; window.__eventSources.push(this); }
-        addEventListener(name, callback) { this.listeners[name] = callback; }
+       window.EventSource = class {
+         constructor(url) {
+           this.url = String(url);
+           this.listeners = {};
+           this.statsTimer = null;
+           // The fixture registry owns the shared client-events transport. Current-stats opens
+           // its own stream after a valid boot capability response, but it is not a second client
+           // event transport and must not make the fixture ownership assertion report a duplicate.
+          if (this.url.startsWith('/api/client-events?')) window.__eventSources.push(this);
+          if (this.url.startsWith('/api/stats-stream?')) {
+            const streamUrl = new URL(this.url, location.origin);
+            const rangeSeconds = Number(streamUrl.searchParams.get('range_seconds'));
+            const resolutionSeconds = Number(streamUrl.searchParams.get('resolution_seconds'));
+            const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
+            let cacheGeneration = Number(streamUrl.searchParams.get('after_cache_generation'));
+            let revision = Number(streamUrl.searchParams.get('after_revision'));
+            const cadenceSeconds = Math.min(
+              resolutionSeconds,
+              window.__fixtureStatsCapabilities.max_live_cadence_seconds,
+            );
+            setTimeout(() => {
+              if (!this.closed) this.emit('ready', {cache_generation: cacheGeneration, revision});
+            }, 0);
+            this.statsTimer = setInterval(() => {
+              if (this.closed) return;
+              const delta = fixtureStatsDelta(model, cacheGeneration, revision + 1);
+              cacheGeneration = delta.cache_generation;
+              revision = delta.revision;
+              this.emit('delta', delta);
+            }, cadenceSeconds * 1000);
+          }
+         }
+         addEventListener(name, callback) { this.listeners[name] = callback; }
         emit(name, payload = {}) { this.listeners[name]?.({data: JSON.stringify(payload)}); }
-        close() { this.closed = true; }
-      };
+         close() {
+           this.closed = true;
+           if (this.statsTimer !== null) clearInterval(this.statsTimer);
+           this.statsTimer = null;
+         }
+       };
       function jsonResponse(payload, status = 200) {
         return Promise.resolve(new Response(JSON.stringify(payload), {
           status,
@@ -2246,6 +2451,72 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         for (const source of window.__eventSources || []) {
           if (typeof source.emit === 'function') source.emit(type, payload);
         }
+      }
+      function fixtureStatsModel(rangeSeconds, resolutionSeconds) {
+        const key = `${rangeSeconds}/${resolutionSeconds}`;
+        let model = window.__fixtureStatsModels.get(key);
+        if (model) return model;
+        const windowEnd = Math.floor(Date.now() / 1000 / resolutionSeconds) * resolutionSeconds;
+        model = {
+          rangeSeconds,
+          resolutionSeconds,
+          windowStart: windowEnd - rangeSeconds,
+          windowEnd,
+          sourceGeneration: 1,
+          cacheGeneration: 1,
+        };
+        window.__fixtureStatsModels.set(key, model);
+        return model;
+      }
+      function fixtureStatsDimensions() {
+        return Object.fromEntries(
+          ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other'].map(key => [
+            key, {tokens: 0, micro_usd: 0, api_list_micro_usd: 0},
+          ]),
+        );
+      }
+      function fixtureStatsCostReport() {
+        return {
+          schema_version: 3,
+          total_micro_usd: 0,
+          total_api_list_micro_usd: 0,
+          total_tokens: 0,
+          dimensions: fixtureStatsDimensions(),
+          priced: {atoms: 0, tokens: 0},
+          unpriced: {atoms: 0, tokens: 0},
+          models: [],
+          agents: [],
+          evidence: [],
+          catalog_revision: 0,
+          omissions: {models: 0, agents: 0, evidence: 0},
+          reasoning_available: false,
+        };
+      }
+      function fixtureStatsBucket(start, duration, open) {
+        return {
+          start,
+          duration,
+          series: {'cpu_percent:fixture': {value: 0, source_count: 1, first_timestamp: start, last_timestamp: start}},
+          source: {first_timestamp: start, last_timestamp: start, count: 1},
+          open,
+        };
+      }
+      function fixtureStatsDelta(model, baseCacheGeneration, revision) {
+        model.sourceGeneration = Math.max(model.sourceGeneration + 1, baseCacheGeneration + 1);
+        model.cacheGeneration = baseCacheGeneration + 1;
+        return {
+          protocol_version: 2,
+          range_seconds: model.rangeSeconds,
+          resolution_seconds: model.resolutionSeconds,
+          source_generation: model.sourceGeneration,
+          base_cache_generation: baseCacheGeneration,
+          cache_generation: model.cacheGeneration,
+          revision,
+          buckets: [fixtureStatsBucket(model.windowEnd - model.resolutionSeconds, model.resolutionSeconds, true)],
+          no_data: [],
+          tombstones: [],
+          cost_report: fixtureStatsCostReport(),
+        };
       }
       function applyFixtureSettingsPatch(patch) {
         window.__settingsPayload.settings = mergeSettings(window.__settingsPayload.settings || {}, patch || {});
@@ -2397,7 +2668,9 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           let message = window.__fixtureChatMessageKeys[key];
           const created = !message;
           if (!message) {
-            message = window.__fixtureChatSendAs(window.__fixtureAuthUsername, body?.browser_instance_id || '', body?.body || '', false);
+            const messageBody = String(body?.body || '');
+            const isQuestion = ['?', '？', '؟', '՞', ';', '፧'].includes(messageBody.trim().at(-1));
+            message = window.__fixtureChatSendAs(window.__fixtureAuthUsername, body?.browser_instance_id || '', messageBody, isQuestion);
             message.client_message_uuid = body?.client_message_uuid || message.client_message_uuid;
             window.__fixtureChatMessageKeys[key] = message;
           }
@@ -2476,11 +2749,17 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           return jsonResponse(window.__settingsPayload);
         }
         if (url.pathname === '/api/notify') return jsonResponse({enabled: false});
+        if (url.pathname === '/api/create-session-plan') {
+          const explicitSession = String(window.__fixtureNextCreatedSession || '').trim();
+          const numericSessions = window.__fixtureSessions.map(session => Number(session)).filter(Number.isFinite);
+          const session = explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
+          return jsonResponse({ok: true, session, generation: 1});
+        }
         if (url.pathname === '/api/create-session') {
           const agent = url.searchParams.get('agent') || 'term';
           const explicitSession = String(window.__fixtureNextCreatedSession || '').trim();
           const numericSessions = window.__fixtureSessions.map(session => Number(session)).filter(Number.isFinite);
-          const session = explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
+          const session = url.searchParams.get('session') || explicitSession || String((numericSessions.length ? Math.max(...numericSessions) : 0) + 1);
           const createSessions = Array.isArray(window.__fixtureCreateSessionRoster)
             ? window.__fixtureCreateSessionRoster.slice()
             : window.__fixtureSessions.slice();
@@ -2568,20 +2847,49 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
               worktree_branch_activity: {},
             };
           };
+          // The rows are rebuilt from CURRENT fixture state on every read, so the payload served at
+          // generation N+1 genuinely observes the mutation. Nothing here relabels pre-mutation
+          // bytes with a newer identity: that is the exact lie the epoch identity exists to catch.
+          const buildSessionRows = () => Object.fromEntries(window.__fixtureSessions.map(session => {
+            const info = transcriptSessions[session] || {};
+            const path = info.current_path || currentPath;
+            const root = info.git_root || gitRoot;
+            return [session, {
+              session,
+              selected_pane: {target: `${session}:0.0`, current_path: path},
+              work_graph: fixtureWorkGraph(session, info, path, root),
+              agents: info.agents || [],
+              panes: info.panes || [],
+            }];
+          }));
+          const meta = window.__fixtureMetadata;
+          const forced = url.searchParams.get('force') === '1';
+          // A forced read is answered from the build that already exists and names the build that
+          // will observe this request -- the server's contract exactly.
+          const servedGeneration = meta.generation;
+          const cache = {
+            hit: true,
+            stale: forced,
+            age_seconds: 0,
+            refresh_seconds: 15,
+            generation: servedGeneration,
+            refreshing: forced,
+          };
+          if (forced) {
+            meta.pending = servedGeneration + 1;
+            cache.pending_generation = meta.pending;
+            cache.pending_identity = {epoch: meta.epoch, generation: meta.pending};
+            // The promised build commits unless a test is deliberately withholding it, so the next
+            // read converges on freshly built rows. `withholdPendingBuild` is how a test models a
+            // build that never lands without also breaking the protocol.
+            if (!meta.withholdPendingBuild) meta.generation = meta.pending;
+          }
           return jsonResponse({
+            metadata_identity: {epoch: meta.epoch, generation: servedGeneration},
+            metadata_generation: servedGeneration,
+            cache,
             session_order: window.__fixtureSessions,
-            sessions: Object.fromEntries(window.__fixtureSessions.map(session => {
-              const info = transcriptSessions[session] || {};
-              const path = info.current_path || currentPath;
-              const root = info.git_root || gitRoot;
-              return [session, {
-                session,
-                selected_pane: {target: `${session}:0.0`, current_path: path},
-                work_graph: fixtureWorkGraph(session, info, path, root),
-                agents: info.agents || [],
-                panes: info.panes || [],
-              }];
-            })),
+            sessions: buildSessionRows(),
           });
         }
         if (url.pathname === '/api/activity-summary') return jsonResponse({sessions: {}, global: {lines: []}, session_order: window.__fixtureSessions});
@@ -2600,9 +2908,52 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           const session = url.searchParams.get('session') || window.__fixtureSessions[0] || '1';
           return jsonResponse((window.__fixtureSessionFilesPayloads || {})[session] || window.__fixtureSessionFilesPayload || {session, files: [], repos: [], errors: [], loaded: true});
         }
+        if (url.pathname === '/api/stats-capabilities') return jsonResponse(window.__fixtureStatsCapabilities);
+        if (url.pathname === '/api/stats-observations') {
+          return jsonResponse({
+            ok: true,
+            accepted: body.observations.length,
+            duplicates: 0,
+            observation_receipts: body.observations.map(observation => ({
+              event_id: observation.event_id,
+              disposition: 'accepted',
+            })),
+          });
+        }
+        if (url.pathname === '/api/stats-snapshot') {
+          const rangeSeconds = Number(url.searchParams.get('range_seconds'));
+          const requestedResolution = url.searchParams.get('resolution') || 'AUTO';
+          const capability = window.__fixtureStatsCapabilities.ranges.find(row => row.range_seconds === rangeSeconds);
+          const resolutionSeconds = requestedResolution === 'AUTO'
+            ? capability?.auto_resolution_seconds
+            : Number(requestedResolution);
+          if (!capability || !capability.explicit_resolution_seconds.includes(resolutionSeconds)) {
+            return jsonResponse({error: 'unsupported fixture stats selection'}, 400);
+          }
+          const model = fixtureStatsModel(rangeSeconds, resolutionSeconds);
+          return jsonResponse({
+            protocol_version: 2,
+            range_seconds: rangeSeconds,
+            requested_resolution: requestedResolution === 'AUTO' ? 'AUTO' : resolutionSeconds,
+            resolution_seconds: resolutionSeconds,
+            window_start: model.windowStart,
+            window_end: model.windowEnd,
+            generated_at: model.windowEnd,
+            source_generation: model.sourceGeneration,
+            cache_generation: model.cacheGeneration,
+            rightmost_open: true,
+            buckets: Array.from({length: rangeSeconds / resolutionSeconds}, (_unused, index) => {
+              const start = model.windowStart + index * resolutionSeconds;
+              return fixtureStatsBucket(start, resolutionSeconds, index === rangeSeconds / resolutionSeconds - 1);
+            }),
+            no_data: [],
+            cost_report: fixtureStatsCostReport(),
+          });
+        }
         if (url.pathname === '/api/ping') return jsonResponse({ok: true});
         if (url.pathname === '/api/event') return jsonResponse({ok: true});
         if (url.pathname === '/api/events') return jsonResponse({events: []});
+        if (url.pathname === '/api/logs') return jsonResponse(window.__fixtureServerLogsPayload);
         if (url.pathname === '/api/tmux-window') return jsonResponse({ok: true, session: url.searchParams.get('session'), window: url.searchParams.get('window')});
         if (url.pathname === '/api/fs/list') {
           const path = url.searchParams.get('path') || '/home/test';
@@ -2631,6 +2982,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
     <html>
       <head>
         <meta charset="utf-8">
+        {_EMPTY_FAVICON_HTML}
         <link rel="stylesheet" href="{dockview_css_uri}">
         <style>{css}</style>
         <style>{brand_css}</style>
@@ -2674,6 +3026,12 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         <script id="yolomux-bootstrap" type="application/json">{json.dumps(bootstrap, separators=(",", ":"))}</script>
         <script>
           window.__fixtureSessions = {json.dumps(sessions)};
+          // Session-metadata build identity, modelled on the server contract rather than invented
+          // here: one epoch per fixture page (one "server process"), a committed build generation,
+          // and -- for a forced read only -- the identity of the build that will observe it. A
+          // fixture that omits this makes every forced refresh a protocol failure, so a journey
+          // that is actually healthy cannot be told apart from one that never converged.
+          window.__fixtureMetadata = {{epoch: 'fixture-server-epoch-1', generation: 1, pending: 0, withholdPendingBuild: false}};
           window.__fixtureTranscriptSessions = {json.dumps(transcript_sessions or {}, separators=(",", ":"))};
           window.__fixtureTranscriptCurrentPath = {json.dumps(transcript_current_path)};
           window.__fixtureTranscriptGitRoot = {json.dumps(transcript_git_root)};
@@ -2686,6 +3044,7 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
           window.__fixtureSharePayload = {json.dumps(share_status_payload, separators=(",", ":")) if share_status_payload is not None else "null"};
           window.__fixtureYoagentChatMode = {json.dumps(yoagent_chat_mode)};
           window.__fixtureBackgroundStatusPayload = {json.dumps(background_status_payload, separators=(",", ":")) if background_status_payload is not None else "null"};
+          window.__fixtureStatsCapabilities = {json.dumps(stats_capabilities, separators=(",", ":"))};
         </script>
         <script>{file_explorer_intent_script}</script>
         <script>{stub_script}</script>
@@ -2698,6 +3057,8 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
 
 
 def load_static_html_fixture(browser, tmp_path, filename, html):
+    if "data-yolomux-favicon" not in html:
+        html = re.sub(r"(<head\b[^>]*>)", rf"\1{_EMPTY_FAVICON_HTML}", html, count=1, flags=re.IGNORECASE)
     page = serve_repo_fixture_page(filename, html)
     browser.get(fixture_page_url(page))
     return page
@@ -2849,25 +3210,34 @@ def load_live_runtime_boot_fixture(browser, tmp_path, search="", expected_redire
     page = serve_repo_fixture_page("live-runtime-boot.html", _live_runtime_boot_fixture_html(**fixture_kwargs))
     fixture_url = fixture_page_url(page, search)
     browser.get(fixture_url)
-    wait_for_live_runtime_bundle(
+    ready_state = wait_for_live_runtime_bundle(
         browser,
         timeout=LIVE_RUNTIME_BUNDLE_WAIT_SECONDS,
         expected_url=fixture_url,
         expected_redirect_paths=expected_redirect_paths,
     )
+    # An explicitly allowed redirect has left the app realm, so there is no client-event transport to own on the destination page.
+    if urlsplit(ready_state.get("url", "")).path in frozenset(expected_redirect_paths):
+        return
+    share_bootstrap = fixture_kwargs.get("share_bootstrap")
+    share_view_mode = isinstance(share_bootstrap, dict) and share_bootstrap.get("view") is True
+    wait_for_fixture_client_event_demand(browser, expected_enabled=not share_view_mode)
 
 
 def live_runtime_bundle_state(browser):
     return browser.execute_script(
         f"""
+        const failures = typeof jsDebugFailureEvents === 'function'
+          ? {{errors: Array.from(jsDebugFailureEvents('error')), rejections: Array.from(jsDebugFailureEvents('rejection'))}}
+          : {{errors: [], rejections: []}};
         return {{
           sentinel: window.{LIVE_RUNTIME_BUNDLE_SENTINEL} === true,
           grid: document.getElementById('grid') !== null,
           appRoot: document.getElementById('appRoot') !== null,
           lateFunction: typeof {LIVE_RUNTIME_LATE_FUNCTION} === 'function',
           url: location.href,
-          errors: Array.from(window.__bootErrors || []),
-          rejections: Array.from(window.__bootRejections || []),
+          errors: failures.errors,
+          rejections: failures.rejections,
         }};
         """
     )
@@ -2931,8 +3301,8 @@ def live_runtime_boot_health(browser):
         });
         return {
           documentReady: document.readyState,
-          errors: window.__bootErrors || [],
-          rejections: window.__bootRejections || [],
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           localeError,
           collapsedPreferenceSectionsError,
           activeLocale,
@@ -2953,21 +3323,9 @@ def live_runtime_boot_health(browser):
 
 
 def install_live_runtime_boot_error_tracker(browser):
-    register_browser_new_document_script(
-        browser,
-        """
-              window.__bootErrors = [];
-              window.__bootRejections = [];
-              addEventListener('error', event => window.__bootErrors.push({
-                message: event.message || String(event.error || event),
-                filename: event.filename || '',
-                lineno: event.lineno || 0,
-                colno: event.colno || 0,
-                stack: event.error?.stack || '',
-              }));
-              addEventListener('unhandledrejection', event => window.__bootRejections.push(String(event.reason || event)));
-            """,
-    )
+    """Retain the call boundary while the product store and Chrome reader own error capture."""
+
+    return None
 
 
 def assert_live_runtime_boot_healthy(browser, case_name, *, expected_locale="en", timeout=8):
@@ -3199,6 +3557,45 @@ def dockview_point(browser, selector, x_ratio=0.5, y_ratio=0.5):
     )
 
 
+def wait_for_dockview_pointer_target(browser, selector, x_ratio=0.5, y_ratio=0.5):
+    """Resolve a Dockview pointer target only after queued native/app layout work owns its hit point."""
+    settle_browser_frames(browser, 2)
+    return WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const node = document.querySelector(arguments[0]);
+            const rect = node?.getBoundingClientRect();
+            if (!node || !rect || rect.width <= 0 || rect.height <= 0) return false;
+            if (
+              dockviewLayoutState.syncQueued
+              || dockviewLayoutState.applyingFromLayout
+              || dockviewLayoutState.adoptingFromDockview
+              || dockviewLayoutState.pendingLoadFrame
+              || dockviewLayoutState.pendingCompletionFrame
+              || pendingLayoutRenderFrame
+            ) return false;
+            const x = Math.round(rect.left + rect.width * arguments[1]);
+            const y = Math.round(rect.top + rect.height * arguments[2]);
+            const hit = document.elementFromPoint(x, y);
+            if (!(hit === node || node.contains(hit))) return false;
+            return {
+              x,
+              y,
+              width: rect.width,
+              height: rect.height,
+              left: rect.left,
+              right: rect.right,
+              top: rect.top,
+              bottom: rect.bottom,
+            };
+            """,
+            selector,
+            x_ratio,
+            y_ratio,
+        )
+    )
+
+
 def cdp_drag(browser, start, end, steps=24):
     assert start and end
     browser.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": start["x"], "y": start["y"], "button": "left", "buttons": 0, "clickCount": 1})
@@ -3338,8 +3735,8 @@ def dockview_layout_metrics(browser):
           })(),
           slots: JSON.parse(JSON.stringify(layoutSlots)),
           url: location.search,
-          errors: window.__bootErrors || [],
-          rejections: window.__bootRejections || [],
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         };
         """
     )

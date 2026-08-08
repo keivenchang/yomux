@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -78,6 +79,60 @@ def test_boot_print_command_launches_dev_ports_in_dev_mode():
     assert "--port 8124" in command
     assert "--port 8125" in command
     assert command.count("--dang --self-signed --dev") == 3
+
+
+def test_boot_asset_check_uses_only_tracked_vendor_files_without_package_tools(tmp_path):
+    checkout = tmp_path / "checkout"
+    vendor_dir = checkout / "static" / "vendor"
+    tools_dir = checkout / "tools"
+    vendor_dir.mkdir(parents=True)
+    tools_dir.mkdir()
+    shutil.copy2(ROOT / "boot.sh", checkout / "boot.sh")
+    shutil.copy2(STARTUP_COMMON, tools_dir / "startup_common.sh")
+    asset_names = ("xterm.js", "xterm.css", "xterm-addon-unicode11.js")
+    for name in asset_names:
+        shutil.copy2(ROOT / "static" / "vendor" / name, vendor_dir / name)
+
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    for name, target in (("bash", "/bin/bash"), ("dirname", "/usr/bin/dirname"), ("uname", "/usr/bin/uname")):
+        (command_dir / name).symlink_to(target)
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": str(command_dir),
+        "PYTHON": sys.executable,
+        "SHELL": str(command_dir / "bash"),
+    }
+    assert shutil.which("npm", path=env["PATH"]) is None
+    assert shutil.which("curl", path=env["PATH"]) is None
+
+    first = subprocess.run(
+        [str(checkout / "boot.sh"), "--check-assets"],
+        cwd=checkout,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert first.returncode == 0, first.stderr
+    assert all(not (checkout / "static" / name).exists() for name in asset_names)
+
+    vendor_bytes = {name: (vendor_dir / name).read_bytes() for name in asset_names}
+    for name in asset_names:
+        (checkout / "static" / name).write_bytes(f"contaminated-{name}".encode("ascii"))
+    second = subprocess.run(
+        [str(checkout / "boot.sh"), "--check-assets"],
+        cwd=checkout,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert second.returncode == 0, second.stderr
+    assert {name: (vendor_dir / name).read_bytes() for name in asset_names} == vendor_bytes
+    assert {(checkout / "static" / name).read_text(encoding="ascii") for name in asset_names} == {
+        f"contaminated-{name}" for name in asset_names
+    }
 
 
 def test_boot_restart_waits_for_stable_listener_after_ready():
@@ -249,11 +304,13 @@ def test_startup_capacity_rejects_invalid_operator_load_discount():
 
 
 def test_default_start_lock_is_shared_outside_process_specific_tmpdir(tmp_path):
+    rooted = tmp_path / "root"
     result = subprocess.run(
         ["bash", "-c", 'source "$1"; TMPDIR="$2" yolomux_start_lock_path', "startup-lock-path", str(STARTUP_COMMON), str(tmp_path)],
         text=True,
         capture_output=True,
         check=True,
+        env={**os.environ, "YOLOMUX_ROOT": str(rooted)},
     )
 
-    assert result.stdout == str(Path.home() / ".cache" / "yolomux" / "start.lock")
+    assert result.stdout == str(rooted / "cache" / "start.lock")

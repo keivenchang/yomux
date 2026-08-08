@@ -451,6 +451,13 @@ class TestElement {
       const key = testDatasetKeyForAttribute(attrName);
       return this.localName === tagName && this.dataset[key] !== undefined && (attrValue === undefined || this.dataset[key] === attrValue);
     }
+    const tagAttributeMatch = selector.match(/^([A-Za-z][A-Za-z0-9-]*)\[([A-Za-z0-9_-]+)(?:="([^"]*)")?\]$/);
+    if (tagAttributeMatch) {
+      const [, tagName, attributeName, attributeValue] = tagAttributeMatch;
+      return this.localName === tagName
+        && this.attributes[attributeName] !== undefined
+        && (attributeValue === undefined || this.attributes[attributeName] === attributeValue);
+    }
     if (selector === 'textarea[data-setting-path]') return this.localName === 'textarea' && this.dataset.settingPath !== undefined;
     if (selector === 'input[type="text"][data-setting-path]') return this.localName === 'input' && this.attributes.type === 'text' && this.dataset.settingPath !== undefined;
     if (selector === '[role="tree"]') return this.attributes.role === 'tree';
@@ -584,6 +591,13 @@ class TestWheelEvent {
   }
 }
 
+class TestCustomEvent {
+  constructor(type, options = {}) {
+    this.type = String(type || '');
+    this.detail = options.detail;
+  }
+}
+
 function assertNoStandalonePrBadge(html, label) {
   assert.equal(html.includes('>PR<'), false, `${label} avoids redundant PR text`);
   assert.equal(/class="[^"]*pr-indicator[^"]*"[^>]*>PR</.test(html), false, `${label} never renders a standalone PR text pill`);
@@ -621,9 +635,11 @@ function settingsOverride(settings = {}, defaults = DEFAULT_TEST_SETTINGS) {
 }
 
 function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], protocol = 'http:', navigatorPlatform = 'Linux x86_64', accessRole = 'admin', options = {}) {
-  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireAllTimeouts', 'locationPort', 'coarsePointer', 'hoverCapable', 'viewport'].includes(key)));
+  const bootstrapOverrides = options.bootstrapOverrides || Object.fromEntries(Object.entries(options).filter(([key]) => !['sessionStorage', 'localStorage', 'fireTimeoutDelays', 'locationPort', 'locationHash', 'coarsePointer', 'hoverCapable', 'viewport', 'performance', 'PerformanceObserver'].includes(key)));
   if (options.share && !bootstrapOverrides.share) bootstrapOverrides.share = options.share;
-  const fireAllTimeouts = options.fireAllTimeouts === true;
+  const fireTimeoutDelays = new Set((Array.isArray(options.fireTimeoutDelays) ? options.fireTimeoutDelays : [])
+    .map(Number)
+    .filter(delay => Number.isFinite(delay) && delay >= 0));
   const coarsePointer = options.coarsePointer === true;
   const hoverCapable = options.hoverCapable === undefined ? !coarsePointer : options.hoverCapable === true;
   const viewport = options.viewport || {};
@@ -680,18 +696,31 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
   const location = {
     search,
     pathname: '/',
-    hash: '',
+    hash: String(options.locationHash || ''),
     protocol,
     hostname: 'localhost',
     port: locationPort,
     host: `localhost:${locationPort}`,
+    assign(url) { context.__locationAssignments.push(String(url)); },
     reload() { context.__reloadCount = (context.__reloadCount || 0) + 1; },
   };
+  const immediateTimeoutHandles = new Set();
   const testSetTimeout = options.setTimeout || ((callback, ms) => {
-    if ((fireAllTimeouts || ms === 8) && typeof callback === 'function') return setImmediate(callback);
+    const delay = Number(ms);
+    if ((delay === 8 || fireTimeoutDelays.has(delay)) && typeof callback === 'function') {
+      const handle = setImmediate(() => {
+        immediateTimeoutHandles.delete(handle);
+        callback();
+      });
+      immediateTimeoutHandles.add(handle);
+      return handle;
+    }
     return 0;
   });
-  const testClearTimeout = options.clearTimeout || (() => {});
+  const testClearTimeout = options.clearTimeout || (handle => {
+    if (!immediateTimeoutHandles.delete(handle)) return;
+    clearImmediate(handle);
+  });
   const testSetInterval = options.setInterval || (() => {});
   const testClearInterval = options.clearInterval || (() => {});
   // Product code deliberately logs recoverable transport failures. Capture those VM logs so green
@@ -715,6 +744,9 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     console: vmConsole,
     EventSource: TestEventSource,
     WheelEvent: TestWheelEvent,
+    CustomEvent: class TestCustomEvent {
+      constructor(type, init = {}) { this.type = type; this.detail = init.detail; }
+    },
     File: TestFile,
     FormData: TestFormData,
     URL,
@@ -722,6 +754,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     WebSocket: TestWebSocket,
     __testWebSocketInstances: TestWebSocket.instances,
     AbortController,
+    CustomEvent: TestCustomEvent,
     clearInterval: testClearInterval,
     clearTimeout: testClearTimeout,
     document: {
@@ -778,7 +811,8 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
       },
     },
     Notification: notification,
-    performance: {now: () => 0},
+    performance: options.performance || {now: () => 0},
+    PerformanceObserver: options.PerformanceObserver,
     requestAnimationFrame: options.requestAnimationFrame || (callback => callback()),
     cancelAnimationFrame: options.cancelAnimationFrame || (() => {}),
     setInterval: testSetInterval,
@@ -798,8 +832,16 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(listener);
       },
+      dispatchEvent(event) {
+        for (const listener of [...(windowListeners.get(event?.type) || [])]) listener(event);
+        return true;
+      },
       clearTimeout: testClearTimeout,
       confirm: () => true,
+      dispatchEvent(event) {
+        for (const listener of windowListeners.get(String(event?.type || '')) || []) listener(event);
+        return true;
+      },
       EventSource: TestEventSource,
       innerHeight: viewportHeight,
       innerWidth: viewportWidth,
@@ -845,6 +887,7 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     },
     localStorage,
     sessionStorage,
+    __locationAssignments: [],
     __clipboardText: '',
     // the OSC 52 clipboard bridge decodes base64 UTF-8; expose the host implementations.
     atob,
@@ -917,6 +960,7 @@ globalThis.__layoutTestApi = {
   },
   refreshBackgroundOwnerStatusForTest: refreshBackgroundOwnerStatus,
   loadAutoStatusesForTest: loadAutoStatuses,
+  autoStatusRequestActiveForTest() { return loadAutoStatuses.request !== null; },
   applyBackgroundOwnerStatusPayloadForTest: applyBackgroundOwnerStatusPayload,
   backgroundOwnerStatusStateForTest() {
     return {
@@ -946,8 +990,17 @@ globalThis.__layoutTestApi = {
       loaded: transcriptMetadataState.loaded,
       error: transcriptMetadataState.error,
       request: transcriptMetadataState.request,
+      epoch: transcriptMetadataState.epoch,
+      previousEpoch: transcriptMetadataState.previousEpoch,
+      generation: transcriptMetadataState.generation,
+      pendingGeneration: transcriptMetadataState.pendingGeneration,
+      lastApply: transcriptMetadataState.lastApply,
     };
   },
+  settleForcedSessionMetadataForTest: settleForcedSessionMetadata,
+  adoptServerEpochForTest: adoptServerEpoch,
+  refreshTmuxSessionMutationStateForTest: refreshTmuxSessionMutationState,
+  metadataConvergenceStatusForTest() { return statusEl.dataset.metadataConvergence || ''; },
   repoComparisonErrorHtmlForTest: repoComparisonErrorHtml,
   setActiveLocaleForTest(locale) { i18nActiveLocale = locale; },
   updateNotificationAllowsVersionForTest: updateNotificationAllowsVersion,
@@ -993,6 +1046,7 @@ globalThis.__layoutTestApi = {
   fileQuickOpenScopeLabel,
   fileIndexStatusFromPayloadForTest: fileIndexStatusFromPayload,
   applyFileIndexStatusPayloadForTest: applyFileIndexStatusPayload,
+  fileExplorerIndexStatusForTest(root) { return fileExplorerIndexStatus.get(normalizeStoredFileExplorerIndexedDir(root)) || ''; },
   showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
   clearFileIndexPartialWarningsForTest() { fileIndexPartialWarningRoots.clear(); },
   fileExplorerDirectoryIsIndexed,
@@ -1154,6 +1208,8 @@ globalThis.__layoutTestApi = {
   rememberFileExplorerSyncExpandedStateForTest: rememberFileExplorerSyncExpandedState,
   resetFileExplorerSyncManualCollapsesForTest: resetFileExplorerSyncManualCollapsesIfNeeded,
   rememberFileExplorerSyncManualCollapseForTest: rememberFileExplorerSyncManualCollapse,
+  setFileExplorerSyncUserExpansionForTest: setFileExplorerSyncUserExpansion,
+  fileExplorerSyncUserExpansionStateForTest: fileExplorerSyncUserExpansionEntries,
   fileExplorerSyncManualCollapsedPathsForTest() { return Array.from(fileExplorerSyncManualCollapsedPaths).sort(); },
   fileExplorerSyncTargetRecordForTest(targetKey, create = false, touch = false) {
     const record = fileExplorerSyncTargetRecord(targetKey, create, touch);
@@ -1214,10 +1270,19 @@ globalThis.__layoutTestApi = {
   clientPushCanSupplyDataForTest: clientPushCanSupplyData,
   readOnlyModeForTest() { return readOnlyMode; },
   setClientEventsSourceForTest(value = {}) { clientEventTransportState.source = value; },
+  setEventSourceConstructorForTest(value) { globalThis.EventSource = value; },
+  addWindowEventListenerForTest(type, listener) { window.addEventListener(type, listener); },
   clientEventTransportStateForTest() {
     return {
       source: clientEventTransportState.source,
+      replacementSource: clientEventTransportState.replacementSource,
       connected: clientEventTransportState.connected,
+      reconnectPending: clientEventTransportState.reconnectPending,
+      disconnectEpisode: clientEventTransportState.disconnectEpisode ? {
+        id: clientEventTransportState.disconnectEpisode.id,
+        reported: clientEventTransportState.disconnectEpisode.reported,
+        hasSource: clientEventTransportState.disconnectEpisode.source !== null,
+      } : null,
       enabled: clientEventTransportState.enabled,
       demand: clientEventTransportState.demand,
       demandSignature: clientEventTransportState.demandSignature,
@@ -1230,12 +1295,17 @@ globalThis.__layoutTestApi = {
   },
   syncServerWatchRootsForTest: syncServerWatchRoots,
   syncServerWatchRootsNowForTest: syncServerWatchRootsNow,
+  clientServerWatchStateForTest() { return clientServerWatchState(); },
   serverWatchRootsStateForTest() {
     return {
       signature: serverWatchRootsState.signature,
       inFlight: serverWatchRootsState.inFlight,
+      registrationPending: serverWatchRootsState.registrationPending,
+      registered: serverWatchRootsState.registered,
       syncedAt: serverWatchRootsState.syncedAt,
+      baselinePending: serverWatchRootsState.watchDiffPromise !== null,
       timer: serverWatchRootsState.timer,
+      timerDelay: serverWatchRootsState.timerDelay,
       pendingOptions: {...serverWatchRootsState.pendingOptions},
     };
   },
@@ -1246,7 +1316,9 @@ globalThis.__layoutTestApi = {
   fileExplorerEntriesByWatchedDirectoryForTest: fileExplorerEntriesByWatchedDirectory,
   refreshFileExplorerFromPushForTest: refreshFileExplorerFromPush,
   refreshWatchedFilesystemForTest: refreshWatchedFilesystem,
+  fileExplorerTreePaneIsVisibleForTest: fileExplorerTreePaneIsVisible,
   filesystemWatchTokenForTest() { return fileExplorerFilesystemWatchToken; },
+  filesystemPushTokenForTest() { return fileExplorerFilesystemPushToken; },
   setFilesystemWatchTokenForTest(value) { fileExplorerFilesystemWatchToken = String(value || ''); },
   setFilesystemLastFullAtForTest(value) { fileExplorerFilesystemLastFullAt = Number(value) || 0; },
   currentFileExplorerListErrorForTest: currentFileExplorerListError,
@@ -1271,6 +1343,17 @@ globalThis.__layoutTestApi = {
   yocostItemId,
   clearJsDebugEventsForTest: clearJsDebugEvents,
   jsDebugEventsForTest() { return jsDebugEvents.map(event => ({...event})); },
+  jsDebugFailureEventsForTest: jsDebugFailureEvents,
+  jsDebugCurrentObservationReceiptBarrierForTest: jsDebugCurrentObservationReceiptBarrier,
+  jsDebugCurrentObservationStateForTest() {
+    return {
+      queue: jsDebugCurrentObservationState.queue.length,
+      receipts: jsDebugCurrentObservationState.receipts.size,
+      timerPending: jsDebugCurrentObservationState.timer !== null,
+      livenessTimerPending: jsDebugCurrentObservationState.livenessTimer !== null,
+    };
+  },
+  debugEventCountsForTest: debugEventCounts,
   debugGraphExactResolutionChoicesForTest: debugGraphExactResolutionChoices,
   jsDebugCurrentCoverageIntervalsForTest: jsDebugCurrentCoverageIntervals,
   clearJsDebugGraphDataForTest: clearJsDebugGraphData,
@@ -1286,6 +1369,48 @@ globalThis.__layoutTestApi = {
   shareDebugTextForClipboardForTest: shareDebugTextForClipboard,
   shareDebugProfileUploadPayloadForTest: shareDebugProfileUploadPayload,
   recordJsDebugEventForTest: recordJsDebugEvent,
+  jsDebugCurrentObservationFromEventForTest: jsDebugCurrentObservationFromEvent,
+  jsDebugObservationBatchForEntriesForTest: jsDebugObservationBatchForEntries,
+  reloadJourneyIdForTest() { return reloadClientJourneyId; },
+  pageLoadProfileEventForTest: pageLoadProfileEvent,
+  notePageLoadApiStartedForTest: notePageLoadApiStarted,
+  notePageLoadApiCompletedForTest: notePageLoadApiCompleted,
+  setPageLoadProfileStateForTest(values) { Object.assign(pageLoadProfileState, values); },
+  newFinderUsableJourneyForTest: newFinderUsableJourney,
+  scheduleFinderUsableObservationForTest: scheduleFinderUsableObservation,
+  clientPerfInteractionEventForTest: clientPerfInteractionEvent,
+  registerApiOperationReceiptForTest: registerApiOperationReceipt,
+  applyApiOperationTerminalForTest: applyApiOperationTerminal,
+  operationTerminalAckDelayMsForTest() { return operationTerminalAckDelayMs; },
+  operationTerminalAckStateForTest() {
+    return {
+      queued: operationTerminalAckState.pending.size,
+      timerPending: operationTerminalAckState.timer !== null,
+      requestPending: operationTerminalAckState.request !== null,
+    };
+  },
+  waitForApiOperationResultForTest: waitForApiOperationResult,
+  apiFetchJsonForTest: apiFetchJson,
+  fetchFilesystemOperationPayloadForTest: fetchFilesystemOperationPayload,
+  apiOperationStateForTest() {
+    return {
+      records: apiOperationState.records.size,
+      pending: apiOperationState.pending.size,
+      terminal: apiOperationState.terminal.size,
+      waiters: [...apiOperationState.waiters.values()].reduce((total, values) => total + values.size, 0),
+      handlerInvocations: [...apiOperationState.records.values()].reduce((total, record) => total + record.handlerInvocations, 0),
+    };
+  },
+  fixtureLifecycleOperationStateForTest() {
+    return window.__yolomuxFixtureLifecycle.operationState();
+  },
+  apiOperationTerminalForTest(operationId) {
+    return apiOperationState.terminal.get(String(operationId || '')) || null;
+  },
+  clientCanUseUnscopedHostRequestsForTest: clientCanUseUnscopedHostRequests,
+  refreshTmuxStatusModeForTest: refreshTmuxStatusMode,
+  jsDebugResourcePhaseTimingsForTest: jsDebugResourcePhaseTimings,
+  applyApiRequestIdHeaderForTest: applyApiRequestIdHeader,
   inactiveTabItems,
   infoItemId,
   infoRelationshipRecords,
@@ -1420,6 +1545,7 @@ globalThis.__layoutTestApi = {
   chatIntroductionHtmlForTest: chatIntroductionHtml,
   chatIntroductionGreetingKeyForTest: chatIntroductionGreetingKey,
   chatYoagentQueryForTest: chatYoagentQuery,
+  chatMessageRequestsYoagentForTest: chatMessageRequestsYoagent,
   openChatSearchForTest: openChatSearch,
   replaceChatTypingForTest: replaceChatTyping,
   conversationAutosizeTextareaForTest: conversationAutosizeTextarea,
@@ -1487,6 +1613,7 @@ globalThis.__layoutTestApi = {
   focusTerminalWhenAutoFocus,
   focusPanel,
   focusTerminalFromUserAction,
+  noteTerminalExplicitInputForTest: noteTerminalExplicitInput,
   handleTerminalDataForTest: handleTerminalData,
   terminalMobileAccessoryHtmlForTest: terminalMobileAccessoryHtml,
   terminalMobileAccessoryDataForTest: terminalMobileAccessoryData,
@@ -1520,6 +1647,9 @@ globalThis.__layoutTestApi = {
   terminalVisibleSelectionStateForTest: terminalVisibleSelectionState,
   clearTerminalVisibleSelectionForTest: clearTerminalVisibleSelection,
   apiFetchJsonQuietForTest: apiFetchJsonQuiet,
+  apiFetchJsonForTest: apiFetchJson,
+  locationAssignmentsForTest() { return [...globalThis.__locationAssignments]; },
+  isApiPendingResponseForTest: isApiPendingResponse,
   setFetchForTest(fn) { globalThis.fetch = fn; },
   setClipboardForTest(clipboard, ClipboardItemType = class {}) {
     navigator.clipboard = clipboard;
@@ -1609,10 +1739,20 @@ globalThis.__layoutTestApi = {
   openFileQuickOpen,
   testElementForId(id) { return document.getElementById(id); },
   registerTerminalForTest(session, term, socket = {readyState: WebSocket.OPEN}) {
-    const item = {term, socket, container: document.getElementById('terminal-pane-' + session)};
+    const item = {term, socket, container: document.getElementById('terminal-pane-' + session), sessionLifecycleToken: tmuxSessionLifecycleToken(session)};
     terminals.set(session, item);
     return item;
   },
+  scheduleRemoteResizeForTest: scheduleRemoteResize,
+  scheduleTerminalBlankScreenRefreshForTest: scheduleTerminalBlankScreenRefresh,
+  queueTmuxScrollForTest: queueTmuxScroll,
+  connectTerminalSocketForTest: connectTerminalSocket,
+  startSummaryStreamForTest: startSummaryStream,
+  stopSummaryStreamForTest: stopSummaryStream,
+  summaryStreamForTest(session) { return summaryStreams.get(session) || null; },
+  startTranscriptStreamForTest: startTranscriptStream,
+  stopTranscriptStreamForTest: stopTranscriptStream,
+  transcriptStreamForTest(session) { return transcriptStreams.get(session) || null; },
   terminalAttentionQuestionTextsForTest: terminalAttentionQuestionTexts,
   terminalAttentionQuestionRowForTest: terminalAttentionQuestionRow,
   syncTerminalAttentionHighlightForTest: syncTerminalAttentionHighlight,
@@ -1757,6 +1897,26 @@ globalThis.__layoutTestApi = {
   confirmSessionGoneOrReconnectForTest: confirmSessionGoneOrReconnect,
   markPendingTmuxSessionForTest: markPendingTmuxSession,
   pendingTmuxSessionNamesForTest: pendingTmuxSessionNames,
+  beginTmuxSessionLifecycleMutationForTest: beginTmuxSessionLifecycleMutation,
+  commitTmuxSessionLifecycleMutationForTest: commitTmuxSessionLifecycleMutation,
+  rollbackTmuxSessionLifecycleMutationForTest: rollbackTmuxSessionLifecycleMutation,
+  waitForTmuxSessionLifecycleMutationLeasesForTest: waitForTmuxSessionLifecycleMutationLeases,
+  tmuxSessionLifecycleAcquireRequestForTest: tmuxSessionLifecycleAcquireRequest,
+  tmuxSessionLifecycleTokenForTest: tmuxSessionLifecycleToken,
+  tmuxSessionLifecycleTokenIsCurrentForTest: tmuxSessionLifecycleTokenIsCurrent,
+  tmuxSessionLifecycleRecordForTest(session) {
+    const record = tmuxSessionLifecycleRecord(session, {create: false});
+    return record ? {
+      name: record.name,
+      generation: record.generation,
+      topologyEpoch: record.topologyEpoch,
+      phase: record.phase,
+      leases: record.requestLeases.size,
+      sources: record.sources.size,
+      timers: record.timers.size,
+      consumerDetachments: record.consumerDetachments,
+    } : null;
+  },
   normalizedSessionOrder,
   fileDropCategory,
   dropSuggestionIndexFromKeyEvent,
@@ -1990,7 +2150,9 @@ globalThis.__layoutTestApi = {
   tmuxSignalPaneForTarget,
   tmuxSignalAgentStateForSession,
   setTmuxSignalStateForTest(payload) { tmuxSignalState = payload; },
+  tmuxSignalStateForTest() { return tmuxSignalState; },
   setAutoApproveStateForTest(session, state) { autoApproveStates.set(session, state); },
+  autoApproveStateForTest(session) { return autoApproveStates.get(session); },
   applyAutoApprovePayloadForTest: applyAutoApprovePayload,
   setAgentAuthForTest(value) { agentAuth = value || {}; },
   maxTabsPerPane,
@@ -2058,9 +2220,13 @@ globalThis.__layoutTestApi = {
   },
   renderFileEditorPanelShouldCaptureViewStateForTest: renderFileEditorPanelShouldCaptureViewState,
   renderFileEditorPanel,
+  scheduleFileEditorSplitScrollSyncForTest: scheduleFileEditorSplitScrollSync,
+  scheduleFileEditorPreviewLayoutSyncForTest: scheduleFileEditorPreviewLayoutSync,
+  fileEditorScrollSyncBlockedForTest: fileEditorScrollSyncBlocked,
   setFileEditorPanelStatusForTest: setFileEditorPanelStatus,
   reloadOpenFileFromDiskForTest: reloadOpenFileFromDisk,
   saveFileEditorForTest: saveFileEditor,
+  refreshOpenFileDiffForTest: refreshOpenFileDiff,
   renderEditorPreviewPane,
   openFileIsMissing,
   terminalTabLabel,
@@ -2334,6 +2500,7 @@ globalThis.__layoutTestApi = {
   shareLayoutSeed,
   shareSlotDigestSnapshot,
   terminalWheelSignedLines,
+  terminalWheelEventIsDiscrete,
   terminalTouchGestureDecision,
   terminalTouchSignedRows,
   terminalTouchAlternateCommand,
@@ -2499,6 +2666,7 @@ globalThis.__layoutTestApi = {
     activitySummaryState.refreshing = false;
     yoagentStartupState.activityPayload = null;
   },
+  activitySummaryEnabledForTest() { return activitySummaryEnabled; },
   activitySummaryStateForTest() {
     return {payload: activitySummaryState.payload, refreshing: activitySummaryState.refreshing};
   },

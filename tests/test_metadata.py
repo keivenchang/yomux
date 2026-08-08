@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -118,7 +119,7 @@ def test_session_work_graph_single_repo_has_no_extra(tmp_path):
     assert roots == {root}
 
 
-def test_indexed_repo_summaries_discovers_repos_under_indexed_root_without_branch_cap(tmp_path):
+def test_indexed_repo_summaries_discovers_repos_with_bounded_branch_inventory(tmp_path):
     indexed = tmp_path / "indexed"
     indexed.mkdir()
     repo_a = indexed / "repo-a"
@@ -138,8 +139,10 @@ def test_indexed_repo_summaries_discovers_repos_under_indexed_root_without_branc
     repo_a_branches = {branch["name"] for branch in by_root[repo_a_root]["other_branches"]["branches"]}
 
     assert {repo_a_root, repo_b_root}.issubset(by_root)
-    assert all(branch in repo_a_branches for branch in branch_names)
-    assert by_root[repo_a_root]["other_branches"]["hidden_count"] == 0
+    assert current_branch in repo_a_branches
+    assert len(repo_a_branches) == metadata.OTHER_BRANCH_LIMIT + 1
+    assert by_root[repo_a_root]["other_branches"]["hidden_count"] == len(branch_names) - metadata.OTHER_BRANCH_LIMIT
+    assert not set(branch_names).issubset(repo_a_branches)
     assert by_root[repo_a_root]["indexed"] is True
 
 
@@ -935,6 +938,29 @@ def test_tail_file_lines_reads_a_bounded_window_from_eof(tmp_path):
     assert tail_file_lines(small, 10) == "a\nb\n"
 
 
+def test_tail_file_lines_window_walk_is_linear_in_long_line_transcripts(tmp_path):
+    # A Claude transcript's JSONL lines are far larger than the 64 KiB backward step, so
+    # reaching the requested line count takes hundreds of steps. Re-counting newlines over
+    # the whole accumulated buffer on every step made that walk quadratic: a live 7771
+    # sampling profile put 58.6% of the entire web process on that one `count` call and
+    # 82% inside this function, while the watchd revision bridge tailed every pane's
+    # transcript on its 2-second loop and held the server at ~89% CPU. Assert both the exact
+    # window and that the work stays linear in the bytes read.
+    transcript = tmp_path / "long.jsonl"
+    line_bytes = 65535  # one byte under the backward step, so every line needs its own step
+    transcript.write_bytes(b"".join(b"%d" % index + b"y" * (line_bytes - len(b"%d" % index)) + b"\n" for index in range(600)))
+    started = time.process_time()
+    tail = tail_file_lines(transcript, 500)
+    elapsed = time.process_time() - started
+    lines = tail.splitlines()
+    assert len(lines) == 500
+    assert lines[0].startswith("100y") and lines[-1].startswith("599y")
+    # The linear walk reads ~33 MB and measures ~0.09s here; the quadratic one re-scanned
+    # ~8 GB and measured ~3.6s. One second separates them with an order of magnitude of
+    # slack on either side.
+    assert elapsed < 1.0, f"tail_file_lines took {elapsed:.2f}s of CPU; the backward walk regressed to quadratic"
+
+
 def test_metadata_cache_is_bounded_and_sweeps_expired_on_write():
     # the cache stays bounded (cap + sweep expired) so dead branch/sha keys don't leak for
     # the process lifetime.
@@ -1166,7 +1192,7 @@ def test_session_work_graph_shared_worktree_keeps_claude_and_shell_observations_
     ]
     shell_observations = [
         observation for observation in graph["path_observations"].values()
-        if observation["tmux_pane_id"] == f"tmux-pane:3:1:1" and observation["runtime_actor_id"] is None
+        if observation["tmux_pane_id"] == metadata.tmux_pane_graph_id(shell_pane) and observation["runtime_actor_id"] is None
     ]
     assert {observation["path"] for observation in claude_observations}.issuperset(changed_paths)
     assert {observation["path"] for observation in shell_observations} == {str(repo.resolve())}
@@ -1412,6 +1438,22 @@ def test_resolve_path_observation_uses_nearest_nested_repository(tmp_path):
     assert resolved["local_repository_id"] == f"local-git:{nested.resolve() / '.git'}"
 
 
+def test_resolve_path_observation_bounds_work_graph_branch_inventory(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    current_branch = _git(repo, "branch", "--show-current").stdout.strip()
+    for index in range(metadata.OTHER_BRANCH_LIMIT + 3):
+        _git(repo, "branch", f"feature/{index}")
+
+    resolved = metadata.resolve_path_observation(str(repo / "f.txt"))
+    inventory = resolved["git_data"]["other_branches"]
+    branch_names = {branch["name"] for branch in inventory["branches"]}
+
+    assert current_branch in branch_names
+    assert len(branch_names) == metadata.OTHER_BRANCH_LIMIT + 1
+    assert inventory["hidden_count"] == 3
+
+
 def test_session_work_graph_generation_is_monotonic(tmp_path):
     repo = tmp_path / "repo"
     _init_repo(repo)
@@ -1444,6 +1486,36 @@ def test_session_work_graph_retains_worktree_branch_history_after_switch(tmp_pat
     ]
     assert historical_activity and historical_activity[0]["current"] is False
     assert first["generation"] < second["generation"]
+
+
+def test_worktree_branch_history_evicts_oldest_branches_and_worktrees(monkeypatch):
+    assert metadata.WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT == metadata.OTHER_BRANCH_LIMIT
+    assert metadata.WORKTREE_BRANCH_HISTORY_WORKTREE_LIMIT == 128
+    monkeypatch.setattr(metadata, "_WORKTREE_BRANCH_HISTORY", {})
+
+    worktree_id = "git-worktree:/tmp/current"
+    for index in range(metadata.WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT + 3):
+        history = metadata.record_worktree_branch_history(
+            worktree_id,
+            {"name": f"feature/{index:03d}", "head_sha": f"sha-{index:03d}"},
+            float(index + 1),
+        )
+    assert len(history) == metadata.WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT
+    assert next(iter(history)) == "feature/003"
+    assert history[f"feature/{metadata.WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT + 2:03d}"]["head_sha"] == (
+        f"sha-{metadata.WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT + 2:03d}"
+    )
+
+    metadata._WORKTREE_BRANCH_HISTORY.clear()
+    for index in range(metadata.WORKTREE_BRANCH_HISTORY_WORKTREE_LIMIT + 3):
+        metadata.record_worktree_branch_history(
+            f"git-worktree:/tmp/{index:03d}",
+            {"name": "main", "head_sha": f"sha-{index:03d}"},
+            float(index + 1),
+        )
+    assert len(metadata._WORKTREE_BRANCH_HISTORY) == metadata.WORKTREE_BRANCH_HISTORY_WORKTREE_LIMIT
+    assert "git-worktree:/tmp/000" not in metadata._WORKTREE_BRANCH_HISTORY
+    assert f"git-worktree:/tmp/{metadata.WORKTREE_BRANCH_HISTORY_WORKTREE_LIMIT + 2:03d}" in metadata._WORKTREE_BRANCH_HISTORY
 
 
 def test_session_work_graph_preserves_deleted_branch_activity_snapshot_and_sha(tmp_path):

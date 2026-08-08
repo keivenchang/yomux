@@ -23,7 +23,7 @@ function capabilities() {
     [300, 1, [1, 10]],
     [900, 10, [10, 60]],
     [1800, 10, [10, 60]],
-    [3600, 10, [10, 60, 300]],
+    [3600, 60, [60, 300]],
     [7200, 60, [60, 300]],
     [14400, 60, [60, 300]],
     [28800, 60, [60, 300]],
@@ -73,6 +73,22 @@ function costReport(changes = {}) {
   };
 }
 
+function usageAtomBackfill() {
+  return {
+    state: 'complete',
+    sources: 2,
+    missing: 0,
+    scan: {
+      files_read: 2,
+      records_parsed: 3,
+      atoms_emitted: 4,
+      atoms_accepted: 4,
+      atoms_rejected: 0,
+      rejection_reasons: {},
+    },
+  };
+}
+
 function buckets(start, count, duration, sparse = false) {
   return Array.from({length: count}, (_unused, index) => {
     const bucketStart = start + index * duration;
@@ -104,6 +120,7 @@ function snapshot({range = 300, requested = 'AUTO', resolution = 1, cache = 1, s
     buckets: buckets(0, range / resolution, resolution, sparse),
     no_data: [],
     cost_report: costReport(),
+    usage_atom_backfill: usageAtomBackfill(),
   };
 }
 
@@ -196,6 +213,26 @@ class FakeEventSource {
   }
 }
 
+class FakePageLifecycle {
+  constructor() {
+    this.listeners = new Map();
+  }
+
+  addEventListener(name, callback) {
+    const listeners = this.listeners.get(name) || [];
+    listeners.push(callback);
+    this.listeners.set(name, listeners);
+  }
+
+  registered() {
+    return [...this.listeners.keys()];
+  }
+
+  emit(name) {
+    for (const callback of this.listeners.get(name) || []) callback({type: name});
+  }
+}
+
 function response(status, payload = null) {
   return {
     status,
@@ -210,6 +247,7 @@ class FakeDomElement {
     this.scrollTop = 0;
     this._innerHTML = '';
     this.controls = null;
+    this.recovery = null;
     this.status = null;
     this.content = null;
     this.modal = null;
@@ -219,11 +257,13 @@ class FakeDomElement {
     this._innerHTML = value;
     if (this.role === 'root' && value.includes('data-stats-current-controls')) {
       this.controls = new FakeDomElement('controls');
+      this.recovery = new FakeDomElement('recovery');
       this.status = new FakeDomElement('status');
       this.content = new FakeDomElement('content');
       this.modal = new FakeDomElement('modal');
     } else if (this.role === 'root' && value === '') {
       this.controls = null;
+      this.recovery = null;
       this.status = null;
       this.content = null;
       this.modal = null;
@@ -237,6 +277,7 @@ class FakeDomElement {
   querySelector(selector) {
     return {
       '[data-stats-current-controls]': this.controls,
+      '[data-stats-current-recovery]': this.recovery,
       '[data-stats-current-status]': this.status,
       '[data-stats-current-content]': this.content,
       '[data-stats-current-modal-root]': this.modal,
@@ -347,6 +388,8 @@ function chartMarkup(html, chartId) {
 async function flushPromises() {
   await Promise.resolve();
   await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 const tests = [];
@@ -410,7 +453,7 @@ test('consumes every server capability cell without deriving or substituting a m
       requests += 1;
     }
   }
-  assert.equal(requests, 26, 'the test traverses every AUTO and explicit server cell');
+  assert.equal(requests, 25, 'the test traverses every AUTO and explicit server cell');
 
   for (const mutate of [
     value => { value.resolution_choices[3] = 600; },
@@ -426,7 +469,7 @@ test('consumes every server capability cell without deriving or substituting a m
   }
 });
 
-test('validates a whole snapshot before atomically replacing the generation', () => {
+test('accepts the producer-shaped snapshot before atomically replacing the generation', () => {
   const controller = loadController({capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'a'});
   const initial = snapshot({requested: 1});
   assert.equal(controller.acceptSnapshot(initial), true);
@@ -479,6 +522,101 @@ test('validates a whole snapshot before atomically replacing the generation', ()
   assert.equal(controller.acceptSnapshot(withGap), true);
   const empty = {...snapshot({requested: 1, cache: 3}), buckets: [], rightmost_open: false};
   assert.equal(controller.acceptSnapshot(empty), true, 'a validated empty generation is ready data');
+});
+
+test('accepts the service-produced backfill field and no unlisted snapshot field', () => {
+  const bareSnapshot = snapshot({requested: 1});
+  delete bareSnapshot.usage_atom_backfill;
+  const payload = JSON.parse(execFileSync('python3', ['-c', `
+import json
+import sys
+from yolomux_lib.stats_current.service import StatsCurrentService
+
+service = object.__new__(StatsCurrentService)
+service._usage_atom_backfill = {
+    "state": "complete", "sources": 2, "missing": 0,
+    "scan": {
+        "files_read": 2, "records_parsed": 3, "atoms_emitted": 4,
+        "atoms_accepted": 4, "atoms_rejected": 0, "rejection_reasons": {},
+    },
+}
+service.encoder = lambda value: json.dumps(value, separators=(",", ":")).encode()
+sys.stdout.buffer.write(service._snapshot_body_with_backfill_status(sys.stdin.buffer.read()))
+`], {input: JSON.stringify(bareSnapshot), encoding: 'utf8'}));
+  const controller = loadController({capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'producer-contract'});
+  assert.equal(controller.acceptSnapshot(payload), true);
+  assert.throws(
+    () => controller.acceptSnapshot({...payload, unexpected_snapshot_field: true}),
+    /fields are not exact/,
+  );
+});
+
+test('accepts the service-produced first delta after a cold public-owner snapshot', () => {
+  const payload = JSON.parse(execFileSync('python3', ['-c', `
+import json
+import tempfile
+from pathlib import Path
+
+from yolomux_lib.stats_current import protocol, service, storage
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    database = root / storage.DATABASE_FILENAME
+    wall_now = [1_800_000_000.0]
+    initial_monotonic = [0.0]
+    initial = service.StatsCurrentService(
+        root / "initial.sock",
+        database,
+        monotonic=lambda: initial_monotonic[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    with storage.Store.open(database) as store:
+        initial.writer = store
+        initial._build_once(store, True, frozenset())
+        initial_monotonic[0] = service.RING_FLUSH_SECONDS
+        assert initial._flush_ring_if_due() is not None
+
+        restarted = service.StatsCurrentService(
+            root / "restarted.sock",
+            database,
+            monotonic=lambda: 0.0,
+            clock=lambda: wall_now[0],
+            randomizer=lambda: 0.0,
+        )
+        restarted.writer = store
+        _metadata, snapshot_binary = restarted.handle_with_binary({
+            "protocol_version": storage.MIN_WRITER_PROTOCOL,
+            "schema_generation": storage.SCHEMA_VERSION,
+            "action": "snapshot",
+            "range_seconds": 900,
+            "resolution": "AUTO",
+            "client_id": "producer-browser",
+        })
+        snapshot = protocol.validate_snapshot(json.loads(snapshot_binary))
+        wall_now[0] += 10.0
+        restarted._build_once(store, True, frozenset())
+        _metadata, delta_binary = restarted.handle_with_binary({
+            "protocol_version": storage.MIN_WRITER_PROTOCOL,
+            "schema_generation": storage.SCHEMA_VERSION,
+            "action": "delta",
+            "range_seconds": 900,
+            "resolution_seconds": 10,
+            "client_id": "producer-browser",
+            "after_cache_generation": snapshot["cache_generation"],
+            "after_revision": 0,
+        })
+        delta = protocol.validate_delta(json.loads(delta_binary))
+        print(json.dumps({"snapshot": snapshot, "delta": delta}, separators=(",", ":")))
+`], {encoding: 'utf8'}));
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 900, savedResolution: 'AUTO', clientId: 'producer-browser',
+  });
+
+  assert.equal(controller.acceptSnapshot(payload.snapshot), true);
+  assert.equal(controller.acceptDelta(payload.delta), true);
+  assert.equal(controller.generation().cache_generation, payload.delta.cache_generation);
+  assert.equal(controller.presentation().delta_revision, payload.delta.revision);
 });
 
 test('cache generations are immutable and source generations cannot regress', () => {
@@ -536,7 +674,7 @@ test('applies exact newer deltas and rejects stale or wrong-key deltas', async (
   assert.equal(controller.acceptDelta(wrongKey), false);
   controller.acceptDelta(wrongKey);
   assert.equal(clock.timers.size, 1, 'wrong deltas coalesce behind one repair');
-  await clock.advance(100);
+  await clock.advance(250);
   assert.equal(repairs, 1);
   assert.equal(controller.generation().cache_generation, 3);
 });
@@ -697,6 +835,211 @@ test('invalid delta base and revision coalesce behind one bounded exact repair',
   assert.equal(controller.buildDeltaRequest().after_revision, 0, 'snapshot repair resets the delta cursor');
 });
 
+test('caught delta rejection records one bounded safe reason before full repair and clears only on push proof', () => {
+  const failures = [];
+  const clock = new FakeClock();
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 300, savedResolution: 1,
+    clientId: 'must-not-leak-client', clock, onFailure: failure => failures.push(failure),
+  });
+  const initial = snapshot({requested: 1, cache: 1, sourceGeneration: 1});
+  controller.acceptSnapshot(initial);
+  const replacement = {...initial.buckets[2], series: {cpu: seriesValue(42, initial.buckets[2].start)}};
+
+  assert.equal(controller.acceptDelta(delta({
+    sourceGeneration: 2, base: 9, cache: 2, revision: 1, bucketReplacements: [replacement],
+  })), false);
+  controller.handleTransportFailure();
+
+  assert.equal(failures.length, 1, 'the caught rejection owns the latch before a generic stream error');
+  assert.equal(failures[0].source, '/api/stats-stream');
+  assert.match(failures[0].message, /d;p=k/);
+  assert.match(failures[0].message, /delta base does not match active cache/);
+  assert.match(failures[0].message, /a=1\/1\/0/);
+  assert.match(failures[0].message, /i=2\/9\/2\/1/);
+  assert.match(failures[0].message, /o=1\/0\/0/);
+  assert.match(failures[0].message, /;x=Error;/);
+  assert.ok(failures[0].message.length <= 160);
+  assert.equal(failures[0].message.includes('must-not-leak-client'), false);
+  assert.equal(controller.buildRequest().since_generation, 0, 'a caught rejection forces an exact full snapshot repair');
+
+  assert.equal(controller.acceptDelta(delta({
+    sourceGeneration: 2, base: 1, cache: 2, revision: 1, bucketReplacements: [replacement],
+  })), true);
+  controller.handleTransportFailure();
+  assert.equal(failures.length, 2, 'only an accepted push clears the diagnostic latch');
+  assert.equal(failures[1].message, 'YO!stats stream unavailable');
+});
+
+test('delta rejection keeps every max-width field and full error class across phases', () => {
+  const max = Number.MAX_SAFE_INTEGER;
+  const rawErrorClass = 'ABCDE FG;IJKLMNOPQRSTUVWX';
+  const errorClass = rawErrorClass.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 24);
+  const errorReason = 'private reason text that may only be truncated from the right';
+  const rejectionError = () => Object.assign(new Error(errorReason), {name: rawErrorClass});
+  const decode = value => Number([...value].reduce(
+    (result, digit) => result * 36n + BigInt(Number.parseInt(digit, 36)),
+    0n,
+  ));
+  const stagedArray = (lowLengthReads = 0, traps = {}) => {
+    let lengthReads = 0;
+    return new Proxy([], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          lengthReads += 1;
+          if (traps.throwLength && lengthReads === 1) throw rejectionError();
+          return lengthReads <= lowLengthReads ? 0 : max;
+        }
+        if (property === Symbol.iterator && traps.throwIterator) {
+          return () => { throw rejectionError(); };
+        }
+        if (property === 'map' && traps.throwMap) {
+          return () => { throw rejectionError(); };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  };
+  const maxArray = () => stagedArray();
+  const prepare = failures => {
+    const controller = loadController({
+      capabilities: capabilities(), savedRange: 300, savedResolution: 1,
+      clientId: 'max-safe-diagnostic', clock: new FakeClock(),
+      onFailure: failure => failures.push(failure),
+    });
+    controller.acceptSnapshot(snapshot({requested: 1, cache: max - 4, sourceGeneration: max - 4}));
+    const replacement = {...controller.generation().buckets[2]};
+    assert.equal(controller.acceptDelta(delta({
+      sourceGeneration: max - 3,
+      base: max - 4,
+      cache: max - 2,
+      revision: max - 1,
+      bucketReplacements: [replacement],
+    })), true);
+    return controller;
+  };
+  const update = values => delta({
+    sourceGeneration: max - 1,
+    base: max - 2,
+    cache: max,
+    revision: max,
+    ...values,
+  });
+  const phaseCases = {
+    e: common => new Proxy(update(common), {ownKeys: () => { throw rejectionError(); }}),
+    k: common => new Proxy(update(common), {
+      get: (target, property, receiver) => {
+        if (property === 'range_seconds') throw rejectionError();
+        return Reflect.get(target, property, receiver);
+      },
+    }),
+    b: common => update({...common, bucketReplacements: stagedArray(0, {throwLength: true})}),
+    n: common => update({
+      ...common,
+      bucketReplacements: stagedArray(2),
+      noData: stagedArray(0, {throwIterator: true}),
+    }),
+    c: common => update({
+      ...common,
+      bucketReplacements: stagedArray(2),
+      noData: stagedArray(1),
+      report: new Proxy(costReport(), {ownKeys: () => { throw rejectionError(); }}),
+    }),
+    t: common => update({
+      ...common,
+      bucketReplacements: stagedArray(2),
+      noData: stagedArray(1),
+      tombstones: stagedArray(0, {throwLength: true}),
+    }),
+    a: common => update({
+      ...common,
+      bucketReplacements: stagedArray(3, {throwMap: true}),
+      noData: stagedArray(2),
+      tombstones: stagedArray(2),
+    }),
+  };
+
+  for (const [phase, makeUpdate] of Object.entries(phaseCases)) {
+    const failures = [];
+    const controller = prepare(failures);
+    const common = {
+      bucketReplacements: maxArray(),
+      noData: maxArray(),
+      tombstones: maxArray(),
+    };
+    assert.equal(controller.acceptDelta(makeUpdate(common)), false, phase);
+    assert.equal(failures.length, 1, phase);
+    const message = failures[0].message;
+    const fields = message.match(/^d;p=([^;]+);a=([^;]+);i=([^;]+);o=([^;]+);x=([^;]+)(?:;r=(.*))?$/);
+    assert.ok(fields, message);
+    assert.equal(fields[1], phase);
+    assert.deepStrictEqual(fields[2].split('/').map(decode), [max - 3, max - 2, max - 1]);
+    assert.deepStrictEqual(fields[3].split('/').map(decode), [max - 1, max - 2, max, max]);
+    assert.deepStrictEqual(fields[4].split('/').map(decode), [max, max, max]);
+    assert.equal(fields[5], errorClass);
+    assert.ok(fields[6] === undefined || errorReason.startsWith(fields[6]));
+    assert.ok(message.length <= 160);
+  }
+});
+
+test('malformed, composed, and no-data delta failures expose only their bounded rejection dimension', () => {
+  const initial = snapshot({requested: 1, cache: 1, sourceGeneration: 1});
+  const replacement = {...initial.buckets[2], series: {cpu: seriesValue(42, initial.buckets[2].start)}};
+  const cases = [
+    ['envelope', {cache_generation: 2}],
+    ['apply', delta({
+      sourceGeneration: 2, base: 1, cache: 2, revision: 1,
+      bucketReplacements: [replacement],
+      tombstones: [{kind: 'bucket', start: replacement.start, duration: replacement.duration}],
+    })],
+    ['no_data', delta({
+      sourceGeneration: 2, base: 1, cache: 2, revision: 1,
+      noData: [{
+        family: 'gpu', source_id: 'must-not-leak-source', start: 20, end: 10,
+        epoch: 'must-not-leak-epoch', reason: 'bad', source_cadence_seconds: 10,
+      }],
+    })],
+  ];
+
+  for (const [dimension, update] of cases) {
+    const failures = [];
+    const clock = new FakeClock();
+    const controller = loadController({
+      capabilities: capabilities(), savedRange: 300, savedResolution: 1,
+      clientId: `diagnostic-${dimension}`, clock, onFailure: failure => failures.push(failure),
+    });
+    controller.acceptSnapshot(initial);
+    assert.equal(controller.acceptDelta(update), false);
+    assert.equal(failures.length, 1);
+    const phase = {envelope: 'e', apply: 'a', no_data: 'n'}[dimension];
+    assert.match(failures[0].message, new RegExp(`d;p=${phase}`));
+    assert.ok(failures[0].message.length <= 160);
+    assert.equal(failures[0].message.includes('must-not-leak'), false);
+  }
+});
+
+test('a renderer callback throw after delta commit is not mislabeled as wire rejection', () => {
+  const failures = [];
+  const initial = snapshot({requested: 1, cache: 1, sourceGeneration: 1});
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 300, savedResolution: 1,
+    clientId: 'callback-throw', clock: new FakeClock(),
+    onFailure: failure => failures.push(failure),
+    onGeneration: generation => {
+      if (generation.cache_generation === 2) throw new Error('renderer failed after commit');
+    },
+  });
+  controller.acceptSnapshot(initial);
+  const replacement = {...initial.buckets[2], series: {cpu: seriesValue(42, initial.buckets[2].start)}};
+
+  assert.throws(() => controller.acceptDelta(delta({
+    sourceGeneration: 2, base: 1, cache: 2, revision: 1, bucketReplacements: [replacement],
+  })), /renderer failed after commit/);
+  assert.equal(controller.generation().cache_generation, 2);
+  assert.equal(controller.buildDeltaRequest().after_revision, 1);
+  assert.equal(failures.length, 0);
+});
+
 test('repair failures use one bounded exponential backoff owner', async () => {
   const clock = new FakeClock();
   let calls = 0;
@@ -770,7 +1113,7 @@ test('a rapid selection change cannot publish the old in-flight response', async
     }),
   });
   controller.start();
-  await clock.advance(0);
+  await clock.advance(100);
   assert.equal(requests.length, 1);
   controller.select(900, 10);
   pending.shift()(snapshot({requested: 1, cache: 5, sourceGeneration: 5}));
@@ -841,7 +1184,7 @@ test('scheduler cadence is resolution-driven, non-overlapping, hidden-aware, and
 
   for (const [range, resolution, cadence] of [
     [900, 10, 10_000],
-    [3600, 10, 10_000],
+    [3600, 60, 60_000],
     [900, 60, 60_000],
     [28800, 60, 60_000],
     [86400, 300, 60_000],
@@ -859,6 +1202,160 @@ test('scheduler cadence is resolution-driven, non-overlapping, hidden-aware, and
     await otherClock.advance(1);
     assert.equal(count, 1);
   }
+});
+
+test('resolved live cadence latches one stream-stall failure until generation advancement', async () => {
+  const clock = new FakeClock();
+  const failures = [];
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'stall-watchdog', clock,
+    onFailure: failure => failures.push(failure),
+  });
+  controller.acceptSnapshot(snapshot({requested: 1, cache: 1, sourceGeneration: 1}));
+  controller.start();
+
+  await clock.advance(4000);
+  assert.equal(failures.length, 1, 'more than three resolved 1s cadences emits one failure');
+  assert.equal(failures[0].source, '/api/stats-stream');
+  assert.match(failures[0].message, /^YO!stats stream .*stalled|^YO!stats stream .*missing/);
+  assert.ok(failures[0].message.length <= 160, 'the failure message is bounded');
+  await clock.advance(5000);
+  assert.equal(failures.length, 1, 'the same stalled generation cannot spam');
+
+  controller.acceptSnapshot(snapshot({requested: 1, cache: 2, sourceGeneration: 2}));
+  await clock.advance(4000);
+  assert.equal(failures.length, 1, 'snapshot repair cannot prove transport recovery or clear the latch');
+  const repaired = controller.generation();
+  assert.equal(controller.acceptDelta(delta({
+    sourceGeneration: 3,
+    base: 2,
+    cache: 3,
+    revision: 1,
+    bucketReplacements: [{
+      ...repaired.buckets[2], series: {cpu: seriesValue(99, repaired.buckets[2].start)},
+    }],
+  })), true);
+  await clock.advance(4000);
+  assert.equal(failures.length, 2, 'an accepted push clears the latch for a later stall');
+  controller.stop();
+});
+
+test('a narrowed selection restarts the delivery budget instead of blaming the new stream', async () => {
+  const clock = new FakeClock();
+  const failures = [];
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 900, savedResolution: 10, clientId: 'select-budget', clock,
+    onFailure: failure => failures.push(failure),
+  });
+  controller.acceptSnapshot(snapshot({range: 900, requested: 10, resolution: 10}));
+  controller.start();
+  await clock.advance(20_000);
+  assert.deepStrictEqual(failures, [], '20s of a 10s-cadence 30s budget is not a stall');
+
+  controller.select(300, 1);
+  await clock.advance(1000);
+  assert.deepStrictEqual(failures, [], 'the first 1s tick after narrowing cannot inherit the 10s-cadence age');
+  await clock.advance(2000);
+  assert.deepStrictEqual(failures, [], 'the replacement snapshot is still inside the new 3s budget');
+
+  await clock.advance(2000);
+  assert.equal(failures.length, 1, 'a selection that never delivers past its own budget is still a stall');
+  assert.equal(failures[0].source, '/api/stats-stream');
+  assert.match(failures[0].message, /^YO!stats stream generation stalled for more than 3s$/);
+  controller.stop();
+});
+
+test('a range the server does not serve is refused instead of silently clamped', async () => {
+  const clock = new FakeClock();
+  const failures = [];
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 3600, savedResolution: 60, clientId: 'unserved-range', clock,
+    onFailure: failure => failures.push(failure),
+  });
+  const before = controller.selection();
+  assert.equal(before.range_seconds, 3600);
+  const after = controller.select(1234, 'AUTO');
+  assert.equal(after.range_seconds, 3600, 'an unserved range keeps the selection the caller already had');
+  assert.equal(controller.selection().range_seconds, 3600);
+  assert.equal(failures.length, 1, 'an unserved range is reported, never substituted in silence');
+  assert.match(failures[0].message, /^YO!stats range 1234 is not served/);
+  assert.ok(failures[0].message.length <= 160, 'the failure message is bounded');
+  assert.equal(failures[0].source, '/api/stats-stream');
+});
+
+test('a refused range keeps the live stream open instead of manufacturing a stall', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const fetchImpl = async url => {
+    if (url === '/api/stats-capabilities') return response(200, capabilities());
+    return response(200, snapshot({range: 300, requested: 1, resolution: 1}));
+  };
+  const client = loadNamespace().createBrowserClient({
+    fetch: fetchImpl,
+    EventSource: FakeEventSource,
+    clientId: 'refused-range',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+  await client.start();
+  await clock.advance(0);
+  assert.equal(FakeEventSource.instances.length, 1);
+
+  const result = client.select(1234, 'AUTO');
+  assert.equal(result.range_seconds, 300, 'the refused range leaves the served selection alone');
+  assert.equal(failures.length, 1, 'the refusal itself is the only record');
+  assert.equal(FakeEventSource.instances.length, 2, 'the stream closed for the refused switch is reopened');
+  assert.equal(FakeEventSource.instances[1].url, FakeEventSource.instances[0].url);
+  const reopened = FakeEventSource.instances[1];
+  for (let beat = 0; beat < 5; beat += 1) {
+    await clock.advance(1000);
+    reopened.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
+  }
+  // The failure owner latches after the refusal, so delivery evidence — not the
+  // failure count — is what proves the old view kept receiving server frames.
+  assert.equal(client.streamEvidence().deliverySequence, 5, 'the reopened stream keeps delivering');
+  assert.equal(client.streamEvidence().streamOpen, true);
+  client.stop();
+});
+
+test('quiet-stream ready heartbeats are liveness, and only real silence is a stall', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  const fetchImpl = async url => {
+    if (url === '/api/stats-capabilities') return response(200, capabilities());
+    return response(200, snapshot({range: 300, requested: 1, resolution: 1}));
+  };
+  const client = loadNamespace().createBrowserClient({
+    fetch: fetchImpl,
+    EventSource: FakeEventSource,
+    clientId: 'ready-liveness',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, onFailure: failure => failures.push(failure)},
+  });
+  await client.start();
+  await clock.advance(0);
+  assert.equal(FakeEventSource.instances.length, 1);
+  const stream = FakeEventSource.instances[0];
+
+  // The server emits one frame per resolved cadence: a delta when the view moved,
+  // otherwise a `ready` heartbeat. Ten unmodified cadences are a provably alive
+  // server serving a provably current view, not a stalled stream.
+  for (let beat = 0; beat < 10; beat += 1) {
+    await clock.advance(1000);
+    stream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
+  }
+  assert.equal(client.streamEvidence().deliverySequence, 10, 'every heartbeat was delivered and validated');
+  assert.deepStrictEqual(failures, [], 'a heartbeat-quiet healthy stream never reports a stall');
+
+  // Silence, not quiet: the server stops delivering entirely.
+  await clock.advance(4000);
+  assert.equal(failures.length, 1, 'a stream that stops delivering is still reported once');
+  assert.match(failures[0].message, /^YO!stats stream generation stalled for more than 3s$/);
+  client.stop();
 });
 
 test('presentation work and exact snapshot repair never overlap each other', async () => {
@@ -931,7 +1428,7 @@ test('scheduler aligns to wall-clock boundaries and labels snapshot-capable coar
   assert.deepStrictEqual(fineViewportEnds, [301], 'an off-boundary snapshot advances on the first wall-clock second');
   assert.equal(fullFetches, 0, 'a fine tick does not inherently fetch a full snapshot');
 
-  for (const range of [900, 3600]) {
+  for (const range of [900]) {
     const tenClock = new FakeClock(11_000);
     const tenKinds = [];
     const tenViewportEnds = [];
@@ -1193,6 +1690,15 @@ test('browser transport uses one authenticated current stream and exact snapshot
     '/api/stats-stream?range_seconds=300&resolution_seconds=1',
     'client_id=browser-current&after_cache_generation=1&after_revision=0',
   ].join('&'));
+  assert.deepStrictEqual({...client.streamEvidence()}, {
+    running: true, visible: true, healthy: true, streamOpen: true, streamEpoch: 2,
+    deliverySequence: 0, acceptedDeltaSequence: 0, lastDeliveryKind: '', lastDeliveryAtMs: 0,
+    lastDeliveryEpoch: 0, rangeSeconds: 300, resolutionSeconds: 1, sourceGeneration: 1,
+    cacheGeneration: 1, deltaRevision: 0,
+  }, 'native open and initial snapshot are readiness, not server-frame delivery proof');
+  initialStream.emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
+  assert.equal(client.streamEvidence().deliverySequence, 1, 'a validated ready frame proves quiet-stream delivery');
+  assert.equal(client.streamEvidence().lastDeliveryKind, 'ready');
   const cachedInitialGeneration = client.controller().generation();
   client.select(300, 1);
   assert.equal(client.controller().generation(), cachedInitialGeneration, 'same exact browser selection keeps cached data');
@@ -1211,14 +1717,19 @@ test('browser transport uses one authenticated current stream and exact snapshot
   current300Generation = 2;
   assert.equal(client.controller().generation().cache_generation, 2);
   assert.equal(client.controller().presentation().delta_revision, 1);
+  assert.equal(client.streamEvidence().deliverySequence, 2);
+  assert.equal(client.streamEvidence().acceptedDeltaSequence, 1);
+  assert.equal(client.streamEvidence().lastDeliveryKind, 'delta');
+  assert.equal(client.streamEvidence().cacheGeneration, 2);
   assert.equal(FakeEventSource.instances.length, 1, 'accepted deltas do not reopen the live stream');
 
   initialStream.emit('error');
   initialStream.emit('error');
   assert.equal(initialStream.closeCount, 1, 'the failed native reconnect owner is closed once');
-  await clock.advance(0);
-  assert.equal(fetches.filter(item => item.url.includes('range_seconds=300') && item.url.includes('since_generation=0')).length, 2, 'stream repair requests one authoritative snapshot instead of a 304 loop');
-  assert.equal(FakeEventSource.instances.length, 2, 'one full repair reopens one stream');
+  await clock.advance(100);
+  assert.equal(fetches.filter(item => item.url.includes('range_seconds=300') && item.url.includes('since_generation=0')).length, 1, 'a transport reconnect retains its accepted snapshot generation');
+  assert.equal(fetches.filter(item => item.url.includes('range_seconds=300') && item.url.includes('since_generation=2')).length, 1, 'a transport reconnect repairs incrementally instead of refetching history');
+  assert.equal(FakeEventSource.instances.length, 2, 'one incremental repair reopens one stream');
   assert.ok(FakeEventSource.instances[1].url.endsWith('after_cache_generation=2&after_revision=0'));
 
   client.select(900, 10);
@@ -1251,6 +1762,333 @@ test('browser transport uses one authenticated current stream and exact snapshot
   assert.ok(fetches.every(item => !item.url.includes('/api/stats-delta')));
 });
 
+test('server-requested stream repair reconnects without reporting a native transport failure', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  let snapshotFetches = 0;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      snapshotFetches += 1;
+      return response(200, snapshot({requested: 1, cache: snapshotFetches, sourceGeneration: snapshotFetches}));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-repair-signal',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {
+      clock, repairBaseMs: 100, repairMaxMs: 400,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+  await client.start();
+  await clock.advance(0);
+  FakeEventSource.instances[0].emit('repair');
+  assert.equal(failures.length, 0, 'the server repair control frame is not an error observation');
+  await clock.advance(100);
+  assert.equal(FakeEventSource.instances.length, 2);
+  FakeEventSource.instances[1].emit('error');
+  assert.equal(failures.length, 1, 'a native EventSource failure uses the latched failure owner');
+  client.stop();
+});
+
+async function startRetirementClient(pageLifecycle, {failures, retirements}) {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  let snapshotFetches = 0;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      snapshotFetches += 1;
+      return response(200, snapshot({requested: 1, cache: snapshotFetches, sourceGeneration: snapshotFetches}));
+    },
+    EventSource: FakeEventSource,
+    pageLifecycle,
+    clientId: 'browser-retirement',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {
+      clock, repairBaseMs: 100, repairMaxMs: 400,
+      onFailure: failure => failures.push(failure),
+      onRetirement: retirement => retirements.push(retirement),
+    },
+  });
+  await client.start();
+  await clock.advance(0);
+  return {client, clock};
+}
+
+test('an unload-initiated stream close reports one machine-readable retirement instead of a transport failure', async () => {
+  const lifecycle = new FakePageLifecycle();
+  const failures = [];
+  const retirements = [];
+  const {client} = await startRetirementClient(lifecycle, {failures, retirements});
+
+  // Measured ordering on live 7771: beforeunload, then the native EventSource error.
+  lifecycle.emit('beforeunload');
+  FakeEventSource.instances[0].emit('error');
+  assert.deepEqual(failures.map(entry => entry.message), [], 'the browser tearing down its own stream is not a transport failure');
+  assert.deepEqual(lifecycle.registered(), ['beforeunload', 'pagehide', 'pageshow']);
+  assert.deepEqual(retirements.map(entry => ({...entry})), [
+    {reason: 'page_beforeunload', source: '/api/stats-stream'},
+  ], 'the expected close still carries a machine-readable reason and route');
+  assert.equal(FakeEventSource.instances[0].closeCount, 1, 'the retired stream is closed exactly once');
+
+  const pagehideOnly = new FakePageLifecycle();
+  const laterFailures = [];
+  const laterRetirements = [];
+  const later = await startRetirementClient(pagehideOnly, {failures: laterFailures, retirements: laterRetirements});
+  pagehideOnly.emit('pagehide');
+  FakeEventSource.instances[0].emit('error');
+  assert.equal(laterFailures.length, 0, 'pagehide alone also discriminates a teardown close');
+  assert.equal(laterRetirements.length, 1);
+  assert.equal(laterRetirements[0].reason, 'page_pagehide');
+  client.stop();
+  later.client.stop();
+});
+
+test('a genuine mid-session stream failure stays a warning-level transport failure through every retirement path', async () => {
+  const lifecycle = new FakePageLifecycle();
+  const failures = [];
+  const retirements = [];
+  const {client, clock} = await startRetirementClient(lifecycle, {failures, retirements});
+
+  // 1. No unload signal at all: an ambiguous native error is still a failure.
+  FakeEventSource.instances[0].emit('error');
+  assert.equal(retirements.length, 0, 'a failure with no unload signal is never reclassified');
+  assert.deepEqual(failures.map(entry => entry.message), ['YO!stats stream unavailable']);
+  await clock.advance(100);
+  assert.equal(FakeEventSource.instances.length, 2, 'the failed transport still repairs');
+
+  // 2. A server-sent `unavailable` frame during an unload is the server failing, not the page leaving.
+  lifecycle.emit('beforeunload');
+  FakeEventSource.instances[1].emit('unavailable');
+  assert.equal(retirements.length, 0, 'a server unavailable frame is never a page retirement');
+  assert.equal(failures.length, 1, 'the failure owner stays latched until an accepted push');
+
+  // 3. The document survived the unload it started: one stream delivery clears the unload
+  //    latch, so the next genuine error is a failure again and the gate is not blinded.
+  const survived = new FakePageLifecycle();
+  const survivedFailures = [];
+  const survivedRetirements = [];
+  const surviving = await startRetirementClient(survived, {failures: survivedFailures, retirements: survivedRetirements});
+  survived.emit('beforeunload');
+  FakeEventSource.instances[0].emit('ready', JSON.stringify({cache_generation: 1, revision: 0}));
+  assert.equal(surviving.client.streamEvidence().deliverySequence, 1, 'the surviving document is demonstrably still transporting');
+  FakeEventSource.instances[0].emit('error');
+  assert.equal(survivedRetirements.length, 0, 'a delivery clears the unload latch so the next failure is not blinded');
+  assert.deepEqual(survivedFailures.map(entry => entry.message), ['YO!stats stream unavailable']);
+
+  // 4. A bfcache restore clears the latch by lifecycle alone, with no delivery required.
+  const restored = new FakePageLifecycle();
+  const restoredFailures = [];
+  const restoredRetirements = [];
+  const later = await startRetirementClient(restored, {failures: restoredFailures, retirements: restoredRetirements});
+  restored.emit('pagehide');
+  restored.emit('pageshow');
+  FakeEventSource.instances[0].emit('error');
+  assert.equal(restoredRetirements.length, 0, 'a restored page reports a genuine failure as a failure');
+  assert.deepEqual(restoredFailures.map(entry => entry.message), ['YO!stats stream unavailable']);
+  client.stop();
+  surviving.client.stop();
+  later.client.stop();
+});
+
+test('browser readiness times out, retries while visible, and stays latched until accepted push proof', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  let capabilitiesCalls = 0;
+  let snapshotCalls = 0;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') {
+        capabilitiesCalls += 1;
+        if (capabilitiesCalls === 1) return new Promise(() => {});
+        if (capabilitiesCalls === 2) throw new Error('capabilities rejected');
+        return response(200, capabilities());
+      }
+      snapshotCalls += 1;
+      return response(200, snapshot({requested: 1, cache: 1, sourceGeneration: 1}));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-readiness',
+    savedRange: 300,
+    savedResolution: 1,
+    readinessTimeoutMs: 100,
+    readinessRetryMs: 50,
+    controllerOptions: {
+      clock, repairBaseMs: 10, repairMaxMs: 40,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+  const initialStart = client.start();
+  const initialRejected = assert.rejects(initialStart, /timed out/);
+  await clock.advance(100);
+  assert.equal(failures.length, 1);
+  await initialRejected;
+  assert.equal(capabilitiesCalls, 1);
+  await clock.advance(50);
+  assert.equal(capabilitiesCalls, 2, 'the first bounded retry runs while document-visible');
+  assert.equal(failures.length, 1, 'a rejected retry stays in the same latched episode');
+  await clock.advance(50);
+  assert.equal(capabilitiesCalls, 3, 'a later retry can recover capabilities');
+  await clock.advance(0);
+  assert.equal(snapshotCalls, 1);
+  assert.equal(client.controller().generation().cache_generation, 1);
+  assert.equal(FakeEventSource.instances.length, 1);
+  FakeEventSource.instances[0].emit('error');
+  assert.equal(failures.length, 1, 'snapshot readiness does not clear the initialization failure latch');
+  await clock.advance(10);
+  const repairedStream = FakeEventSource.instances[1];
+  repairedStream.emit('delta', JSON.stringify(delta({
+    sourceGeneration: 2,
+    base: 1,
+    cache: 2,
+    revision: 1,
+    bucketReplacements: [{
+      ...client.controller().generation().buckets[2],
+      series: {cpu: seriesValue(88, 2)},
+    }],
+  })));
+  repairedStream.emit('error');
+  assert.equal(failures.length, 2, 'accepted push proof clears the latch for a later native failure');
+  client.stop();
+});
+
+test('browser readiness bounds a hung initial snapshot and retries the whole client', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  let capabilitiesCalls = 0;
+  let snapshotCalls = 0;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') {
+        capabilitiesCalls += 1;
+        return response(200, capabilities());
+      }
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) return new Promise(() => {});
+      return response(200, snapshot({requested: 1, cache: 2, sourceGeneration: 2}));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-snapshot-readiness',
+    savedRange: 300,
+    savedResolution: 1,
+    readinessTimeoutMs: 100,
+    readinessRetryMs: 50,
+    controllerOptions: {
+      clock, repairBaseMs: 10, repairMaxMs: 40,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+  await client.start();
+  await clock.advance(0);
+  assert.equal(snapshotCalls, 1);
+  await clock.advance(100);
+  assert.equal(failures.length, 1, 'a hung initial snapshot is one bounded initialization failure');
+  await clock.advance(50);
+  assert.equal(capabilitiesCalls, 2, 'readiness retry reconstructs the whole client contract');
+  await clock.advance(0);
+  assert.equal(snapshotCalls, 2);
+  assert.equal(client.controller().generation().cache_generation, 2);
+  assert.equal(FakeEventSource.instances.length, 1);
+  client.stop();
+});
+
+test('browser transport unwraps response envelopes before exact validation', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const envelope = data => ({
+    state: 'ready',
+    request: {id: 'r-stats-envelope'},
+    data,
+    ok: true,
+    terminal: true,
+  });
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => response(200, envelope(
+      url === '/api/stats-capabilities'
+        ? capabilities()
+        : snapshot({requested: 1, cache: 7, sourceGeneration: 7}),
+    )),
+    EventSource: FakeEventSource,
+    clientId: 'browser-envelope',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  assert.equal(client.controller().generation().cache_generation, 7);
+  assert.equal(FakeEventSource.instances.length, 1);
+  client.stop();
+
+  const invalid = loadNamespace().createBrowserClient({
+    fetch: async () => response(200, envelope({...capabilities(), unknown_inner_field: true})),
+    EventSource: FakeEventSource,
+    clientId: 'browser-envelope-negative',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+  });
+  await assert.rejects(
+    invalid.start(),
+    error => error.statsContractViolation === true && /stats capabilities fields are not exact/.test(error.message),
+  );
+});
+
+test('five typed stream repairs for a 24h selection each settle through one snapshot owner', async () => {
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const states = [];
+  let generation = 0;
+  const snapshotRequests = [];
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      snapshotRequests.push(url);
+      generation += 1;
+      return response(200, snapshot({
+        range: 86400,
+        requested: 300,
+        resolution: 300,
+        cache: generation,
+        sourceGeneration: generation,
+      }));
+    },
+    EventSource: FakeEventSource,
+    clientId: 'repeat-24h-repair',
+    savedRange: 86400,
+    savedResolution: 300,
+    onState: state => states.push(state),
+    controllerOptions: {clock, repairBaseMs: 100, repairMaxMs: 400},
+  });
+
+  await client.start();
+  await clock.advance(0);
+  for (let index = 0; index < 5; index += 1) {
+    const stream = FakeEventSource.instances.at(-1);
+    stream.emit('repair', JSON.stringify({
+      status: 'repair_required',
+      reason: 'delta cursor is outside the retained exact chain',
+    }));
+    await clock.advance(100);
+    await flushPromises();
+    await flushPromises();
+    assert.equal(states.at(-1), 'ready', `repair ${index + 1} reaches a terminal state`);
+    assert.equal(FakeEventSource.instances.length, index + 2, `repair ${index + 1} opens one replacement stream`);
+    assert.equal(stream.closeCount, 1, `repair ${index + 1} closes its failed stream once`);
+  }
+
+  assert.equal(snapshotRequests.length, 6, 'initial load plus five repairs issue no duplicate snapshots');
+  assert.ok(snapshotRequests.every(url => url.includes('range_seconds=86400&resolution=300')));
+  client.stop();
+});
+
 test('valid pending snapshots honor the server retry hint until exact 2h/300s data is ready', async () => {
   FakeEventSource.instances = [];
   const clock = new FakeClock();
@@ -1263,7 +2101,7 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
       snapshotUrls.push(url);
       snapshotCalls += 1;
       if (snapshotCalls <= 2) {
-        return response(503, {status: 'pending', retry_after_seconds: 1});
+        return response(202, {status: 'pending', retry_after_seconds: 1});
       }
       return response(200, snapshot({
         range: 7200,
@@ -1282,7 +2120,7 @@ test('valid pending snapshots honor the server retry hint until exact 2h/300s da
   });
 
   await client.start();
-  await clock.advance(0);
+  await clock.advance(100);
   await flushPromises();
   await flushPromises();
   assert.equal(snapshotCalls, 1);
@@ -1384,7 +2222,8 @@ test('terminal 503 reason reaches state and explicit retry restarts snapshot and
   assert.equal(states.at(-1).error.terminal, true);
 
   await client.retry();
-  await clock.advance(0);
+  await flushPromises();
+  await clock.advance(250);
   await flushPromises();
   assert.equal(fetches.find(item => item.url === '/api/stats-retry').options.method, 'POST');
   assert.equal(states.at(-1).state, 'ready');
@@ -1501,9 +2340,9 @@ test('invalid streamed JSON and protocol deltas share the controller bounded rep
     stream.emit('delta', streamedValue);
     stream.emit('delta', streamedValue);
     assert.equal(stream.closeCount, 1);
-    await clock.advance(immediate ? 0 : 99);
-    assert.equal(snapshotFetches, immediate ? 2 : 1, 'repair timing is owned by the controller');
-    if (!immediate) await clock.advance(1);
+    await clock.advance(99);
+    assert.equal(snapshotFetches, 1, 'repair timing is owned by the controller');
+    await clock.advance(1);
     assert.equal(snapshotFetches, 2, 'duplicate bad events coalesce behind one repair');
     assert.equal(FakeEventSource.instances.length, 2);
     client.stop();
@@ -1586,6 +2425,26 @@ test('mount owns exact capability controls and renders sparse current series wit
   assert.equal(fetchedSnapshots.length, snapshotsBeforeToggle, 'chart visibility is presentation-only');
   root.listeners.get('click')({target: costToggle});
   assert.equal(root.content.innerHTML.includes('data-stats-chart="cost"'), false);
+
+  const liveStream = FakeEventSource.instances[0];
+  const hiddenMarkup = root.content.innerHTML;
+  const hiddenSnapshotRequests = fetchedSnapshots.length;
+  mounted.setVisible(false);
+  liveStream.emit('delta', JSON.stringify(delta({
+    sourceGeneration: 2,
+    base: 1,
+    cache: 2,
+    revision: 1,
+    bucketReplacements: [{
+      ...rendererSnapshot().buckets[0],
+      series: {'cpu_percent:host': seriesValue(77, 0)},
+    }],
+  })));
+  assert.equal(liveStream.closeCount, 0, 'panel hiding does not stop the exact transport');
+  assert.equal(root.content.innerHTML, hiddenMarkup, 'hidden generations skip renderer work');
+  mounted.setVisible(true);
+  assert.equal(fetchedSnapshots.length, hiddenSnapshotRequests, 'panel opening does not fetch a snapshot');
+  assert.notEqual(root.content.innerHTML, hiddenMarkup, 'opening paints the already-accepted generation');
 
   await clock.advance(1000);
   assert.equal(root.scrollTop, 73);
@@ -1787,7 +2646,7 @@ test('mount has one stable loading, pending, and error state owner', async () =>
     view: 'stats', clientId: 'pending', fetch: async url => (
       url === '/api/stats-capabilities'
         ? response(200, capabilities())
-        : response(503, {status: 'pending', retry_after_seconds: 1})
+        : response(202, {status: 'pending', retry_after_seconds: 1})
     ),
     EventSource: FakeEventSource,
     controllerOptions: {clock: pendingClock, repairBaseMs: 100, repairMaxMs: 400},

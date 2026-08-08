@@ -35,6 +35,248 @@ const {
 } = require('./browser_helpers/layout_test_helper');
 
 async function runLayoutRestoreSuite() {
+  await testAsync('activity summary is fail-closed across missing and malformed bootstrap values', async () => {
+    for (const activitySummary of [undefined, null, {}, {enabled: false}, {enabled: 1}, {enabled: 'true'}]) {
+      const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {bootstrapOverrides: {activitySummary}});
+      const requests = [];
+      api.setFetchForTest((url) => {
+        requests.push(String(url));
+        return Promise.resolve(jsonResponse({sessions: {}, global: {lines: []}, session_order: []}));
+      });
+      assert.equal(api.activitySummaryEnabledForTest(), false);
+      assert.equal(api.clientServerWatchStateForTest().activity_summary.visible, false);
+      assert.equal(await api.refreshActivitySummaryForTest({force: true}), false);
+      assert.equal(api.applyActivitySummaryPayloadFromPushForTest({sessions: {unexpected: {}}}), false);
+      assert.deepEqual(requests, []);
+      assert.equal(api.activitySummaryStateForTest().refreshing, false);
+    }
+  });
+
+  test('activity-summary refresh triggers share one fail-closed owner', () => {
+    const sources = [
+      fs.readFileSync('static_src/js/yolomux/05_i18n.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/80_info_panel.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/81_yoagent_panel.js', 'utf8'),
+      fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8'),
+    ].join('\n');
+    for (const trigger of ['localeChange', 'setInfoSessionFileLookbackHours', 'createYoagentPanel', 'activateYoagentPanel', 'clearYoagentConversation', 'repairClientEventReadyChannels', "type === 'activity_summary_ready'", "type === 'yoagent_skills_changed'"]) {
+      assert.ok(sources.includes(trigger), `missing activity-summary trigger coverage for ${trigger}`);
+    }
+    assert.ok(/async function refreshActivitySummary[\s\S]*?if \(!activitySummaryEnabled\)[\s\S]*?return false;/.test(sources));
+    assert.ok(/function applyActivitySummaryPayloadFromPush[\s\S]*?if \(!activitySummaryEnabled\) return false;/.test(sources));
+  });
+
+  test('focused-notification suppression posts a nonempty event message', () => {
+    const source = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
+    assert.ok(/postEvent\(session, 'agent_window_transition_notification_suppressed_visible',\s*'[^']+'/.test(source));
+  });
+
+  test('JS debug failure classifier rejects stats warnings and errors but keeps info', () => {
+    const api = loadYolomux();
+    api.clearJsDebugEventsForTest();
+    api.recordJsDebugEventForTest('stats_history', {level: 'warning', message: 'stats warning'});
+    api.recordJsDebugEventForTest('stats_history', {level: 'error', message: 'stats error'});
+    api.recordJsDebugEventForTest('stats_history', {level: 'info', message: 'stats info'});
+
+    const failures = api.jsDebugFailureEventsForTest().map(event => [event.type, event.level, event.message]);
+    assert.deepStrictEqual(canonical(failures), [
+      ['stats_history', 'warning', 'stats warning'],
+      ['stats_history', 'error', 'stats error'],
+    ]);
+    assert.deepStrictEqual(canonical(api.jsDebugFailureEventsForTest('rejection')), []);
+  });
+
+  test('API and page-load observations retain bounded attribution and phase timings', () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
+      bootstrapOverrides: {clientRevision: 'a25ff8ff3'},
+    });
+    const apiObservation = api.jsDebugCurrentObservationFromEventForTest({
+      key: 'page-1:7',
+      event: {
+        type: 'api',
+        ts: '2026-08-03T18:25:08.000Z',
+        method: 'GET',
+        url: '/api/session-metadata?force=1',
+        requestId: 'r-web-page-1-7',
+        status: 200,
+        durationMs: 8553.6,
+        requestBytes: 44,
+        responseBytes: 1900000,
+        connectionProtocol: 'h2',
+        phaseTimings: {queueMs: 1.5, connectMs: 2.5, tlsMs: 1.25, ttfbMs: 8400, downloadMs: 100, applyRenderMs: 49.35},
+      },
+    });
+    assert.deepStrictEqual(canonical(apiObservation.payload), {
+      kind: 'api', endpoint: '/api/session-metadata', method: 'GET', request_id: 'r-web-page-1-7', status: 200,
+      latency_ms: 8553.6, bytes: 1900044, queue_ms: 1.5, connect_ms: 2.5, tls_ms: 1.25,
+      ttfb_ms: 8400, download_ms: 100, apply_render_ms: 49.35, connection_protocol: 'h2',
+      journey_id: api.reloadJourneyIdForTest(), code_revision: 'a25ff8ff3', browser_family: 'chromium',
+    });
+
+    const pageObservation = api.jsDebugCurrentObservationFromEventForTest({
+      key: 'page-1:load',
+      event: {
+        type: 'page_load',
+        ts: '2026-08-03T18:25:09.000Z',
+        url: '/?sessions=finder,debug',
+        phaseTimings: {
+          navigationMs: 4, bundleParseEvalMs: 31, firstPaintMs: 35,
+          firstContentfulPaintMs: 38, firstApiMs: 42, fanoutMs: 80,
+          interactiveMs: 240, appReadyMs: 240,
+        },
+        fanoutCount: 9,
+        maxConcurrency: 6,
+      },
+    });
+    assert.deepStrictEqual(canonical(pageObservation.payload), {
+      kind: 'page_load', endpoint: '/', navigation_ms: 4, bundle_parse_eval_ms: 31,
+      first_paint_ms: 35, first_contentful_paint_ms: 38, first_api_ms: 42,
+      fanout_ms: 80, interactive_ms: 240, app_ready_ms: 240, fanout_count: 9,
+      max_concurrency: 6, journey_id: api.reloadJourneyIdForTest(),
+      code_revision: 'a25ff8ff3', browser_family: 'chromium',
+    });
+  });
+
+  test('perceptual, operation, long-task, and upload-health observations are durable and path-free', () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Firefox/142.0', 'admin', {
+      bootstrapOverrides: {clientRevision: 'revision-7'},
+    });
+    const common = {
+      journey_id: 'j-action-7', code_revision: 'revision-7', browser_family: 'firefox',
+    };
+    const cases = [
+      [{type: 'finder_usable', ts: '2026-08-03T18:25:08.000Z', journeyId: 'j-action-7', durationMs: 120, entryCount: 4}, {kind: 'finder_usable', latency_ms: 120, entry_count: 4, ...common}],
+      [{type: 'interaction', ts: '2026-08-03T18:25:08.000Z', journeyId: 'j-action-7', durationMs: 180, inputDelayMs: 70, processingMs: 50, presentationDelayMs: 60, interactionType: 'click'}, {kind: 'interaction', latency_ms: 180, input_delay_ms: 70, processing_ms: 50, presentation_delay_ms: 60, interaction_type: 'click', ...common}],
+      [{type: 'operation_wait', ts: '2026-08-03T18:25:08.000Z', journeyId: 'j-action-7', durationMs: 3200, operationKind: 'session_files', outcome: 'ready', requestId: 'r-web-7'}, {kind: 'operation_wait', latency_ms: 3200, operation_kind: 'session_files', outcome: 'ready', request_id: 'r-web-7', ...common}],
+      [{type: 'long_task', ts: '2026-08-03T18:25:08.000Z', journeyId: 'j-action-7', durationMs: 88.5}, {kind: 'long_task', latency_ms: 88.5, ...common}],
+      [{type: 'heartbeat', ts: '2026-08-03T18:25:08.000Z', journeyId: 'j-action-7', durationMs: 8, bytes: 100, uploadQueueDepth: 17, uploadDrops: 2, uploadRetries: 3, instrumentationCostMs: 0.42}, {kind: 'heartbeat', latency_ms: 8, bytes: 100, upload_queue_depth: 17, upload_drops: 2, upload_retries: 3, instrumentation_cost_ms: 0.42, ...common}],
+    ];
+    for (const [event, expected] of cases) {
+      const observation = api.jsDebugCurrentObservationFromEventForTest({key: `page:${event.type}`, event});
+      assert.deepStrictEqual(canonical(observation.payload), expected);
+      assert.equal(JSON.stringify(observation.payload).includes('/home/'), false);
+      assert.equal(JSON.stringify(observation.payload).includes('?'), false);
+    }
+  });
+
+  test('page milestones, Finder paint, input timing, and accepted-operation wait use browser monotonic time', () => {
+    let now = 10;
+    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
+      performance: {
+        now: () => now,
+        getEntriesByType: type => type === 'paint' ? [
+          {name: 'first-paint', startTime: 18},
+          {name: 'first-contentful-paint', startTime: 24},
+        ] : [],
+      },
+      bootstrapOverrides: {clientRevision: 'revision-8'},
+    });
+    api.setPageLoadProfileStateForTest({
+      bundleEvalStartedAt: 5, bundleEvalEndedAt: 15, firstApiStartedAt: null,
+      lastApiStartedAt: null, apiCount: 0, activeApiCount: 0, maxConcurrency: 0,
+      emitted: false,
+    });
+    api.notePageLoadApiStartedForTest(30);
+    api.notePageLoadApiStartedForTest(35);
+    api.notePageLoadApiCompletedForTest();
+    api.notePageLoadApiCompletedForTest();
+    const page = api.pageLoadProfileEventForTest(200);
+    assert.deepStrictEqual(canonical(page.phaseTimings), {
+      navigationMs: 0, bundleParseEvalMs: 10, firstPaintMs: 18,
+      firstContentfulPaintMs: 24, firstApiMs: 30, fanoutMs: 5,
+      interactiveMs: 200, appReadyMs: 200,
+    });
+    assert.equal(page.fanoutCount, 2);
+    assert.equal(page.maxConcurrency, 2);
+
+    api.clearJsDebugEventsForTest();
+    now = 300;
+    const finderJourney = api.newFinderUsableJourneyForTest();
+    now = 425;
+    assert.equal(api.scheduleFinderUsableObservationForTest(new TestElement('finder-tree'), [{name: 'a'}], finderJourney), true);
+    const finderEvent = api.jsDebugEventsForTest().find(event => event.type === 'finder_usable');
+    assert.equal(finderEvent.durationMs, 125);
+    assert.equal(finderEvent.entryCount, 1);
+
+    const interaction = api.clientPerfInteractionEventForTest({
+      name: 'click', startTime: 100, processingStart: 160, processingEnd: 220, duration: 180,
+    });
+    assert.deepStrictEqual(canonical({...interaction, journeyId: 'bounded'}), {
+      journeyId: 'bounded', durationMs: 180, inputDelayMs: 60, processingMs: 60,
+      presentationDelayMs: 60, interactionType: 'click',
+    });
+
+    api.clearJsDebugEventsForTest();
+    now = 500;
+    const record = api.registerApiOperationReceiptForTest({
+      request: {id: 'r-web-operation-1'},
+      operation: {id: 'operation-1', kind: 'test_operation', context: {}, cursor: {epoch: 'operation-epoch-1', seq: 0}},
+    });
+    now = 3700;
+    assert.equal(api.applyApiOperationTerminalForTest({
+      operation: {id: record.id, cursor: {epoch: 'operation-epoch-1', seq: 1}}, result: {state: 'ready'},
+    }), true);
+    const waitEvent = api.jsDebugEventsForTest().find(event => event.type === 'operation_wait');
+    assert.equal(waitEvent.durationMs, 3200);
+    assert.equal(waitEvent.operationKind, 'test_operation');
+    assert.equal(waitEvent.requestId, 'r-web-operation-1');
+  });
+
+  test('long-task and Event Timing observers upload only bounded exemplars', () => {
+    const observers = [];
+    class TestPerformanceObserver {
+      constructor(callback) { this.callback = callback; observers.push(this); }
+      observe(options) { this.options = options; }
+    }
+    const api = loadYolomux('', ['1'], 'http:', 'Mozilla/5.0 Chrome/140.0', 'admin', {
+      PerformanceObserver: TestPerformanceObserver,
+    });
+    assert.deepStrictEqual(observers.map(observer => observer.options.type || observer.options.entryTypes[0]), ['longtask', 'event']);
+    const longTaskObserver = observers.find(observer => observer.options.entryTypes?.[0] === 'longtask');
+    const inputObserver = observers.find(observer => observer.options.type === 'event');
+    longTaskObserver.callback({getEntries: () => Array.from({length: 30}, (_, index) => ({duration: 50 + index, name: 'self'}))});
+    inputObserver.callback({getEntries: () => Array.from({length: 30}, (_, index) => ({duration: 16 + index, name: 'click', interactionId: index + 1}))});
+    const events = api.jsDebugEventsForTest();
+    assert.equal(events.filter(event => event.type === 'long_task').length, 20);
+    assert.equal(events.filter(event => event.type === 'interaction').length, 20);
+  });
+
+  test('resource timing phases are non-overlapping and observation uploads stay below the route limit', () => {
+    const api = loadYolomux();
+    const phases = api.jsDebugResourcePhaseTimingsForTest({
+      startTime: 10, fetchStart: 12, connectStart: 13, secureConnectionStart: 14,
+      connectEnd: 18, requestStart: 19, responseStart: 29, responseEnd: 39,
+    }, 5);
+    assert.deepStrictEqual(canonical(phases), {queueMs: 7, connectMs: 1, tlsMs: 4, ttfbMs: 10, downloadMs: 10});
+
+    const entries = Array.from({length: 1000}, (_, index) => ({
+      key: `page:${index}`,
+      event: {
+        type: 'api', ts: '2026-08-03T18:25:08.000Z', method: 'GET',
+        url: `/api/session-metadata?force=1&padding=${'x'.repeat(400)}`,
+        requestId: `r-web-page-${index}`, status: 200, durationMs: index,
+        phaseTimings: {ttfbMs: index},
+      },
+    }));
+    const batch = api.jsDebugObservationBatchForEntriesForTest(entries, {protocolVersion: 1, schemaGeneration: 1});
+    assert.ok(batch.observations.length > 0 && batch.observations.length < entries.length);
+    assert.ok(Buffer.byteLength(JSON.stringify(batch)) < 128 * 1024);
+  });
+
+  test('normal API requests carry distinct correlatable request ids', () => {
+    const api = loadYolomux();
+    const first = {};
+    const second = {};
+    const firstId = api.applyApiRequestIdHeaderForTest('/api/ping', first);
+    const secondId = api.applyApiRequestIdHeaderForTest('/api/ping', second);
+    assert.match(firstId, /^r-web-/);
+    assert.match(secondId, /^r-web-/);
+    assert.notEqual(firstId, secondId);
+    assert.equal(first.headers['X-YOLOmux-Request-ID'], firstId);
+    assert.equal(second.headers['X-YOLOmux-Request-ID'], secondId);
+    assert.equal(api.applyApiRequestIdHeaderForTest('/static/codemirror.js', {}), '');
+  });
+
   test('shared button builder owns attributes, accessibility state, dataset, and events', () => {
     const api = loadYolomux();
     const clicks = [];
@@ -273,7 +515,9 @@ async function runLayoutRestoreSuite() {
 
   test('YO!info activity-summary lookback state uses shared options and refreshes activity summary', () => {
     const requests = [];
-    const api = loadYolomux('', ['1']);
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {activitySummary: {enabled: true}},
+    });
     assert.equal(api.infoSessionFileLookbackHoursForTest(), 24, 'Info activity-summary lookback defaults to 24 hours');
     api.setTranscriptSessionOrderForTest(['external', '1']);
     api.setTranscriptInfoForTest('external', {
@@ -445,6 +689,9 @@ async function runLayoutRestoreSuite() {
     let createRequest = null;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/create-session-plan') {
+        return Promise.resolve(jsonResponse({session: '2', generation: 7, ok: true}));
+      }
       if (parsed.pathname === '/api/create-session') {
         createRequest = parsed;
         return Promise.resolve(jsonResponse({session: '2', sessions: ['1'], agent: parsed.searchParams.get('agent') || 'codex', created: true, ok: true}));
@@ -460,7 +707,10 @@ async function runLayoutRestoreSuite() {
 
     await api.createNextSessionForTest('codex', {dangerouslyYolo: true});
     await flushAsyncWork();
+    assert.ok(createRequest, api.statusHtmlForTest());
     assert.equal(createRequest.searchParams.get('dangerously_yolo'), '1', 'full-access Codex launches explicitly request its bypass flags');
+    assert.equal(createRequest.searchParams.get('session'), '2', 'create commits the server-reserved session name');
+    assert.equal(createRequest.searchParams.get('generation'), '7', 'create commits the server-reserved lifecycle generation');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
       left: {tabs: ['1', '2'], active: '2'},
     }, 'new session tab opens even when create-session returns the old roster');
@@ -474,11 +724,41 @@ async function runLayoutRestoreSuite() {
     assert.deepStrictEqual(canonical(api.pendingTmuxSessionNamesForTest()), ['2'], 'fresh server roster does not end the new-session grace window before tmux/socket state settles');
   });
 
+  await testAsync('server-reserved create identity seals metadata and status until the matching response commits', async () => {
+    const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
+    let resolveCreate;
+    const createResponse = new Promise(resolve => { resolveCreate = resolve; });
+    api.setFetchForTest(url => {
+      const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/create-session-plan') return Promise.resolve(jsonResponse({session: '2', generation: 41, ok: true}));
+      if (parsed.pathname === '/api/create-session') return createResponse;
+      if (parsed.pathname === '/api/ensure-session') return Promise.resolve(jsonResponse({session: '2', created: false, ok: true}));
+      if (parsed.pathname === '/api/session-metadata') return Promise.resolve(jsonResponse({session_order: ['1', '2'], sessions: {'1': {panes: []}, '2': {panes: []}}}));
+      return Promise.resolve(jsonResponse({session_order: ['1'], sessions: {'1': {}}}));
+    });
+
+    const creating = api.createNextSessionForTest('codex');
+    await flushAsyncWork();
+    assert.ok(api.tmuxSessionLifecycleRecordForTest('2'), api.statusHtmlForTest());
+    assert.equal(api.tmuxSessionLifecycleRecordForTest('2').phase, 'creating');
+    await api.applySessionMetadataPayloadForTest({session_order: ['1', '2'], sessions: {'1': {panes: []}, '2': {panes: []}}}, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    api.applyAutoApprovePayloadForTest({session_order: ['1', '2'], sessions: {'1': {}, '2': {target: '2', marker: 'premature'}}}, {render: false});
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {left: {tabs: ['1'], active: '1'}}, 'metadata cannot expose the reserved generation before create commits');
+    assert.equal(api.autoApproveStateForTest('2'), undefined, 'status cannot expose the reserved generation before create commits');
+
+    resolveCreate(jsonResponse({session: '2', generation: 41, sessions: ['1', '2'], agent: 'codex', created: true, ok: true}));
+    await creating;
+    assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {left: {tabs: ['1', '2'], active: '2'}}, 'the matching create response commits exactly one visible tab');
+  });
+
   await testAsync('new Xterm tab stays active when create-session is fresh but transcripts lag', async () => {
     const api = loadYolomuxWithFileExplorerClosed('?sessions=1&layout=left&tabs=left:1', ['1']);
     let createRequest = null;
     api.setFetchForTest(url => {
       const parsed = new URL(String(url), 'http://localhost');
+      if (parsed.pathname === '/api/create-session-plan') {
+        return Promise.resolve(jsonResponse({session: '2', generation: 8, ok: true}));
+      }
       if (parsed.pathname === '/api/create-session') {
         createRequest = parsed;
         return Promise.resolve(jsonResponse({session: '2', sessions: ['1', '2'], agent: 'term', created: true, ok: true}));
@@ -494,6 +774,7 @@ async function runLayoutRestoreSuite() {
 
     await api.createNextSessionForTest('term', {terminal: 'tsh'});
     await flushAsyncWork();
+    assert.ok(createRequest, api.statusHtmlForTest());
     assert.equal(createRequest.searchParams.get('dangerously_yolo'), '0', 'normal launches explicitly retain the default permission behavior');
     assert.equal(createRequest.searchParams.get('terminal'), 'tsh', 'an explicit Xterm command is sent as a named server-validated choice');
     assert.deepStrictEqual(canonical(api.serialize(api.currentSlots()).panes), {
@@ -1513,7 +1794,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const activitySummaryState = {') && source.includes('guard: makeGenerationGuard()'), 'activity summary payload and refresh generation share one record');
     assert.ok(source.includes('if (activitySummaryState.refreshing && options.force !== true) return;'), 'activity summary polling skips overlapping non-forced refreshes');
     assert.ok(source.includes('const transcriptMetadataState = {') && source.includes('guard: makeGenerationGuard()'), 'metadata payload and request generation share one record');
-    assert.ok(source.includes('if (transcriptMetadataState.request) return transcriptMetadataState.request;'), 'metadata refreshes dedupe overlapping loads');
+    assert.ok(source.includes('if (transcriptMetadataState.request && options.force !== true) return transcriptMetadataState.request;'), 'metadata refreshes dedupe ordinary overlap while forced topology repair supersedes stale work');
     assert.ok(source.includes('transcriptMetadataState.loading = true;'), 'metadata refreshes expose a loading state');
     assert.ok(source.includes('infoMetadataLoadingHtml()'), 'YO!info renders an explicit repo-metadata loading state');
     assert.ok(source.includes('const notificationLastSentLimit = 512;'), 'notification signature cache has a bounded size');
@@ -1522,7 +1803,7 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const watchedPrRecords = new Map();'), 'watched-PR status and notification throttles share one PR-keyed owner');
     assert.ok(source.includes('setLimitedMapEntry(record.notificationLastSent, key, now, notificationLastSentLimit);'), 'watched-PR notification transition keys use the shared bounded-map helper');
     assert.equal(/\b(?:openFiles|fileIdentityByPath|openFilePathByIdentity|fileOpenPromisesByPath)\b/.test(source), false, 'open-file content, identity, and in-flight state have no parallel legacy maps or aliases');
-    assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*function apiFetch\(url, options = \{\}\)[\s\S]*applyShareTokenHeaders\(requestOptions\)[\s\S]*function apiFetchJsonQuiet[\s\S]*applyShareTokenHeaders\(requestOptions\)/.test(source), 'normal and quiet API fetches share one share-token header owner');
+    assert.ok(/function applyShareTokenHeaders\(requestOptions\)[\s\S]*async function apiFetch\(url, options = \{\}, internalOptions = \{\}\)[\s\S]*applyShareTokenHeaders\(requestOptions\)[\s\S]*async function apiFetchJsonQuiet\(url, options = \{\}, phaseTimings = null\)[\s\S]*apiFetch\(url, options, \{recordDebug: false\}\)/.test(source), 'normal and quiet API fetches route through the one share-token header owner');
     assert.ok(/function readNotificationDelivery\(\)[\s\S]*safeJsonParse\(/.test(source) && /function clientEventEnvelope\(event\)[\s\S]*safeJsonParse\(/.test(source), 'stored notification and client-event JSON reads reuse the safe parser');
     assert.ok(/function chatRelativeTimesVisibleConsumer\(\)[\s\S]*document\.visibilityState !== 'hidden'[\s\S]*itemInLayout\(chatItemId\)[\s\S]*itemIsActivePaneTab\(chatItemId\)/.test(source), 'chat relative-time refresh has one foreground active-panel consumer predicate');
     assert.ok(/function syncChatRelativeTimesRefresh\(\)[\s\S]*resetRuntimeInterval\('chat-relative-times',[\s\S]*!chatRelativeTimesVisibleConsumer\(\)\) return null;[\s\S]*refreshChatRelativeTimes\(\)/.test(source), 'chat relative-time timer skips the DOM query without a visible consumer');
@@ -2041,11 +2322,11 @@ async function runLayoutRestoreSuite() {
     assert.equal(api.sessionConfirmedGone(api.fileEditorItemFor('/x/y.txt'), []), false, 'non-tmux items are never roster-pruned');
     api.markPendingTmuxSessionForTest('4');
     assert.equal(api.sessionConfirmedGone('4', ['1', '2', '3']), false, 'a stale roster cannot prune a pending new or renamed tmux session');
-    assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item, event);'), 'terminal WS close passes the close event into the exit lifecycle decision');
+    assert.ok(source.includes('confirmSessionGoneOrReconnect(session, item, event, lifecycleToken);'), 'terminal WS close passes the close event and generation token into the exit lifecycle decision');
     assert.ok(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/tmux-session-exists\?session=/.test(source), 'terminal close uses the read-only tmux existence endpoint');
     assert.equal(/function tmuxSessionExistsForReconnect\(session\)[\s\S]*\/api\/ensure-session\?session=/.test(source), false, 'terminal close no longer routes through the mutating ensure-session endpoint');
     assert.ok(/terminalSocketCloseLooksFinal\(event\)[\s\S]*pruneDeadSession\(session\);/.test(source), 'a clean terminal close prunes immediately');
-    assert.ok(/scheduleTerminalReconnect\(session, item\);\s*\}\s*$/m.test(source) || source.includes('scheduleTerminalReconnect(session, item);'), 'a transient disconnect still reconnects');
+    assert.ok(source.includes('scheduleTerminalReconnect(session, item, lifecycleToken);'), 'a transient disconnect reconnects only through the current generation token');
   });
 
   await testAsync('exited Xterm tab prunes through read-only tmux existence without stale roster fallback', async () => {
@@ -2130,12 +2411,17 @@ async function runLayoutRestoreSuite() {
 
     const data = api.applyTmuxSignalsPayloadForTest({
       patch: true,
-      windows: [],
-      removed_window_keys: ['1:1'],
-      removed_window_event_at: eventAt,
-      removed_window_event_type: 'pane-exited',
-      ok: true,
-      window_count: 1,
+      collection: 'windows',
+      changes: {},
+      removed_keys: ['1:1'],
+      fields: {
+        removed_window_keys: ['1:1'],
+        removed_window_event_at: eventAt,
+        removed_window_event_type: 'pane-exited',
+        ok: true,
+        window_count: 1,
+      },
+      removed_fields: [],
     });
 
     assert.deepStrictEqual([...data.windows.map(windowRecord => windowRecord.key)], ['1:0'], 'tmux signal patch removes the dead window');
@@ -2228,21 +2514,24 @@ async function runLayoutRestoreSuite() {
     });
     const firstKey = '["prompt","1","first"]';
     const secondKey = '["prompt","2","second"]';
+    const timerCountBefore = timers.size;
     assert.equal(api.acknowledgeAttentionKeysForTest([firstKey], {delayMs: 25, localOnly: true}), true);
+    const firstTimer = api.attentionAcknowledgementRecordForTest(firstKey).timer;
     assert.equal(api.acknowledgeAttentionKeysForTest([firstKey], {delayMs: 25, localOnly: true}), true);
-    assert.equal(timers.size, 1, 'repeated delayed acknowledgement reuses its record timer');
-    assert.deepEqual(api.attentionAcknowledgementRecordForTest(firstKey), {recordedAt: null, timer: 1, pending: false});
-    const staleTimer = timers.get(1).callback;
+    assert.equal(timers.size, timerCountBefore + 1, 'repeated delayed acknowledgement reuses its record timer');
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(firstKey), {recordedAt: null, timer: firstTimer, pending: false});
+    const staleTimer = timers.get(firstTimer).callback;
 
     api.acknowledgeAttentionKeysForTest([secondKey], {delayMs: 25, localOnly: true});
+    const secondTimer = api.attentionAcknowledgementRecordForTest(secondKey).timer;
     api.clearSessionAttentionAcknowledgementRecordsForTest('1');
-    assert.deepEqual(cleared, [1], 'session cleanup cancels only its delayed acknowledgement');
+    assert.deepEqual(cleared, [firstTimer], 'session cleanup cancels only its delayed acknowledgement');
     assert.equal(api.attentionAcknowledgementRecordForTest(firstKey), null);
-    assert.deepEqual(api.attentionAcknowledgementRecordForTest(secondKey), {recordedAt: null, timer: 2, pending: false});
+    assert.deepEqual(api.attentionAcknowledgementRecordForTest(secondKey), {recordedAt: null, timer: secondTimer, pending: false});
     staleTimer();
     assert.equal(api.attentionAcknowledgementRecordForTest(firstKey), null, 'a stale cleared timer cannot recreate its session record');
 
-    timers.get(2).callback();
+    timers.get(secondTimer).callback();
     const completed = api.attentionAcknowledgementRecordForTest(secondKey);
     assert.equal(completed.timer, null);
     assert.equal(completed.pending, false);
@@ -2721,7 +3010,9 @@ async function runLayoutRestoreSuite() {
     assert.ok(source.includes('const previewZoomActions = Object.freeze'), 'visual preview zoom toolbar actions are owned by one action table');
     assert.ok(/function previewZoomButton[\s\S]*return makeButton\(\{[\s\S]*dataset: \{previewZoomAction: action\.id\}/.test(source), 'visual preview zoom buttons come from the shared button helper');
     assert.ok(source.includes('function previewZoomOptionsForKind'), 'visual preview fit caps come from one renderer options helper');
-    assert.ok(/mermaidFull: Object\.freeze\(\{[\s\S]*wheelZoom: true[\s\S]*panDrag: true/.test(source), 'Mermaid preview zoom owns wheel zoom and drag pan through renderer defaults');
+    assert.ok(/mermaidFull: Object\.freeze\(\{[\s\S]*panDrag: true/.test(source), 'Mermaid preview zoom owns drag pan through renderer defaults');
+    assert.equal(source.includes('wheelZoom'), false, 'visual previews leave every wheel gesture to native scrolling');
+    assert.equal(source.includes("bind(viewport, 'wheel'"), false, 'visual preview surfaces do not intercept native wheel scrolling');
     assert.ok(/function bindPreviewZoomDragPan[\s\S]*pointerdown[\s\S]*pointermove[\s\S]*viewport\.scrollLeft/.test(source), 'Mermaid preview drag pan is routed through the shared zoom surface');
     assert.ok(source.includes('function previewZoomScopedKey'), 'visual preview zoom state is scoped by surface context');
     assert.ok(source.includes('function svgReadableEdgeColor'), 'Mermaid SVG edges are restyled through one readable color helper');

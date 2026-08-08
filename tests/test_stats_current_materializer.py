@@ -194,6 +194,94 @@ def test_browser_observations_are_shared_as_fair_all_client_averages():
     ) == materializer.slice_generation(generation, 300, 10)
 
 
+def test_browser_failure_without_a_metric_does_not_publish_orphan_source_facts():
+    observations = (
+        Observation("failure", "browser", "browser:a", 11, "epoch:a", 1, {
+            "kind": "error", "signature": "jsf-deadbeef", "message": "boom",
+            "source": "/static/yolomux.js", "delivery_outcome": "failed",
+        }),
+        Observation("api", "browser", "browser:a", 12, "epoch:a", 2, {
+            "kind": "api", "latency_ms": 10,
+        }),
+    )
+
+    generation = _build(_snapshot(observations=observations))
+    failure_bucket = next(bucket for bucket in generation.layer(1).buckets if bucket.start == 11)
+    api_bucket = next(bucket for bucket in generation.layer(1).buckets if bucket.start == 12)
+
+    assert failure_bucket.series == ()
+    assert (failure_bucket.source_count, failure_bucket.first_observed_at, failure_bucket.last_observed_at) == (0, None, None)
+    assert api_bucket.series
+    assert (api_bucket.source_count, api_bucket.first_observed_at, api_bucket.last_observed_at) == (1, 12, 12)
+
+
+def test_browser_failure_does_not_widen_same_bucket_metric_source_facts():
+    observations = (
+        Observation("failure", "browser", "browser:a", 11, "epoch:a", 1, {
+            "kind": "error", "signature": "jsf-deadbeef", "message": "boom",
+            "source": "/static/yolomux.js", "delivery_outcome": "failed",
+        }),
+        Observation("api", "browser", "browser:a", 12, "epoch:a", 2, {
+            "kind": "api", "latency_ms": 10,
+        }),
+    )
+
+    generation = _build(_snapshot(observations=observations))
+    mixed_bucket = next(bucket for bucket in generation.layer(10).buckets if bucket.start == 10)
+
+    assert mixed_bucket.series
+    assert (mixed_bucket.source_count, mixed_bucket.first_observed_at, mixed_bucket.last_observed_at) == (1, 12, 12)
+
+
+def test_browser_perceptual_queue_and_instrumentation_signals_have_first_class_series():
+    observations = (
+        Observation("api", "browser", "browser:a", 11, "epoch:a", 1, {
+            "kind": "api", "latency_ms": 3000, "queue_ms": 2800,
+        }),
+        Observation("load", "browser", "browser:a", 12, "epoch:a", 1, {
+            "kind": "page_load", "endpoint": "/", "first_paint_ms": 20,
+            "first_contentful_paint_ms": 25, "app_ready_ms": 200,
+            "max_concurrency": 6,
+        }),
+        Observation("finder", "browser", "browser:a", 13, "epoch:a", 1, {
+            "kind": "finder_usable", "latency_ms": 120, "entry_count": 4,
+        }),
+        Observation("input", "browser", "browser:a", 14, "epoch:a", 1, {
+            "kind": "interaction", "latency_ms": 180, "input_delay_ms": 70,
+            "processing_ms": 50, "presentation_delay_ms": 60,
+            "interaction_type": "click",
+        }),
+        Observation("operation", "browser", "browser:a", 15, "epoch:a", 1, {
+            "kind": "operation_wait", "latency_ms": 3200,
+            "operation_kind": "session_files", "outcome": "ready",
+        }),
+        Observation("task", "browser", "browser:a", 16, "epoch:a", 1, {
+            "kind": "long_task", "latency_ms": 88.5,
+        }),
+        Observation("health", "browser", "browser:a", 17, "epoch:a", 1, {
+            "kind": "heartbeat", "upload_queue_depth": 17, "upload_drops": 2,
+            "upload_retries": 3, "instrumentation_cost_ms": 0.42,
+        }),
+    )
+    generation = _build(_snapshot(observations=observations))
+    bucket = next(item for item in generation.layer(10).buckets if item.start == 10)
+    values = {item.name: item.value for item in bucket.series}
+
+    assert values["browser_queue_ms"] == 2800
+    assert values["browser_first_paint_ms"] == 20
+    assert values["browser_first_contentful_paint_ms"] == 25
+    assert values["browser_app_ready_ms"] == 200
+    assert values["browser_page_max_concurrency"] == 6
+    assert values["browser_finder_usable_ms"] == 120
+    assert values["browser_input_latency_ms"] == 180
+    assert values["browser_operation_wait_ms"] == 3200
+    assert values["browser_long_task_ms"] == 88.5
+    assert values["browser_upload_queue_depth"] == 17
+    assert values["browser_upload_drops"] == 2
+    assert values["browser_upload_retries"] == 3
+    assert values["browser_instrumentation_cost_ms"] == 0.42
+
+
 def test_all_browser_sources_are_retained_in_shared_series():
     observations = tuple(
         Observation(f"browser-{index}", "browser", f"browser:{index}", 10 + index, f"epoch:{index}", 1, {
@@ -446,6 +534,128 @@ def test_measured_zero_is_a_value_while_missing_covered_slot_is_no_data():
     )
 
 
+def test_legacy_per_sample_coverage_is_compacted_before_gap_scans_without_erasing_gaps():
+    legacy = tuple(
+        CoverageEpoch("cpu", "port:7443", f"42:cpu:{int(100 + index + index * 0.4)}", 100 + index + index * 0.4, 101 + index + index * 0.4, 1, 42)
+        for index in range(5_000)
+    )
+    boundaries = (
+        CoverageEpoch("cpu", "port:7443", "positive-gap", 7_100, 7_101, 1, 42),
+        CoverageEpoch("cpu", "port:7443", "new-owner", 7_101, 7_102, 1, 43),
+        CoverageEpoch("cpu", "other", "new-source", 7_102, 7_103, 1, 42),
+        CoverageEpoch("gpu", "port:7443", "new-family", 7_103, 7_113, 10, 42),
+    )
+
+    compacted = materializer._coalesce_coverage_epochs((*legacy, *boundaries), ())
+
+    assert len(compacted) == 5
+    first = next(
+        item
+        for item in compacted
+        if (item.family, item.source_id, item.owner_generation) == ("cpu", "port:7443", 42)
+        and item.epoch_id != "positive-gap"
+    )
+    assert (first.family, first.source_id, first.started_at, first.ended_at) == (
+        "cpu", "port:7443", 100, legacy[-1].ended_at,
+    )
+    assert first.epoch_id == legacy[-1].epoch_id
+    assert all(item in compacted for item in boundaries)
+    assert materializer._coverage_gaps(
+        _snapshot(coverage=legacy),
+        legacy[0].started_at,
+        legacy[-1].ended_at,
+    ) == ()
+
+
+def test_legacy_inline_normalization_keeps_explicit_unavailable_separator():
+    before = CoverageEpoch("cpu", "port:7443", "42:cpu:100", 100, 101, 1, 42)
+    after = CoverageEpoch("cpu", "port:7443", "42:cpu:101", 101.4, 102.4, 1, 42)
+    unavailable = UnavailableSpan(
+        "cpu", "port:7443", "explicit", 101, 101.4, 1, "collector_missed", 42,
+    )
+
+    compacted = materializer._coalesce_coverage_epochs((before, after), (unavailable,))
+    gaps = materializer._coverage_gaps(
+        _snapshot(coverage=(before, after), unavailable=(unavailable,)),
+        100,
+        102.4,
+    )
+
+    assert compacted == (before, after)
+    assert [(gap.start, gap.end, gap.reason) for gap in gaps] == [
+        (101, 101.4, "collector_missed"),
+    ]
+
+
+def test_legacy_inline_normalization_preserves_nonlegacy_epochs_exactly():
+    scheduled = CoverageEpoch("gpu", "gpu:0", "scheduled:second", 110, 125, 10, 42)
+    canonical = CoverageEpoch("gpu", "gpu:0", "inline:42:gpu:first", 100, 120, 10, 42)
+    touching = CoverageEpoch("gpu", "gpu:0", "inline:42:gpu:third", 125, 130, 10, 42)
+    unavailable = UnavailableSpan(
+        "gpu", "gpu:0", "scheduled:unavailable", 130, 140, 10, "collector_missed", 42,
+    )
+    epochs = (scheduled, canonical, touching)
+
+    compacted = materializer._coalesce_coverage_epochs(epochs, (unavailable,))
+    gaps = materializer._coverage_gaps(
+        _snapshot(coverage=epochs, unavailable=(unavailable,)),
+        100,
+        140,
+    )
+
+    assert compacted == epochs
+    assert gaps == (
+        gaps[0].__class__("gpu", "gpu:0", "scheduled:unavailable", 130, 140, 10, "collector_missed"),
+    )
+
+
+def test_legacy_inline_detection_rejects_numeric_equivalent_noncanonical_ids():
+    epochs = (
+        CoverageEpoch("cpu", "host", "42:cpu:-0", 0, 100, 1, 42),
+        CoverageEpoch("cpu", "host", "42:cpu:+100", 100, 101, 1, 42),
+        CoverageEpoch("cpu", "host", "42:cpu:0101", 101, 102, 1, 42),
+        CoverageEpoch("cpu", "host", "42:cpu: 102", 102, 103, 1, 42),
+        CoverageEpoch("cpu", "host", "42:cpu:1e2", 103, 104, 1, 42),
+        CoverageEpoch("cpu", "host", "42:cpu:104", 104, 105, 1, 42),
+        CoverageEpoch("cpu", "host", "inline:42:cpu:stable", 105, 106, 1, 42),
+        CoverageEpoch("cpu", "host", "42:cpu:106", 106, 107, 1, 42),
+        CoverageEpoch("cpu", "host", "scheduled:stable", 107, 108, 1, 42),
+    )
+    unavailable = UnavailableSpan(
+        "cpu", "host", "explicit", 108, 109, 1, "collector_missed", 42,
+    )
+
+    assert [materializer._is_legacy_inline_epoch(item) for item in epochs] == [
+        False, False, False, False, False, True, False, True, False,
+    ]
+    assert materializer._coalesce_coverage_epochs(epochs, (unavailable,)) == epochs
+    gaps = materializer._coverage_gaps(
+        _snapshot(coverage=epochs, unavailable=(unavailable,)),
+        0,
+        109,
+    )
+    assert gaps == (
+        gaps[0].__class__("cpu", "host", "explicit", 108, 109, 1, "collector_missed"),
+    )
+
+
+def test_legacy_inline_normalization_compacts_interleaved_sources_per_logical_run():
+    epochs = tuple(
+        CoverageEpoch(
+            "gpu", source, f"42:gpu:{started_at}", started_at, started_at + 10, 10, 42,
+        )
+        for started_at in (100, 110, 120)
+        for source in ("gpu:0", "gpu:1")
+    )
+
+    compacted = materializer._coalesce_coverage_epochs(epochs, ())
+
+    assert compacted == (
+        CoverageEpoch("gpu", "gpu:0", "42:gpu:120", 100, 130, 10, 42),
+        CoverageEpoch("gpu", "gpu:1", "42:gpu:120", 100, 130, 10, 42),
+    )
+
+
 def test_superseded_dynamic_source_does_not_poison_current_family_coverage():
     snapshot = _snapshot(
         observations=(_cpu(0, 1, source="retired:web"), _cpu(20, 2, source="port:8881")),
@@ -493,16 +703,14 @@ def test_coverage_only_incremental_refreshes_no_data_without_rebuilding_buckets(
     )
 
 
-def test_successful_empty_usage_scan_is_covered_and_real_scan_gap_serves_tokens_and_cost():
+def test_usage_scan_cadence_does_not_turn_sparse_event_buckets_into_coverage_gaps():
     snapshot = _snapshot(coverage=(
         CoverageEpoch("agent_tokens", "scan", "scan-1", 0, 10, 10, 1),
         CoverageEpoch("agent_tokens", "scan", "scan-2", 20, None, 10, 1),
     ))
-    gaps = _build(snapshot, until=30).layer(10).no_data
-    assert {(gap.family, gap.start, gap.end) for gap in gaps} == {
-        ("agent_tokens", 10, 20),
-        ("cost", 10, 20),
-    }
+    layer = _build(snapshot, until=30).layer(10)
+    assert layer.no_data == ()
+    assert all(bucket.series == () for bucket in layer.buckets)
 
 
 def test_explicit_unrecoverable_span_is_served_without_fabricating_coverage():

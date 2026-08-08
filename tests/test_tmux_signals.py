@@ -1,7 +1,19 @@
+from http.client import HTTPConnection
 import signal
+import threading
+import time
 from types import SimpleNamespace
 
+import pytest
+
+from tests.tmux_runtime import adaptive_tmux_poll_interval
+from tests.tmux_runtime import run_isolated_tmux
+from tests.tmux_runtime import start_isolated_default_tmux_runtime
+from tests.tmux_runtime import start_isolated_tmux_runtime
+from tests.tmux_runtime import stop_isolated_tmux_runtime
 from yolomux_lib import tmux_signals
+from yolomux_lib import tmux_utils
+from yolomux_lib.server import TmuxWebtermHTTPServer
 from yolomux_lib.tmux_signals import install_tmux_signal_monitoring
 from yolomux_lib.tmux_signals import parse_tmux_signal_snapshot
 from yolomux_lib.tmux_signals import tmux_signal_subscription_commands
@@ -10,6 +22,141 @@ from yolomux_lib.tmux_signals import tmux_control_attach_command
 from yolomux_lib.tmux_signals import tmux_control_event_relevant
 from yolomux_lib.tmux_signals import tmux_control_event_type
 from yolomux_lib.tmux_signals import window_record_key
+
+
+def test_tmux_signal_watcher_status_preserves_typed_absence_states():
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: [], on_event=lambda event: None)
+
+    assert watcher.status_payload() == {
+        "state": "never-started",
+        "healthy": False,
+        "reason_code": "not_started",
+        "reason": "Tmux signal watcher has not been started",
+        "sessions": [],
+        "thread_alive": False,
+        "process_pid": 0,
+    }
+
+    watcher._set_status("attaching", sessions=["alpha"])
+    attaching = watcher.status_payload()
+    assert attaching["state"] == "attaching"
+    assert attaching["healthy"] is None
+    assert attaching["sessions"] == ["alpha"]
+
+    watcher._set_status("no-sessions", sessions=[])
+    no_sessions = watcher.status_payload()
+    assert no_sessions["state"] == "no-sessions"
+    assert no_sessions["healthy"] is True
+
+    watcher._set_status("exited", error="tmux control-mode start failed: refused")
+    exited = watcher.status_payload()
+    assert exited["state"] == "exited"
+    assert exited["healthy"] is False
+    assert exited["reason_code"] == "control_client_exited"
+    assert exited["reason"] == "tmux control-mode start failed: refused"
+
+
+def test_client_event_lifecycle_requires_a_live_tmux_control_client(
+    monkeypatch,
+    tmp_path,
+    make_tmux_webterm_app,
+    no_control_socket,
+    isolated_yoagent_conversation_state,
+):
+    """An event-watch thread without a control client must not suppress fallback polling."""
+
+    app = make_tmux_webterm_app(())
+    try:
+        app.start_client_event_watcher()
+        assert app.tmux_signal_event_watcher is not None
+        assert app.tmux_signal_event_watcher.thread is not None
+        assert app.tmux_signal_event_watcher.thread.is_alive()
+        assert app.tmux_signal_event_watcher_healthy() is False
+    finally:
+        app.stop_client_event_watcher()
+
+
+def test_client_event_sse_lifecycle_recreates_a_stopped_tmux_control_client(
+    monkeypatch,
+    tmp_path,
+    make_tmux_webterm_app,
+    no_control_socket,
+    isolated_yoagent_conversation_state,
+):
+    """A second SSE subscriber must repair a stopped control client under its live parent."""
+
+    runtime = start_isolated_tmux_runtime(monkeypatch, tmp_path)
+    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    app = make_tmux_webterm_app(tuple(runtime.sessions))
+    server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    first_connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    second_connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    rows = []
+    try:
+        first_connection.request("GET", "/api/client-events?channels=status")
+        first_response = first_connection.getresponse()
+        assert first_response.status == 200
+        assert first_response.readline().decode("utf-8") == "event: ready\n"
+        stopped_watcher = app.tmux_signal_event_watcher
+        assert stopped_watcher is not None
+        stopped_watcher.stop()
+        assert stopped_watcher.thread is not None
+        stopped_watcher.thread.join(timeout=2.0)
+        assert stopped_watcher.thread.is_alive() is False
+
+        second_connection.request("GET", "/api/client-events?channels=status")
+        second_response = second_connection.getresponse()
+        assert second_response.status == 200
+        assert second_response.readline().decode("utf-8") == "event: ready\n"
+        assert app.tmux_signal_event_watcher is not stopped_watcher
+        deadline = time.monotonic() + 4.0
+        attempt = 0
+        while time.monotonic() < deadline:
+            result = run_isolated_tmux(runtime, "list-clients", "-F", "#{client_control_mode}\\t#{client_session}")
+            rows = [line for line in result.stdout.splitlines() if line.startswith("1\\t")]
+            if rows:
+                break
+            time.sleep(adaptive_tmux_poll_interval(attempt))
+            attempt += 1
+        assert rows == [f"1\\t{runtime.sessions[0]}"]
+        assert app.tmux_signal_event_watcher_healthy() is True
+    finally:
+        first_connection.close()
+        second_connection.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2.0)
+        assert server_thread.is_alive() is False
+        stop_isolated_tmux_runtime(runtime)
+
+
+def test_readonly_control_attach_starts_on_fixture_default_server(monkeypatch, tmp_path):
+    """The normal no-socket configuration must create an observable control client."""
+
+    runtime = start_isolated_default_tmux_runtime(monkeypatch, tmp_path)
+    watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: list(runtime.sessions), on_event=lambda _event: None)
+    rows = []
+    try:
+        assert watcher.start() is True
+        deadline = time.monotonic() + 4.0
+        attempt = 0
+        while time.monotonic() < deadline:
+            result = run_isolated_tmux(runtime, "list-clients", "-F", "#{client_control_mode}\\t#{client_session}")
+            rows = [line for line in result.stdout.splitlines() if line.startswith("1\\t")]
+            if rows:
+                break
+            time.sleep(adaptive_tmux_poll_interval(attempt))
+            attempt += 1
+        assert rows == [f"1\\t{runtime.sessions[0]}"]
+        assert watcher.status_payload()["state"] == "attached"
+    finally:
+        watcher.stop()
+        assert watcher.thread is not None
+        watcher.thread.join(timeout=2.0)
+        assert watcher.thread.is_alive() is False
+        stop_isolated_tmux_runtime(runtime)
 
 
 def test_window_record_key_prefers_record_key_and_falls_back_to_session_window():
@@ -196,11 +343,41 @@ def test_run_control_client_spawns_with_parent_death_preexec(monkeypatch):
         return FakeProcess()
 
     monkeypatch.setattr(tmux_signals.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/control-client.sock")
 
     watcher = tmux_signals.TmuxSignalEventWatcher(sessions=lambda: ["alpha"], on_event=lambda event: None)
     watcher.run_control_client("alpha")
 
     assert captured["kwargs"].get("preexec_fn") is tmux_signals.set_control_client_parent_death_signal
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        (tmux_utils.TmuxSocketTargetError("-C attach-session", ["-C", "attach-session"]), "tmux control-mode attach refused"),
+        (OSError("tmux executable is unavailable"), "tmux control-mode start failed"),
+    ],
+)
+def test_control_client_pre_spawn_failure_reports_never_started(monkeypatch, failure, expected_reason):
+    errors = []
+    watcher = tmux_signals.TmuxSignalEventWatcher(
+        sessions=lambda: ["alpha"],
+        on_event=lambda _event: None,
+        on_error=errors.append,
+    )
+
+    if isinstance(failure, tmux_utils.TmuxSocketTargetError):
+        monkeypatch.setattr(tmux_signals, "tmux_control_attach_command", lambda _session: (_ for _ in ()).throw(failure))
+    else:
+        monkeypatch.setattr(tmux_signals.subprocess, "Popen", lambda *_args, **_kwargs: (_ for _ in ()).throw(failure))
+
+    watcher.run_control_client("alpha")
+
+    payload = watcher.status_payload()
+    assert payload["state"] == "never-started"
+    assert payload["reason_code"] == "not_started"
+    assert expected_reason in payload["reason"]
+    assert errors == [payload["reason"]]
 
 
 def test_tmux_control_event_filter_accepts_signal_notifications():

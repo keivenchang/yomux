@@ -61,6 +61,18 @@ def install_chat_defaults(monkeypatch, webapp):
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: {"type": args[0] if args else ""})
 
 
+def test_yoagent_intent_promotes_nested_error_to_typed_top_level_response():
+    webapp = app_module.TmuxWebtermApp(["1"])
+    try:
+        payload, status = webapp.yoagent_controller.yoagent_intent({})
+    finally:
+        webapp.stop_auto_approve_all()
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert payload["error"] == "missing target session"
+    assert payload["user_message"] == payload["job_preview"]["user_message"]
+
+
 def test_yoagent_chat_send_by_bare_number_executes_verified_send_without_refusal(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     target_calls = []

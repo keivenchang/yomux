@@ -11,6 +11,7 @@ const source = fs.readFileSync('static_src/js/yolomux/85_debug_panel.js', 'utf8'
 const currentSource = fs.readFileSync('static_src/js/yolomux/84_stats_current.js', 'utf8');
 const bootstrapSource = fs.readFileSync('static_src/js/yolomux/00_bootstrap_state.js', 'utf8');
 const coreSource = fs.readFileSync('static_src/js/yolomux/10_core_utils.js', 'utf8');
+const shareSource = fs.readFileSync('static_src/js/yolomux/94_share_replay.js', 'utf8');
 const terminalSource = fs.readFileSync('static_src/js/yolomux/99_terminal_boot.js', 'utf8');
 const css = fs.readFileSync('static_src/css/yolomux/30_preferences_changes.css', 'utf8');
 const localeEn = JSON.parse(fs.readFileSync('static_src/locales/en.json', 'utf8'));
@@ -47,6 +48,18 @@ function sourceFunction(name, nextName) {
   return source.slice(start, end);
 }
 
+const clientCapabilityGuardSource = bootstrapSource.slice(
+  bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()'),
+  bootstrapSource.indexOf('\nconst shareToken =', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
+);
+
+function clientCapabilityFixtureSource(unscopedHostRequests) {
+  return `
+    const clientCapabilityState = Object.freeze({unscopedHostRequests: ${JSON.stringify(unscopedHostRequests === true)}});
+    ${clientCapabilityGuardSource}
+  `;
+}
+
 test('the established Graph API-SSE System Logs shell remains the renderer owner', () => {
   assert.match(source, /function debugPanelHtml\(\)/);
   assert.match(source, /debugSubTabButtonHtml\('graph'/);
@@ -58,6 +71,158 @@ test('the established Graph API-SSE System Logs shell remains the renderer owner
   assert.match(source, /function debugLogsInnerHtml\(/);
   assert.doesNotMatch(source, /data-stats-current-view/);
   assert.equal(fs.existsSync('static_src/js/yolomux/83_stats_panel.js'), false);
+});
+
+test('Logs normalizes browser and server records without duplicate IDs or unsafe extra fields', () => {
+  const secret = 'fixture-share-token-never-log';
+  const tokenized = label => `${label}?token=${secret}`;
+  const classifierContext = {result: null, jsDebugLogLevels: ['info', 'warning', 'debug', 'error']};
+  vm.runInNewContext(`
+    ${sourceFunction('debugEventDetailText', 'debugClientLogLevel')}
+    ${sourceFunction('debugClientLogLevel', 'recordJsDebugStatsDiagnostic')}
+    const event = {type: 'client_failure', error: 'graph activity failed'};
+    result = {level: debugClientLogLevel(event), detail: debugEventDetailText(event)};
+  `, classifierContext);
+  assert.deepEqual({...classifierContext.result}, {level: 'error', detail: 'graph activity failed'});
+  const modelSource = source.slice(
+    source.indexOf('function debugClientLogRecord('),
+    source.indexOf('\nfunction debugLogTimeText('),
+  );
+  const clipboardSource = source.slice(
+    source.indexOf('function debugLogTimeText('),
+    source.indexOf('\nfunction debugLogsCopyButtonLabel('),
+  );
+  const pacificTimeStart = coreSource.indexOf('const diagnosticPacificTimeFormatter');
+  const pacificTimeSource = coreSource.slice(
+    pacificTimeStart,
+    coreSource.indexOf('\nfunction recordJsDebugEvent(', pacificTimeStart),
+  );
+  const context = {
+    Date,
+    Intl,
+    Number,
+    Object,
+    String,
+    Set,
+    result: null,
+    jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
+    jsDebugLogsState: {
+      clearedAt: 0,
+      levels: new Set(['warning', 'error']),
+      payload: [
+        {id: 7, timestamp: 100, level: 'error', source: 'watchd', category: 'transport', message: tokenized('timeout'), request_id: tokenized('r-watchd'), route: tokenized('/api/fs/watch-diff'), event_type: tokenized('watch-update'), delivery_outcome: tokenized('timeout'), unsafe: secret},
+        {id: 7, timestamp: 100, level: 'error', source: 'watchd', category: 'transport', message: 'duplicate', request_id: 'r-watchd'},
+      ],
+    },
+    jsDebugEvents: [
+      {id: 9, ts: '1970-01-01T00:01:41.000Z', type: 'stats_history', level: 'warning', source: '/stats/current', message: tokenized('graph stalled'), requestId: tokenized('r-graph'), route: tokenized('/stats/current'), eventType: tokenized('graph-activity'), deliveryOutcome: tokenized('stalled'), unsafe: secret},
+    ],
+    shareDebugSecretValues: () => [],
+    debugClientLogLevel: event => event.level,
+    debugEventDetailText: event => event.message,
+    debugEventStatusText: () => '',
+    debugPhaseTimingText: () => '',
+  };
+  const replayRedactorSource = shareSource.slice(
+    shareSource.indexOf('function shareReplayRedactText('),
+    shareSource.indexOf('\nfunction shareReplayAttributeIsTokenBearing('),
+  );
+  const diagnosticRedactorSource = shareSource.slice(
+    shareSource.indexOf('function shareRedactSecretText('),
+    shareSource.indexOf('\nfunction shareDebugNumber('),
+  );
+  vm.runInNewContext(`
+    ${replayRedactorSource}
+    ${diagnosticRedactorSource}
+    ${pacificTimeSource}
+    ${modelSource}
+    ${clipboardSource}
+    const records = debugMergedLogRecords();
+    result = {records, clipboard: debugLogsTextForClipboard()};
+  `, context);
+  assert.equal(context.result.records.length, 2);
+  assert.deepEqual([...context.result.records.map(record => record.id)], ['client:9', 'server:7']);
+  assert.equal(JSON.stringify(context.result).includes(secret), false);
+  assert.match(JSON.stringify(context.result.records), /\[redacted-share-token\]/);
+  for (const record of context.result.records) {
+    for (const field of ['message', 'requestId', 'route', 'event', 'delivery']) {
+      assert.match(record[field], /\[redacted-share-token\]/, `${record.id} redacts ${field}`);
+    }
+  }
+  assert.match(context.result.records[0].message, /^graph stalled\?token=/);
+  assert.match(context.result.records[0].requestId, /^r-graph\?token=/);
+  assert.match(context.result.records[0].event, /^graph-activity\?token=/);
+  assert.match(context.result.records[1].message, /^timeout\?token=/);
+  assert.match(context.result.records[1].requestId, /^r-watchd\?token=/);
+  assert.match(context.result.records[1].route, /^\/api\/fs\/watch-diff\?token=/);
+  assert.match(context.result.clipboard, /request=r-graph/);
+  assert.match(context.result.clipboard, /delivery=timeout/);
+  assert.doesNotMatch(context.result.clipboard, new RegExp(`${secret}|duplicate`));
+});
+
+test('Logs formats failure evidence with an exact Pacific wall time', () => {
+  const start = coreSource.indexOf('const diagnosticPacificTimeFormatter');
+  const end = coreSource.indexOf('\nfunction jsDebugFailureEvents(', start);
+  assert.notEqual(start, -1, 'shared Pacific diagnostic time owner exists');
+  assert.notEqual(end, -1, 'Pacific diagnostic time owner precedes failure evidence');
+  const fixedTime = Date.parse('2026-01-15T12:34:56.000Z');
+  class FixedDate extends Date {
+    static now() { return fixedTime; }
+  }
+  const context = {
+    Date: FixedDate,
+    Intl,
+    Number,
+    Object,
+    String,
+    jsDebugEventSeq: 0,
+    jsDebugEvents: [],
+    jsDebugEventLimit: 500,
+    shareRedactDiagnosticValue: value => value,
+    scheduleJsDebugPanelRefresh: () => {},
+    result: null,
+  };
+  vm.runInNewContext(`
+    ${coreSource.slice(start, end)}
+    result = {
+      formatted: diagnosticPacificWallTime(${fixedTime}),
+      event: recordJsDebugEvent('stats_history', {level: 'warning'}),
+    };
+  `, context);
+  assert.equal(context.result.formatted, '2026-01-15 04:34:56 PST');
+  assert.equal(context.result.event.ts, '2026-01-15T12:34:56.000Z');
+  assert.equal(context.result.event.wallTime, '2026-01-15 04:34:56 PST');
+});
+
+test('the mixed browser diagnostic ring retains the newest 500 records in exact order', () => {
+  const start = coreSource.indexOf('const diagnosticPacificTimeFormatter');
+  const end = coreSource.indexOf('\nfunction jsDebugFailureClassification(', start);
+  const context = {
+    Date,
+    Intl,
+    Number,
+    Object,
+    String,
+    jsDebugEventSeq: 0,
+    jsDebugEvents: [],
+    jsDebugEventLimit: 500,
+    shareRedactDiagnosticValue: value => value,
+    scheduleJsDebugPanelRefresh: () => {},
+    result: null,
+  };
+  vm.runInNewContext(`
+    ${coreSource.slice(start, end)}
+    const types = ['api', 'sse', 'client_failure', 'stats_history', 'heartbeat'];
+    for (let index = 1; index <= 777; index += 1) {
+      recordJsDebugEvent(types[(index - 1) % types.length], {ordinal: index});
+    }
+    result = jsDebugEvents.map(event => ({id: event.id, type: event.type, ordinal: event.ordinal}));
+  `, context);
+  assert.equal(context.result.length, 500);
+  assert.deepEqual(context.result.map(event => event.id), Array.from({length: 500}, (_unused, index) => index + 278));
+  assert.deepEqual(context.result.map(event => event.ordinal), context.result.map(event => event.id));
+  assert.deepEqual(context.result.slice(0, 5).map(event => event.type), ['client_failure', 'stats_history', 'heartbeat', 'api', 'sse']);
+  assert.equal(context.result.at(-1).type, 'sse');
 });
 
 test('pricing links use one synchronous external-open owner and keep in-app links untouched', () => {
@@ -91,6 +256,17 @@ test('zero-valued CPU samples remain visibly inside the chart viewBox', () => {
   vm.runInNewContext(`${geometrySource}\n${plotSource}\nresult = {zero: debugGraphPlotYForValue(0, 100), max: debugGraphPlotYForValue(100, 100), height: jsDebugGraphGeometry.height};`, context);
   assert.equal(context.result.zero, context.result.height - 4, 'a valid 0% web CPU line is not clipped below the SVG');
   assert.equal(context.result.max, 8, 'the top plotting bound stays unchanged');
+});
+
+test('CPU charts preserve multi-core peaks and expand their axis beyond 100%', () => {
+  const axisSource = sourceFunction('debugGraphChartAxisMax', 'debugGraphChartCapacityMax');
+  const cpuGroup = /\{key: 'cpu',[^\n]+/.exec(source)?.[0] || '';
+  const systemCpu = /\{key: 'systemCpu',[^\n]+/.exec(source)?.[0] || '';
+  assert.doesNotMatch(cpuGroup, /fixedMax: 100/);
+  assert.doesNotMatch(systemCpu, /Math\.min\(100/);
+  const context = {Number, Math, result: null, debugGraphNiceAxisMax: value => Math.ceil(value / 10) * 10};
+  vm.runInNewContext(`${axisSource}\nresult = debugGraphChartAxisMax({unit: 'percent'}, 157.973);`, context);
+  assert.equal(context.result, 160);
 });
 
 test('Services omits the duplicated web process while CPU names it clearly', () => {
@@ -268,6 +444,20 @@ test('one shared spike-compression descriptor preserves token behavior and makes
   assert.match(source, /data-js-debug-chart-axis-break/);
 });
 
+test('a live service transport failure keeps its typed reason and operator-specific label', () => {
+  const start = source.indexOf('function debugSystemServiceState(');
+  const end = source.indexOf('\nconst DEBUG_SYSTEM_SERVICE_FRESH_MS', start);
+  assert.notEqual(start, -1, 'service-state owner exists');
+  assert.notEqual(end, -1, 'service-state owner has a bounded source region');
+  const functionText = source.slice(start, end);
+  const context = {Number, String, result: null, t: key => key};
+  vm.runInNewContext(`${functionText}\nresult = debugSystemServiceState({pid: 42, healthy: false, transport_reason: 'rpc_refused', last_failure: 'status transport refused'});`, context);
+  assert.equal(context.result.reason, 'rpc_refused');
+  assert.match(context.result.label, /transport/i);
+  assert.doesNotMatch(context.result.label, /not running/i);
+  assert.equal(context.result.tone, 'bad');
+});
+
 test('the System sampler renders stalled usage as an explicit bounded warning', () => {
   const functionText = sourceFunction('debugSystemStatsSamplerCardHtml', 'debugSystemCpuBudgetCardHtml');
   const context = {result: null};
@@ -338,10 +528,18 @@ test('System renders bounded recurring-work diagnostics without client identity 
 });
 
 test('the exact current snapshot feeds the established renderer without legacy APIs', () => {
-  assert.match(source, /\/api\/stats-snapshot\?range_seconds=/);
+  assert.match(currentSource, /exactUrl\('\/api\/stats-snapshot'/);
+  assert.doesNotMatch(source, /\/api\/stats-snapshot/);
   assert.match(source, /function applyJsDebugCurrentSnapshot\(/);
   assert.match(source, /debugGraphApplyServerRecord\(jsDebugCurrentBucketRecord/);
   assert.doesNotMatch(source, /fetchJsDebugStatsJson\(jsDebugStatsSampleQuery/);
+});
+
+test('cost backfill labels distinguish unknown, pending, and complete cursor state', () => {
+  assert.match(source, /const jsDebugUsageAtomBackfill = \{state: 'unknown'/);
+  assert.match(source, /debugGraphApplyUsageAtomBackfill\(snapshot\.usage_atom_backfill\)/);
+  assert.match(source, /backfillUnknown/);
+  assert.match(source, /backfillPending/);
 });
 
 test('browser observations share the topbar ping and keep a calm bounded cadence', () => {
@@ -349,8 +547,10 @@ test('browser observations share the topbar ping and keep a calm bounded cadence
   assert.match(source, /'\/api\/stats-observations'/);
   assert.match(bootstrapSource, /const statsWriterFence = \(\(\) =>/);
   assert.match(bootstrapSource, /Object\.freeze\(\{protocolVersion, schemaGeneration\}\)/);
-  assert.match(source, /protocol_version: statsWriterFence\.protocolVersion/);
-  assert.match(source, /schema_generation: statsWriterFence\.schemaGeneration/);
+  assert.match(source, /function jsDebugObservationBatchForEntries\(entries, fence = statsWriterFence\)/);
+  assert.match(source, /protocol_version: fence\.protocolVersion/);
+  assert.match(source, /schema_generation: fence\.schemaGeneration/);
+  assert.match(source, /jsDebugObservationBatchForEntries\(validEntries\.map\(item => item\.entry\), statsWriterFence\)/);
   assert.doesNotMatch(source, /jsDebugCurrentObservationProtocol|jsDebugCurrentObservationSchema|= 23/);
   assert.match(source, /Math\.min\(jsDebugCurrentObservationRetryMaxMs, state\.retryMs \* 2\)/);
   assert.match(source, /recordJsDebugClientHealthObservation\(latencyMs, bandwidthBytes, sampleTimeMs\)/);
@@ -362,47 +562,855 @@ test('browser observations share the topbar ping and keep a calm bounded cadence
   assert.equal((source.match(/apiFetchJson\(url/g) || []).length, 1, 'YO!stats must reuse the topbar health round trip');
 });
 
-testAsync('browser observation writer fences acknowledge, back off, stop terminal 426, and restart with a new page epoch', async () => {
+test('client failures use the existing bounded observation uploader without debug mode or private content', () => {
+  assert.match(coreSource, /installJsDebugEventCapture\(\);/);
+  assert.match(source, /'error', 'unhandledrejection'/);
+  assert.match(source, /payload\.signature = event\.type === 'stats_history'/);
+  assert.match(source, /\? producerSignature[\s\S]*: jsDebugFailureSignature/);
+  assert.match(source, /payload\.message = jsDebugFailureText/);
+  assert.match(source, /const stack = jsDebugFailureStack/);
+  assert.match(source, /if \(stack\) payload\.stack = stack/);
+  assert.match(coreSource, /function jsDebugFailureClassification\(event\)/);
+  assert.match(source, /payload\.source = correlation\.source/);
+  assert.match(source, /const jsDebugObservationUploadMaxBytes = 120 \* 1024/);
+  assert.match(source, /const jsDebugObservationUploadMaxItems = 100/);
+  assert.match(source, /for \(const event of jsDebugEvents\) recordJsDebugEventForGraph\(event\)/);
+  assert.doesNotMatch(source, /payload\.(?:typed_text|file_contents|input_value|document_text)/);
+});
+
+test('browser observation uploader emits a periodic heartbeat when the page is otherwise idle', () => {
+  assert.match(source, /const jsDebugCurrentObservationHeartbeatMs = 10_000/);
+  assert.match(source, /function installJsDebugCurrentObservationLiveness\(\)[\s\S]*recordJsDebugClientHealthObservation\(0, 0\)[\s\S]*setInterval/);
+  assert.match(source, /installJsDebugCurrentObservationLiveness\(\);/);
+  const functionText = source.slice(
+    source.indexOf('function installJsDebugCurrentObservationLiveness()'),
+    source.indexOf('\nfunction jsDebugBrowserFamily()'),
+  );
+  const runFixture = unscopedHostRequests => {
+    const context = {calls: [], timers: [], jsDebugCurrentObservationState: {livenessTimer: null}};
+    vm.runInNewContext(`
+      const jsDebugCurrentObservationHeartbeatMs = 10000;
+      function recordJsDebugClientHealthObservation(...args) { calls.push(args); }
+      function setInterval(callback, delay) { timers.push({callback, delay}); return 91; }
+      ${clientCapabilityFixtureSource(unscopedHostRequests)}
+      ${functionText}
+    `, context);
+    return context;
+  };
+  const denied = runFixture(false);
+  assert.deepEqual(denied.calls, [], 'share-scoped clients do not queue host observation heartbeats');
+  assert.deepEqual(denied.timers, [], 'share-scoped clients do not install the host heartbeat timer');
+  const context = runFixture(true);
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0]], 'boot queues an idle heartbeat immediately');
+  assert.equal(context.timers.length, 1, 'boot owns exactly one periodic heartbeat timer');
+  assert.equal(context.timers[0].delay, 10000);
+  context.timers[0].callback();
+  assert.deepEqual(context.calls.map(args => [args[0], args[1]]), [[0, 0], [0, 0]], 'the periodic timer emits another heartbeat without other traffic');
+});
+
+test('client failure observations are signed, source-bounded, and omit arbitrary event fields', () => {
+  const functionText = source.slice(
+    source.indexOf('function jsDebugBrowserFamily('),
+    source.indexOf('\nconst jsDebugObservationUploadMaxBytes'),
+  );
+  const failureHelpers = coreSource.slice(
+    coreSource.indexOf('function jsDebugFailureText('),
+    coreSource.indexOf('\nfunction recordApiDebugEvent('),
+  );
+  const failureClassifier = coreSource.slice(
+    coreSource.indexOf('function jsDebugFailureClassification('),
+    coreSource.indexOf('\nfunction jsDebugFailureEvents('),
+  );
+  const context = {
+    result: null,
+    jsDebugCurrentObservationState: {epoch: 'epoch-1', instrumentationCostMs: 0},
+    jsDebugStatsClientIdForRequest: () => 'client-1',
+    performanceNow: () => 0,
+    reloadClientJourneyId: 'j-reload-test',
+    bootstrap: {clientRevision: 'test-revision'},
+    navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
+    window: {location: {origin: 'https://localhost:7774', pathname: '/'}},
+    jsDebugEndpointText: value => String(value || '').split('?', 1)[0],
+    shareRedactDiagnosticValue: value => value,
+  };
+  vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
+    key: 'epoch-1:error:1',
+    event: {
+      type: 'error', ts: '2026-08-04T12:00:00.000Z',
+      message: 'render failed', stack: 'Error: render failed\\n at paint (/static/yolomux.js:10:2)',
+      source: '/static/yolomux.js?secret=value', line: 10, column: 2,
+      signature: 'jsf-deadbeef', provenance: 'confirmed_real', typedText: 'do not upload', fileContents: 'private',
+    },
+  });`, context);
+  assert.deepEqual(Object.keys(context.result.payload).sort(), [
+    'browser_family', 'code_revision', 'column', 'delivery_outcome', 'event_type',
+    'journey_id', 'kind', 'line', 'message', 'provenance', 'route', 'signature', 'source', 'stack',
+  ]);
+  assert.equal(context.result.payload.kind, 'error');
+  assert.equal(context.result.payload.source, '/static/yolomux.js');
+  assert.match(context.result.payload.signature, /^jsf-[0-9a-f]{8}$/);
+  assert.notEqual(context.result.payload.signature, 'jsf-deadbeef');
+  assert.equal(context.result.payload.provenance, 'confirmed_real');
+  vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
+    key: 'epoch-1:error:2',
+    event: {type: 'error', ts: '2026-08-04T12:01:00.000Z', message: 'unmarked', source: '/static/yolomux.js'},
+  });`, context);
+  assert.equal(Object.hasOwn(context.result.payload, 'provenance'), false);
+});
+
+test('controlled API probe producer preserves the fixed source and provenance', () => {
+  const start = coreSource.indexOf('function recordApiDebugEvent(');
+  const end = coreSource.indexOf('\nfunction recordApiDebugResponseBytes(', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const recordSource = coreSource.slice(start, end);
+  const context = {
+    result: null,
+    performanceNow: () => 10,
+    jsDebugUrlText: value => String(value),
+    jsDebugEndpointText: value => String(value).split('?', 1)[0],
+    jsDebugDurationMs: () => 0,
+    jsDebugErrorText: value => String(value),
+    jsDebugFailureSource: value => String(value).split('?', 1)[0],
+    recordJsDebugEvent: (_type, payload) => payload,
+  };
+  vm.runInNewContext(`${recordSource}
+    result = recordApiDebugEvent('/__p0_negative_error_probe__', 'GET', 10, {
+      status: 500, ok: false, error: 'P0 fixed negative probe', requestId: 'r-p0-negative-fixed',
+      source: '/__p0_negative_error_probe__?private=value', provenance: 'controlled_probe',
+    });`, context);
+  assert.equal(context.result.source, '/__p0_negative_error_probe__');
+  assert.equal(context.result.provenance, 'controlled_probe');
+  assert.equal(context.result.requestId, 'r-p0-negative-fixed');
+});
+
+test('typed YO!stats warnings use the same durable browser-observation path', () => {
+  const functionText = source.slice(
+    source.indexOf('function jsDebugBrowserFamily('),
+    source.indexOf('\nconst jsDebugObservationUploadMaxBytes'),
+  );
+  const failureHelpers = coreSource.slice(
+    coreSource.indexOf('function jsDebugFailureText('),
+    coreSource.indexOf('\nfunction recordApiDebugEvent('),
+  );
+  const failureClassifier = coreSource.slice(
+    coreSource.indexOf('function jsDebugFailureClassification('),
+    coreSource.indexOf('\nfunction jsDebugFailureEvents('),
+  );
+  const context = {
+    result: null,
+    jsDebugCurrentObservationState: {epoch: 'epoch-1', instrumentationCostMs: 0},
+    jsDebugStatsClientIdForRequest: () => 'client-1',
+    performanceNow: () => 0,
+    reloadClientJourneyId: 'j-reload-test',
+    bootstrap: {clientRevision: 'test-revision'},
+    navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
+    window: {location: {origin: 'https://localhost:7774', pathname: '/'}},
+    jsDebugEndpointText: value => String(value || '').split('?', 1)[0],
+    shareRedactDiagnosticValue: value => value,
+  };
+  vm.runInNewContext(`${failureHelpers}\n${failureClassifier}\n${sourceFunction('jsDebugCurrentFailureCorrelation', 'jsDebugCurrentObservationReceiptBarrier')}\n${functionText}\nresult = jsDebugCurrentObservationFromEvent({
+    key: 'epoch-1:stats:1',
+    event: {
+      type: 'stats_history', level: 'warning', ts: '2026-08-05T12:00:00.000Z',
+      message: 'YO!stats stream initialization unavailable: stats capabilities fields are not exact',
+      route: '/api/stats-stream', requestId: 'r-stats-1', eventType: 'stats-generation',
+      wallTime: '2026-08-05 05:00:00 PDT', deliveryOutcome: 'stalled', typedText: 'do not upload',
+    },
+  });`, context);
+  assert.equal(context.result.payload.kind, 'warning');
+  assert.equal(context.result.payload.source, '/api/stats-stream');
+  assert.equal(context.result.payload.request_id, 'r-stats-1');
+  assert.equal(context.result.payload.route, '/api/stats-stream');
+  assert.equal(context.result.payload.event_type, 'stats-generation');
+  assert.equal(context.result.payload.wall_time, '2026-08-05 05:00:00 PDT');
+  assert.equal(context.result.payload.delivery_outcome, 'stalled');
+  assert.match(context.result.payload.signature, /^jsf-[0-9a-f]{8}$/);
+  assert.equal(Object.hasOwn(context.result.payload, 'typedText'), false);
+});
+
+testAsync('browser observation writer fences acknowledge, retry authentication, and discard only rejected batches', async () => {
   const uploaderSource = source.slice(
-    source.indexOf('function queueJsDebugCurrentObservation('),
+    source.indexOf('function jsDebugCurrentObservationEventSnapshot('),
     source.indexOf('\nfunction recordApiDebugResponseBytesForGraph('),
   );
-  const makeUploader = (fence, epoch) => {
+  const endpointStart = coreSource.indexOf('function jsDebugEndpointText(');
+  const endpointSource = coreSource.slice(endpointStart, coreSource.indexOf('\nfunction jsDebugRoundedMs(', endpointStart));
+  const byteLengthStart = coreSource.indexOf('function utf8ByteLength(');
+  const byteLengthSource = coreSource.slice(byteLengthStart, coreSource.indexOf('\nfunction domDataAttributeName(', byteLengthStart));
+  const failureClassifierSource = coreSource.slice(
+    coreSource.indexOf('function jsDebugFailureClassification('),
+    coreSource.indexOf('\nfunction jsDebugFailureEvents('),
+  );
+  const recordEventSource = coreSource.slice(
+    coreSource.indexOf('function recordJsDebugEvent('),
+    coreSource.indexOf('\nfunction jsDebugFailureClassification('),
+  );
+  const clearEventsSource = coreSource.slice(
+    coreSource.indexOf('function clearJsDebugEvents('),
+    coreSource.indexOf('\nfunction runJsDebugPanelRefresh('),
+  );
+  const memoryStorage = initial => {
+    const values = new Map();
+    if (initial !== null && initial !== undefined) values.set('yolomux.current-observation-receipts.v1', String(initial));
+    return {
+      getItem: key => values.has(String(key)) ? values.get(String(key)) : null,
+      setItem: (key, next) => { values.set(String(key), String(next)); },
+      removeItem: key => { values.delete(String(key)); },
+      value: (key = 'yolomux.current-observation-receipts.v1') => values.get(String(key)) ?? null,
+    };
+  };
+  const makeUploader = (fence, epoch, journal = undefined, durableJournal = undefined, identity = {}) => {
     const requests = [];
     const outcomes = [];
     const timers = [];
+    const primaryStorage = journal === undefined ? memoryStorage(null) : journal;
+    const fallbackStorage = durableJournal === undefined ? primaryStorage : durableJournal;
     const context = {
       requests,
       outcomes,
+      jsDebugEvents: [],
+      sessionStorage: primaryStorage,
+      localStorage: fallbackStorage,
       setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; },
+      clearTimeout(_timer) {},
       apiFetchJsonQuiet: async (url, options) => {
-        requests.push({url, body: JSON.parse(options.body)});
-        const outcome = outcomes.shift() || {ok: true};
+        const body = JSON.parse(options.body);
+        requests.push({url, body});
+        const outcome = await (outcomes.shift() || {ok: true, accepted: body.observations.length, duplicates: 0});
         if (outcome.status) throw outcome;
+        if (outcome.ok === true && !Object.hasOwn(outcome, 'observation_receipts')) {
+          const accepted = Number.isSafeInteger(outcome.accepted) ? outcome.accepted : 0;
+          return {
+            ...outcome,
+            observation_receipts: body.observations.map((observation, index) => ({
+              event_id: observation.event_id,
+              disposition: index < accepted ? 'accepted' : 'duplicate',
+            })),
+          };
+        }
         return outcome;
       },
       jsDebugStatsClientIdForRequest: () => 'client-1',
+      performanceNow: () => 0,
+      jsDebugRoundedMs: value => Number(value),
+      jsDebugFailureSignature: () => 'jsf-deadbeef',
+      jsDebugFailureText: value => String(value || '').slice(0, 500),
+      jsDebugFailureStack: value => String(value?.stack || '').slice(0, 4000),
+      jsDebugFailureSource: value => String(value || '/').split('?', 1)[0],
+      shareRedactDiagnosticValue: value => value,
+      reloadClientJourneyId: identity.journeyId || 'j-reload-test',
+      bootstrap: {clientRevision: identity.codeRevision || 'test-revision'},
+      navigator: {userAgent: identity.userAgent || 'Mozilla/5.0 Chrome/140.0'},
     };
     vm.runInNewContext(`
       const statsWriterFence = ${JSON.stringify(fence)};
       const jsDebugCurrentObservationBatchDelayMs = 10000;
       const jsDebugCurrentObservationRetryMaxMs = 300000;
-      const jsDebugCurrentObservationState = {queue: [], keys: new Set(), nextHealthId: 1, timer: null, inFlight: false, retryMs: 10000, stopped: statsWriterFence === null, epoch: ${JSON.stringify(epoch)}};
+      const jsDebugCurrentObservationState = {queue: [], keys: new Set(), nextHealthId: 1, timer: null, inFlight: false, retryMs: 10000, epoch: ${JSON.stringify(epoch)}, highWaterDepth: 0, drops: 0, retries: 0, instrumentationCostMs: 0, receipts: new Map()};
+      ${endpointSource}
+      ${byteLengthSource}
+      ${failureClassifierSource}
+      ${clientCapabilityFixtureSource(true)}
       ${uploaderSource}
-      globalThis.testApi = {state: jsDebugCurrentObservationState, queue: queueJsDebugCurrentObservation, flush: flushJsDebugCurrentObservations};
+      globalThis.testApi = {
+        state: jsDebugCurrentObservationState,
+        queue: queueJsDebugCurrentObservation,
+        flush: flushJsDebugCurrentObservations,
+        barrier: jsDebugCurrentObservationReceiptBarrier,
+        projection: jsDebugCurrentObservationReceiptProjection,
+        persist: persistJsDebugCurrentObservationReceipts,
+      };
     `, context);
     return {...context, timers, api: context.testApi};
   };
+  const installEventClearLifecycle = uploader => {
+    vm.runInNewContext(`
+      let jsDebugEventSeq = 0;
+      const jsDebugEventLimit = 1000;
+      const terminalRemovalLatencyPending = new Map();
+      let terminalRemovalLatencySamples = [];
+      let jsDebugRenderTimer = null;
+      let jsDebugRenderForce = false;
+      let jsDebugRenderDragDeferred = false;
+      function diagnosticPacificWallTime() { return '2026-08-06 12:00:00 PDT'; }
+      function recordJsDebugEventForGraph(event) {
+        testApi.queue(\`${uploader.api.state.epoch}:\${event.id}\`, event);
+      }
+      function scheduleJsDebugPanelRefresh() {}
+      function clearClientPerfCounters() {}
+      function clearJsDebugGraphData() {}
+      function clearJsDebugServerHistory() {}
+      function renderDebugPanels() {}
+      ${recordEventSource}
+      ${clearEventsSource}
+      globalThis.eventLifecycleApi = {record: recordJsDebugEvent, clear: clearJsDebugEvents};
+    `, uploader);
+    return uploader.eventLifecycleApi;
+  };
   const event = {type: 'api', ts: '2026-07-17T12:00:00.000Z', durationMs: 12, requestBytes: 10, responseBytes: 20};
+  const empty = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-empty');
+  await empty.api.flush();
+  assert.equal(empty.requests.length, 0, 'zero observations never create an empty production upload');
+
   const current = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-1');
-  current.api.queue('page-1:api:1', event);
-  current.api.queue('page-1:api:1', event);
+  current.api.queue('page-1:error:1', {...event, type: 'error', message: 'accepted failure'});
+  current.api.queue('page-1:error:1', {...event, type: 'error', message: 'accepted failure'});
   assert.equal(current.api.state.queue.length, 1, 'stable event keys deduplicate before upload');
   current.api.state.timer = null;
   await current.api.flush();
   assert.equal(current.api.state.queue.length, 0, 'durable acknowledgement removes accepted entries');
+  assert.deepEqual(JSON.parse(JSON.stringify(current.api.barrier('page-1'))), {
+    epoch: 'page-1', accepted: 1, pending: 0, retrying: 0, rejected: 0, dropped: 0, quiescent: true, blocking: [],
+  }, 'an accepted event reaches the event/epoch receipt barrier before fixture retirement');
   assert.deepEqual(current.requests[0].body.protocol_version, 24);
   assert.deepEqual(current.requests[0].body.schema_generation, 5);
+
+  const clearedAccepted = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-clear-accepted');
+  const clearedAcceptedEvents = installEventClearLifecycle(clearedAccepted);
+  const acceptedBeforeClear = clearedAcceptedEvents.record('error', {message: 'accepted before clear'});
+  clearedAccepted.api.state.timer = null;
+  await clearedAccepted.api.flush();
+  clearedAcceptedEvents.clear();
+  const acceptedAfterClear = clearedAcceptedEvents.record('error', {message: 'accepted after clear'});
+  clearedAccepted.api.state.timer = null;
+  await clearedAccepted.api.flush();
+  assert.deepEqual(
+    [acceptedBeforeClear.id, acceptedAfterClear.id],
+    [1, 2],
+    'clearing visible events preserves monotonically increasing durable event identity',
+  );
+  assert.deepEqual(
+    [...clearedAccepted.api.state.receipts.keys()],
+    ['page-clear-accepted:1', 'page-clear-accepted:2'],
+    'accepted receipts before and after Clear retain distinct epoch/event keys',
+  );
+  assert.equal(clearedAccepted.api.barrier().accepted, 2, 'both accepted receipts survive visible Clear');
+
+  const clearedPending = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-clear-pending');
+  const clearedPendingEvents = installEventClearLifecycle(clearedPending);
+  const pendingBeforeClear = clearedPendingEvents.record('error', {message: 'pending before clear'});
+  clearedPendingEvents.clear();
+  const pendingAfterClear = clearedPendingEvents.record('error', {message: 'pending after clear'});
+  assert.deepEqual([pendingBeforeClear.id, pendingAfterClear.id], [1, 2]);
+  assert.equal(clearedPending.api.state.queue.length, 2, 'Clear cannot suppress a later event behind a pending receipt key');
+  assert.equal(clearedPending.api.barrier().pending, 2, 'pending receipts remain independently release-blocking across Clear');
+  clearedPending.api.state.timer = null;
+  await clearedPending.api.flush();
+  assert.equal(clearedPending.api.barrier().accepted, 2, 'both pending identities receive independent terminal receipts');
+
+  const classified = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-classified');
+  for (const [suffix, failure] of [
+    ['api', {...event, type: 'api', status: 500, ok: false, endpoint: '/api/fail'}],
+    ['sse', {...event, type: 'sse', error: 'stream failed', eventType: 'stats'}],
+    ['client', {...event, type: 'client_failure', error: 'graph failed', source: '/graph'}],
+  ]) classified.api.queue(`page-classified:${suffix}:1`, failure);
+  assert.equal(classified.api.barrier().pending, 3, 'every shared release-blocking failure class owns a durable receipt');
+  assert.equal(classified.api.state.queue.every(entry => entry.releaseBlocking), true, 'release-blocking classification cannot diverge from the failure reader');
+  classified.api.state.timer = null;
+  await classified.api.flush();
+  const failurePayloadFields = new Set([
+    'kind', 'journey_id', 'code_revision', 'browser_family', 'signature', 'message', 'stack',
+    'source', 'line', 'column', 'provenance', 'request_id', 'route', 'event_type',
+    'wall_time', 'delivery_outcome', 'status',
+  ]);
+  for (const observation of classified.requests[0].body.observations) {
+    assert.equal(
+      Object.keys(observation.payload).every(field => failurePayloadFields.has(field)),
+      true,
+      `release-blocking ${observation.payload.kind} payload contains only the backend failure schema`,
+    );
+  }
+
+  const stableRetry = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5},
+    'page-stable-retry',
+    undefined,
+    undefined,
+    {journeyId: 'j-first', codeRevision: 'revision-first', userAgent: 'Mozilla/5.0 Chrome/140.0'},
+  );
+  const mutableFailure = {
+    ...event,
+    id: 1,
+    type: 'api',
+    ok: false,
+    endpoint: '/api/activity-summary',
+    requestId: 'r-stable-retry',
+    phaseTimings: {queueMs: 1, ttfbMs: 2},
+  };
+  stableRetry.api.queue('page-stable-retry:1', mutableFailure);
+  stableRetry.api.state.timer = null;
+  stableRetry.outcomes.push({status: 503});
+  await stableRetry.api.flush();
+  const firstRetryObservation = JSON.parse(JSON.stringify(stableRetry.requests[0].body.observations[0]));
+  mutableFailure.endpoint = '/api/mutated-after-queue';
+  mutableFailure.phaseTimings.queueMs = 999;
+  stableRetry.bootstrap.clientRevision = 'revision-after-queue';
+  stableRetry.navigator.userAgent = 'Mozilla/5.0 Firefox/140.0';
+  stableRetry.api.state.timer = null;
+  await stableRetry.api.flush();
+  assert.deepEqual(
+    stableRetry.requests[1].body.observations[0],
+    firstRetryObservation,
+    'one event identity retries byte-equivalent facts after its source object and producer context change',
+  );
+
+  for (const [accepted, duplicates] of [[2, 0], [1, 1], [0, 2]]) {
+    const counted = makeUploader({protocolVersion: 24, schemaGeneration: 5}, `page-count-${accepted}-${duplicates}`);
+    for (let index = 0; index < 2; index += 1) {
+      counted.api.queue(`page-count-${accepted}-${duplicates}:error:${index}`, {...event, type: 'error', message: `counted ${index}`});
+    }
+    counted.api.state.timer = null;
+    counted.outcomes.push({ok: true, source_generation: 8, accepted, duplicates});
+    await counted.api.flush();
+    assert.equal(counted.api.state.queue.length, 0, `accepted=${accepted} duplicates=${duplicates} acknowledges the complete batch`);
+    assert.equal(counted.api.barrier().accepted, 2, 'new and duplicate server rows are both durable receipt outcomes');
+  }
+
+  const concurrent = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-concurrent');
+  concurrent.api.queue('page-concurrent:error:1', {...event, type: 'error', message: 'concurrent receipt'});
+  concurrent.api.state.timer = null;
+  let resolveConcurrentReceipt;
+  concurrent.outcomes.push(new Promise(resolve => { resolveConcurrentReceipt = resolve; }));
+  const originalFlush = concurrent.api.flush();
+  concurrent.api.queue('page-concurrent:error:2', {...event, type: 'error', message: 'next batch'});
+  let joinedFlushSettled = false;
+  const joinedFlush = concurrent.api.flush().then(() => { joinedFlushSettled = true; });
+  await Promise.resolve();
+  assert.equal(joinedFlushSettled, false, 'a concurrent flush joins the request carrying its event/epoch receipt');
+  resolveConcurrentReceipt({ok: true, source_generation: 8, accepted: 1, duplicates: 0});
+  await Promise.all([originalFlush, joinedFlush]);
+  assert.equal(concurrent.api.barrier('page-concurrent').accepted, 1, 'all flush waiters observe the exact server receipt transition');
+  assert.equal(concurrent.api.barrier('page-concurrent').pending, 1, 'an event queued during the request retains its own later batch');
+  assert.equal(concurrent.requests[0].body.observations.length, 1, 'the first acknowledgement removes only the entries in its request');
+  concurrent.api.state.timer = null;
+  await concurrent.api.flush();
+  assert.equal(concurrent.api.barrier('page-concurrent').quiescent, true, 'the later batch transitions independently after its own receipt');
+
+  const partial = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-partial');
+  for (let index = 0; index < 2; index += 1) {
+    partial.api.queue(`page-partial:error:${index}`, {...event, type: 'error', message: `partial ${index}`});
+  }
+  partial.api.state.timer = null;
+  partial.outcomes.push({ok: true, source_generation: 8, accepted: 1, duplicates: 0});
+  await partial.api.flush();
+  assert.equal(partial.api.state.queue.length, 2, 'a partial-count response retains the complete batch for idempotent retry');
+  assert.equal(partial.api.barrier().retrying, 2, 'a partial-count response cannot retire either exact event receipt');
+  partial.api.state.timer = null;
+  partial.outcomes.push({ok: true, source_generation: 8, accepted: 0, duplicates: 2});
+  await partial.api.flush();
+  assert.equal(partial.api.barrier().quiescent, true, 'duplicate replay durably acknowledges the retained batch');
+
+  const malformedCount = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-malformed-count');
+  malformedCount.api.queue('page-malformed-count:error:1', {...event, type: 'error', message: 'typed count required'});
+  malformedCount.api.state.timer = null;
+  malformedCount.outcomes.push({ok: true, source_generation: 8, accepted: '1', duplicates: 0});
+  await malformedCount.api.flush();
+  assert.equal(malformedCount.api.barrier().retrying, 1, 'response parsing rejects counts outside the integer server schema');
+
+  const malformedMappings = [
+    [{event_id: 'wrong-event', disposition: 'accepted'}],
+    [{event_id: 'page-malformed-mapping:error:1', disposition: 'unknown'}],
+    [
+      {event_id: 'page-malformed-mapping:error:1', disposition: 'accepted'},
+      {event_id: 'page-malformed-mapping:error:1', disposition: 'duplicate'},
+    ],
+  ];
+  for (const observationReceipts of malformedMappings) {
+    const malformedMapping = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-malformed-mapping');
+    malformedMapping.api.queue('page-malformed-mapping:error:1', {...event, type: 'error', message: 'exact mapping required'});
+    malformedMapping.api.state.timer = null;
+    malformedMapping.outcomes.push({
+      ok: true, source_generation: 8, accepted: 1, duplicates: 0,
+      observation_receipts: observationReceipts,
+    });
+    await malformedMapping.api.flush();
+    assert.equal(malformedMapping.api.state.queue.length, 1, 'a malformed per-event mapping retires no event');
+    assert.equal(malformedMapping.api.barrier().retrying, 1, 'a malformed per-event mapping remains release-blocking');
+  }
+
+  const unresolved = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-unresolved');
+  unresolved.api.queue('page-unresolved:error:1', {...event, type: 'error', message: 'receipt required'});
+  unresolved.api.state.timer = null;
+  unresolved.outcomes.push({ok: true, accepted: 0, duplicates: 0});
+  await unresolved.api.flush();
+  assert.equal(unresolved.api.state.queue.length, 1, 'a resolved response without the batch receipt retains the original browser failure');
+  assert.deepEqual(JSON.parse(JSON.stringify(unresolved.api.barrier('page-unresolved'))), {
+    epoch: 'page-unresolved', accepted: 0, pending: 0, retrying: 1, rejected: 0, dropped: 0, quiescent: false,
+    blocking: [{key: 'page-unresolved:error:1', epoch: 'page-unresolved', requestId: '', source: '/', route: '/', event: 'error', wallTime: '', deliveryOutcome: 'failed', httpStatus: null, status: 'retrying'}],
+  }, 'fixture retirement fails closed while the original browser failure is retrying');
+
+  const journal = memoryStorage(null);
+  const beforeReload = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-before-reload', journal);
+  beforeReload.api.queue('page-before-reload:1', {
+    id: 1, type: 'stats_history', level: 'warning', ts: '2026-07-17T12:00:00.000Z',
+    message: 'reload receipt', route: '/api/stats-stream', requestId: 'r-reload', wallTime: '2026-07-17 05:00:00 PDT',
+  });
+  beforeReload.api.state.timer = null;
+  beforeReload.outcomes.push({status: 503});
+  await beforeReload.api.flush();
+  const beforeReloadObservation = JSON.parse(JSON.stringify(beforeReload.requests[0].body.observations[0]));
+  const restoredReceipt = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5},
+    'page-after-reload',
+    journal,
+    undefined,
+    {journeyId: 'j-after-reload', codeRevision: 'revision-after-reload', userAgent: 'Mozilla/5.0 Firefox/140.0'},
+  );
+  assert.equal(restoredReceipt.api.state.queue.length, 1, 'a reload restores an unacknowledged release-blocking warning');
+  assert.equal(restoredReceipt.api.barrier().quiescent, false, 'the default release barrier aggregates restored non-accepted epochs');
+  assert.equal(restoredReceipt.api.barrier('page-before-reload').quiescent, false, 'the old epoch remains non-quiescent after a new page epoch starts');
+  restoredReceipt.api.state.timer = null;
+  await restoredReceipt.api.flush();
+  assert.equal(restoredReceipt.requests[0].body.observations[0].epoch_id, 'page-before-reload', 'the receipt stays keyed to the original page epoch');
+  assert.deepEqual(
+    restoredReceipt.requests[0].body.observations[0],
+    beforeReloadObservation,
+    'reload retry preserves the exact observation bytes attached to the original event identity',
+  );
+  assert.equal(restoredReceipt.api.barrier().quiescent, true, 'the global release barrier clears only after every restored epoch is acknowledged');
+  assert.equal(restoredReceipt.api.barrier('page-before-reload').quiescent, true, 'the restored warning retires only after its server receipt');
+
+  const malformedPrimary = memoryStorage('{malformed');
+  const malformedFallback = memoryStorage(null);
+  const malformedReload = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-malformed-reload', malformedPrimary, malformedFallback,
+  );
+  assert.equal(malformedReload.api.barrier().quiescent, false, 'malformed receipt JSON restores a global release blocker');
+  assert.equal(malformedPrimary.value(), '{malformed', 'malformed underlying receipt evidence is not overwritten or removed');
+
+  const incompleteAcceptedRaw = JSON.stringify({
+    entries: [], receipts: [{key: 'x', epoch: 'old', status: 'accepted'}],
+  });
+  const incompleteAcceptedPrimary = memoryStorage(incompleteAcceptedRaw);
+  const incompleteAcceptedFallback = memoryStorage(null);
+  const incompleteAccepted = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-incomplete-accepted',
+    incompleteAcceptedPrimary, incompleteAcceptedFallback,
+  );
+  assert.equal(incompleteAccepted.api.barrier().quiescent, false, 'an accepted receipt missing production correlation fields fails closed');
+  assert.equal(incompleteAcceptedPrimary.value(), incompleteAcceptedRaw, 'the incomplete accepted receipt remains byte-identical');
+
+  const strictReceipt = (overrides = {}) => ({
+    key: 'old:7',
+    epoch: 'old',
+    eventId: 7,
+    requestId: '',
+    source: '/',
+    route: '/',
+    event: 'error',
+    wallTime: '',
+    deliveryOutcome: 'failed',
+    httpStatus: null,
+    status: 'accepted',
+    ...overrides,
+  });
+  const validAcceptedStorage = memoryStorage(JSON.stringify({entries: [], receipts: [strictReceipt()]}));
+  const validAccepted = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-valid-accepted', validAcceptedStorage, memoryStorage(null),
+  );
+  assert.equal(validAccepted.api.barrier().quiescent, true, 'the exact production accepted-receipt schema restores cleanly');
+  assert.equal(validAccepted.api.barrier().accepted, 1, 'the exact production accepted receipt remains visible as accepted history');
+  for (const status of ['accepted', 'pending', 'retrying', 'rejected', 'dropped']) {
+    const receipt = strictReceipt({status});
+    const entries = ['pending', 'retrying'].includes(status)
+      ? [{key: receipt.key, epoch: receipt.epoch, event: {id: 7, type: 'error'}, releaseBlocking: true}]
+      : [];
+    const restored = makeUploader(
+      {protocolVersion: 24, schemaGeneration: 5}, `page-valid-status-${status}`,
+      memoryStorage(JSON.stringify({entries, receipts: [receipt]})), memoryStorage(null),
+    );
+    assert.equal(restored.api.barrier()[status], 1, `the exact ${status} receipt schema restores its status`);
+    assert.equal(restored.api.barrier().quiescent, status === 'accepted', `the ${status} receipt has the exact release-barrier behavior`);
+  }
+  const requiredReceiptMutations = [];
+  for (const [field, wrongType] of [
+    ['key', 7],
+    ['epoch', 7],
+    ['eventId', '7'],
+    ['requestId', null],
+    ['source', null],
+    ['route', null],
+    ['event', null],
+    ['wallTime', null],
+    ['deliveryOutcome', null],
+    ['httpStatus', '200'],
+    ['status', 7],
+  ]) {
+    const missing = strictReceipt();
+    delete missing[field];
+    requiredReceiptMutations.push([`missing-${field}`, missing]);
+    requiredReceiptMutations.push([`typed-${field}`, strictReceipt({[field]: wrongType})]);
+  }
+  requiredReceiptMutations.push(
+    ['unknown-field', strictReceipt({unexpected: true})],
+    ['unsafe-epoch', strictReceipt({key: 'bad epoch:7', epoch: 'bad epoch'})],
+    ['slash-epoch', strictReceipt({key: 'bad/epoch:7', epoch: 'bad/epoch'})],
+    ['long-epoch', strictReceipt({key: `${'e'.repeat(129)}:7`, epoch: 'e'.repeat(129)})],
+    ['key-epoch-mismatch', strictReceipt({key: 'other:7'})],
+    ['key-event-id-mismatch', strictReceipt({key: 'old:8'})],
+    ['negative-event-id', strictReceipt({key: 'old:-1', eventId: -1})],
+    ['empty-event', strictReceipt({event: ''})],
+    ['long-event', strictReceipt({event: 'e'.repeat(65)})],
+    ['empty-delivery', strictReceipt({deliveryOutcome: ''})],
+    ['long-delivery', strictReceipt({deliveryOutcome: 'd'.repeat(33)})],
+    ['long-request-id', strictReceipt({requestId: 'r'.repeat(129)})],
+    ['long-source', strictReceipt({source: `/${'s'.repeat(240)}`})],
+    ['long-route', strictReceipt({route: `/${'r'.repeat(240)}`})],
+    ['long-wall-time', strictReceipt({wallTime: 'w'.repeat(65)})],
+    ['control-request-id', strictReceipt({requestId: 'bad\nrequest'})],
+    ['low-http-status', strictReceipt({httpStatus: 99})],
+    ['high-http-status', strictReceipt({httpStatus: 600})],
+    ['accepted-global-blocker', strictReceipt({globalBlocker: true})],
+    ['normal-global-flag', strictReceipt({globalBlocker: false})],
+    ['reserved-epoch', strictReceipt({key: '*:7', epoch: '*'})],
+    ['special-key-normal-shape', strictReceipt({key: '__yolomux_receipt_journal_overflow__'})],
+  );
+  const strictOverflow = {
+    key: '__yolomux_receipt_journal_overflow__', epoch: '*', eventId: null, requestId: '',
+    source: '/', route: '/', event: 'receipt_journal_overflow', wallTime: '',
+    deliveryOutcome: 'dropped', httpStatus: null, status: 'dropped', globalBlocker: true,
+    journalOverflow: true, omitted: 1,
+  };
+  requiredReceiptMutations.push(
+    ['overflow-accepted-global', {...strictOverflow, status: 'accepted'}],
+    ['overflow-global-false', {...strictOverflow, globalBlocker: false}],
+    ['overflow-zero-omitted', {...strictOverflow, omitted: 0}],
+    ['overflow-extra-field', {...strictOverflow, unexpected: true}],
+  );
+  for (const [label, receipt] of requiredReceiptMutations) {
+    const raw = JSON.stringify({entries: [], receipts: [receipt]});
+    const primary = memoryStorage(raw);
+    const fallback = memoryStorage(null);
+    const invalid = makeUploader(
+      {protocolVersion: 24, schemaGeneration: 5}, `page-strict-${label}`, primary, fallback,
+    );
+    assert.equal(invalid.api.barrier().quiescent, false, `strict receipt schema fails closed: ${label}`);
+    invalid.api.persist();
+    assert.equal(primary.value(), raw, `strict receipt schema preserves underlying evidence: ${label}`);
+    const reloaded = makeUploader(
+      {protocolVersion: 24, schemaGeneration: 5}, `page-strict-reload-${label}`, primary, fallback,
+    );
+    assert.equal(reloaded.api.barrier().quiescent, false, `strict receipt schema remains globally blocking across reload: ${label}`);
+  }
+
+  for (const [label, saved] of [
+    ['null-root', 'null'],
+    ['array-root', '[]'],
+    ['entries-not-array', JSON.stringify({entries: {}, receipts: []})],
+    ['receipt-not-object', JSON.stringify({entries: [], receipts: [null]})],
+    ['receipt-status', JSON.stringify({entries: [], receipts: [{key: 'bad', epoch: 'old', status: 'unknown'}]})],
+    ['entry-without-receipt', JSON.stringify({entries: [{key: 'lost', epoch: 'old', event: {type: 'error'}, releaseBlocking: true}], receipts: []})],
+  ]) {
+    const invalidPrimary = memoryStorage(saved);
+    const invalid = makeUploader(
+      {protocolVersion: 24, schemaGeneration: 5}, `page-invalid-${label}`, invalidPrimary, memoryStorage(null),
+    );
+    assert.equal(invalid.api.barrier().quiescent, false, `schema-invalid receipt journal fails closed: ${label}`);
+    assert.equal(invalidPrimary.value(), saved, `schema-invalid underlying evidence remains intact: ${label}`);
+  }
+
+  const readFailureStorage = {
+    getItem() { throw new Error('receipt storage read failed'); },
+    setItem() { throw new Error('receipt storage write failed'); },
+    removeItem() { throw new Error('receipt storage remove failed'); },
+  };
+  const readFailure = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-read-failure', readFailureStorage, memoryStorage(null),
+  );
+  assert.equal(readFailure.api.barrier().quiescent, false, 'receipt storage read failure restores a global release blocker');
+
+  const writeFailureFallback = memoryStorage(null);
+  const writeFailure = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-write-failure', readFailureStorage, writeFailureFallback,
+  );
+  writeFailure.api.queue('page-write-failure:1', {...event, id: 1, type: 'error', message: 'unwritable receipt'});
+  const writeFailureReload = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-write-failure-reload', memoryStorage(null), writeFailureFallback,
+  );
+  assert.equal(writeFailureReload.api.barrier().quiescent, false, 'a write failure leaves a durable global blocker for reload');
+  writeFailureReload.api.state.timer = null;
+  await writeFailureReload.api.flush();
+  assert.equal(
+    writeFailureReload.api.barrier().quiescent,
+    true,
+    `a healthy primary acknowledges the restored fallback entry and clears the storage blocker: ${JSON.stringify(writeFailureReload.api.barrier())}`,
+  );
+  assert.equal(
+    writeFailureFallback.value('yolomux.current-observation-receipts.v1.fallback'), null,
+    'successful recovery removes the fallback journal only after the primary journal is healthy',
+  );
+  assert.equal(
+    writeFailureFallback.value('yolomux.current-observation-receipts.v1.failure'), null,
+    'successful recovery removes the durable failure marker',
+  );
+
+  const recoveryRaceBacking = memoryStorage(null);
+  recoveryRaceBacking.setItem('yolomux.current-observation-receipts.v1.failure', '{"schema":1,"reason":"prior_failure"}');
+  let recoveryJournalWrites = 0;
+  const recoveryRacePrimary = {
+    getItem: key => recoveryRaceBacking.getItem(key),
+    setItem(key, value) {
+      if (key === 'yolomux.current-observation-receipts.v1') {
+        recoveryJournalWrites += 1;
+        if (recoveryJournalWrites === 2) throw new Error('recovery journal write raced with storage revocation');
+      }
+      recoveryRaceBacking.setItem(key, value);
+    },
+    removeItem: key => recoveryRaceBacking.removeItem(key),
+  };
+  const recoveryRace = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-recovery-race', recoveryRacePrimary, memoryStorage(null),
+  );
+  assert.doesNotThrow(() => recoveryRace.api.persist(), 'a recovery rewrite race is contained by the persistence boundary');
+  assert.equal(recoveryJournalWrites, 0, 'empty recovery removes the primary journal instead of adding a race-prone rewrite');
+  assert.equal(recoveryRace.api.barrier().quiescent, true, 'the verified primary journal clears the restored storage blocker');
+
+  const cleanupRaceBacking = memoryStorage(null);
+  cleanupRaceBacking.setItem('yolomux.current-observation-receipts.v1.failure', '{"schema":1,"reason":"prior_failure"}');
+  let failCleanup = true;
+  const cleanupRaceStorage = {
+    getItem: key => cleanupRaceBacking.getItem(key),
+    setItem: (key, value) => cleanupRaceBacking.setItem(key, value),
+    removeItem(key) {
+      if (failCleanup && key === 'yolomux.current-observation-receipts.v1.failure') {
+        failCleanup = false;
+        throw new Error('recovery cleanup raced with storage revocation');
+      }
+      cleanupRaceBacking.removeItem(key);
+    },
+  };
+  const cleanupRace = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-cleanup-race', cleanupRaceStorage,
+  );
+  assert.doesNotThrow(() => cleanupRace.api.persist(), 'a recovery cleanup race is contained by the persistence boundary');
+  assert.equal(cleanupRace.api.barrier().quiescent, false, 'a failed recovery cleanup retains the global storage blocker');
+
+  const throwingLocalStorage = {
+    getItem() { return null; },
+    setItem() { throw new Error('local storage quota failure'); },
+    removeItem() { throw new Error('local storage quota failure'); },
+  };
+  const localWriteFailure = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-local-write-failure', memoryStorage(null), throwingLocalStorage,
+  );
+  assert.equal(localWriteFailure.api.barrier().quiescent, false, 'unwritable durable marker storage fails closed on every load');
+
+  const journalReceipt = (epoch, eventId, status) => ({
+    key: `${epoch}:${eventId}`, epoch, eventId, requestId: '', source: '/', route: '/',
+    event: 'error', wallTime: '', deliveryOutcome: 'failed', httpStatus: null, status,
+  });
+  const duplicateKey = 'page-duplicate:1';
+  const duplicateReceipt = journalReceipt('page-duplicate', 1, 'retrying');
+  const duplicateJournal = eventValue => JSON.stringify({
+    entries: [{key: duplicateKey, epoch: 'page-duplicate', event: eventValue, releaseBlocking: true}],
+    receipts: [duplicateReceipt],
+  });
+  const duplicatePrimary = memoryStorage(duplicateJournal({type: 'error', message: 'same'}));
+  const duplicateFallback = memoryStorage(null);
+  const duplicateFallbackEntry = {
+    releaseBlocking: true,
+    event: {message: 'same', type: 'error'},
+    epoch: 'page-duplicate',
+    key: duplicateKey,
+  };
+  duplicateFallback.setItem(
+    'yolomux.current-observation-receipts.v1.fallback',
+    JSON.stringify({receipts: [Object.fromEntries(Object.entries(duplicateReceipt).reverse())], entries: [duplicateFallbackEntry]}, null, 2),
+  );
+  const duplicateReload = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-duplicate-reload', duplicatePrimary, duplicateFallback,
+  );
+  assert.equal(duplicateReload.api.state.queue.length, 1, 'identical primary/fallback entries merge once');
+  assert.equal(duplicateReload.api.state.receiptStorageCorrupt, undefined, 'an identical duplicate journal is not a conflict');
+
+  const conflictPrimary = memoryStorage(duplicateJournal({type: 'error', message: 'primary'}));
+  const conflictFallback = memoryStorage(null);
+  conflictFallback.setItem(
+    'yolomux.current-observation-receipts.v1.fallback',
+    duplicateJournal({type: 'error', message: 'fallback'}),
+  );
+  const conflictReload = makeUploader(
+    {protocolVersion: 24, schemaGeneration: 5}, 'page-conflict-reload', conflictPrimary, conflictFallback,
+  );
+  assert.equal(conflictReload.api.state.receiptStorageCorrupt, true, 'conflicting same-key queued records fail closed');
+  assert.ok(
+    conflictReload.api.barrier('unrelated-epoch').blocking.some(receipt => receipt.storageFailure === 'journal_conflict'),
+    'journal conflict is a global blocker for every epoch-specific release barrier',
+  );
+  for (const blockingStatus of ['rejected', 'retrying']) {
+    const boundedStorage = memoryStorage(null);
+    const bounded = makeUploader({protocolVersion: 24, schemaGeneration: 5}, `page-${blockingStatus}`, boundedStorage);
+    const blockerKey = `page-${blockingStatus}:0`;
+    bounded.api.state.receipts.set(blockerKey, journalReceipt(`page-${blockingStatus}`, 0, blockingStatus));
+    for (let index = 0; index < 500; index += 1) {
+      const key = `page-${blockingStatus}:${index + 1}`;
+      bounded.api.state.receipts.set(key, journalReceipt(`page-${blockingStatus}`, index + 1, 'accepted'));
+    }
+    bounded.api.persist();
+    const saved = JSON.parse(boundedStorage.value());
+    assert.ok(saved.receipts.length <= 500, 'the persisted receipt journal stays bounded');
+    assert.ok(saved.receipts.some(receipt => receipt.status === blockingStatus), `the oldest ${blockingStatus} blocker survives accepted-history bounding`);
+    const restored = makeUploader({protocolVersion: 24, schemaGeneration: 5}, `page-restored-${blockingStatus}`, boundedStorage);
+    assert.equal(restored.api.barrier().quiescent, false, `restore fails closed for an oldest ${blockingStatus} receipt plus 500 accepted receipts`);
+    assert.equal(restored.api.barrier()[blockingStatus], 1, `restore retains the exact ${blockingStatus} receipt status`);
+  }
+
+  const overflowStorage = memoryStorage(null);
+  const overflow = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-overflow', overflowStorage);
+  for (let index = 0; index < 501; index += 1) {
+    const key = `page-overflow:${index}`;
+    overflow.api.state.receipts.set(key, journalReceipt('page-overflow', index, index % 2 ? 'retrying' : 'rejected'));
+  }
+  overflow.api.persist();
+  const savedOverflow = JSON.parse(overflowStorage.value());
+  assert.ok(savedOverflow.receipts.length <= 500, 'a blocker-only journal remains bounded beyond capacity');
+  const restoredOverflow = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-restored-overflow', overflowStorage);
+  assert.equal(restoredOverflow.api.barrier().quiescent, false, 'blocker overflow restores a global fail-closed receipt');
+
+  const acceptedStorage = memoryStorage(null);
+  const acceptedOnly = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-accepted-only', acceptedStorage);
+  for (let index = 0; index < 700; index += 1) {
+    const key = `page-accepted-only:${index}`;
+    acceptedOnly.api.state.receipts.set(key, journalReceipt('page-accepted-only', index, 'accepted'));
+  }
+  acceptedOnly.api.persist();
+  const savedAccepted = JSON.parse(acceptedStorage.value());
+  assert.equal(savedAccepted.receipts.length, 500, 'accepted-only history retains the newest bounded window');
+  assert.equal(savedAccepted.receipts[0].key, 'page-accepted-only:200', 'accepted-only history drops only its oldest accepted rows');
+
+  const capped = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-cap');
+  for (let index = 0; index < 1001; index += 1) {
+    capped.api.queue(`page-cap:api:${index}`, event);
+  }
+  assert.equal(capped.api.state.queue.length, 1000, 'the shared queue stays bounded');
+  assert.equal(capped.api.state.drops, 1, 'overflow is counted rather than retained');
+
+  const itemBatch = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-items');
+  for (let index = 0; index < 101; index += 1) {
+    itemBatch.api.queue(`page-items:api:${index}`, event);
+  }
+  itemBatch.api.state.timer = null;
+  await itemBatch.api.flush();
+  assert.equal(itemBatch.requests.length, 1, 'many events produce one batched request');
+  assert.equal(itemBatch.requests[0].body.observations.length, 100, 'one batch contains at most 100 items');
+  assert.equal(itemBatch.api.state.queue.length, 1, 'overflow waits for the next batch');
+
+  const byteBatch = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-bytes');
+  const largeFailure = {
+    type: 'error', ts: '2026-07-17T12:00:00.000Z', message: 'failure',
+    stack: `Error: failure\\n${'x'.repeat(3990)}`, source: '/static/yolomux.js',
+  };
+  for (let index = 0; index < 100; index += 1) {
+    byteBatch.api.queue(`page-bytes:error:${index}`, largeFailure);
+  }
+  byteBatch.api.state.timer = null;
+  await byteBatch.api.flush();
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(byteBatch.requests[0].body), 'utf8') <= 120 * 1024,
+    'the serialized request stays within 120 KiB',
+  );
+  assert.ok(byteBatch.api.state.queue.length > 0, 'byte overflow waits for a later batch');
 
   current.api.queue('page-1:api:2', event);
   current.api.state.timer = null;
@@ -410,47 +1418,195 @@ testAsync('browser observation writer fences acknowledge, back off, stop termina
   await current.api.flush();
   assert.equal(current.api.state.queue.length, 1, 'transient failure retains the queue');
   assert.equal(current.api.state.retryMs, 20000, 'transient failure doubles the bounded retry delay');
+  assert.equal(current.api.state.retries, 1, 'transient failure increments durable upload health');
   assert.equal(current.timers.at(-1).delay, 10000, 'first retry waits one batch interval');
 
   current.api.state.timer = null;
-  current.outcomes.push({status: 426});
+  current.outcomes.push({status: 401});
   await current.api.flush();
-  assert.equal(current.api.state.stopped, true, 'upgrade-required is terminal for the loaded page');
-  assert.equal(current.api.state.queue.length, 0, 'terminal rejection drops stale queued writes');
+  assert.equal(current.api.state.queue.length, 1, 'an expired session retains its queued browser failure');
+  assert.equal(current.api.state.retries, 2, 'authentication rejection is counted as a retry, not permanent death');
+  current.api.queue('page-1:error:3', {...event, type: 'error', message: 'after-authentication'});
+  current.api.state.timer = null;
+  await current.api.flush();
+  assert.equal(current.api.state.queue.length, 0, 'a later authenticated flush delivers the original and later error');
+  assert.equal(current.requests.at(-1).body.observations.length, 2, 'the post-authentication request retains both queued observations');
+  assert.ok(current.requests.at(-1).body.observations.some(
+    observation => observation.payload.kind === 'error' && observation.payload.message === 'after-authentication',
+  ), 'a later JavaScript failure survives the prior authentication rejection');
+
+  const rejected = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-rejected');
+  rejected.api.queue('page-rejected:api:1', event);
+  rejected.api.state.timer = null;
+  rejected.outcomes.push({status: 426});
+  await rejected.api.flush();
+  assert.equal(rejected.api.state.queue.length, 0, 'an upgrade rejection drops only its rejected batch');
+  assert.equal(rejected.api.state.drops, 1, 'rejected batches are visible through upload_drops');
+  rejected.api.queue('page-rejected:api:2', event);
+  rejected.api.state.timer = null;
+  await rejected.api.flush();
+  assert.equal(rejected.requests.length, 2, 'a rejected batch never permanently stops later uploads');
 
   const reloaded = makeUploader({protocolVersion: 24, schemaGeneration: 5}, 'page-2');
   reloaded.api.queue('page-2:api:1', event);
   reloaded.api.state.timer = null;
   await reloaded.api.flush();
-  assert.equal(reloaded.api.state.stopped, false, 'a new page epoch starts a fresh current uploader');
   assert.equal(reloaded.requests.length, 1);
 
   const missingFence = makeUploader(null, 'page-old');
   missingFence.api.queue('page-old:api:1', event);
   await missingFence.api.flush();
-  assert.equal(missingFence.api.state.stopped, true);
   assert.equal(missingFence.requests.length, 0, 'an invalid bootstrap fence never reaches the write endpoint');
+  assert.equal(missingFence.api.state.queue.length, 1, 'a missing fence retains the observation instead of silently discarding it');
+  assert.equal(missingFence.api.state.retries, 1, 'a missing fence is visible in uploader health');
+  assert.equal(missingFence.timers.at(-1).delay, 10000, 'a missing fence schedules a bounded retry');
 });
 
 test('the established renderer consumes the protocol-v2 exact stream', () => {
   assert.match(source, /globalThis\.YOLOmuxStatsCurrent\.createBrowserClient/);
-  assert.match(source, /onGeneration\(snapshot\)[\s\S]*applyJsDebugCurrentSnapshot\(snapshot/);
+  assert.match(source, /onGeneration\(snapshot\)[\s\S]*paintJsDebugCurrentStatsGeneration/);
   assert.match(source, /client\.select\(selection\.rangeSeconds, selection\.resolution\)/);
   assert.match(source, /onState\(state, error\)[\s\S]*requestedRangeSeconds: liveSelection\.rangeSeconds[\s\S]*error\?\.reason/);
   assert.match(source, /initialHistoryOverlayOwnsLoading \|\| jsDebugHistoryReadiness\.phase === 'error'/);
   assert.match(source, /function retryJsDebugHistory\(\)[\s\S]*client\.retry\(\)/);
   assert.match(source, /if \(jsDebugGraphExactResolutionEnabled\) return false;[\s\S]*function clearJsDebugGraphData/);
+  const initializeSource = sourceFunction('initializeJsDebugStatsBeforeStreams', 'jsDebugTextForClipboard');
+  assert.match(initializeSource, /syncJsDebugCurrentStatsClient\(\)/);
+  assert.doesNotMatch(initializeSource, /await jsDebugCurrentStatsClientState\.startPromise/, 'hidden stats startup cannot delay normal page boot');
+});
+
+test('same-cursor requested-resolution switches paint and complete readiness in both directions', () => {
+  const functionText = sourceFunction('jsDebugCurrentStatsGenerationKey', 'ensureJsDebugCurrentStatsClient');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const paints = [];
+    const jsDebugCurrentStatsClientState = {paintedGenerationKey: ''};
+    const readiness = {phase: 'loading'};
+    function jsDebugStatsPanelVisible() { return true; }
+    function applyJsDebugCurrentSnapshot(snapshot) {
+      paints.push(snapshot.requested_resolution);
+      readiness.phase = 'ready';
+    }
+    ${functionText}
+    const shared = {
+      range_seconds: 300,
+      resolution_seconds: 1,
+      source_generation: 11,
+      cache_generation: 12,
+    };
+    const autoPainted = paintJsDebugCurrentStatsGeneration({...shared, requested_resolution: 'AUTO'});
+    readiness.phase = 'loading';
+    const explicitPainted = paintJsDebugCurrentStatsGeneration({...shared, requested_resolution: 1});
+    const explicitReadiness = readiness.phase;
+    readiness.phase = 'loading';
+    const duplicatePainted = paintJsDebugCurrentStatsGeneration({...shared, requested_resolution: 1});
+    readiness.phase = 'loading';
+    const returnedAutoPainted = paintJsDebugCurrentStatsGeneration({...shared, requested_resolution: 'AUTO'});
+    const returnedAutoReadiness = readiness.phase;
+    result = {
+      autoPainted,
+      explicitPainted,
+      explicitReadiness,
+      duplicatePainted,
+      returnedAutoPainted,
+      returnedAutoReadiness,
+      paints,
+    };
+  `, context);
+  assert.equal(context.result.autoPainted, true);
+  assert.equal(context.result.explicitPainted, true);
+  assert.equal(context.result.explicitReadiness, 'ready');
+  assert.equal(context.result.duplicatePainted, false, 'an unchanged request identity stays deduplicated');
+  assert.equal(context.result.returnedAutoPainted, true);
+  assert.equal(context.result.returnedAutoReadiness, 'ready');
+  assert.deepEqual([...context.result.paints], ['AUTO', 1, 'AUTO']);
+});
+
+test('current stream failures emit one provenance-bearing warning record per failed episode', () => {
+  const functionText = sourceFunction('recordJsDebugCurrentStatsFailure', 'jsDebugStatsPanelVisible');
+  const context = {result: null};
+  vm.runInNewContext(`
+    const diagnostics = [];
+    const events = [];
+    const jsDebugCurrentStatsClientState = {failureLatched: false};
+    function recordJsDebugStatsDiagnostic(level, message, details = {}) { diagnostics.push({level, message, details}); }
+    function recordJsDebugEvent(type, payload) { events.push({type, ...payload}); }
+    function jsDebugFailureDetails(type, message, source) { return {message, source, signature: 'jsf-current-stats'}; }
+    ${functionText}
+    recordJsDebugCurrentStatsFailure({message: 'YO!stats stream generation stalled beyond its resolved cadence', source: '/api/stats-stream'});
+    recordJsDebugCurrentStatsFailure({message: 'same failed episode', source: '/api/stats-stream'});
+    acceptJsDebugCurrentStatsPushProof();
+    recordJsDebugCurrentStatsFailure({message: 'later failed episode', source: '/api/stats-stream'});
+    result = {diagnostics, events};
+  `, context);
+  assert.equal(context.result.diagnostics.length, 2);
+  assert.equal(context.result.diagnostics[0].level, 'warning');
+  assert.equal(context.result.diagnostics[0].details.category, 'stats_stream');
+  assert.equal(context.result.diagnostics[0].details.route, '/api/stats-stream');
+  assert.equal(context.result.diagnostics[0].details.eventType, 'stats-generation');
+  assert.equal(context.result.diagnostics[0].details.deliveryOutcome, 'stalled');
+  assert.equal(context.result.events.length, 0, 'the producer must not create a second article for one stall');
+  assert.ok(context.result.diagnostics[0].message.length <= 160);
+});
+
+test('an unload retirement records a non-blocking info observation while a genuine failure stays release-blocking', () => {
+  const recorders = sourceFunction('recordJsDebugCurrentStatsFailure', 'jsDebugStatsPanelVisible');
+  const diagnostic = sourceFunction('recordJsDebugStatsDiagnostic', 'debugClientLogRecord');
+  const graphGate = sourceFunction('recordJsDebugEventForGraph', 'jsDebugCurrentObservationEventSnapshot');
+  const failureClassifier = coreSource.slice(
+    coreSource.indexOf('function jsDebugFailureClassification('),
+    coreSource.indexOf('\nfunction jsDebugFailureEvents('),
+  );
+  const context = {result: null};
+  vm.runInNewContext(`
+    const events = [];
+    const queued = [];
+    const jsDebugCurrentStatsClientState = {failureLatched: false};
+    const jsDebugCurrentObservationState = {epoch: 'epoch-1'};
+    function jsDebugFailureSource(value) { return String(value || '/'); }
+    function jsDebugFailureSignature() { return 'jsf-test'; }
+    function queueJsDebugCurrentObservation(key, event) { queued.push({key, level: event.level}); }
+    function recordJsDebugEvent(type, payload) {
+      const event = {id: events.length + 1, type, ...payload};
+      events.push(event);
+      recordJsDebugEventForGraph(event);
+    }
+    ${failureClassifier}
+    ${graphGate}
+    ${diagnostic}
+    ${recorders}
+    recordJsDebugCurrentStatsRetirement({reason: 'page_beforeunload', source: '/api/stats-stream'});
+    recordJsDebugCurrentStatsFailure({message: 'YO!stats stream unavailable', source: '/api/stats-stream'});
+    result = {
+      events,
+      queued,
+      classifications: events.map(event => jsDebugFailureClassification(event).releaseBlocking),
+    };
+  `, context);
+  const [retirement, failure] = context.result.events;
+  assert.equal(retirement.level, 'info', 'the page tearing down its own stream is not a warning');
+  assert.equal(retirement.deliveryOutcome, 'retired');
+  assert.equal(retirement.reason, 'page_beforeunload', 'the expected close carries a machine-readable reason');
+  assert.equal(retirement.route, '/api/stats-stream');
+  assert.equal(retirement.eventType, 'stats-generation');
+  assert.match(retirement.message, /^YO!stats: stream closed by page retirement \(page_beforeunload\)$/);
+  assert.equal(failure.level, 'warning', 'a genuine mid-session stream failure is still a warning');
+  assert.equal(failure.deliveryOutcome, 'failed');
+  assert.deepEqual([...context.result.classifications], [false, true], 'only the genuine failure is release-blocking');
+  assert.deepEqual([...context.result.queued].map(entry => entry.level), ['warning'], 'the retirement creates no durable receipt');
 });
 
 test('an exact range-resolution switch retains the rendered buckets behind one request owner', () => {
   const requestSource = sourceFunction('requestJsDebugHistoryForCurrentDomain', 'setDebugGraphRange');
   const applySource = sourceFunction('applyJsDebugCurrentSnapshot', 'scheduleJsDebugStatsHistoryFlush');
   const pollOwnerSource = sourceFunction('armJsDebugStatsPolling', 'pollJsDebugStatsOnInterval');
+  const pollCompatibilitySource = sourceFunction('pollJsDebugStatsSample', 'scheduleJsDebugStatsHistoryFlush');
   assert.match(requestSource, /beginJsDebugHistoryReadiness[\s\S]*syncJsDebugCurrentStatsClient\(\{select: true\}\)/);
   assert.doesNotMatch(requestSource, /clearJsDebugGraphData/);
   assert.match(applySource, /clearJsDebugGraphData\(\)[\s\S]*debugGraphApplyServerRecord/);
   assert.match(pollOwnerSource, /if \(jsDebugGraphExactResolutionEnabled && syncJsDebugCurrentStatsClient\(\)\) return;/);
-  assert.doesNotMatch(pollOwnerSource, /pollJsDebugStatsSample[\s\S]*syncJsDebugCurrentStatsClient/);
+  assert.match(pollCompatibilitySource, /syncJsDebugCurrentStatsClient\(\{select: forceGraphRefresh\}\)/);
+  assert.doesNotMatch(pollCompatibilitySource, /\/api\/stats-snapshot/);
 
   const context = {result: null};
   vm.runInNewContext(`
@@ -570,6 +1726,65 @@ test('the retained YO!cost adapter and totals preserve marginal and API-list pri
   assert.match(priceContext.result.html, /\$0\.00 marginal[\s\S]*\$0\.60 list/);
   assert.match(sourceFunction('debugGraphCostUsageTableHtml', 'debugGraphCostModelUsageChartHtml'), /grandTotalDual[\s\S]*grandTotalApiList/);
   assert.match(sourceFunction('debugGraphCostReportHtml', 'debugGraphCostSummaryHtml'), /debugGraphCostPricePairText\(summary\.totalMicroUsd, summary\.apiListMicroUsd\)/);
+});
+
+test('current cost rows retain typed unpriced coverage instead of rendering it as zero', () => {
+  const adapterSource = [
+    sourceFunction('jsDebugCurrentCostDimensionRows', 'jsDebugCurrentCostSummary'),
+    sourceFunction('debugGraphAgentDisplayLabel', 'debugGraphCostModelAgentKind'),
+    sourceFunction('jsDebugCurrentCostSummary', 'jsDebugCurrentModelComponent'),
+  ].join('\n');
+  const context = {
+    result: null,
+    debugGraphCostInteger: value => Number.isSafeInteger(Number(value)) && Number(value) >= 0 ? Number(value) : 0,
+    debugGraphCostOptionalInteger: value => value === null || value === undefined ? null : Number(value),
+    debugGraphCostText: (_key, fallback) => fallback,
+    debugGraphCostUsdText: value => `$${(Number(value) / 1000000).toFixed(2)}`,
+    debugGraphCostApiListMicroUsd: row => row?.api_list_micro_usd ?? null,
+    debugGraphCostPricePairHtml: value => `<small>$${(Number(value) / 1000000).toFixed(2)}</small>`,
+    debugGraphCostPricePairText: value => `$${(Number(value) / 1000000).toFixed(2)}`,
+    debugGraphTokenNumberText: value => String(value),
+    esc: value => String(value),
+  };
+  vm.runInNewContext(`
+    ${adapterSource}
+    ${sourceFunction('debugGraphCostUsageUsdText', 'debugGraphCostPricePairText')}
+    ${sourceFunction('debugGraphCostUsageTableCellHtml', 'debugGraphCostExactTotalRow')}
+    const report = {
+      total_tokens: 10,
+      total_micro_usd: 0,
+      total_api_list_micro_usd: 0,
+      priced: {atoms: 0, tokens: 0},
+      unpriced: {atoms: 1, tokens: 10},
+      dimensions: {output: {tokens: 10, micro_usd: 0, api_list_micro_usd: 0}},
+      models: [{
+        provider: 'unknown', model: 'future-model', total_tokens: 10,
+        total_micro_usd: 0, total_api_list_micro_usd: 0,
+        dimensions: {output: {tokens: 10, micro_usd: 0, api_list_micro_usd: 0}},
+        priced: {atoms: 0, tokens: 0}, unpriced: {atoms: 1, tokens: 10},
+      }],
+      agents: [], evidence: [], catalog_revision: 5,
+    };
+    const summary = jsDebugCurrentCostSummary(report);
+    const row = summary.models[0];
+    const pricedSummary = jsDebugCurrentCostSummary({
+      ...report,
+      priced: {atoms: 1, tokens: 10},
+      unpriced: {atoms: 0, tokens: 0},
+      models: [{...report.models[0], priced: {atoms: 1, tokens: 10}, unpriced: {atoms: 0, tokens: 0}}],
+    });
+    const pricedRow = pricedSummary.models[0];
+    result = {
+      row,
+      html: debugGraphCostUsageTableCellHtml(row.token_quantity, row.micro_usd, {total: true, row}),
+      pricedZeroHtml: debugGraphCostUsageTableCellHtml(pricedRow.token_quantity, pricedRow.micro_usd, {total: true, row: pricedRow}),
+    };
+  `, context);
+  assert.equal(context.result.row.unpriced_token_quantity, 10);
+  assert.match(context.result.html, /Unpriced/);
+  assert.doesNotMatch(context.result.html, /\$0(?:\.00)?/);
+  assert.match(context.result.pricedZeroHtml, /\$0\.00/);
+  assert.doesNotMatch(context.result.pricedZeroHtml, /Unpriced/);
 });
 
 test('same-range resolution replacement is not mislabeled as older history', () => {
@@ -866,9 +2081,14 @@ test('already-selected current views keep their cached generation and skip selec
     };
     const jsDebugCurrentStatsClientState = {client, selectionKey: '7200:300', startPromise: null};
     function ensureJsDebugCurrentStatsClient() { return client; }
+    function loadJsDebugStatsUiPreferences() {}
     function jsDebugStatsPanelVisible() { return true; }
+    function jsDebugStatsDocumentVisible() { return true; }
     function jsDebugCurrentStatsSelection() { return selection; }
+    function paintJsDebugCurrentStatsGeneration() {}
     function recordJsDebugStatsDiagnostic() {}
+    function recordJsDebugCurrentStatsFailure() {}
+    function recordJsDebugCurrentStatsRetirement() {}
     function jsDebugErrorText(error) { return String(error); }
     ${functionText}
     result = {handled: syncJsDebugCurrentStatsClient({select: true}), calls, sameGeneration: controller.generation() === generation};
@@ -877,6 +2097,234 @@ test('already-selected current views keep their cached generation and skip selec
   assert.equal(context.result.calls.select, 0);
   assert.equal(context.result.calls.start, 1);
   assert.equal(context.result.sameGeneration, true);
+});
+
+test('current stats stream selector exposes exact production client evidence without healthy defaults', () => {
+  const functionText = sourceFunction('jsDebugCurrentStatsStreamEvidence', 'paintJsDebugCurrentStatsGeneration');
+  const evidence = {running: true, streamOpen: true, deliverySequence: 4, acceptedDeltaSequence: 2};
+  const context = {result: null, missing: null};
+  vm.runInNewContext(`
+    const globalThis = {YOLOmuxStatsCurrent: {createBrowserClient() {}}};
+    const generation = {cache_generation: 8};
+    const controller = {generation: () => generation};
+    const client = {controller: () => controller, streamEvidence: () => (${JSON.stringify(evidence)})};
+    let jsDebugCurrentStatsClientState = {client, paintedGenerationKey: '300:1:1:8:8'};
+    function jsDebugStatsPanelVisible() { return false; }
+    ${functionText}
+    result = jsDebugCurrentStatsStreamEvidence();
+    jsDebugCurrentStatsClientState = {client: null, paintedGenerationKey: ''};
+    missing = jsDebugCurrentStatsStreamEvidence();
+  `, context);
+  assert.deepEqual({...context.result.stream}, evidence);
+  assert.equal(context.result.panelVisible, false);
+  assert.equal(context.result.controllerReady, true);
+  assert.equal(context.missing.clientReady, false);
+  assert.equal(context.missing.controllerReady, false);
+  assert.equal(context.missing.generationReady, false);
+  assert.equal(context.missing.stream, null);
+});
+
+test('hidden panels start the document-visible client and paint only when opened', () => {
+  const start = source.indexOf('function jsDebugStatsPanelVisible()');
+  const end = source.indexOf('\nfunction jsDebugStatsTokenConsumerEnabled()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const functionText = source.slice(start, end);
+  const context = {result: null};
+  vm.runInNewContext(`
+    let panelVisible = false;
+    const document = {visibilityState: 'visible'};
+    const debugModeEnabled = true;
+    const debugPaneItemId = 'debug';
+    const yocostItemId = 'cost';
+    const jsDebugGraphRangeSeconds = 7200;
+    const jsDebugGraphResolutionOverrideSeconds = 300;
+    function normalizedJsDebugGraphRange(value) { return value; }
+    function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
+    function itemIsActivePaneTab() { return panelVisible; }
+    const selection = {rangeSeconds: 7200, resolution: 300};
+    let generation = {cache_generation: 12, source_generation: 12};
+    const controller = {
+      selection: () => ({range_seconds: 7200, resolution: 300}),
+      generation: () => generation,
+    };
+    const calls = {select: 0, start: 0, visible: [], paints: []};
+    const client = {
+      controller: () => controller,
+      setVisible(value) { calls.visible.push(value); },
+      select() { calls.select += 1; },
+      start() { calls.start += 1; return Promise.resolve(); },
+    };
+    const jsDebugCurrentStatsClientState = {
+      client, selectionKey: '7200:300', startPromise: null,
+      paintedGenerationKey: '',
+    };
+    function applyJsDebugCurrentSnapshot(value) { calls.paints.push(value.cache_generation); }
+    function recordJsDebugStatsDiagnostic() {}
+    function recordJsDebugCurrentStatsFailure() {}
+    function recordJsDebugCurrentStatsRetirement() {}
+    function jsDebugErrorText(error) { return String(error); }
+    function armJsDebugStatsPolling() {}
+    function loadJsDebugStatsUiPreferences() {}
+    ${functionText}
+    const hiddenHandled = syncJsDebugCurrentStatsClient();
+    generation = {cache_generation: 13, source_generation: 13};
+    panelVisible = true;
+    const openedHandled = syncJsDebugCurrentStatsClient();
+    result = {hiddenHandled, openedHandled, calls};
+  `, context);
+  assert.equal(context.result.hiddenHandled, true);
+  assert.equal(context.result.openedHandled, true);
+  assert.deepEqual([...context.result.calls.visible], [true, true], 'panel state does not pause document-visible transport');
+  assert.equal(context.result.calls.start, 1, 'normal hidden boot starts the one exact client');
+  assert.equal(context.result.calls.select, 0, 'opening cached selection does not request a snapshot or repair');
+  assert.deepEqual([...context.result.calls.paints], [13], 'hidden generations advance in memory and the newest paints only when the panel opens');
+});
+
+test('hidden boot loads saved exact selection before constructing the one current client', () => {
+  const start = source.indexOf('function jsDebugStatsPanelVisible()');
+  const end = source.indexOf('\nfunction jsDebugStatsTokenConsumerEnabled()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const functionText = source.slice(start, end);
+  const context = {result: null};
+  vm.runInNewContext(`
+    const document = {visibilityState: 'visible'};
+    const debugModeEnabled = true;
+    const debugPaneItemId = 'debug';
+    const yocostItemId = 'cost';
+    let jsDebugGraphRangeSeconds = 900;
+    let jsDebugGraphResolutionOverrideSeconds = 0;
+    let loaded = false;
+    let constructed = null;
+    function loadJsDebugStatsUiPreferences() {
+      loaded = true;
+      jsDebugGraphRangeSeconds = 3600;
+      jsDebugGraphResolutionOverrideSeconds = 60;
+    }
+    function normalizedJsDebugGraphRange(value) { return value; }
+    function normalizedDebugGraphResolutionOverrideSeconds(value) { return value; }
+    function itemIsActivePaneTab() { return false; }
+    function jsDebugStatsClientIdForRequest() { return 'saved-selection'; }
+    function recordJsDebugCurrentStatsFailure() {}
+    function recordJsDebugCurrentStatsRetirement() {}
+    function acceptJsDebugCurrentStatsPushProof() {}
+    function applyJsDebugCurrentSnapshot() {}
+    function recordJsDebugStatsDiagnostic() {}
+    function jsDebugErrorText(error) { return String(error); }
+    function armJsDebugStatsPolling() {}
+    const controller = null;
+    const client = {
+      controller: () => controller,
+      setVisible() {},
+      select() {},
+      start: () => Promise.resolve(controller),
+    };
+    const YOLOmuxStatsCurrent = {
+      createBrowserClient(options) { constructed = {loaded, ...options}; return client; },
+    };
+    globalThis.YOLOmuxStatsCurrent = YOLOmuxStatsCurrent;
+    const jsDebugCurrentStatsClientState = {
+      client: null, selectionKey: '', startPromise: null, failureLatched: false,
+      paintedGenerationKey: '',
+    };
+    ${functionText}
+    const handled = syncJsDebugCurrentStatsClient();
+    result = {handled, constructed, selectionKey: jsDebugCurrentStatsClientState.selectionKey};
+  `, context);
+  assert.equal(context.result.handled, true);
+  assert.equal(context.result.constructed.loaded, true);
+  assert.equal(context.result.constructed.savedRange, 3600);
+  assert.equal(context.result.constructed.savedResolution, 60);
+  assert.equal(context.result.selectionKey, '3600:60');
+});
+
+testAsync('synchronous current-client construction failure cannot reject terminal boot', async () => {
+  const syncSource = sourceFunction('syncJsDebugCurrentStatsClient', 'jsDebugStatsTokenConsumerEnabled');
+  const initializeStart = source.indexOf('async function initializeJsDebugStatsBeforeStreams(');
+  const initializeEnd = source.indexOf('\nfunction jsDebugTextForClipboard(', initializeStart);
+  assert.notEqual(initializeStart, -1);
+  assert.notEqual(initializeEnd, -1);
+  const initializeSource = source.slice(initializeStart, initializeEnd);
+  const context = {result: null};
+  vm.runInNewContext(`
+    const failures = [];
+    const jsDebugGraphExactResolutionEnabled = true;
+    const jsDebugCurrentStatsClientState = {client: null, startPromise: null, failureLatched: false};
+    function ensureJsDebugCurrentStatsClient() { throw new Error('EventSource constructor unavailable'); }
+    function recordJsDebugCurrentStatsFailure(failure) { failures.push(failure); }
+    function recordJsDebugCurrentStatsRetirement() {}
+    function loadJsDebugStatsUiPreferences() {}
+    function jsDebugErrorText(error) { return String(error?.message || error); }
+    async function primeJsDebugStatsBeforeLongLivedStreams() { return false; }
+    function syncJsDebugStatsPolling() {}
+    const jsDebugStatsPollState = {firstSampleReceived: false};
+    ${syncSource}
+    ${initializeSource}
+    result = initializeJsDebugStatsBeforeStreams().then(value => ({value, failures}));
+  `, context);
+  const resolved = await context.result;
+  assert.equal(resolved.value, false);
+  assert.equal(resolved.failures.length, 1);
+  assert.equal(resolved.failures[0].source, '/api/stats-stream');
+});
+
+testAsync('a rejected current-client start retains the exact owner without starting legacy polling', async () => {
+  const functionText = sourceFunction('syncJsDebugCurrentStatsClient', 'jsDebugStatsTokenConsumerEnabled');
+  const run = async error => {
+    const calls = {start: 0, fallback: []};
+    const client = {
+      controller: () => null,
+      setVisible() {},
+      select() {},
+      start() {
+        calls.start += 1;
+        return Promise.reject(error);
+      },
+    };
+    const context = {
+      client,
+      calls,
+      error,
+      result: null,
+    };
+    vm.runInNewContext(`
+      const selection = {rangeSeconds: 300, resolution: 1};
+      const jsDebugCurrentStatsClientState = {client, selectionKey: '300:1', startPromise: null, failureLatched: false};
+      function ensureJsDebugCurrentStatsClient() { return client; }
+      function loadJsDebugStatsUiPreferences() {}
+      function jsDebugStatsPanelVisible() { return true; }
+      function jsDebugStatsDocumentVisible() { return true; }
+      function jsDebugCurrentStatsSelection() { return selection; }
+      function paintJsDebugCurrentStatsGeneration() {}
+      function recordJsDebugStatsDiagnostic() {}
+      function recordJsDebugCurrentStatsFailure() {}
+      function recordJsDebugCurrentStatsRetirement() {}
+      function jsDebugErrorText(value) { return String(value); }
+      function armJsDebugStatsPolling(options) { calls.fallback.push(options); }
+      ${functionText}
+      result = {firstHandled: syncJsDebugCurrentStatsClient(), state: jsDebugCurrentStatsClientState};
+    `, context);
+    await Promise.resolve();
+    await Promise.resolve();
+    return {
+      firstHandled: context.result.firstHandled,
+      secondHandled: vm.runInNewContext('syncJsDebugCurrentStatsClient()', context),
+      calls,
+    };
+  };
+
+  const transport = await run(new Error('stats transport unavailable'));
+  assert.equal(transport.firstHandled, true, 'the exact start owns its pending attempt');
+  assert.equal(transport.secondHandled, true, 'a failed exact start never releases a second request owner');
+  assert.equal(transport.calls.start, 1, 'the pending exact start remains the one initialization owner');
+  assert.equal(JSON.stringify(transport.calls.fallback), '[]');
+
+  const contractError = new Error('stats capabilities fields are not exact');
+  contractError.statsContractViolation = true;
+  const contract = await run(contractError);
+  assert.equal(contract.firstHandled, true);
+  assert.equal(JSON.stringify(contract.calls.fallback), '[]');
 });
 
 test('live chart slide cadence follows effective resolution with one shared repaint', () => {
@@ -1180,8 +2628,16 @@ test('health observations retain measured latency and bytes as original browser 
   );
   const context = {
     result: null,
-    jsDebugCurrentObservationState: {epoch: 'epoch-1'},
+    jsDebugCurrentObservationState: {epoch: 'epoch-1', instrumentationCostMs: 0},
     jsDebugStatsClientIdForRequest: () => 'client-1',
+    performanceNow: () => 0,
+    reloadClientJourneyId: 'j-reload-test',
+    bootstrap: {clientRevision: 'test-revision'},
+    navigator: {userAgent: 'Mozilla/5.0 Chrome/140.0'},
+    jsDebugCodeRevision: () => 'test-revision',
+    jsDebugBrowserFamily: () => 'chromium',
+    jsDebugBoundedToken: value => String(value || ''),
+    jsDebugFailureClassification: () => ({releaseBlocking: false, kind: '', observationKind: 'heartbeat'}),
   };
   vm.runInNewContext(`${functionText}\nresult = jsDebugCurrentObservationFromEvent({
     key: 'epoch-1:health:1',

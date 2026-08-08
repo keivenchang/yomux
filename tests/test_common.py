@@ -13,6 +13,7 @@ from yolomux_lib import common
 from yolomux_lib import session_files
 from yolomux_lib import web
 from yolomux_lib.filesystem import git_ops
+from yolomux_lib.tmux import process_group_ownership
 from yolomux_lib.yoagent import conversation
 
 
@@ -28,8 +29,7 @@ def test_record_owned_thread_starts_use_shared_rollback_owner():
     owners = {
         "yolomux_lib/app.py": {
             "start_client_event_watcher",
-            "start_client_directory_poll",
-            "request_session_files_disk_cache_prune",
+            "start_watchd_revision_watcher",
             "start_input_heartbeat_worker",
             "start_tabber_activity_cache_refresh",
             "start_tabber_activity_cache_warmer",
@@ -101,11 +101,10 @@ def test_main_process_cpu_work_has_named_allowlist():
     assert thread_owners == {
         "chat_yoagent",
         "indexed_repo_roots_snapshot",
-        "start_client_directory_poll",
         "start_client_event_watcher",
         "start_client_watch_snapshot_publish",
         "start_input_heartbeat_worker",
-        "start_native_filesystem_watcher",
+        "start_watchd_revision_watcher",
             "start_session_files_cache_refresh",
             "start_status_generation_watcher",
             "start_tabber_activity_cache_refresh",
@@ -113,7 +112,6 @@ def test_main_process_cpu_work_has_named_allowlist():
         "start_transcripts_payload_refresh",
         "start_update_check_thread",
         "warm_metadata_cache_async",
-        "request_session_files_disk_cache_prune",
     }
 
     retired_patterns = (
@@ -213,9 +211,13 @@ def test_terminate_process_group_waits_after_sigkill(monkeypatch):
                 raise subprocess.TimeoutExpired("cmd", timeout)
             return 0
 
-    monkeypatch.setattr(common.os, "killpg", lambda pid, sig: calls.append(("killpg", pid, sig)))
+    process = FakeProcess()
+    monkeypatch.setattr(process_group_ownership.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(process_group_ownership.os, "killpg", lambda pid, sig: calls.append(("killpg", pid, sig)))
+    monkeypatch.setattr(process_group_ownership, "process_start_identity", lambda pid: "fixture-start")
+    process_group_ownership.record_owned_process_group(process)
 
-    common.terminate_process_group(FakeProcess())
+    common.terminate_process_group(process)
 
     assert calls == [
         ("killpg", 12345, signal.SIGTERM),

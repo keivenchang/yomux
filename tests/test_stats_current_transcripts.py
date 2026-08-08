@@ -8,27 +8,20 @@ import os
 import pytest
 
 from yolomux_lib import session_files
+from yolomux_lib.pricing_catalog import PricingCatalog
 from yolomux_lib.stats_current import materializer
 from yolomux_lib.stats_current import pricing
 from yolomux_lib.stats_current.storage import DATABASE_FILENAME
 from yolomux_lib.stats_current.storage import Store
 from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
 from yolomux_lib.stats_current.usage import usage_atom_from_source
-
-
-def _write_records(path, records):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records),
-        encoding="utf-8",
-    )
-
-
-def _append_record(path, record):
-    line = json.dumps(record, separators=(",", ":")) + "\n"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-    return line
+from tools.mockers.transcript import append_record as _append_record
+from tools.mockers.transcript import claude_usage as _claude_usage
+from tools.mockers.transcript import codex_meta as _codex_meta
+from tools.mockers.transcript import codex_usage as _codex_usage
+from tools.mockers.transcript import write_records as _write_records
+from tests.cross_layer_matrix import render_cost_model_table
+from tests.terminal_state_guard import assert_terminal_transition
 
 
 @pytest.fixture(autouse=True)
@@ -43,44 +36,6 @@ def _isolated_transcript_scan_store(tmp_path, monkeypatch):
         session_files._TRANSCRIPT_SCAN_CACHE_STATE_DIR = None
 
 
-def _codex_meta(thread_id, parent_thread_id="", **context):
-    payload = {"id": thread_id}
-    payload.update(context)
-    if parent_thread_id:
-        payload["source"] = {
-            "subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id}},
-        }
-    return {"type": "session_meta", "timestamp": 1, "payload": payload}
-
-
-def _codex_usage(timestamp, input_tokens, cached_tokens, output_tokens):
-    return {
-        "type": "event_msg",
-        "timestamp": timestamp,
-        "payload": {
-            "info": {
-                "total_token_usage": {
-                    "input_tokens": input_tokens,
-                    "cached_input_tokens": cached_tokens,
-                    "output_tokens": output_tokens,
-                },
-            },
-        },
-    }
-
-
-def _claude_usage(timestamp, message_id, model, input_tokens, output_tokens):
-    return {
-        "type": "assistant",
-        "timestamp": timestamp,
-        "message": {
-            "id": message_id,
-            "model": model,
-            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
-        },
-    }
-
-
 def _output_items(result):
     return [item for item in result.items if item.atom.direction == "output"]
 
@@ -88,6 +43,57 @@ def _output_items(result):
 def _commit(scanner, result):
     scanner.commit(result.receipt_id)
     return result
+
+
+def test_usage_atom_backfill_status_varies_with_committed_cursor_progress(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    _write_records(transcript, [
+        _codex_meta("backfill-status", model="gpt-5.6-sol"),
+        _codex_usage(1_000, 10, 5, 1),
+    ])
+    scanner = StatsCurrentTranscriptUsageScanner(max_bytes_per_scan=16, max_records_per_scan=16)
+    rows = [{"key": "yo7772|0|codex", "kind": "codex", "transcript": str(transcript)}]
+
+    unknown = scanner.usage_atom_backfill_status()
+    assert unknown is None
+    _commit(scanner, scanner.scan(rows))
+    pending = scanner.usage_atom_backfill_status()
+    assert pending == {"state": "pending", "sources": 1, "missing": 1}
+
+    scanner._max_bytes_per_scan = 1024 * 1024
+    _commit(scanner, scanner.scan(rows))
+    complete = scanner.usage_atom_backfill_status()
+    assert complete == {"state": "complete", "sources": 1, "missing": 0}
+    assert_terminal_transition(
+        contract_id="usage-backfill-status",
+        pending_observed=(unknown is None and pending["state"] == "pending"),
+        terminal_observed=(complete["state"] == "complete" and complete != pending),
+        evidence={"unknown": unknown, "pending": pending, "complete": complete},
+    )
+
+
+def test_backfill_scan_status_exposes_adapter_rejection_reasons(tmp_path):
+    transcript = tmp_path / "rollout.jsonl"
+    _write_records(transcript, [
+        _codex_meta("scan-counters", model="gpt-5.6-sol"),
+        _codex_usage(1_000, 10, 5, 1),
+    ])
+    result = StatsCurrentTranscriptUsageScanner().scan([
+        {"key": "yo7772|0|codex", "kind": "codex", "transcript": str(transcript)},
+    ])
+    status = StatsCurrentTranscriptUsageScanner.usage_atom_backfill_status_for_scan(
+        result,
+        atoms_accepted=0,
+        rejection_reasons={"payload.model exceeds 512 bytes": len(result.items)},
+    )
+    assert status["scan"] == {
+        "files_read": 1,
+        "records_parsed": 2,
+        "atoms_emitted": len(result.items),
+        "atoms_accepted": 0,
+        "atoms_rejected": len(result.items),
+        "rejection_reasons": {"payload.model exceeds 512 bytes": len(result.items)},
+    }
 
 
 def _model_totals(results):
@@ -98,6 +104,47 @@ def _model_totals(results):
             totals[key] = totals.get(key, 0) + item.atom.quantity
     return totals
 
+
+def test_opus_five_transcript_reaches_priced_api_report_and_costs_renderer(tmp_path):
+    transcript = tmp_path / ".claude" / "projects" / "fixture" / "session.jsonl"
+    _write_records(transcript, [
+        _claude_usage("2026-09-02T00:00:01Z", "opus", "claude-opus-5", 10, 5),
+        _claude_usage("2026-09-02T00:00:02Z", "unknown", "future-model", 10, 5),
+    ])
+    atoms = [
+        usage_atom_from_source(atom)
+        for atom in session_files.iter_claude_transcript_usage_atoms(transcript)
+    ]
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        store.append_batch(usage_atoms=atoms)
+        snapshot = store.read_snapshot()
+    observed_until = max(atom.observed_at for atom in atoms) + 1
+    generation = materializer.build_generation(
+        snapshot,
+        source_generation=snapshot.schema.source_generation,
+        cache_generation=1,
+        generated_at=observed_until,
+        observed_until=observed_until,
+        price_resolver=pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing")),
+    )
+    report = materializer.build_cost_report(
+        materializer.slice_generation(generation, 86_400, 300),
+    )
+
+    models = {row["model"]: row for row in report["models"]}
+    assert models["claude-opus-5"]["total_micro_usd"] == 175
+    assert models["claude-opus-5"]["unpriced"] == {"atoms": 0, "tokens": 0}
+    assert models["future-model"]["total_micro_usd"] == 0
+    assert models["future-model"]["unpriced"] == {"atoms": 2, "tokens": 15}
+    assert report["total_micro_usd"] == 175
+    assert report["unpriced"] == {"atoms": 2, "tokens": 15}
+
+    rendered = render_cost_model_table(report)
+    assert "claude-opus-5" in rendered
+    assert "$0.000175" in rendered
+    unknown_row = rendered.split("future-model", 1)[1].split("</tr>", 1)[0]
+    assert "Unpriced" in unknown_row
+    assert "$0" not in unknown_row
 
 def test_two_recent_forks_do_not_add_copied_parent_tokens_or_cost(tmp_path):
     sessions = tmp_path / ".codex" / "sessions" / "2026" / "07" / "16"
@@ -939,6 +986,77 @@ def test_codex_cold_restart_restores_durable_model_effort_and_counters(tmp_path)
     assert resumed.bytes_read < transcript.stat().st_size
 
 
+def test_fresh_host_partition_replays_transcript_despite_legacy_eof_cursor(tmp_path, monkeypatch):
+    transcript = tmp_path / "rollout-partitioned.jsonl"
+    _write_records(transcript, [
+        _codex_meta("partition-thread", model="gpt-partition"),
+        _codex_usage(2, 20, 10, 5),
+    ])
+    rows = [{"key": "partition", "kind": "codex", "transcript": str(transcript)}]
+    state_dir = tmp_path / "state"
+    legacy_store = state_dir / f"transcript-scan-cache-v{session_files._TRANSCRIPT_SCAN_STORE_VERSION}"
+
+    monkeypatch.setattr(session_files.common, "STATE_DIR", state_dir)
+    monkeypatch.setattr(
+        session_files,
+        "host_partitioned_state_dir",
+        lambda root: state_dir / "hosts" / "host-a",
+        raising=False,
+    )
+    with monkeypatch.context() as legacy_cursor:
+        legacy_cursor.setattr(session_files, "transcript_scan_store_dir", lambda: legacy_store)
+        old_scanner = StatsCurrentTranscriptUsageScanner()
+        old_scan = old_scanner.scan(rows)
+        assert _output_items(old_scan)
+        _commit(old_scanner, old_scan)
+
+    with session_files._TRANSCRIPT_SCAN_CACHE_GUARD:
+        session_files._TRANSCRIPT_SCAN_CACHE.clear()
+        session_files._TRANSCRIPT_SCAN_CACHE_STATE_DIR = None
+
+    fresh_scanner = StatsCurrentTranscriptUsageScanner()
+    fresh_scan = fresh_scanner.scan(rows)
+    fresh_atoms = tuple(
+        usage_atom_from_source({**vars(item.atom), "tmux_key": item.tmux_key, "agent_kind": item.agent_kind})
+        for item in fresh_scan.items
+    )
+    database = state_dir / "hosts" / "host-a" / DATABASE_FILENAME
+    with Store.open(database) as store:
+        appended = store.append_batch(usage_atoms=fresh_atoms)
+        assert appended.usage_atoms_accepted > 0
+        assert store.read_snapshot().usage_atoms
+    _commit(fresh_scanner, fresh_scan)
+
+    fresh_record = session_files.stats_current_transcript_scan_record(transcript, "codex")
+    assert session_files.transcript_scan_store_path(fresh_record.identity).parent == database.parent / f"transcript-scan-cache-v{session_files._TRANSCRIPT_SCAN_STORE_VERSION}"
+    assert legacy_store.exists()
+
+
+def test_incomplete_backfill_cursors_survive_pruning_until_every_file_advances(tmp_path, monkeypatch):
+    paths = []
+    for index in range(3):
+        path = tmp_path / f"rollout-{index}.jsonl"
+        _write_records(path, [
+            _codex_meta(f"prune-thread-{index}", model="gpt-prune"),
+            _codex_usage(index + 1, 10, 5, index + 1),
+        ])
+        paths.append(path)
+    rows = [
+        {"key": f"prune|{index}|codex", "kind": "codex", "transcript": str(path)}
+        for index, path in enumerate(paths)
+    ]
+    output_ids = set()
+
+    for index in (*range(3), *range(3)):
+        scanner = StatsCurrentTranscriptUsageScanner(max_records_per_scan=1)
+        result = scanner.scan([rows[index]])
+        output_ids.update(item.atom.event_id for item in result.items)
+        _commit(scanner, result)
+        session_files.prune_transcript_scan_store(max_entries=1, max_bytes=64 * 1024 * 1024)
+
+    assert len(output_ids) == 3
+
+
 def test_partial_receipt_persist_failure_replays_all_files_in_process(tmp_path, monkeypatch):
     paths = [tmp_path / "rollout-a.jsonl", tmp_path / "rollout-b.jsonl"]
     for index, path in enumerate(paths, 1):
@@ -972,6 +1090,46 @@ def test_partial_receipt_persist_failure_replays_all_files_in_process(tmp_path, 
     replayed = scanner.scan(rows)
     assert {item.atom.event_id for item in replayed.items} == first_ids
     _commit(scanner, replayed)
+
+
+def test_receipt_larger_than_memory_retention_commits_before_pruning(tmp_path):
+    sessions = tmp_path / ".codex" / "sessions" / "2026" / "08" / "02"
+    active = sessions / "rollout-active.jsonl"
+    _write_records(active, [
+        _codex_meta("active-thread", model="gpt-5.6-sol"),
+        _codex_usage(2, 20, 10, 5),
+    ])
+    for index in range(512):
+        _write_records(sessions / f"rollout-fork-{index:04d}.jsonl", [
+            _codex_meta(
+                f"fork-{index}",
+                "active-thread",
+                forked_from_id="active-thread",
+                thread_source="subagent",
+            ),
+        ])
+    scanner = StatsCurrentTranscriptUsageScanner()
+
+    result = scanner.scan([{
+        "key": "active", "kind": "codex", "transcript": str(active),
+    }])
+
+    assert result.files_read == 513
+    assert len(scanner._inflight.files) == 513
+    assert [item.atom.quantity for item in _output_items(result)] == [5]
+    pending_observed = (
+        scanner._inflight is not None
+        and scanner._inflight.receipt_id == result.receipt_id
+        and len(scanner._inflight.files) == 513
+    )
+    scanner.commit(result.receipt_id)
+    assert len(scanner._files) == 512
+    assert_terminal_transition(
+        contract_id="transcript-scan-receipt",
+        pending_observed=pending_observed,
+        terminal_observed=(scanner._inflight is None and len(scanner._files) == 512),
+        evidence={"receipt_id": result.receipt_id, "retained_files": len(scanner._files)},
+    )
 
 
 def test_real_codex_fork_suppresses_copied_metadata_context_and_usage_until_handoff(tmp_path):

@@ -9,6 +9,7 @@ import pytest
 
 from yolomux_lib import app as app_module
 from yolomux_lib import common
+from yolomux_lib import statusd_protocol
 from yolomux_lib.app import ATTENTION_ACK_TTL_SECONDS
 
 
@@ -16,6 +17,10 @@ from yolomux_lib.app import ATTENTION_ACK_TTL_SECONDS
 def make_app(monkeypatch, make_tmux_webterm_app):
     def factory():
         app = make_tmux_webterm_app()
+        # The app now owns a host-namespaced status path. Keep this test's two
+        # app instances on its fixture-owned shared file instead of the live
+        # host partition that the retired constants no longer control.
+        app.tmux_ai_status_path = common.TMUX_AI_STATUS_PATH
         monkeypatch.setattr(app, "notify_background_client_event_followers", lambda *args, **kwargs: None)
         monkeypatch.setattr(app.background_owner, "live_generation_records", lambda: [])
         return app
@@ -69,7 +74,7 @@ def test_auto_approve_read_merges_peer_ack_without_event_subscriber(monkeypatch,
     invalidations = []
     monkeypatch.setattr(second.status_client, "invalidate", lambda reason: invalidations.append(reason) or {"ok": True})
     monkeypatch.setattr(second.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: (
-        {"ok": True, "protocol_version": 1, "generation": 3, "status": int(HTTPStatus.OK), "stale": False, "built_at": 1.0},
+        {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "generation": 3, "status": int(HTTPStatus.OK), "stale": False, "built_at": 1.0},
         b'{"target":"1"}',
     ))
 
@@ -146,7 +151,7 @@ def test_auto_approve_roster_read_discards_cache_from_before_peer_ack(monkeypatc
     invalidations = []
     monkeypatch.setattr(second.status_client, "invalidate", lambda reason: invalidations.append(reason) or {"ok": True})
     monkeypatch.setattr(second.status_client, "snapshot", lambda sessions, session=None, timeout=1.0: (
-        {"ok": True, "protocol_version": 1, "generation": 1, "status": int(HTTPStatus.OK), "stale": False, "built_at": 1.0},
+        {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "generation": 1, "status": int(HTTPStatus.OK), "stale": False, "built_at": 1.0},
         b'{"session_order":["1"],"sessions":{}}',
     ))
 

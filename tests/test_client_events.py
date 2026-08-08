@@ -33,6 +33,7 @@ def test_client_event_broker_publishes_to_subscribers():
     assert event["type"] == "fs_changed"
     assert event["payload"] == {"paths": ["/repo/app.py"]}
     assert event["resource"] == "fs_changed"
+    assert event["base_resource_revision"] == 0
     assert event["resource_revision"] == 1
     assert event["epoch"]
 
@@ -62,6 +63,7 @@ def test_client_event_broker_assigns_monotonic_revisions_per_resource_and_expose
 
     assert first_files["epoch"] == status["epoch"] == second_files["epoch"]
     assert first_files["resource"] == second_files["resource"] == "fs_changed"
+    assert (first_files["base_resource_revision"], second_files["base_resource_revision"]) == (0, 1)
     assert (first_files["resource_revision"], second_files["resource_revision"]) == (1, 2)
     assert status["resource"] == "auto_approve_changed"
     assert status["resource_revision"] == 1
@@ -114,6 +116,29 @@ def test_client_event_broker_coalesces_pending_resource_to_its_latest_revision()
     assert snapshot["dropped_events"] == 0
     assert snapshot["clients"][0]["coalesced_events"] == 1
     broker.unsubscribe(subscriber_id)
+
+
+def test_client_event_broker_marks_coalesced_keyed_patch_for_snapshot_repair():
+    broker = ClientEventBroker(max_queue_size=3)
+    subscriber_id, _subscriber_queue = broker.subscribe(channels={"status"})
+    patch = {
+        "patch": True,
+        "collection": "sessions",
+        "changes": {"1": {"target": "1", "enabled": True}},
+        "removed_keys": [],
+        "fields": {},
+        "removed_fields": [],
+    }
+
+    first = broker.publish("auto_approve_changed", patch)
+    first_revisions = (first["base_resource_revision"], first["resource_revision"])
+    latest = broker.publish("auto_approve_changed", patch)
+    delivered = broker.next_event(subscriber_id, timeout=0.01)
+
+    assert first_revisions == (0, 1)
+    assert (latest["base_resource_revision"], latest["resource_revision"]) == (1, 2)
+    assert delivered["id"] == latest["id"]
+    assert delivered["repair_resources"] == ["auto_approve_changed"]
 
 
 def test_client_event_broker_keeps_background_role_scopes_as_independent_resources():
@@ -244,7 +269,7 @@ def test_app_publishes_only_known_client_event_types():
 
 def test_browser_client_event_contract_matches_server_event_types():
     source = (REPO_ROOT / "static_src" / "js" / "yolomux" / "99_terminal_boot.js").read_text(encoding="utf-8")
-    match = re.search(r"const clientPushEventTypes = Object\.freeze\(\[(.*?)\]\);", source, flags=re.DOTALL)
+    match = re.search(r"const clientServerPushEventTypes = Object\.freeze\(\[(.*?)\]\);", source, flags=re.DOTALL)
     assert match, "browser EventSource/dispatch contract must have one declared event table"
     browser_types = set(re.findall(r"'([a-z_]+)'", match.group(1)))
     assert browser_types == CLIENT_EVENT_TYPES, (
@@ -252,6 +277,7 @@ def test_browser_client_event_contract_matches_server_event_types():
         f"browser-only={sorted(browser_types - CLIENT_EVENT_TYPES)}, "
         f"server-only={sorted(CLIENT_EVENT_TYPES - browser_types)}"
     )
+    assert "const clientLocalPushEventTypes = Object.freeze(['generation_ready']);" in source
 
 
 def test_update_available_is_a_known_client_event():

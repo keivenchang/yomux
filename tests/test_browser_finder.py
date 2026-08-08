@@ -1,5 +1,178 @@
+from selenium.webdriver.common.by import By
+
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+
+
+def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, tmp_path):
+    fs_entries = {
+        "/home/test": [{"name": "dev", "kind": "dir"}],
+        "/home/test/dev": [{"name": "ai-config", "kind": "dir"}],
+        "/home/test/dev/ai-config": [{"name": "CLAUDE.md", "kind": "file"}],
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=row@35(slot1,left)&tabs=slot1:files;left:1",
+        fs_entries=fs_entries,
+    )
+    opened = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        openFileExplorerAt('/home/test', {user: true})
+          .then(result => done({result}))
+          .catch(error => done({error: String(error)}));
+        """
+    )
+    assert opened == {"result": True}, opened
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const rows = liveDirectoryRows('/home/test/dev', null);
+            return rows.length === 2 && rows.every(row => row.getAttribute('aria-expanded') === 'false');
+            """
+        )
+    )
+
+    browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/dev"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const rows = liveDirectoryRows('/home/test/dev', null);
+            return rows.length === 2 && rows.every(row => (
+              row.getAttribute('aria-expanded') === 'true'
+              && childContainerForRow(row, '/home/test/dev') !== null
+            ));
+            """
+        )
+    )
+    browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/dev/ai-config"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const rows = liveDirectoryRows('/home/test/dev/ai-config', null);
+            return rows.length === 2 && rows.every(row => (
+              row.getAttribute('aria-expanded') === 'true'
+              && childContainerForRow(row, '/home/test/dev/ai-config') !== null
+            ));
+            """
+        )
+    )
+
+    browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/dev"]').click()
+    collapsed = browser.execute_script(
+        """
+        const rows = liveDirectoryRows('/home/test/dev', null);
+        return {
+          surfaces: rows.map(row => ({
+            expanded: row.getAttribute('aria-expanded'),
+            hasChildren: childContainerForRow(row, '/home/test/dev') !== null,
+          })),
+          expandedPaths: Array.from(fileExplorerExpanded).sort(),
+          pendingPaths: Array.from(fileExplorerPendingExpansions).sort(),
+        };
+        """
+    )
+    assert collapsed == {
+        "surfaces": [
+            {"expanded": "false", "hasChildren": False},
+            {"expanded": "false", "hasChildren": False},
+        ],
+        "expandedPaths": ["/home/test/dev/ai-config"],
+        "pendingPaths": [],
+    }
+
+    browser.find_element(By.CSS_SELECTOR, '#panel-__finder__ .file-tree-row[data-path="/home/test/dev"]').click()
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            """
+            const rows = liveDirectoryRows('/home/test/dev', null);
+            return rows.length === 2
+              && rows.every(row => (
+                row.getAttribute('aria-expanded') === 'true'
+                && childContainerForRow(row, '/home/test/dev') !== null
+              ))
+              && fileExplorerPendingExpansions.size === 0;
+            """
+        )
+    )
+
+
+def test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        fs_entries={"/home/test": []},
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const originalFetch = window.fetch;
+          const root = '/home/test/workspace/projects/provider/component-with-a-realistic-long-name';
+          const paths = Array.from({length: 64}, (_, index) => `${root}/entry-${String(index).padStart(2, '0')}.json`);
+          let batchRequests = [];
+          window.fetch = async (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/fs/batch') return originalFetch(input, options);
+            batchRequests = JSON.parse(options.body || '{}').requests || [];
+            return new Response(JSON.stringify({
+              state: 'queued',
+              request: {id: 'r-fs-batch-64'},
+              operation: {
+                id: 'op-fs-batch-64',
+                kind: 'fs_batch',
+                status_url: '/api/operations/op-fs-batch-64',
+                events_url: '/api/client-events?operation_id=op-fs-batch-64',
+                cursor: {epoch: 'epoch', seq: 0},
+                context: {product_key: 'fs-batch:64'},
+              },
+            }), {status: 202, headers: {'Content-Type': 'application/json'}});
+          };
+          try {
+            const pending = paths.map(path => fetchFilePathInfo(path, {fresh: true, trigger: 'tree-render'}));
+            await flushFileExplorerFsBatch();
+            if (batchRequests.length !== 64) throw new Error(`expected one 64-item batch, got ${batchRequests.length}`);
+            handleClientPushEventNow('operation_terminal', {
+              operation: {id: 'op-fs-batch-64', cursor: {epoch: 'epoch', seq: 1}},
+              result: {
+                state: 'ready',
+                request: {id: 'r-fs-batch-64'},
+                data: {
+                  responses: batchRequests.map(request => ({
+                    id: request.id,
+                    ok: true,
+                    status: 200,
+                    payload: {path: request.path, name: request.path.split('/').pop(), kind: 'file'},
+                  })),
+                },
+                quality: {complete: true, stale: false},
+                warnings: [],
+              },
+            });
+            const results = await Promise.all(pending);
+            done({
+              batchSize: batchRequests.length,
+              ids: batchRequests.map(request => request.id),
+              resultPaths: results.map(result => result.path),
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } finally {
+            window.fetch = originalFetch;
+          }
+        })().catch(error => done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
+        """
+    )
+
+    assert not metrics.get("error"), metrics
+    assert metrics["batchSize"] == 64
+    assert len(set(metrics["ids"])) == 64
+    assert len(metrics["resultPaths"]) == 64
+    assert metrics["errors"] == []
+    assert metrics["rejections"] == []
+
 
 def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, tmp_path):
     page = tmp_path / "disclosure-size.html"
@@ -99,8 +272,8 @@ def test_file_tree_context_menu_zip_download_is_folder_only(browser, tmp_path):
           await showFileTreeContextMenu(fileRow, '/home/test/note.txt', {kind: 'file', name: 'note.txt'}, 32, 32);
           const fileButtons = rowsForMenu();
           closeFileContextMenu();
-          done({folderButtons, fileButtons, errors: window.__bootErrors, rejections: window.__bootRejections});
-        })().catch(error => done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections}));
+          done({folderButtons, fileButtons, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        })().catch(error => done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
         """
     )
     assert not metrics.get("error"), metrics
@@ -123,23 +296,52 @@ def test_finder_copy_path_uses_the_visible_pending_root_input(browser, tmp_path)
         Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => copied.push(text)}});
         const input = Array.from(document.querySelectorAll('.file-explorer-path-inline')).find(node => node.getClientRects().length > 0);
         input.value = '/home/test/pending-root';
-        document.querySelector('.file-explorer-path-copy-panel').click();
-        setTimeout(() => {
+        const button = document.querySelector('.file-explorer-path-copy-panel');
+        const before = {aria: button.getAttribute('aria-label'), title: button.getAttribute('title')};
+        const deadline = performance.now() + 4000;
+        const waitFor = predicate => new Promise((resolve, reject) => {
+          const poll = () => {
+            if (predicate()) return resolve();
+            if (performance.now() >= deadline) return reject(new Error('copy-feedback state did not settle'));
+            requestAnimationFrame(poll);
+          };
+          requestAnimationFrame(poll);
+        });
+        (async () => {
+          button.click();
+          await waitFor(() => button.dataset.copyFeedbackActive === 'true' && /copied/i.test(button.getAttribute('aria-label') || ''));
+          const first = {aria: button.getAttribute('aria-label'), title: button.getAttribute('title'), checkmark: getComputedStyle(button, '::after').content, active: button.dataset.copyFeedbackActive};
+          await waitFor(() => !button.dataset.copyFeedbackActive && button.getAttribute('aria-label') === before.aria && button.getAttribute('title') === before.title);
+          button.click();
+          await waitFor(() => copied.length === 2 && button.dataset.copyFeedbackActive === 'true' && /copied/i.test(button.getAttribute('aria-label') || ''));
+          const repeat = {aria: button.getAttribute('aria-label'), title: button.getAttribute('title'), active: button.dataset.copyFeedbackActive};
+          await waitFor(() => !button.dataset.copyFeedbackActive);
           Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async () => { throw new Error('clipboard denied'); }}});
-          document.querySelector('.file-explorer-path-copy-panel').click();
-          setTimeout(() => done({
+          button.click();
+          await waitFor(() => Boolean(document.querySelector('#status .err')));
+          done({
             copied,
+            before,
+            first,
+            repeat,
             copyFailure: document.getElementById('status')?.textContent || '',
             copyFailureIsVisible: Boolean(document.querySelector('#status .err')),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
-          }), 0);
-        }, 0);
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        })().catch(error => done({error: String(error?.stack || error), copied, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
         """
     )
+    assert not metrics.get("error"), metrics
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
-    assert metrics["copied"] == ["/home/test/pending-root"]
+    assert metrics["copied"] == ["/home/test/pending-root", "/home/test/pending-root"]
+    assert "copied" in metrics["first"]["aria"].lower(), metrics
+    assert "copied" in metrics["first"]["title"].lower(), metrics
+    assert metrics["first"]["active"] == "true", metrics
+    assert "✓" in metrics["first"]["checkmark"], metrics
+    assert "copied" in metrics["repeat"]["aria"].lower(), metrics
+    assert metrics["repeat"]["active"] == "true", metrics
     assert metrics["copyFailureIsVisible"] is True and "copy failed" in metrics["copyFailure"].lower(), metrics
 
 
@@ -162,7 +364,7 @@ def test_finder_reload_button_uses_the_delegated_force_refresh(browser, tmp_path
             requestAnimationFrame(inspect);
             return;
           }
-          done({before, after, errors: window.__bootErrors, rejections: window.__bootRejections});
+          done({before, after, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         };
         requestAnimationFrame(inspect);
         """
@@ -209,8 +411,8 @@ def test_finder_tree_toolbar_and_disclosure_use_real_events(browser, tmp_path):
           filesystemFetches: window.__bootFetches.filter(item => item.path === '/api/fs/batch' || item.path === '/api/fs/list'),
           expanded: row()?.getAttribute('aria-expanded') || '',
           child: Boolean(child()),
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         });
         const sort = panel.querySelector('[data-file-explorer-tree-sort]');
         sort.value = 'newest';
@@ -272,7 +474,7 @@ def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser
         };
         const waitFor = (predicate, next, deadline = performance.now() + 2000) => {
           if (predicate()) return next();
-          if (performance.now() >= deadline) return done({error: 'timed out waiting for create action', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (performance.now() >= deadline) return done({error: 'timed out waiting for create action', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           requestAnimationFrame(() => waitFor(predicate, next, deadline));
         };
         panel.querySelector('[data-file-explorer-new-file]').click();
@@ -283,7 +485,7 @@ def test_finder_create_actions_use_visible_root_and_reject_invalid_names(browser
             requestAnimationFrame(() => requestAnimationFrame(() => {
               window.fetch = originalFetch;
               window.prompt = originalPrompt;
-              done({requests, root: currentFileExplorerRoot(), errors: window.__bootErrors, rejections: window.__bootRejections});
+              done({requests, root: currentFileExplorerRoot(), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             }));
           });
         });
@@ -323,9 +525,9 @@ def test_finder_file_context_menu_uses_the_real_right_click_and_copy_action(brow
             requestAnimationFrame(inspect);
             return;
           }
-          if (!button) return done({error: 'full-path button missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!button) return done({error: 'full-path button missing', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           button.click();
-          requestAnimationFrame(() => done({copied, menuOpen: Boolean(document.querySelector('.file-context-menu')), errors: window.__bootErrors, rejections: window.__bootRejections}));
+          requestAnimationFrame(() => done({copied, menuOpen: Boolean(document.querySelector('.file-context-menu')), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
         };
         requestAnimationFrame(inspect);
         """
@@ -368,19 +570,19 @@ def test_finder_context_rename_uses_the_real_input_submit_path(browser, tmp_path
         const inspect = () => {
           const rename = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /^rename$/i.test(node.textContent.trim()));
           if (!rename && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!rename) return done({error: 'rename button missing', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!rename) return done({error: 'rename button missing', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           rename.click();
           requestAnimationFrame(() => {
             const input = document.querySelector('#panel-__finder__ .file-tree-rename-input');
-            if (!input) return done({error: 'rename input missing', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (!input) return done({error: 'rename input missing', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             input.value = 'renamed.txt';
             input.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
             const waitForRename = () => {
               if (requests.length && document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/renamed.txt"]')) {
                 window.fetch = originalFetch;
-                return done({requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+                return done({requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
               }
-              if (performance.now() >= deadline) return done({error: 'rename did not finish', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+              if (performance.now() >= deadline) return done({error: 'rename did not finish', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
               requestAnimationFrame(waitForRename);
             };
             requestAnimationFrame(waitForRename);
@@ -428,15 +630,15 @@ def test_finder_context_delete_invalidates_parent_and_removes_the_real_row(brows
         const inspect = () => {
           const remove = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /^delete$/i.test(node.textContent.trim()));
           if (!remove && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!remove) return done({error: 'delete button missing', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!remove) return done({error: 'delete button missing', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           remove.click();
           const waitForDelete = () => {
             if (requests.length && !document.querySelector('#panel-__finder__ .file-tree-row[data-path="/home/test/remove-me.txt"]')) {
               window.fetch = originalFetch;
               window.confirm = originalConfirm;
-              return done({requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+              return done({requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             }
-            if (performance.now() >= deadline) return done({error: 'delete did not refresh the Finder tree', requests, errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (performance.now() >= deadline) return done({error: 'delete did not refresh the Finder tree', requests, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             requestAnimationFrame(waitForDelete);
           };
           requestAnimationFrame(waitForDelete);
@@ -474,7 +676,7 @@ def test_finder_keyboard_selection_drag_payload_and_readonly_context_are_real_pa
         beta.dispatchEvent(new DragEvent('dragstart', {bubbles: true, cancelable: true, dataTransfer}));
         const selection = Array.from(fileExplorerSelectedPaths).sort();
         const drag = {plain: dataTransfer.getData('text/plain'), custom: JSON.parse(dataTransfer.getData('application/x-yolomux-file') || '{}')};
-        done({selection, lead: fileExplorerSelectionLead, drag, errors: window.__bootErrors, rejections: window.__bootRejections});
+        done({selection, lead: fileExplorerSelectionLead, drag, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         """
     )
     assert metrics["selection"] == ["/home/test/alpha.txt", "/home/test/beta.txt"], metrics
@@ -505,7 +707,7 @@ def test_finder_keyboard_selection_drag_payload_and_readonly_context_are_real_pa
         const inspect = () => {
           const buttons = Array.from(document.querySelectorAll('.file-context-menu button')).map(button => ({text: button.textContent.trim(), disabled: button.disabled}));
           if (!buttons.length && performance.now() < deadline) return requestAnimationFrame(inspect);
-          done({buttons, errors: window.__bootErrors, rejections: window.__bootRejections});
+          done({buttons, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         };
         requestAnimationFrame(inspect);
         """
@@ -544,7 +746,7 @@ def test_finder_context_download_actions_use_the_selected_file_or_folder(browser
           const inspect = () => {
             const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === label);
             if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
-            if (!button) return done({error: `${label} missing`, calls, errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (!button) return done({error: `${label} missing`, calls, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             button.click();
             requestAnimationFrame(next);
           };
@@ -553,7 +755,7 @@ def test_finder_context_download_actions_use_the_selected_file_or_folder(browser
         open('/home/test/note.txt', 'Download', () => open('/home/test/project', 'Zip & download', () => {
           triggerFileDownload = originalDownload;
           triggerFolderZipDownload = originalZip;
-          done({calls, errors: window.__bootErrors, rejections: window.__bootRejections});
+          done({calls, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
         }));
         """
     )
@@ -588,13 +790,13 @@ def test_finder_context_index_action_and_nonimage_guard_use_real_menu_state(brow
         };
         open('/home/test/project', buttons => {
           const include = buttons.find(button => button.textContent.trim() === 'Include in index');
-          if (!include) return done({error: 'include action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!include) return done({error: 'include action missing', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           include.click();
           requestAnimationFrame(() => open('/home/test/note.txt', fileButtons => done({
             indexed: fileExplorerDirectoryIsIndexed('/home/test/project'),
             fileButtons: fileButtons.map(button => ({text: button.textContent.trim(), disabled: button.disabled})),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           })));
         });
         """
@@ -626,11 +828,11 @@ def test_finder_context_open_new_tab_uses_the_selected_file(browser, tmp_path):
         const inspect = () => {
           const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === 'Open in new tab');
           if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!button) return done({error: 'open action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!button) return done({error: 'open action missing', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           button.click();
           const waitForOpen = () => {
-            if (fileState.has('/home/test/note.txt')) return done({opened: true, errors: window.__bootErrors, rejections: window.__bootRejections});
-            if (performance.now() >= deadline) return done({error: 'selected file did not open', errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (fileState.has('/home/test/note.txt')) return done({opened: true, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+            if (performance.now() >= deadline) return done({error: 'selected file did not open', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             requestAnimationFrame(waitForOpen);
           };
           requestAnimationFrame(waitForOpen);
@@ -672,14 +874,14 @@ def test_finder_context_copy_image_fetches_bytes_and_writes_image_clipboard(brow
         const inspect = () => {
           const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => node.textContent.trim() === 'Copy image');
           if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!button) return done({error: 'copy-image action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!button) return done({error: 'copy-image action missing', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           button.click();
           const waitForWrite = () => {
             if (writes.length) {
               window.fetch = originalFetch;
-              return done({writes, errors: window.__bootErrors, rejections: window.__bootRejections});
+              return done({writes, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             }
-            if (performance.now() >= deadline) return done({error: 'image clipboard write missing', writes, errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (performance.now() >= deadline) return done({error: 'image clipboard write missing', writes, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             requestAnimationFrame(waitForWrite);
           };
           requestAnimationFrame(waitForWrite);
@@ -718,8 +920,8 @@ def test_finder_hidden_button_uses_the_real_click_path(browser, tmp_path):
             pressed: document.querySelector('.file-explorer-hidden-toggle-panel')?.getAttribute('aria-pressed'),
             hiddenVisible,
             mode: fileExplorerRootModeValue(),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         };
         requestAnimationFrame(inspect);
@@ -788,11 +990,11 @@ def test_finder_context_relative_copy_uses_visible_root_and_fails_closed(browser
             const unavailable = Array.from(document.querySelectorAll('.file-context-menu button')).find(button => /copy relative path/i.test(button.textContent));
             const disabledAfterRootFailure = Boolean(unavailable?.disabled);
             closeFileContextMenu();
-            done({enabled, copied, disabledAfterRootFailure, errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({enabled, copied, disabledAfterRootFailure, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           } finally {
             window.fetch = originalFetch;
           }
-        })().catch(error => done({error: String(error?.stack || error), errors: window.__bootErrors, rejections: window.__bootRejections}));
+        })().catch(error => done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
         """
     )
     assert not metrics.get("error"), metrics
@@ -818,8 +1020,8 @@ def test_legacy_changes_url_opens_differ(browser, tmp_path, legacy_token):
         const changes = panel.querySelector('.file-explorer-changes-panel');
         const visible = selector => Array.from(panel.querySelectorAll(selector)).filter(node => node.getClientRects().length > 0);
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           panelConnected: panel?.isConnected === true,
           panelMode: panel?.dataset.fileExplorerMode,
           noModeSwitcher: panel?.querySelector('.file-explorer-mode-switcher') === null,
@@ -884,7 +1086,7 @@ def test_differ_controls_use_real_session_reload_sort_and_date_events(browser, t
             fetches: fetches(), before,
             sort: fileExplorerTreeSortModeForView('differ'),
             date: fileExplorerTreeDateModeForView('differ'),
-            errors: window.__bootErrors, rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection'),
           })));
         };
         requestAnimationFrame(wait);
@@ -929,7 +1131,7 @@ def test_differ_repo_folder_and_global_collapse_controls_use_real_events(browser
         requestAnimationFrame(() => done({
           repoCollapsed, repoExpanded, folderCollapsed, treesCollapsed,
           treesExpanded: !changesRepoCollapsed.size && !changesFolderCollapsed.size,
-          errors: window.__bootErrors, rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection'),
         }));
         """
     )
@@ -964,8 +1166,8 @@ def test_differ_ref_input_change_uses_its_own_repository_context(browser, tmp_pa
         const inspect = () => {
           const selected = diffRefsByRepo['/repo/app']?.from || '';
           const fetches = window.__bootFetches.filter(item => item.path === '/api/session-files').length;
-          if (selected === 'abc123def456' && fetches > before) return done({selected, before, fetches, errors: window.__bootErrors, rejections: window.__bootRejections});
-          if (performance.now() >= deadline) return done({error: 'repo-scoped ref did not commit', selected, before, fetches, errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (selected === 'abc123def456' && fetches > before) return done({selected, before, fetches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          if (performance.now() >= deadline) return done({error: 'repo-scoped ref did not commit', selected, before, fetches, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           requestAnimationFrame(inspect);
         };
         requestAnimationFrame(inspect);
@@ -997,13 +1199,13 @@ def test_differ_directory_context_expands_the_target_in_finder(browser, tmp_path
         const inspect = () => {
               const button = Array.from(document.querySelectorAll('.file-context-menu button')).find(node => /expand/i.test(node.textContent));
           if (!button && performance.now() < deadline) return requestAnimationFrame(inspect);
-          if (!button) return done({error: 'expand-in-Finder action missing', errors: window.__bootErrors, rejections: window.__bootRejections});
+          if (!button) return done({error: 'expand-in-Finder action missing', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           button.click();
           const waitForFinder = () => {
             if (itemInLayout(finderItemId) && currentFileExplorerRoot() === '/repo/app/src') {
-              return done({finderOpen: true, root: currentFileExplorerRoot(), errors: window.__bootErrors, rejections: window.__bootRejections});
+              return done({finderOpen: true, root: currentFileExplorerRoot(), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             }
-            if (performance.now() >= deadline) return done({error: 'Finder did not open the changed directory', root: currentFileExplorerRoot(), errors: window.__bootErrors, rejections: window.__bootRejections});
+            if (performance.now() >= deadline) return done({error: 'Finder did not open the changed directory', root: currentFileExplorerRoot(), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
             requestAnimationFrame(waitForFinder);
           };
           requestAnimationFrame(waitForFinder);
@@ -1061,8 +1263,8 @@ def test_finder_differ_directory_diff_counts_are_bare_numbers(browser, tmp_path)
           };
         });
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           records,
           visibleCounts: records.filter(record => !record.hidden).map(record => record.count),
           hasFileChangedLabel: records.some(record => /\\bfiles? changed\\b/.test(record.text)),
@@ -1134,8 +1336,8 @@ def test_differ_expanded_directory_chevrons_follow_row_state_through_reload(brow
         return {
           initial,
           restored: expandedRows.map(stateFor),
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         };
         """
     )
@@ -1229,8 +1431,8 @@ def test_sync_mode_opens_common_repo_parent_and_expands_affected_dirs(browser, t
 	          nameWeight: Number(getComputedStyle(row.querySelector(':scope > .file-tree-name')).fontWeight),
 	        }));
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           rows,
           fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch').length,
@@ -1582,8 +1784,8 @@ def test_sync_finder_follows_clicked_editor_file_to_repo(browser, tmp_path):
         const tree = document.querySelector('.file-explorer-panel .file-explorer-tree-panel');
         const path = '/home/test/dynamo/frontend-crates/conformance/utils/tests/parity/reasoning/table.py';
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           mode: fileExplorerRootModeValue(),
           plan: fileExplorerSyncPlanForFile(path),
@@ -1917,11 +2119,11 @@ def test_sync_finder_remembers_same_root_cursor_without_stealing_browser_focus(b
                 rowId: second?.id || '',
                 focusPreserved: document.activeElement === sentinel,
               },
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -2306,8 +2508,8 @@ def test_fixed_finder_session_dropdown_change_does_not_move_root(browser, tmp_pa
               root: document.querySelector('.file-explorer-path-inline')?.value || '',
               mode: fileExplorerRootModeValue(),
             },
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         }, 600);
         """
@@ -3167,8 +3369,8 @@ def test_sync_mode_empty_session_opens_home_not_stale_payload(browser, tmp_path)
           hasTouched: row.classList.contains('file-tree-row--session-touched'),
         }));
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           root: document.querySelector('.file-explorer-path-inline')?.value || '',
           rows,
           fetchedPaths: window.__bootFetches.filter(item => item.path === '/api/fs/list' || item.path === '/api/fs/batch').map(item => item.path),
@@ -3236,8 +3438,8 @@ def test_finder_panel_paints_initial_path_under_push_without_sync(browser, tmp_p
     metrics = browser.execute_script(
         """
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           root: document.querySelector('.file-explorer-finder .file-explorer-path-inline')?.value || '',
           rows: Array.from(document.querySelectorAll('.file-explorer-finder .file-tree-row')).map(row => row.dataset.path),
         };

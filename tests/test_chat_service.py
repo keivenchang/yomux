@@ -116,6 +116,35 @@ def test_chat_service_yoagent_source_is_owned_and_reply_is_idempotent(tmp_path):
         service.yoagent_source(username="other", browser_instance_id="browser-a", message_id=source.id)
 
 
+def test_chat_service_yoagent_source_accepts_server_classified_question_and_rejects_statement(tmp_path):
+    service = _service(tmp_path)
+    question, _created = service.send(
+        username="guest",
+        payload={"browser_instance_id": "browser-a", "client_message_uuid": "m-question", "body": "are you there?"},
+        locale="en",
+    )
+    statement, _created = service.send(
+        username="guest",
+        payload={"browser_instance_id": "browser-a", "client_message_uuid": "m-statement", "body": "status update"},
+        locale="en",
+    )
+
+    source, query = service.yoagent_source(
+        username="guest",
+        browser_instance_id="browser-a",
+        message_id=question["message"]["id"],
+    )
+
+    assert source.is_question is True
+    assert query == "are you there?"
+    with pytest.raises(ChatServiceError, match="not a /yo command"):
+        service.yoagent_source(
+            username="guest",
+            browser_instance_id="browser-a",
+            message_id=statement["message"]["id"],
+        )
+
+
 def test_chat_service_signed_cursor_rejects_invalid_and_forged_values(tmp_path):
     service = _service(tmp_path)
     service.send(username="alice", payload={"browser_instance_id": "browser-a", "client_message_uuid": "m-1", "body": "hello"}, locale="en")

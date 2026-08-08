@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import hashlib
 from http import HTTPStatus
 import io
@@ -17,16 +18,21 @@ import yaml
 
 from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
+from yolomux_lib.stats_current import host_collectors
 from yolomux_lib import common
 from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
+from yolomux_lib import statusd_protocol
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
+from yolomux_lib.local_services.rpc import encode_metadata
+from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
+from yolomux_lib.local_services.rpc import new_envelope
 from yolomux_lib import server_logs
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
@@ -300,6 +306,98 @@ def test_stats_agent_token_rows_keeps_existing_transcript_rows_when_enriching_mi
     assert {row["key"] for row in rows} == {"s|1|codex", "s|3|claude"}
 
 
+def test_stats_agent_token_rows_stop_re_enriching_a_permanently_unresolvable_roster(monkeypatch, tmp_path):
+    """Session yo7770 runs in a tree with no matching Codex rollout, so its statusd row can never
+    carry a transcript. That made `any(not row["transcript"])` permanently true and forced a full
+    discover_sessions (measured 1.53-2.05s CPU) on every collector sample."""
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["s"]
+    pane = PaneInfo("s", "3", "0", "%3", "s:3.0", str(tmp_path), "codex", True, True, "codex", 9)
+    agent = AgentInfo("s", "codex", 9, "%3", "codex", str(tmp_path), None, "thread", str(tmp_path / "rollout.jsonl"), None)
+    info = SessionInfo("s", [pane], pane, [agent])
+    discover_calls = []
+    monkeypatch.setattr(
+        app_module, "discover_sessions",
+        lambda sessions: discover_calls.append(tuple(sessions)) or ({"s": info}, []),
+    )
+    clock = _StepClock()
+    monkeypatch.setattr(webapp.stats_agent_token_enrich_memo(), "clock", clock)
+    statusd_rows = [
+        {"session": "s", "window_index": 3, "kind": "codex", "transcript": ""},
+        {"session": "yo7770", "window_index": 1, "kind": "codex", "transcript": ""},
+    ]
+
+    first = webapp.stats_agent_token_rows(list(statusd_rows))
+    assert len(discover_calls) == 1
+
+    # Five more samples at the 10s watched cadence, inside the memo TTL, same unresolved roster.
+    for _ in range(5):
+        clock.advance(10.0)
+        assert webapp.stats_agent_token_rows(list(statusd_rows)) == first
+    assert len(discover_calls) == 1
+
+
+def test_stats_agent_token_rows_re_enrich_immediately_when_a_new_agent_appears(monkeypatch, tmp_path):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["s"]
+    pane = PaneInfo("s", "3", "0", "%3", "s:3.0", str(tmp_path), "codex", True, True, "codex", 9)
+    agent = AgentInfo("s", "codex", 9, "%3", "codex", str(tmp_path), None, "thread", str(tmp_path / "rollout.jsonl"), None)
+    info = SessionInfo("s", [pane], pane, [agent])
+    discover_calls = []
+    monkeypatch.setattr(
+        app_module, "discover_sessions",
+        lambda sessions: discover_calls.append(tuple(sessions)) or ({"s": info}, []),
+    )
+    clock = _StepClock()
+    monkeypatch.setattr(webapp.stats_agent_token_enrich_memo(), "clock", clock)
+
+    webapp.stats_agent_token_rows([{"session": "s", "window_index": 3, "kind": "codex", "transcript": ""}])
+    assert len(discover_calls) == 1
+
+    clock.advance(1.0)
+    webapp.stats_agent_token_rows([
+        {"session": "s", "window_index": 3, "kind": "codex", "transcript": ""},
+        {"session": "s", "window_index": 4, "kind": "claude", "transcript": ""},
+    ])
+
+    # A roster change is not subject to the TTL: a pane that just started is enriched next sample.
+    assert len(discover_calls) == 2
+
+
+def test_stats_agent_token_rows_re_enrich_after_the_memo_ttl_for_an_unchanged_roster(monkeypatch, tmp_path):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = ["s"]
+    pane = PaneInfo("s", "3", "0", "%3", "s:3.0", str(tmp_path), "codex", True, True, "codex", 9)
+    agent = AgentInfo("s", "codex", 9, "%3", "codex", str(tmp_path), None, "thread", str(tmp_path / "rollout.jsonl"), None)
+    info = SessionInfo("s", [pane], pane, [agent])
+    discover_calls = []
+    monkeypatch.setattr(
+        app_module, "discover_sessions",
+        lambda sessions: discover_calls.append(tuple(sessions)) or ({"s": info}, []),
+    )
+    clock = _StepClock()
+    monkeypatch.setattr(webapp.stats_agent_token_enrich_memo(), "clock", clock)
+    statusd_rows = [{"session": "s", "window_index": 3, "kind": "codex", "transcript": ""}]
+
+    webapp.stats_agent_token_rows(list(statusd_rows))
+    clock.advance(app_module.STATS_AGENT_TOKEN_ENRICH_MEMO_TTL_SECONDS + 1.0)
+    webapp.stats_agent_token_rows(list(statusd_rows))
+
+    assert len(discover_calls) == 2
+
+
+class _StepClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 def test_record_owned_direct_image_stream_ignores_partial_fragments_until_final_usage():
     submitted = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
@@ -398,9 +496,10 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
         monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
         services = webapp.runtime_local_services()
     finally:
+        webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
 
-    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "statusd", "approvald"]
+    assert [row["service"] for row in services["services"]] == ["indexd", "statsd", "jobd", "statusd", "watchd", "approvald"]
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
@@ -638,7 +737,7 @@ def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monk
         calls.append(args[0])
         return next(responses)
 
-    monkeypatch.setattr(app_module.subprocess, "run", run)
+    monkeypatch.setattr(host_collectors.subprocess, "run", run)
 
     metrics = app_module.stats_GPU_gpu_metrics()
 
@@ -651,26 +750,24 @@ def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monk
 
 
 def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypatch):
-    payload = app_module.plistlib.dumps([{
+    payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"GPU Activity(%)": 44, "In use system memory": 2 * 1024 * 1024},
     }])
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
+    monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
     metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
 
-    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0 (Apple M4 Pro)", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 8 * 1024 * 1024}
+    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 0}
     assert metrics == {"devices": metrics["devices"]}
 
 
 def test_stats_macos_gpu_metrics_reads_current_device_utilization_key(monkeypatch):
-    payload = app_module.plistlib.dumps([{
+    payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"Device Utilization %": 8, "In use system memory": 2 * 1024 * 1024},
     }])
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
+    monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
     metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
 
@@ -678,12 +775,11 @@ def test_stats_macos_gpu_metrics_reads_current_device_utilization_key(monkeypatc
 
 
 def test_stats_macos_gpu_metrics_drops_records_without_utilization(monkeypatch):
-    payload = app_module.plistlib.dumps([{
+    payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"In use system memory": 2 * 1024 * 1024},
     }])
-    monkeypatch.setattr(app_module.sys, "platform", "darwin")
-    monkeypatch.setattr(app_module, "current_system_memory_bytes", lambda: (8 * 1024 * 1024, 0))
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
+    monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
     assert app_module.stats_macos_gpu_metrics("Apple M4 Pro") == {}
 
@@ -694,7 +790,8 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
         "SPMemoryDataType": [{"dimm_type": "LPDDR5"}],
         "SPDisplaysDataType": [{"sppci_model": "Apple M4 Pro", "sppci_cores": "20"}],
     })
-    monkeypatch.setattr(app_module.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
+    monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
+    monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
     assert app_module.stats_macos_hardware_metadata() == {
         "cpu_label": "Apple M4 Pro · 14 cores (10 performance + 4 efficiency)",
@@ -732,6 +829,44 @@ def test_system_cpu_percent_from_times_clamps_to_single_100_percent_scale():
     assert app_module.system_cpu_percent_from_times((100.0, 20.0), (100.0, 21.0)) == 0.0
 
 
+def test_current_stats_sample_is_a_statsd_push_reader(monkeypatch):
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    record = webapp.stats_collection_state.sample_record
+    record.cached_payload = {"pid": 12, "cpu_percent": 17.0, "system_cpu_percent": 25.0}
+
+    sample, recorded = webapp.current_stats_sample(force=True)
+
+    assert recorded is False
+    assert sample == record.cached_payload
+
+
+def test_statsd_cpu_push_updates_the_web_cache_without_a_web_sampler():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {"status": "ok", "current_percent": sample["cpu_percent"]}
+
+    response = webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": 100.0, "pid": os.getpid(), "cpu_percent": 42.0, "system_cpu_percent": 11.0, "rss_bytes": 123},
+    })
+
+    assert response == {"ok": True, "cpu_budget": {"status": "ok", "current_percent": 42.0}}
+    assert webapp.latest_stats_sample()["cpu_percent"] == 42.0
+
+
+def test_cpu_budget_marks_a_missing_statsd_push_stale():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    payload = webapp.server_cpu_budget_payload(now=None)
+
+    assert payload["status"] == "stale"
+    assert payload["source"] == "statsd_push"
+    assert payload["sample_age_seconds"] is None
+    assert payload["stale"] is True
+
+
 def test_background_status_includes_performance_summary():
     webapp = app_module.TmuxWebtermApp([])
     try:
@@ -748,6 +883,21 @@ def test_background_status_includes_performance_summary():
             owner_role="owner",
         )
         payload, status = webapp.background_owner_status_payload()
+        diagnostics_calls = []
+        profile_payload = {
+            "ok": True,
+            "retained": 1,
+            "maximum": 256,
+            "items": [{"kind": "api", "endpoint": "/api/session-metadata", "ttfb_ms": 8400}],
+        }
+        observation_status_payload = {
+            "ok": True, "accepted_reports": 2, "confirmed_real_failures": 1,
+        }
+        webapp.stats_current_client.browser_diagnostics = lambda: diagnostics_calls.append("combined") or {
+            "ok": True,
+            "profiles": profile_payload,
+            "observation_status": observation_status_payload,
+        }
         diagnostics = webapp.performance_diagnostics_payload()
         control_response = webapp.handle_control_request({"action": "background_status"})
     finally:
@@ -756,6 +906,13 @@ def test_background_status_includes_performance_summary():
     assert status == HTTPStatus.OK
     assert "perf" not in payload
     perf = diagnostics["perf"]
+    assert diagnostics["browser_profiles"] == {
+        "retained": 1,
+        "maximum": 256,
+        "items": [{"kind": "api", "endpoint": "/api/session-metadata", "ttfb_ms": 8400}],
+    }
+    assert diagnostics["browser_observation_status"] == {"accepted_reports": 2, "confirmed_real_failures": 1}
+    assert diagnostics_calls == ["combined"]
     assert perf["record_count"] == 1
     assert perf["recent"][0]["cache_key_kind"] == "payload"
     assert perf["recent"][0]["cache_hit"] is True
@@ -767,6 +924,10 @@ def test_background_status_includes_performance_summary():
         "compute_ms_total": 12.5,
         "compute_ms_avg": 12.5,
         "compute_ms_max": 12.5,
+        "request_total_ms_avg": 0.0,
+        "request_total_ms_max": 0.0,
+        "accept_to_route_ms_avg": 0.0,
+        "accept_to_route_ms_max": 0.0,
         "payload_bytes_total": len(json.dumps({"files": [{"path": "/repo/a.py"}]}, sort_keys=True, separators=(",", ":")).encode("utf-8")),
         "cache": {"hit:fresh": 1},
     }]
@@ -916,7 +1077,7 @@ def test_performance_metrics_payload_ranks_response_bytes():
 def test_capture_measurement_metrics_exclude_other_browser_records():
     webapp = app_module.TmuxWebtermApp([])
     try:
-        webapp.record_performance_sample("http-endpoint", "GET /api/ping", compute_ms=2.0, details={"measurement_scope": "capture"})
+        webapp.record_performance_sample("http-endpoint", "GET /api/ping", compute_ms=2.0, details={"measurement_scope": "capture", "request_total_ms": 9.0, "accept_to_route_ms": 4.0})
         webapp.record_performance_sample("http-endpoint", "GET /api/fs/watch-diff", compute_ms=99.0)
         response = webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "capture"})
     finally:
@@ -924,6 +1085,9 @@ def test_capture_measurement_metrics_exclude_other_browser_records():
 
     assert response["ok"] is True
     assert [(row["surface"], row["compute_ms_total"]) for row in response["performance"]["summary"]] == [("GET /api/ping", 2.0)]
+    row = response["performance"]["summary"][0]
+    assert row["request_total_ms_max"] == 9.0
+    assert row["accept_to_route_ms_max"] == 4.0
     assert webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "other"}) == {"ok": False, "error": "unsupported measurement scope"}
 
 
@@ -954,6 +1118,49 @@ def test_server_cpu_budget_warns_after_sustained_window_with_top_consumers(monke
     assert len(logs) == 1 and logs[0][0][:2] == ("warning", "stats-cpu")
     assert len(events) == 1 and events[0][0][1] == "server_cpu_budget_warning"
     assert recovered["status"] == "ok" and recovered["sustained_seconds"] == 0.0
+
+
+def test_server_cpu_budget_warning_spans_the_breach_window_and_states_its_coverage(monkeypatch):
+    # The warning explained a 300s breach with a 60s slice of profiling and no denominator, so a
+    # consumer worth 0.4% of the CPU read as the cause. Two defects, one message: the summary
+    # window must be the breach window, and the report must say what share of the measured CPU it
+    # actually accounts for. A live 7771 breach burned ~267 CPU-s and attributed 0.9ms of it.
+    webapp = app_module.TmuxWebtermApp([])
+    logs = []
+    events = []
+    monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: logs.append((args, kwargs)))
+    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: events.append((args, kwargs)))
+    try:
+        # 120s old: inside the 300s breach window, outside the 60s summary default that was used.
+        webapp.record_performance_sample(
+            "http-endpoint", "GET /api/logs", compute_ms=90.0, record_time=time.time() - 120.0,
+        )
+        webapp.update_server_cpu_budget({"cpu_percent": 90.0}, now=2000.0)
+        early = webapp.update_server_cpu_budget({"cpu_percent": 90.0}, now=2299.0)
+        warned = webapp.update_server_cpu_budget({"cpu_percent": 90.0}, now=2300.0)
+    finally:
+        webapp.control_server.stop()
+
+    # Unchanged: the breach threshold and the moment the warning fires.
+    assert early["status"] == "watching" and warned["status"] == "warning"
+    assert warned["sustained_seconds"] == 300.0
+
+    # The breach window, not the 60s default: a 120s-old record must be counted.
+    assert warned["top_consumers"] == [
+        {"role": "http-endpoint", "surface": "GET /api/logs", "count": 1, "compute_ms_total": 90.0},
+    ]
+
+    fields = events[0][0][3]
+    # 90% of a core integrated across 2000->2300 is 270 CPU-s; 90ms of it is profiled.
+    assert fields["cpu_ms_consumed"] == pytest.approx(270000.0, rel=1e-6)
+    assert fields["attributed_ms"] == pytest.approx(90.0)
+    assert fields["attributed_percent"] == pytest.approx(0.033, abs=0.001)
+
+    message = logs[0][0][2]
+    assert "consuming 270.0 CPU-s" in message
+    assert "unattributed 100.0%" in message
+    assert "the cause is unprofiled, not the list below" in message
+    assert "(latest 1s sample)" in message
 
 
 def test_runtime_python_profile_reports_named_native_threads():
@@ -1181,6 +1388,23 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
         "system_cpu_percent": 12.0,
         "rss_bytes": 4096,
     }
+    assert payload["tmux_signal_watcher"] == {
+        "state": "never-started",
+        "healthy": False,
+        "reason_code": "not_started",
+        "reason": "Tmux signal watcher has not been started",
+        "sessions": [],
+        "thread_alive": False,
+        "process_pid": 0,
+        "demanded": False,
+    }
+    subscriber_id, _ = webapp.client_events.subscribe(channels="core")
+    try:
+        demanded = webapp.tmux_signal_event_watcher_status()
+    finally:
+        webapp.client_events.unsubscribe(subscriber_id)
+    assert demanded["state"] == "never-started"
+    assert demanded["demanded"] is True
 
 
 def test_background_refresh_control_uses_nested_payload(monkeypatch):
@@ -1323,10 +1547,11 @@ def test_attention_acknowledgement_is_server_owned(monkeypatch, tmp_path):
         webapp.control_server.stop()
 
 
-def test_agent_window_attention_key_uses_shared_per_window_hash_transitions(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module.common, "TMUX_AI_STATUS_PATH", tmp_path / "tmux-AI-status.json")
-    monkeypatch.setattr(app_module.common, "LEGACY_ATTENTION_ACKS_PATH", tmp_path / "attention-acks.json")
+def test_agent_window_attention_key_uses_shared_per_window_hash_transitions(tmp_path):
     webapp = app_module.TmuxWebtermApp(["1"])
+    status_path = webapp.host_identity.namespaced_path(tmp_path / "state", "tmux-AI-status.json")
+    webapp.tmux_ai_status_path = status_path
+    assert webapp.tmux_ai_status_path == status_path
     first_screen = {"key": "approval", "question_text": "Do you want to proceed?", "prompt_hash": "command-a"}
     second_screen = {"key": "approval", "question_text": "Do you want to proceed?", "prompt_hash": "command-b"}
     try:
@@ -1346,6 +1571,9 @@ def test_agent_window_attention_key_uses_shared_per_window_hash_transitions(monk
     assert first_b == "command-b:2"
     assert returned_a == "command-a:3"
     assert after_idle_a == "command-a:4"
+    assert status_path.exists()
+
+
 def test_stats_agent_window_rows_uses_statusd_snapshot(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     cached_payload = {
@@ -1453,7 +1681,7 @@ def test_status_snapshot_payload_preserves_statusd_generation_for_agent_window_c
     }).encode("utf-8")
     metadata = {
         "ok": True,
-        "protocol_version": 1,
+        "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION,
         "generation": 17,
         "status": 200,
         "built_at": 1.0,
@@ -2236,7 +2464,7 @@ def test_session_files_memory_cache_is_bounded():
         webapp.control_server.stop()
 
 
-def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
+def test_client_event_watch_sleep_ignores_watchd_owned_filesystem_deadlines(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     subscriber_id = None
     try:
@@ -2253,20 +2481,20 @@ def test_client_event_watch_sleep_uses_next_due_preference(monkeypatch):
         record.next_watched_pr_poll_at = 200.0
         assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(60.0)
         subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
-        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(60.0)
         record.filesystem_healthy = True
         record.next_signature_poll_at = 101.25
-        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(1.25)
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(60.0)
         record.filesystem_healthy = False
         record.next_signature_poll_at = 0.0
-        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(0.25)
+        assert webapp.client_event_watch_sleep_seconds(100.0) == pytest.approx(60.0)
     finally:
         if subscriber_id is not None:
             webapp.client_events.unsubscribe(subscriber_id)
         webapp.control_server.stop()
 
 
-def test_client_event_watch_uses_native_events_without_visible_or_background_scans(monkeypatch):
+def test_client_event_watch_uses_watchd_without_visible_or_background_scans():
     webapp = app_module.TmuxWebtermApp([])
     subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
     record = webapp.client_watch_service.event_watcher_record
@@ -2282,8 +2510,8 @@ def test_client_event_watch_uses_native_events_without_visible_or_background_sca
     record.filesystem_healthy = True
     record.next_signature_poll_at = time.monotonic() + 60.0
     record.wake_event = StopAfterOneWait()
-    monkeypatch.setattr(webapp, "poll_client_file_events_once", lambda: pytest.fail("healthy native watch must not scan visible files"))
-    monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: pytest.fail("healthy native watch must not scan background files"))
+    assert not hasattr(webapp, "poll_client_file_events_once")
+    assert not hasattr(webapp, "poll_client_background_file_events_once")
     try:
         webapp.client_event_watch_loop(record)
     finally:
@@ -2383,12 +2611,12 @@ def test_status_generation_waiter_publishes_once_per_advanced_generation(monkeyp
     ])
     record = webapp.client_watch_service.event_watcher_record
     record.status_generation = 7
-    monkeypatch.setattr(webapp.status_client, "wait_generation", lambda _generation, timeout: next(responses))
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda _generation: next(responses))
     monkeypatch.setattr(
         webapp.status_client,
         "snapshot",
         lambda _sessions, timeout: (
-            {"ok": True, "protocol_version": 1, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
             b'{"session_order":[],"sessions":{}}',
         ),
     )
@@ -2410,6 +2638,93 @@ def test_status_generation_waiter_publishes_once_per_advanced_generation(monkeyp
     assert events[0][1]["data"] == {"session_order": [], "sessions": {}}
 
 
+def test_status_generation_waiter_uses_immediate_probe_and_stop_aware_cadence(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    record = webapp.client_watch_service.event_watcher_record
+    probes = []
+    waits = []
+    events = []
+    responses = iter([
+        {"ok": True, "changed": False, "generation": 7},
+        {"ok": True, "changed": True, "generation": 8},
+    ])
+
+    class CadenceStopEvent:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def clear(self):
+            self.stopped = False
+
+    record.status_generation = 7
+    record.status_generation_stop_event = CadenceStopEvent()
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda generation: probes.append(generation) or next(responses), raising=False)
+    monkeypatch.setattr(webapp.status_client, "wait_generation", lambda *_args, **_kwargs: pytest.fail("generation watcher must not occupy a long-poll handler"))
+    monkeypatch.setattr(
+        webapp.status_client,
+        "snapshot",
+        lambda _sessions, timeout: (
+            {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            b'{"session_order":[],"sessions":{}}',
+        ),
+    )
+
+    def publish_then_stop(event_type, payload=None, **_kwargs):
+        events.append((event_type, payload or {}))
+        record.status_generation_stop_event.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", publish_then_stop)
+    try:
+        webapp.status_generation_wait_loop(record)
+    finally:
+        webapp.control_server.stop()
+
+    assert probes == [7, 7]
+    assert waits == [app_module.STATUS_GENERATION_RPC_WAIT_SECONDS]
+    assert [event_type for event_type, _payload in events] == ["auto_approve_changed"]
+    assert events[0][1]["generation"] == 8
+
+
+def test_status_generation_waiter_suppresses_generation_only_snapshot_change(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    events = []
+    record = webapp.client_watch_service.event_watcher_record
+    record.status_generation = 7
+    webapp.client_watch_service.auto_approve_payload = {
+        "agent_window_snapshot_revision": 7,
+        "session_order": [],
+        "sessions": {},
+    }
+    monkeypatch.setattr(webapp.status_client, "probe_generation", lambda _generation: {"ok": True, "changed": True, "generation": 8})
+
+    def snapshot(_sessions, timeout):
+        record.stop_event.set()
+        return (
+            {"ok": True, "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION, "status": 200, "generation": 8, "stale": False, "built_at": 1.0, "content_type": "application/json"},
+            b'{"agent_window_snapshot_revision":8,"session_order":[],"sessions":{}}',
+        )
+
+    monkeypatch.setattr(webapp.status_client, "snapshot", snapshot)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
+    try:
+        webapp.status_generation_wait_loop(record)
+    finally:
+        webapp.control_server.stop()
+
+    assert events == []
+    assert record.status_generation == 8
+    assert webapp.client_watch_service.auto_approve_payload["agent_window_snapshot_revision"] == 8
+
+
 def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["1"])
     record = webapp.client_watch_service.event_watcher_record
@@ -2418,13 +2733,11 @@ def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monke
     monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "lease-1"})
     monkeypatch.setattr(webapp.status_client, "snapshot", lambda _sessions, timeout: ({"ok": True, "status": 200, "generation": 7}, b"{}"))
 
-    def wait_generation(_generation, timeout):
-        assert timeout == 30.0
+    def probe_generation(_generation):
         wait_entered.set()
-        record.status_generation_stop_event.wait(timeout=1.0)
-        return {"ok": False, "error": "stopped"}
+        return {"ok": True, "changed": False, "generation": 7}
 
-    monkeypatch.setattr(webapp.status_client, "wait_generation", wait_generation)
+    monkeypatch.setattr(webapp.status_client, "probe_generation", probe_generation)
     monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda lease_id: released.append(lease_id) or {"ok": True})
     try:
         assert webapp.start_status_generation_watcher(record) is True
@@ -2435,6 +2748,37 @@ def test_status_generation_watcher_is_demand_scoped_and_releases_its_lease(monke
 
     assert released == ["lease-1"]
     assert record.status_generation_worker is None
+
+
+def test_status_generation_watcher_stop_does_not_leave_an_obsolete_probe_or_cadence(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"])
+    record = webapp.client_watch_service.event_watcher_record
+    wait_entered = threading.Event()
+    probes = []
+    monkeypatch.setattr(webapp.status_client, "acquire_generation_lease", lambda: {"ok": True, "lease_id": "lease-1"})
+    monkeypatch.setattr(webapp.status_client, "snapshot", lambda _sessions, timeout: ({"ok": True, "status": 200, "generation": 7}, b"{}"))
+    monkeypatch.setattr(webapp.status_client, "release_generation_lease", lambda _lease_id: {"ok": True})
+
+    def probe_generation(generation):
+        probes.append(generation)
+        wait_entered.set()
+        return {"ok": True, "changed": False, "generation": 7}
+
+    monkeypatch.setattr(webapp.status_client, "probe_generation", probe_generation)
+    try:
+        assert webapp.start_status_generation_watcher(record) is True
+        assert wait_entered.wait(timeout=1.0)
+        webapp.stop_status_generation_watcher(record)
+        assert record.status_generation_worker is None
+        assert not any(
+            thread.name == "statusd-generation-wait" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert probes == [7]
+    assert app_module.STATUS_GENERATION_RPC_WAIT_SECONDS <= 1.0
 
 
 def test_client_event_recurring_work_is_fixed_name_and_tracks_useful_vs_no_change():
@@ -2505,7 +2849,7 @@ def test_stable_signature_payload_drops_volatile_keys_recursively():
         webapp.control_server.stop()
 
 
-def test_activity_summary_ready_signature_ignores_generated_timestamps(monkeypatch):
+def test_activity_summary_ready_signature_ignores_generated_timestamps(monkeypatch, legacy_activity_summary_enabled):
     webapp = app_module.TmuxWebtermApp([])
     events = []
     payloads = [
@@ -2524,6 +2868,40 @@ def test_activity_summary_ready_signature_ignores_generated_timestamps(monkeypat
     assert [event_type for event_type, _payload in events] == ["activity_summary_ready"]
 
 
+def test_auto_approve_client_event_patch_suppresses_noop_and_sends_changed_sessions_only():
+    webapp = app_module.TmuxWebtermApp([])
+    previous = {
+        "agent_window_snapshot_revision": 7,
+        "generated_at": 1.0,
+        "session_order": ["1", "2"],
+        "sessions": {
+            "1": {"target": "1", "enabled": False, "agent_windows": [{"window_index": 0, "state": "idle"}]},
+            "2": {"target": "2", "enabled": True, "agent_windows": [{"window_index": 1, "state": "working"}]},
+        },
+        "rules": {"mode": "safe"},
+    }
+    same = copy.deepcopy(previous)
+    same.update({"agent_window_snapshot_revision": 8, "generated_at": 2.0})
+    changed = copy.deepcopy(same)
+    changed["agent_window_snapshot_revision"] = 9
+    changed["sessions"]["2"]["agent_windows"][0]["state"] = "needs-input"
+    try:
+        assert webapp.auto_approve_client_event_patch(previous, same) is None
+        patch = webapp.auto_approve_client_event_patch(same, changed)
+    finally:
+        webapp.control_server.stop()
+
+    assert patch == {
+        "patch": True,
+        "collection": "sessions",
+        "changes": {"2": changed["sessions"]["2"]},
+        "removed_keys": [],
+        "fields": {"agent_window_snapshot_revision": 9},
+        "removed_fields": [],
+    }
+    assert len(json.dumps(patch, separators=(",", ":"))) < len(json.dumps({"data": changed}, separators=(",", ":")))
+
+
 def test_tmux_signal_event_publishes_changed_window_patch(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     events = []
@@ -2539,7 +2917,17 @@ def test_tmux_signal_event_publishes_changed_window_patch(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert events == [("tmux_signals_changed", {"patch": True, "windows": [{"session": "1", "window_index": 0, "active": False}, {"session": "1", "window_index": 1, "active": True}], "removed_window_keys": [], "window_count": 2, "ok": True, "generated_at": 2.0, "compute_ms": None})]
+    assert events == [("tmux_signals_changed", {
+        "patch": True,
+        "collection": "windows",
+        "changes": {
+            "1:0": {"session": "1", "window_index": 0, "active": False},
+            "1:1": {"session": "1", "window_index": 1, "active": True},
+        },
+        "removed_keys": [],
+        "fields": {"generated_at": 2.0},
+        "removed_fields": [],
+    })]
 
 
 def test_tmux_signal_event_publishes_removed_window_origin(monkeypatch):
@@ -2560,18 +2948,21 @@ def test_tmux_signal_event_publishes_removed_window_origin(monkeypatch):
 
     assert events == [("tmux_signals_changed", {
         "patch": True,
-        "windows": [],
-        "removed_window_keys": ["1:1"],
-        "window_count": 1,
-        "ok": True,
-        "generated_at": 10.4,
-        "compute_ms": None,
-        "removed_window_event_at": 10.25,
-        "removed_window_event_type": "pane-exited",
+        "collection": "windows",
+        "changes": {},
+        "removed_keys": ["1:1"],
+        "fields": {
+            "window_count": 1,
+            "generated_at": 10.4,
+            "removed_window_keys": ["1:1"],
+            "removed_window_event_at": 10.25,
+            "removed_window_event_type": "pane-exited",
+        },
+        "removed_fields": [],
     })]
 
 
-def test_tmux_signal_full_snapshot_keeps_removed_window_origin(monkeypatch):
+def test_tmux_signal_patch_keeps_removed_window_origin_when_metadata_changes(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     events = []
     payloads = [
@@ -2587,16 +2978,21 @@ def test_tmux_signal_full_snapshot_keeps_removed_window_origin(monkeypatch):
     finally:
         webapp.control_server.stop()
 
-    assert events == [("tmux_signals_changed", {"data": {
-        "ok": True,
-        "window_count": 1,
-        "pane_count": 1,
-        "windows": [{"session": "1", "window_index": 0}],
-        "generated_at": 20.4,
-        "removed_window_keys": ["1:1"],
-        "removed_window_event_at": 20.1,
-        "removed_window_event_type": "pane-died",
-    }})]
+    assert events == [("tmux_signals_changed", {
+        "patch": True,
+        "collection": "windows",
+        "changes": {},
+        "removed_keys": ["1:1"],
+        "fields": {
+            "pane_count": 1,
+            "window_count": 1,
+            "generated_at": 20.4,
+            "removed_window_keys": ["1:1"],
+            "removed_window_event_at": 20.1,
+            "removed_window_event_type": "pane-died",
+        },
+        "removed_fields": [],
+    })]
 
 
 def test_tmux_signal_event_does_not_force_auto_approve_poll():
@@ -2848,6 +3244,20 @@ def test_create_next_session_applies_saved_active_color_to_new_tmux(monkeypatch,
     assert webapp.tmux_theme_color == "purple"
 
 
+def test_create_next_session_plan_generations_are_unique_and_javascript_safe(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "refresh_sessions", lambda maintenance=True: [])
+    try:
+        first, first_status = webapp.create_next_session_plan()
+        second, second_status = webapp.create_next_session_plan()
+    finally:
+        webapp.control_server.stop()
+
+    assert first_status == second_status == HTTPStatus.OK
+    assert first["session"] == second["session"] == "1"
+    assert 0 < first["generation"] < second["generation"] <= (1 << 53) - 1
+
+
 def test_create_next_session_uses_the_explicit_full_access_choice(monkeypatch, tmp_path):
     webapp = app_module.TmuxWebtermApp([], dangerously_yolo=True)
     tmux_calls = []
@@ -2970,10 +3380,9 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
     monkeypatch.setattr(webapp, "server_attention_ack_event_poll_seconds", lambda: 12.0)
     monkeypatch.setattr(webapp, "server_tmux_signal_event_poll_seconds", lambda: 15.0)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
-    monkeypatch.setattr(webapp, "start_native_filesystem_watcher", lambda record=None: False)
     try:
         webapp.start_client_event_watcher()
-        assert started == ["client-event-watch"]
+        assert started == ["client-event-watch", "watchd-revision"]
         record = webapp.client_watch_service.event_watcher_record
         assert record.next_attention_ack_poll_at == pytest.approx(112.0)
         assert record.next_tmux_signal_poll_at == pytest.approx(115.0)
@@ -2984,70 +3393,33 @@ def test_start_client_event_watcher_defers_expensive_timer_polls(monkeypatch):
 
 def test_client_event_watcher_restart_does_not_reuse_or_clobber_old_generation(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
-    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
-    old_polled = threading.Event()
-    new_polled = threading.Event()
-    release_old = threading.Event()
-    release_replacement = threading.Event()
-    poll_threads = []
-
-    def poll_files():
-        worker = threading.current_thread()
-        poll_threads.append(worker)
-        if len(poll_threads) == 1:
-            old_polled.set()
-            assert release_old.wait(timeout=2.0)
-            return
-        new_polled.set()
-        assert release_replacement.wait(timeout=2.0)
-        with webapp.client_watch_service.lock:
-            record = webapp.client_watch_service.event_watcher_record
-            record.stop_event.set()
-            record.wake_event.set()
-
-    monkeypatch.setattr(webapp, "poll_client_file_events_once", poll_files)
-    monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: None)
-    monkeypatch.setattr(webapp, "poll_attention_acks_client_event_once", lambda: None)
-    monkeypatch.setattr(webapp, "poll_tmux_signals_client_event_once", lambda: None)
-    monkeypatch.setattr(webapp, "poll_watched_prs_client_event_once", lambda: None)
-    monkeypatch.setattr(webapp.yoagent_controller, "poll_yoagent_jobs_once", lambda: None)
-    monkeypatch.setattr(webapp, "start_client_directory_poll", lambda record=None: False)
     monkeypatch.setattr(webapp, "start_tmux_signal_event_watcher", lambda: True)
     monkeypatch.setattr(webapp, "stop_tmux_signal_event_watcher", lambda: None)
+    monkeypatch.setattr(webapp, "start_watchd_revision_watcher", lambda record: False)
     try:
         webapp.start_client_event_watcher()
         old_record = webapp.client_watch_service.event_watcher_record
-        old_worker = old_record.worker
-        assert old_worker is not None
-        assert old_polled.wait(timeout=1.0)
-
-        old_worker.join = lambda timeout=None: None
         webapp.stop_client_event_watcher()
         assert old_record.stop_event.is_set()
         assert webapp.client_watch_service.event_watcher_record is not old_record
 
         webapp.start_client_event_watcher()
         replacement = webapp.client_watch_service.event_watcher_record
-        replacement_worker = replacement.worker
         assert replacement is not old_record
-        assert replacement_worker is not None and replacement_worker is not old_worker
         assert replacement.stop_event is not old_record.stop_event
         assert replacement.wake_event is not old_record.wake_event
-        assert new_polled.wait(timeout=1.0)
-        release_replacement.set()
-        replacement_worker.join(timeout=1.0)
-
-        release_old.set()
-        threading.Thread.join(old_worker, timeout=1.0)
-        assert old_worker.is_alive() is False
-        assert replacement_worker.is_alive() is False
+        stale_revision = {
+            "epoch": "old",
+            "revision": 1,
+            "watch_generation": 1,
+            "token": "old:1",
+            "roots": ["/old"],
+            "root_generations": {"/old": 1},
+        }
+        assert webapp.apply_watchd_revision(old_record, stale_revision) == []
         assert webapp.client_watch_service.event_watcher_record is replacement
-        assert replacement.worker is None
-        assert poll_threads == [old_worker, replacement_worker]
+        assert replacement.watchd_revision == 0
     finally:
-        release_old.set()
-        release_replacement.set()
-        webapp.client_events.unsubscribe(subscriber_id)
         webapp.stop_client_event_watcher()
         webapp.control_server.stop()
 
@@ -3072,43 +3444,28 @@ def test_client_event_watcher_parallel_lifecycle_attributes_are_retired():
         assert f"self.{name}" not in source
 
 
-def test_client_directory_poll_old_generation_cannot_clear_replacement(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    entered = threading.Event()
-    release = threading.Event()
 
-    def blocked_poll():
-        entered.set()
-        assert release.wait(timeout=2.0)
-
-    monkeypatch.setattr(webapp, "poll_client_events_once", blocked_poll)
-    try:
-        old_record = webapp.client_watch_service.event_watcher_record
-        assert webapp.start_client_directory_poll(old_record) is True
-        old_worker = old_record.directory_poll_worker
-        assert old_worker is not None
-        assert entered.wait(timeout=1.0)
-
-        replacement = app_module.ClientEventWatcherRecord(directory_poll_worker=threading.current_thread())
-        with webapp.client_watch_service.lock:
-            webapp.client_watch_service.event_watcher_record = replacement
-        release.set()
-        old_worker.join(timeout=1.0)
-
-        assert old_worker.is_alive() is False
-        assert webapp.client_watch_service.event_watcher_record is replacement
-        assert replacement.directory_poll_worker is threading.current_thread()
-    finally:
-        release.set()
-        webapp.control_server.stop()
-
-
-@pytest.mark.parametrize("method_name", ["events_payload", "search_payload", "build_auto_approve_status"])
+@pytest.mark.parametrize(
+    "method_name",
+    (
+        "events_payload",
+        "search_payload",
+        "run_history_payload",
+        "session_files_payload",
+        "build_auto_approve_status",
+    ),
+)
 def test_session_scoped_endpoints_refresh_before_unknown_session_guard(monkeypatch, method_name):
     webapp = app_module.TmuxWebtermApp(["old"])
     monkeypatch.setattr(app_module, "list_tmux_session_names", lambda: (["new"], None))
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     monkeypatch.setattr(webapp, "auto_approve_session_status", lambda session, **_kwargs: {"target": session})
+    if method_name == "session_files_payload":
+        monkeypatch.setattr(
+            webapp,
+            "session_files_payload_for_infos",
+            lambda session, *_args, **_kwargs: ({"session": session}, HTTPStatus.OK),
+        )
     try:
         if method_name == "search_payload":
             payload, status = webapp.search_payload("", session="new")
@@ -3383,8 +3740,8 @@ def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(
         panes=[pane0, pane1],
         selected_pane=pane0,
         agents=[
-            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/agent_clients/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
-            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/agent_clients/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "claude", 10, "%claude", "python3 tools/mockers/claude.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
+            AgentInfo("mock", "codex", 11, "%codex", "python3 tools/mockers/codex.py --mock", str(tmp_path), None, None, None, "mock no transcript"),
         ],
     )
     captures = {"%claude": claude_capture, "%codex": codex_capture}
@@ -3409,6 +3766,8 @@ def test_agent_window_status_payloads_use_real_run_captures_without_transcripts(
 
 
 def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
+    current_path = tmp_path / "repo" / "idle"
+    current_path.mkdir(parents=True)
     pane = PaneInfo(
         session="2",
         window="0",
@@ -3416,7 +3775,7 @@ def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
         pane="0",
         pane_id="%20",
         target="%20",
-        current_path="/repo/idle",
+        current_path=str(current_path),
         command="claude",
         active=True,
         window_active=True,
@@ -3429,7 +3788,7 @@ def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
         session="2",
         panes=[pane],
         selected_pane=pane,
-        agents=[AgentInfo("2", "claude", 20, "%20", "claude", "/repo/idle", "idle", "claude-id", str(tmp_path / "claude.jsonl"), None)],
+        agents=[AgentInfo("2", "claude", 20, "%20", "claude", str(current_path), "idle", "claude-id", str(tmp_path / "claude.jsonl"), None)],
     )
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, **_kwargs: "idle prompt")
     monkeypatch.setattr(app_module, "agent_screen_state", lambda _text, **_kwargs: {"key": "idle", "text": ""})
@@ -3448,6 +3807,8 @@ def test_idle_current_agent_window_is_not_active(monkeypatch, tmp_path):
 
 
 def test_agent_window_working_completion_gets_a_fresh_pause_timestamp_after_idle_confirmation(monkeypatch, tmp_path):
+    current_path = tmp_path / "repo" / "working"
+    current_path.mkdir(parents=True)
     pane = PaneInfo(
         session="2",
         window="0",
@@ -3455,7 +3816,7 @@ def test_agent_window_working_completion_gets_a_fresh_pause_timestamp_after_idle
         pane="0",
         pane_id="%20",
         target="%20",
-        current_path="/repo/working",
+        current_path=str(current_path),
         command="codex",
         active=True,
         window_active=True,
@@ -3468,7 +3829,7 @@ def test_agent_window_working_completion_gets_a_fresh_pause_timestamp_after_idle
         session="2",
         panes=[pane],
         selected_pane=pane,
-        agents=[AgentInfo("2", "codex", 20, "%20", "codex", "/repo/working", "idle", "codex-id", str(tmp_path / "codex.jsonl"), None)],
+        agents=[AgentInfo("2", "codex", 20, "%20", "codex", str(current_path), "idle", "codex-id", str(tmp_path / "codex.jsonl"), None)],
     )
     states = iter(({"key": "working", "text": "working"}, {"key": "idle", "text": "done"}, {"key": "idle", "text": "done"}, {"key": "idle", "text": "done"}))
     monkeypatch.setattr(app_module, "tmux_capture_pane", lambda _target, **_kwargs: "fixture")
@@ -3683,7 +4044,7 @@ def test_tmux_recency_ordered_sessions_uses_session_and_window_activity(monkeypa
         webapp.control_server.stop()
 
 
-def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
+def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch, legacy_activity_summary_enabled):
     infos = {
         name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
         for name in ("1", "2", "3")
@@ -3706,7 +4067,7 @@ def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
     monkeypatch.setattr(app_module, "build_session_activity_summary", fake_build_summary)
     webapp = app_module.TmuxWebtermApp(["1", "2", "3"])
     webapp.warm_metadata_cache_async = lambda sessions: None
-    webapp.cached_session_files_payload_for_info = lambda info, hours=24.0: {"files": [], "repos": [], "errors": []}
+    webapp.cached_session_files_payload_for_info = lambda info, hours=24.0, wait_for_fresh=True: {"files": [], "repos": [], "errors": []}
     webapp.tmux_signal_snapshot = lambda force=False: {
         "sessions": {
             "1": {"activity_ts": 10, "last_attached_ts": 0},
@@ -3716,7 +4077,7 @@ def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
         "windows": [{"session": "3", "activity_ts": 200}],
     }
     try:
-        payload = webapp.activity_summary_payload()
+        payload = webapp.assemble_activity_summary_payload()
     finally:
         webapp.control_server.stop()
 
@@ -3724,7 +4085,121 @@ def test_activity_summary_payload_prioritizes_tmux_recent_sessions(monkeypatch):
     assert payload["session_order"] == ["3", "2", "1"]
 
 
-def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monkeypatch):
+def test_activity_summary_payload_single_flights_equivalent_concurrent_requests(monkeypatch, legacy_activity_summary_enabled):
+    caller_count = 8
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    discovered_count = 0
+    discovered_lock = threading.Lock()
+    all_discovered = threading.Event()
+
+    def discover(_sessions):
+        nonlocal discovered_count
+        with discovered_lock:
+            discovered_count += 1
+            if discovered_count == caller_count:
+                all_discovered.set()
+        return {"1": info}, []
+
+    graph_calls = 0
+    graph_lock = threading.Lock()
+    graph_started = threading.Event()
+    release_graph = threading.Event()
+
+    def build_graph(_info, _cache, allow_network=False):
+        nonlocal graph_calls
+        assert allow_network is False
+        with graph_lock:
+            graph_calls += 1
+            graph_started.set()
+        assert release_graph.wait(5)
+        return metadata.empty_work_graph()
+
+    monkeypatch.setattr(app_module, "discover_sessions", discover)
+    monkeypatch.setattr(app_module, "session_work_graph", build_graph)
+    monkeypatch.setattr(
+        app_module,
+        "build_session_activity_summary",
+        lambda session_info, work, files, locale="en", **_kwargs: {
+            "session": session_info.session,
+            "agent": "",
+            "active": False,
+            "repos": [],
+            "files": {"count": 0, "added": 0, "removed": 0},
+            "lines": [],
+        },
+    )
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.warm_metadata_cache_async = lambda sessions: None
+    webapp.cached_session_files_payload_for_info = lambda session_info, hours=24.0, wait_for_fresh=True: {
+        "files": [],
+        "repos": [],
+        "errors": [],
+    }
+    webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: ["1"]
+    try:
+        with ThreadPoolExecutor(max_workers=caller_count) as executor:
+            futures = [executor.submit(webapp.assemble_activity_summary_payload) for _ in range(caller_count)]
+            assert all_discovered.wait(5)
+            assert graph_started.wait(5)
+            release_graph.set()
+            payloads = [future.result(timeout=5) for future in futures]
+    finally:
+        release_graph.set()
+        webapp.control_server.stop()
+
+    assert graph_calls == 1
+    assert all(payload == payloads[0] for payload in payloads)
+
+
+def test_activity_summary_payload_reuses_transcripts_work_graph_without_duplicate_warm(monkeypatch, legacy_activity_summary_enabled):
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    cached_graph = {**metadata.empty_work_graph(), "generation": 17}
+    observed_graphs = []
+
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({"1": info}, []))
+    monkeypatch.setattr(
+        app_module,
+        "session_work_graph",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("activity summary rebuilt a cached work graph")),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "activity_work_summary_from_graph",
+        lambda graph: observed_graphs.append(graph) or {},
+    )
+    monkeypatch.setattr(
+        app_module,
+        "build_session_activity_summary",
+        lambda session_info, work, files, locale="en", **_kwargs: {
+            "session": session_info.session,
+            "agent": "",
+            "active": False,
+            "repos": [],
+            "files": {"count": 0, "added": 0, "removed": 0},
+            "lines": [],
+        },
+    )
+    webapp = app_module.TmuxWebtermApp(["1"])
+    webapp.set_transcripts_payload_cache({"sessions": {"1": {"work_graph": cached_graph}}})
+    webapp.warm_metadata_cache_async = lambda _sessions: (_ for _ in ()).throw(
+        AssertionError("activity summary spawned a duplicate metadata warm")
+    )
+    webapp.cached_session_files_payload_for_info = lambda session_info, hours=24.0, wait_for_fresh=True: {
+        "files": [],
+        "repos": [],
+        "errors": [],
+    }
+    webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: ["1"]
+    try:
+        payload = webapp.assemble_activity_summary_payload(force=True)
+    finally:
+        webapp.control_server.stop()
+
+    assert payload["session_order"] == ["1"]
+    assert observed_graphs == [cached_graph]
+
+
+def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monkeypatch, legacy_activity_summary_enabled):
     infos = {
         name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
         for name in ("1", "external")
@@ -3738,7 +4213,7 @@ def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monke
     webapp.warm_metadata_cache_async = lambda sessions: None
     summary_hours = []
 
-    def fake_cached_session_files_payload_for_info(info, hours=24.0):
+    def fake_cached_session_files_payload_for_info(info, hours=24.0, wait_for_fresh=True):
         summary_hours.append(hours)
         return {"files": [], "repos": [], "errors": []}
 
@@ -3751,8 +4226,8 @@ def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monke
         "windows": [],
     }
     try:
-        configured = webapp.activity_summary_payload()
-        all_sessions = webapp.activity_summary_payload(session_scope="all", hours=336)
+        configured = webapp.assemble_activity_summary_payload()
+        all_sessions = webapp.assemble_activity_summary_payload(session_scope="all", hours=336)
     finally:
         webapp.control_server.stop()
 
@@ -3767,7 +4242,7 @@ def test_activity_summary_payload_all_scope_includes_visible_tmux_sessions(monke
     assert summary_hours[-2:] == [336.0, 336.0]
 
 
-def test_activity_summary_payload_batches_recent_events_for_multiple_sessions(monkeypatch):
+def test_activity_summary_payload_batches_recent_events_for_multiple_sessions(monkeypatch, legacy_activity_summary_enabled):
     infos = {
         name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
         for name in ("1", "2", "3")
@@ -3777,7 +4252,7 @@ def test_activity_summary_payload_batches_recent_events_for_multiple_sessions(mo
     monkeypatch.setattr(app_module, "build_session_activity_summary", lambda info, work, files, locale="en", **_kwargs: {"session": info.session, "agent": "", "active": False, "repos": [], "files": {"count": 0, "added": 0, "removed": 0}, "lines": []})
     webapp = app_module.TmuxWebtermApp(["1", "2", "3"])
     webapp.warm_metadata_cache_async = lambda sessions: None
-    webapp.cached_session_files_payload_for_info = lambda info, hours=24.0: {"files": [], "repos": [], "errors": []}
+    webapp.cached_session_files_payload_for_info = lambda info, hours=24.0, wait_for_fresh=True: {"files": [], "repos": [], "errors": []}
     webapp.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: ["3", "2", "1"]
     tail_many_calls = []
 
@@ -3794,7 +4269,7 @@ def test_activity_summary_payload_batches_recent_events_for_multiple_sessions(mo
     webapp.event_log.tail_many = fake_tail_many
     webapp.event_log.tail = fail_tail
     try:
-        payload = webapp.activity_summary_payload()
+        payload = webapp.assemble_activity_summary_payload()
     finally:
         webapp.control_server.stop()
 
@@ -3803,6 +4278,157 @@ def test_activity_summary_payload_batches_recent_events_for_multiple_sessions(mo
     assert payload["session_info"]["3"]["recent_events"][0]["message"] == "3 recent"
     assert payload["session_info"]["2"]["recent_events"][0]["message"] == "2 recent"
     assert payload["session_info"]["1"]["recent_events"][0]["message"] == "1 recent"
+
+
+def test_activity_summary_payload_forwards_exact_statusd_body_without_web_work_graph(monkeypatch, legacy_activity_summary_enabled):
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"1": info}, []))
+    monkeypatch.setattr(
+        app_module,
+        "session_work_graph",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("activity summary must not build work graphs in the web process")
+        ),
+    )
+    webapp = app_module.TmuxWebtermApp(["1"])
+    expected = {
+        "generated_at": "2026-08-04T00:00:00+00:00",
+        "generated_ts": 1785801600.0,
+        "session_order": ["1"],
+        "sessions": {"1": {"session": "1", "local": "ready"}},
+        "session_info": {"1": {"session": "1", "recent_events": [{"session": "1", "message": "ready"}]}},
+        "agents": [],
+        "global": {"total_agents": 1, "lines": ["ready"]},
+        "capabilities": {},
+        "errors": [],
+        "locale": "en",
+        "session_scope": "configured",
+        "session_file_hours": 24.0,
+        "yoagent_summaries": {"mode": "first_launch", "first_launch_started": False, "running": False, "updated_ts": 0.0, "updated_at": ""},
+    }
+    calls = []
+    cached_graph = metadata.empty_work_graph()
+    expected_work = metadata.activity_work_summary_from_graph(cached_graph)
+
+    class ActivityStatusClient:
+        def activity_summary(self, sessions, **kwargs):
+            calls.append((list(sessions), kwargs))
+            return {
+                "ok": True,
+                "protocol_version": statusd_protocol.STATUSD_PROTOCOL_VERSION,
+                "status": 200,
+                "built_at": 1785801600.0,
+            }, json.dumps(expected, separators=(",", ":")).encode("utf-8")
+
+    webapp.status_client = ActivityStatusClient()
+    webapp.set_transcripts_payload_cache({"sessions": {"1": {"work_graph": cached_graph}}})
+    webapp.cached_transcripts_work_graph = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("web activity forwarder deep-copied a full cached work graph")
+    )
+    try:
+        payload = webapp.activity_summary_payload()
+    finally:
+        webapp.control_server.stop()
+
+    assert calls == [(["1"], {"force": False, "locale": "en", "session_scope": "configured", "hours": 24.0, "work_by_session": {"1": expected_work}})]
+    assert payload == expected
+
+
+def test_activity_summary_cached_work_projection_matches_daemon_local_graph_assembly(monkeypatch, legacy_activity_summary_enabled):
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    graph = metadata.empty_work_graph()
+    projected_work = metadata.activity_work_summary_from_graph(graph)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({"1": info}, []))
+    monkeypatch.setattr(app_module, "session_work_graph", lambda *_args, **_kwargs: graph)
+    monkeypatch.setattr(
+        app_module,
+        "build_session_activity_summary",
+        lambda session_info, work, files, locale="en", **_kwargs: {
+            "session": session_info.session,
+            "agent": "",
+            "active": False,
+            "repos": work.get("repos", []),
+            "files": {"count": 0, "added": 0, "removed": 0},
+            "lines": [],
+        },
+    )
+
+    session_files_wait_flags = []
+
+    def configured_app():
+        app = app_module.TmuxWebtermApp(["1"], status_service_mode=True)
+        app.cached_session_files_payload_for_info = lambda _info, hours=24.0, wait_for_fresh=True: session_files_wait_flags.append(wait_for_fresh) or {"files": [], "repos": [], "errors": []}
+        app.tmux_recency_ordered_sessions = lambda session_names=None, payload=None: ["1"]
+        app.tabber_activity_agents_snapshot = lambda force=False: []
+        app.event_log.tail_many = lambda sessions, limit=5: {}
+        return app
+
+    graph_app = configured_app()
+    projected_app = configured_app()
+    graph_payload = graph_app.assemble_activity_summary_payload()
+    projected_payload = projected_app.assemble_activity_summary_payload(work_by_session={"1": projected_work})
+    for payload in (graph_payload, projected_payload):
+        payload.pop("generated_at")
+        payload.pop("generated_ts")
+
+    assert projected_payload == graph_payload
+    assert session_files_wait_flags == [False, False]
+
+
+def test_cached_activity_work_projection_omits_an_entry_over_the_rpc_budget(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"], status_service_mode=True)
+    webapp.set_transcripts_payload_cache({"sessions": {"1": {"work_graph": metadata.empty_work_graph()}}})
+    monkeypatch.setattr(
+        app_module,
+        "activity_work_summary_from_graph",
+        lambda _graph: {"git": {"blob": "x" * app_module.STATUSD_ACTIVITY_MAX_WORK_BYTES}},
+    )
+
+    assert webapp.cached_activity_work_by_session() == {}
+
+
+def test_activity_summary_cold_session_files_schedules_refresh_without_waiting(monkeypatch):
+    webapp = app_module.TmuxWebtermApp(["1"], status_service_mode=True)
+    info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
+    refreshes = []
+    monkeypatch.setattr(webapp, "get_session_files_cache", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        webapp,
+        "start_session_files_cache_refresh",
+        lambda cache_key, target, *args: refreshes.append((cache_key, target, args)) or True,
+    )
+
+    payload = webapp.cached_session_files_payload_for_info(info, wait_for_fresh=False)
+
+    assert payload == {
+        "session": "1",
+        "hours": 24.0,
+        "files": [],
+        "repos": [],
+        "errors": [],
+        "refreshing_elsewhere": True,
+    }
+    assert len(refreshes) == 1
+    assert refreshes[0][1] == webapp.refresh_session_files_info_cache
+
+
+def test_activity_summary_bytes_returns_typed_terminal_statusd_failure(monkeypatch, legacy_activity_summary_enabled):
+    webapp = app_module.TmuxWebtermApp(["1"], status_service_mode=True)
+    monkeypatch.setattr(
+        webapp.status_client,
+        "activity_summary",
+        lambda *_args, **_kwargs: ({"ok": False, "status": HTTPStatus.SERVICE_UNAVAILABLE, "error": "unavailable"}, b""),
+    )
+
+    body, status = webapp.activity_summary_bytes()
+
+    assert status == HTTPStatus.FAILED_DEPENDENCY
+    assert json.loads(body) == {
+        "status": "unavailable",
+        "error": "unavailable",
+        "terminal": True,
+        "upstream": {"ok": False, "status": HTTPStatus.SERVICE_UNAVAILABLE, "error": "unavailable"},
+    }
 
 
 def test_activity_payload_and_summary_tick_prioritize_tmux_recent_sessions(monkeypatch):
@@ -3942,6 +4568,7 @@ def test_tabber_activity_rebuilds_only_changed_session_rows_and_removes_deleted_
     webapp.cached_session_files_payloads_for_infos = lambda agent_infos, hours=24.0: {session: {"files": [], "repos": [], "errors": []} for session in agent_infos}
     webapp.activity_snapshot_with_recency = lambda snapshot=None: {"1": {"last_user_input_ts": 10}, "2": {"last_user_input_ts": 20}}
     webapp.agent_window_screen_state = lambda agent, preclassified_by_target=None: dict(screens[agent.pane_target])
+    webapp.status_snapshot_payload = lambda: None
     webapp.merge_shared_attention_acks = lambda: False
     # `compute_tabber_activity_rows_via_jobd` submits one batch per `build_activity_payload()` call
     # containing every session whose signature changed since the last call, so this replaces the
@@ -4103,6 +4730,75 @@ def test_recent_agents_payload_filters_paths_by_agent_window():
     assert [item["path"] for item in by_target["5:1.0"]["recent_paths"]] == ["/repo/claude"]
 
 
+def test_tabber_jobd_request_projects_large_session_files_to_bounded_recent_paths():
+    session = "5"
+    target = "5:0.0"
+    pane = PaneInfo(session=session, window="0", pane="0", pane_id="%50", target=target, current_path="/repo", command="codex", active=True, window_active=True, title="", pid=50, process_label="codex")
+    agent = AgentInfo(session, "codex", 50, target, "codex", "/repo", "running", "codex-sid", None, None)
+    info = SessionInfo(session=session, panes=[pane], selected_pane=pane, agents=[agent])
+    files_payload = {
+        "files": [
+            {
+                "repo": f"/repo/{index % 4}",
+                "abs_path": f"/repo/{index % 4}/file-{index}.py",
+                "mtime": float(index),
+                "status": "M",
+                "ignored_large_field": "x" * 512,
+                "agent_windows": [{"kind": "codex", "window": "0", "window_index": 0, "pane": "0", "pane_target": target}],
+            }
+            for index in range(700)
+        ],
+        "repos": [],
+    }
+    expected = activity_summary.build_recent_agents_payload(
+        {session: info},
+        [session],
+        session_files_by_session={session: files_payload},
+    )[0]["recent_paths"]
+    captured = {}
+
+    class CaptureJobClient:
+        def submit(self, task, payload, **kwargs):
+            captured.update({"task": task, "payload": payload, "kwargs": kwargs})
+            return {"ok": False, "error": "captured"}
+
+    webapp = app_module.TmuxWebtermApp([session])
+    webapp.job_client = CaptureJobClient()
+    try:
+        with pytest.raises(app_module.TabberActivityJobdUnavailable, match="captured"):
+            webapp.compute_tabber_activity_rows_via_jobd(
+                {session: info},
+                discovered_sessions={session: info},
+                session_files_by_session={session: files_payload},
+                activity_snapshot={},
+                preclassified_by_session={session: {target: {"key": "idle", "text": ""}}},
+                owned_agent_rows={},
+                snapshot_revision=7,
+                scope="configured",
+                bounded_hours=24.0,
+                source_signature="large-files",
+            )
+    finally:
+        webapp.control_server.stop()
+
+    session_input = captured["payload"]["sessions"][session]
+    request_payload = {
+        "action": "submit",
+        "task": captured["task"],
+        "payload": captured["payload"],
+        "priority": captured["kwargs"]["priority"],
+        "generation": captured["kwargs"]["generation"],
+        "coalesce_key": captured["kwargs"]["coalesce_key"],
+        "deadline_ms": captured["kwargs"]["deadline_ms"],
+    }
+    encoded = encode_metadata(new_envelope("jobd", "submit", request_payload, timeout_seconds=0.5))
+    result = activity_summary.tabber_activity_view_result(captured["payload"], max_bytes=512 * 1024)
+
+    assert "files_payload" not in session_input
+    assert len(encoded) <= LOCAL_RPC_MAX_METADATA_BYTES
+    assert result["session_rows"][session]["agents"][0]["recent_paths"] == expected
+
+
 def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
     pane = PaneInfo(
         session="6",
@@ -4208,14 +4904,17 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     monkeypatch.setattr(app_module, "agent_auth_status", lambda: {})
     webapp = app_module.TmuxWebtermApp(["5"])
     calls.clear()
+    refreshes = []
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
-    webapp.start_transcripts_payload_refresh = lambda: (webapp.refresh_transcripts_payload_cache() or True)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
     try:
-        first = webapp.transcripts_payload(force=True)
+        webapp.set_transcripts_payload_cache(webapp.build_session_metadata_payload())
+        first = webapp.transcripts_payload()
         with webapp.activity_transcript_service.transcripts_payload_cache_lock:
             webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at -= app_module.TRANSCRIPTS_PAYLOAD_CACHE_SECONDS + 1.0
         second = webapp.transcripts_payload()
+        webapp.refresh_transcripts_payload_cache()
         third = webapp.transcripts_payload()
     finally:
         webapp.control_server.stop()
@@ -4226,6 +4925,109 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     assert second["cache"]["stale"] is True
     assert third["sessions"]["5"]["call"] == 2
     assert calls == [1, 2]
+    assert refreshes == [(False, False)]
+
+
+def test_forced_metadata_refresh_runs_a_build_that_starts_after_the_request(monkeypatch):
+    """A forced metadata read must be answered by a build that can see the state it asks about.
+
+    Regression: `force=1` is served from the payload cache, so its bytes always predate the request.
+    The refresh it started was then coalesced onto whatever build was already running -- including
+    one that began before the session being asked about existed -- and nothing re-ran. The browser
+    kept rendering pre-create metadata with no generation to wait on, so a 15s watchdog was the only
+    thing that ever noticed. The response must name the generation that WILL observe this instant,
+    and that generation must actually be built and published.
+    """
+
+    webapp = app_module.TmuxWebtermApp([])
+    entered = threading.Event()
+    release = threading.Event()
+    builds: list[float] = []
+    published: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda name, payload, **kwargs: published.append(
+            (name, int((payload.get("data") or {}).get("metadata_generation") or 0))
+        ),
+    )
+
+    def blocking_build(lightweight: bool = False) -> dict[str, object]:
+        builds.append(time.monotonic())
+        entered.set()
+        if len(builds) == 1:
+            assert release.wait(timeout=10)
+        return {"sessions": {}, "session_order": [], "build": len(builds)}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", blocking_build)
+    try:
+        webapp.set_transcripts_payload_cache({"sessions": {}, "session_order": [], "build": 0})
+        first = threading.Thread(target=lambda: webapp.session_metadata_payload(force=True), daemon=True)
+        first.start()
+        assert entered.wait(timeout=5), "the first forced refresh never started a build"
+
+        second_requested_at = time.monotonic()
+        second = webapp.session_metadata_payload(force=True)
+        assert builds[0] < second_requested_at, "the probe did not model a build that predates the request"
+
+        release.set()
+        first.join(timeout=10)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(builds) < 2:
+            time.sleep(0.02)
+
+        assert len(builds) == 2, "the forced refresh adopted the older in-flight build instead of re-running"
+        settled = webapp.session_metadata_payload()
+        assert settled["build"] == 2
+        pending = int(second["cache"]["pending_generation"])
+        assert pending > int(second["cache"]["generation"]), second["cache"]
+        assert int(settled["metadata_generation"]) >= pending, settled["cache"]
+        assert ("transcripts_changed", pending) in published, published
+    finally:
+        release.set()
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
+
+
+def test_forced_metadata_refresh_reuses_a_build_that_already_started_after_the_request(monkeypatch):
+    """Forward coalescing only. A build that began after the request already answers it, so the
+    forced read must name that generation rather than queue a second identical rebuild."""
+
+    webapp = app_module.TmuxWebtermApp([])
+    entered = threading.Event()
+    release = threading.Event()
+    builds: list[int] = []
+
+    def blocking_build(lightweight: bool = False) -> dict[str, object]:
+        builds.append(len(builds) + 1)
+        entered.set()
+        assert release.wait(timeout=10)
+        return {"sessions": {}, "session_order": [], "build": len(builds)}
+
+    monkeypatch.setattr(webapp, "build_transcripts_payload", blocking_build)
+    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: None)
+    try:
+        webapp.set_transcripts_payload_cache({"sessions": {}, "session_order": [], "build": 0})
+        worker = threading.Thread(target=lambda: webapp.refresh_transcripts_payload_cache(True), daemon=True)
+        worker.start()
+        assert entered.wait(timeout=5)
+        record = webapp.activity_transcript_service.transcripts_payload_cache_record
+        in_flight_generation = record.generation
+        # Model a build that began after the request rather than racing one into that window: the
+        # predicate under test is exactly "did this build start at or after the caller's instant".
+        record.worker_started_at = time.monotonic() + 1.0
+
+        payload = webapp.session_metadata_payload(force=True)
+
+        assert record.rebuild_requested is False
+        assert int(payload["cache"]["pending_generation"]) == in_flight_generation
+        release.set()
+        worker.join(timeout=10)
+        assert builds == [1]
+    finally:
+        release.set()
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
 
 
 def test_transcripts_payload_worker_guard_supersedes_a_stalled_worker():
@@ -4273,7 +5075,7 @@ def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(mo
     monkeypatch.setattr(app_module, "session_to_json", fake_session_to_json)
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refresh_calls.append((publish, defer)) or True)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refresh_calls.append((publish, defer)) or True)
     try:
         payload = webapp.transcripts_payload()
     finally:
@@ -4311,10 +5113,11 @@ def test_refresh_transcripts_payload_cache_publishes_full_payload_when_requested
     assert events[0][2]["trigger"] == "transcripts_refresh"
 
 
-def test_old_transcripts_refresh_cannot_overwrite_forced_payload(monkeypatch):
+def test_forced_session_metadata_returns_cached_payload_without_superseding_live_refresh(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     old_started = threading.Event()
     release_old = threading.Event()
+    returned = threading.Event()
     events = []
 
     def blocked_build():
@@ -4322,19 +5125,36 @@ def test_old_transcripts_refresh_cannot_overwrite_forced_payload(monkeypatch):
         assert release_old.wait(timeout=3)
         return {"marker": "old"}
 
+    def read_forced():
+        try:
+            return webapp.session_metadata_payload(force=True)
+        finally:
+            returned.set()
+
+    webapp.set_transcripts_payload_cache({"marker": "cached"})
     monkeypatch.setattr(webapp, "build_transcripts_payload", blocked_build)
-    monkeypatch.setattr(webapp, "build_session_metadata_payload", lambda: {"marker": "forced"})
+    monkeypatch.setattr(webapp, "build_session_metadata_payload", blocked_build)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload, kwargs)))
     try:
-        assert webapp.start_transcripts_payload_refresh(publish=True) is True
+        assert webapp.start_transcripts_payload_refresh() is True
         with webapp.activity_transcript_service.transcripts_payload_cache_lock:
             old_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker
         assert old_worker is not None
         assert old_started.wait(timeout=2)
-
-        forced = webapp.session_metadata_payload(force=True)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            forced_future = executor.submit(read_forced)
+            assert returned.wait(timeout=0.25)
+            forced = forced_future.result(timeout=1)
+        with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+            queued_follow_up = webapp.activity_transcript_service.transcripts_payload_cache_record.rebuild_requested
         release_old.set()
         old_worker.join(timeout=2)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+                if webapp.activity_transcript_service.transcripts_payload_cache_record.worker is None:
+                    break
+            time.sleep(0.02)
         with webapp.activity_transcript_service.transcripts_payload_cache_lock:
             cached = webapp.activity_transcript_service.transcripts_payload_cache_record.payload
             active_worker = webapp.activity_transcript_service.transcripts_payload_cache_record.worker
@@ -4342,10 +5162,19 @@ def test_old_transcripts_refresh_cannot_overwrite_forced_payload(monkeypatch):
         release_old.set()
         webapp.control_server.stop()
 
-    assert forced["marker"] == "forced"
-    assert cached == {"marker": "forced"}
+    assert forced["marker"] == "cached"
+    assert forced["cache"]["hit"] is True
+    assert forced["cache"]["refreshing"] is True
+    # The live refresh is not superseded: it still commits its own result. The forced read is
+    # coalesced FORWARD onto one queued follow-up instead, because a build that began before the
+    # request cannot contain what the request is asking about.
+    assert queued_follow_up is True
+    assert cached["marker"] == "old"
     assert active_worker is None
-    assert events == []
+    # Two publishes, not one: the live refresh delivers its own result, and the queued follow-up
+    # delivers the one the forced read asked for. A single publish here means the forced read was
+    # answered by a build that started before it.
+    assert [event[0] for event in events] == ["transcripts_changed", "transcripts_changed"]
 
 
 def test_clear_transcript_caches_invalidates_blocked_refresh(monkeypatch):
@@ -4381,6 +5210,197 @@ def test_clear_transcript_caches_invalidates_blocked_refresh(monkeypatch):
     assert cached is None
     assert stored_at is None
     assert active_worker is None
+
+
+def transcripts_payload_work_state(webapp):
+    """The whole single-flight guard as one snapshot, so a partial release is visible."""
+
+    with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+        record = webapp.activity_transcript_service.transcripts_payload_cache_record
+        return {
+            "worker": record.worker,
+            "worker_started_at": record.worker_started_at,
+            "publish_requested": record.publish_requested,
+            "rebuild_requested": record.rebuild_requested,
+            "rebuild_publish": record.rebuild_publish,
+            "payload": record.payload,
+            "stored_at": record.stored_at,
+        }
+
+
+def queued_transcripts_follow_up_app(monkeypatch):
+    """An app whose in-flight build has exactly one forced follow-up queued behind it."""
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.client_events = SimpleNamespace(epoch="epoch-under-test")
+    webapp.activity_transcript_service = SimpleNamespace(
+        transcripts_payload_cache_lock=threading.RLock(),
+        transcripts_payload_cache_record=state_services.TranscriptsPayloadCacheRecord(),
+        transcript_tail_cache_lock=threading.Lock(),
+        transcript_tail_cache={},
+        context_items_cache_lock=threading.Lock(),
+        context_items_cache={},
+    )
+    started: list[bool] = []
+    monkeypatch.setattr(
+        app_module.TmuxWebtermApp,
+        "start_transcripts_payload_refresh",
+        lambda self, publish=False, defer=False, not_before=None: bool(started.append(publish)) or True,
+    )
+    record = webapp.activity_transcript_service.transcripts_payload_cache_record
+    worker = object()
+    generation = webapp.begin_transcripts_payload_work(worker)
+    webapp.commit_transcripts_payload_cache({"sessions": {}}, generation)
+    with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+        record.publish_requested = True
+    # A forced refresh arriving during this build cannot be answered by it, so it queues one
+    # follow-up: the exact state the invalidation below has to deal with.
+    webapp.begin_transcripts_payload_work(object(), queue_rebuild_after=record.worker_started_at + 1.0, queue_rebuild_publish=True)
+    assert (record.rebuild_requested, record.rebuild_publish) == (True, True)
+    return webapp, record, worker, generation, started
+
+
+def test_clear_transcript_caches_releases_the_whole_guard_and_drains_the_queued_follow_up(monkeypatch):
+    """Cache invalidation must leave no worker and no queued intent behind.
+
+    Regression: it cleared `worker`, `payload` and `stored_at` only. `worker_started_at`,
+    `publish_requested`, `rebuild_requested` and `rebuild_publish` survived, and the invalidated
+    worker could not drain them -- its `finish` is a generation mismatch and returns before the
+    drain -- so the queued forced rebuild sat on the record until an unrelated later build inherited
+    it and published an extra follow-up for a caller that had already been answered.
+    """
+
+    webapp, record, worker, generation, started = queued_transcripts_follow_up_app(monkeypatch)
+
+    webapp.clear_transcript_caches()
+
+    state = transcripts_payload_work_state(webapp)
+    assert state == {
+        "worker": None,
+        "worker_started_at": None,
+        "publish_requested": False,
+        "rebuild_requested": False,
+        "rebuild_publish": False,
+        "payload": None,
+        "stored_at": None,
+    }
+    # The promise is kept, not dropped: exactly one publishing follow-up build ran.
+    assert started == [True]
+
+    # The invalidated worker's late finish is a no-op and cannot start anything more.
+    assert webapp.finish_transcripts_payload_work(generation, worker) is False
+    assert started == [True]
+
+    # A later unrelated build cannot inherit an intent that belonged to the superseded caller.
+    next_worker = object()
+    next_generation = webapp.begin_transcripts_payload_work(next_worker, replace=True)
+    assert webapp.finish_transcripts_payload_work(next_generation, next_worker) is True
+    assert started == [True]
+
+
+def test_clear_transcript_caches_guard_assertion_fails_when_queued_intent_survives(monkeypatch):
+    """Negative control for the test above.
+
+    If invalidation leaves the queued intent alive -- the pre-fix behaviour, reproduced here by
+    restoring the fields it used to leave -- the same snapshot assertion and the same
+    inherited-follow-up assertion both go red. A green that cannot fail proves nothing.
+    """
+
+    webapp, record, worker, generation, started = queued_transcripts_follow_up_app(monkeypatch)
+    stale_started_at = record.worker_started_at
+
+    webapp.clear_transcript_caches()
+    started.clear()
+    # Reintroduce exactly the fields the old implementation left behind.
+    with webapp.activity_transcript_service.transcripts_payload_cache_lock:
+        record.worker = None
+        record.worker_started_at = stale_started_at
+        record.publish_requested = True
+        record.rebuild_requested = True
+        record.rebuild_publish = True
+
+    state = transcripts_payload_work_state(webapp)
+    assert state["worker_started_at"] is not None
+    assert (state["publish_requested"], state["rebuild_requested"], state["rebuild_publish"]) == (True, True, True)
+
+    # And the stale intent is inherited by the next unrelated build, which is the observable harm.
+    next_worker = object()
+    next_generation = webapp.begin_transcripts_payload_work(next_worker, replace=True)
+    assert webapp.finish_transcripts_payload_work(next_generation, next_worker) is True
+    assert started == [True], "an unrelated build inherited the superseded caller's publishing rebuild"
+
+
+def test_forced_session_metadata_on_a_cold_cache_names_a_build_identity():
+    """A forced read must always name the build that will observe it, cache hit or not.
+
+    Regression: the cold branch started a refresh and returned `metadata_generation: 0` with NO
+    `pending_generation`. The browser therefore waited for generation 0, which every payload already
+    satisfies, so the force resolved instantly against a lightweight payload built before the
+    mutation it was sent to confirm.
+    """
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        payload = webapp.session_metadata_payload(force=True)
+        cache = payload["cache"]
+        assert cache["hit"] is False, cache
+        assert cache["refreshing"] is True, cache
+        pending = cache["pending_identity"]
+        assert pending["epoch"] == webapp.server_epoch
+        assert pending["generation"] >= 1, cache
+        # The scalar stays only as a projection of the identity object.
+        assert cache["pending_generation"] == pending["generation"]
+        # And the payload the client is being asked to replace names the same server.
+        assert payload["metadata_identity"] == {"epoch": webapp.server_epoch, "generation": 0}
+        assert payload["metadata_generation"] == 0
+    finally:
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
+
+
+def test_unforced_session_metadata_on_a_cold_cache_names_no_build_identity():
+    """Negative control: the pending identity is emitted for a FORCED read, not for every read.
+
+    Only a forced refresh publishes its result, so only a forced refresh may hand a client a
+    generation to wait on. If this assertion could not fail, the test above would be satisfied by
+    stamping a pending identity unconditionally.
+    """
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        cache = webapp.session_metadata_payload(force=False)["cache"]
+        assert "pending_identity" not in cache, cache
+        assert "pending_generation" not in cache, cache
+    finally:
+        webapp.background_owner.stop()
+        webapp.control_server.stop()
+
+
+def test_metadata_identity_epoch_is_per_process_and_survives_invalidation():
+    """The epoch partitions generations; it never orders them.
+
+    Within one process, invalidating the cache advances the generation and keeps the epoch, so a
+    client can compare the two generations. Across processes the epochs differ, and generation 0 of
+    a new process is not comparable to generation 50 of the old one at all.
+    """
+
+    webapp = app_module.TmuxWebtermApp([])
+    other = app_module.TmuxWebtermApp([])
+    try:
+        webapp.set_transcripts_payload_cache({"sessions": {}, "session_order": []})
+        first = copy.deepcopy(webapp.activity_transcript_service.transcripts_payload_cache_record.payload)
+        webapp.clear_transcript_caches()
+        webapp.set_transcripts_payload_cache({"sessions": {}, "session_order": []})
+        second = copy.deepcopy(webapp.activity_transcript_service.transcripts_payload_cache_record.payload)
+
+        assert first["metadata_identity"]["epoch"] == second["metadata_identity"]["epoch"] == webapp.server_epoch
+        assert second["metadata_identity"]["generation"] > first["metadata_identity"]["generation"]
+        assert other.server_epoch != webapp.server_epoch, "each server process owns its own epoch"
+        assert other.metadata_identity(0) == {"epoch": other.server_epoch, "generation": 0}
+    finally:
+        for instance in (webapp, other):
+            instance.background_owner.stop()
+            instance.control_server.stop()
 
 
 def test_transcripts_payload_parallel_cache_state_is_retired():
@@ -4450,7 +5470,7 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
     monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): calls.append("jobd"))
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
         webapp.warm_metadata_cache({"5": info}, threading.Event())
     finally:
         webapp.control_server.stop()
@@ -4476,7 +5496,7 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
     monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): None)
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
         webapp.warm_metadata_cache({"5": info}, threading.Event())
     finally:
         webapp.control_server.stop()
@@ -4648,7 +5668,6 @@ def test_client_watch_snapshot_skips_volatile_transcript_payload_push(monkeypatc
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
     monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
-    monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
     try:
         webapp.publish_client_watch_snapshot()
@@ -4688,7 +5707,6 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
     monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
     monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
-    monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: events.append((event_type, payload or {}, kwargs)))
     try:
         old_record = webapp.client_watch_service.event_watcher_record
@@ -4718,7 +5736,9 @@ def test_client_watch_snapshot_replacement_rejects_retired_worker(monkeypatch):
         webapp.stop_client_event_watcher()
         webapp.control_server.stop()
 
-    assert cached == {"marker": "new"}
+    # The committing build stamps its own generation into the payload, so compare the marker that
+    # identifies WHICH build won rather than the full committed dict.
+    assert cached["marker"] == "new"
     assert cache_worker is None
     assert old_record.snapshot_worker is None
     assert replacement.snapshot_worker is None
@@ -4760,7 +5780,6 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
         monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
         monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: [])
         monkeypatch.setattr(webapp, "background_can_run", lambda role: False)
-        monkeypatch.setattr(webapp, "request_watch_roots_owner_refresh", lambda roots, reason: None)
         assert webapp.start_client_watch_snapshot_publish() is True
         assert retry_started.wait(timeout=2)
         worker = webapp.client_watch_service.event_watcher_record.snapshot_worker
@@ -4773,7 +5792,7 @@ def test_client_watch_snapshot_thread_start_failure_allows_retry(monkeypatch):
         webapp.stop_client_event_watcher()
         webapp.control_server.stop()
 
-    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload == {"marker": "retry"}
+    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload["marker"] == "retry"
     assert webapp.client_watch_service.event_watcher_record.snapshot_worker is None
 
 
@@ -5122,7 +6141,7 @@ def _install_fake_metadata_warm_jobd(monkeypatch, webapp):
     return submitted_session_batches
 
 
-def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp_path):
+def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp_path, legacy_activity_summary_enabled):
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "Fix tabs"}}) + "\n", encoding="utf-8")
     info = SessionInfo(
@@ -5169,6 +6188,7 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     monkeypatch.setattr(app_module, "build_session_activity_summary", fake_build)
     webapp = app_module.TmuxWebtermApp(["5"])
     _install_fake_session_files_jobd(monkeypatch, webapp, files_payload)
+    webapp.cached_session_files_payload_for_info = lambda _info, hours=24.0, wait_for_fresh=True: files_payload
     webapp.warm_metadata_cache_async = lambda sessions: None
     tail_many_calls = []
 
@@ -5182,10 +6202,10 @@ def test_activity_summary_payload_reuses_cached_session_summary(monkeypatch, tmp
     webapp.event_log.tail_many = fake_tail_many
     webapp.event_log.tail = fail_tail
     try:
-        first = webapp.activity_summary_payload()
-        second = webapp.activity_summary_payload()
-        third = webapp.activity_summary_payload(force=True)
-        localized = webapp.activity_summary_payload(locale="zh-Hant")
+        first = webapp.assemble_activity_summary_payload()
+        second = webapp.assemble_activity_summary_payload()
+        third = webapp.assemble_activity_summary_payload(force=True)
+        localized = webapp.assemble_activity_summary_payload(locale="zh-Hant")
     finally:
         webapp.control_server.stop()
 
@@ -5605,7 +6625,7 @@ def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monk
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"7770": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fail_tmux)
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
         monkeypatch.setattr(app_module.time, "time", lambda: 2000.0)
 
@@ -5838,7 +6858,7 @@ def test_activity_summary_ready_auto_triggers_do_not_regenerate(monkeypatch):
     assert calls == []
 
 
-def test_activity_summary_agents_come_from_tabber_activity_cache(monkeypatch):
+def test_activity_summary_agents_come_from_tabber_activity_cache(monkeypatch, legacy_activity_summary_enabled):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     webapp = app_module.TmuxWebtermApp(["5"])
     try:
@@ -5851,7 +6871,7 @@ def test_activity_summary_agents_come_from_tabber_activity_cache(monkeypatch):
         }
         source_signature = webapp.tabber_activity_source_signature()
         webapp.set_tabber_activity_cache({"activity": {}, "agents": [cached_agent], "errors": []}, write_disk=False, source_signature=source_signature)
-        payload = webapp.activity_summary_payload()
+        payload = webapp.assemble_activity_summary_payload()
         assert payload["agents"] == [cached_agent]
     finally:
         webapp.control_server.stop()
@@ -6078,7 +7098,7 @@ def test_session_files_cold_miss_never_calls_inline_compute_on_request_thread(mo
     assert payload["files"] == [{"path": "via-jobd.py"}]
 
 
-def test_session_files_jobd_unavailable_returns_pending_never_inline_git(monkeypatch):
+def test_session_files_jobd_unavailable_returns_typed_terminal_error_never_inline_git(monkeypatch):
     # Checkbox 9: when jobd cannot produce the product, the request thread must
     # serve the bounded "refreshing elsewhere" shape, never fall back to inline git.
     info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
@@ -6097,9 +7117,9 @@ def test_session_files_jobd_unavailable_returns_pending_never_inline_git(monkeyp
     finally:
         webapp.control_server.stop()
 
-    assert status == HTTPStatus.OK
-    assert payload.get("refreshing_elsewhere") is True
-    assert payload["files"] == []
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert {key: payload[key] for key in ("ok", "status", "reason", "terminal")} == {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": "jobd down", "terminal": True}
+    assert payload["cache"]["refreshing_elsewhere"] is False
 
 
 def test_session_files_payload_returns_stale_cache_and_refreshes(monkeypatch):
@@ -6223,35 +7243,26 @@ def test_session_files_disk_cache_prune_removes_old_entries_and_caps_bytes(monke
 
 
 def test_session_files_disk_prune_record_coalesces_and_tracks_completion(monkeypatch):
-    workers = []
-
-    class FakeThread:
-        def __init__(self, *, target, name, daemon):
-            self.target = target
-            self.name = name
-            self.daemon = daemon
-            workers.append(self)
-
-        def start(self):
-            return None
-
     now = [100.0]
+    submissions = []
     webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
     monkeypatch.setattr(app_module.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(webapp, "prune_session_files_disk_cache", lambda: {"removed_entries": 0, "kept_bytes": 12})
+    webapp.job_client = SimpleNamespace(
+        produce=lambda *args, **kwargs: submissions.append((args, kwargs)) or (
+            {"ok": True, "job": {"job_id": f"prune-{len(submissions)}", "status": "queued"}},
+            b"",
+        ),
+    )
     try:
         assert webapp.request_session_files_disk_cache_prune("first") is True
         assert webapp.request_session_files_disk_cache_prune("duplicate") is False
-        assert webapp.session_files_service.disk_prune_record.running is True
-        assert webapp.session_files_service.disk_prune_record.next_at == 100.0 + app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
-        workers[0].target()
         assert webapp.session_files_service.disk_prune_record.running is False
-        assert webapp.session_files_service.disk_prune_record.last_result == {"removed_entries": 0, "kept_bytes": 12}
+        assert webapp.session_files_service.disk_prune_record.next_at == 100.0 + app_module.SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
+        assert webapp.session_files_service.disk_prune_record.last_result == {"submitted": True, "reason": "first", "job_id": "prune-1"}
         assert webapp.request_session_files_disk_cache_prune("too-early") is False
         now[0] = webapp.session_files_service.disk_prune_record.next_at
         assert webapp.request_session_files_disk_cache_prune("due") is True
-        assert len(workers) == 2
+        assert len(submissions) == 2
     finally:
         webapp.control_server.stop()
 
@@ -6267,6 +7278,42 @@ def test_session_files_disk_prune_record_clears_running_after_failure(monkeypatc
 
     assert webapp.session_files_service.disk_prune_record.running is False
     assert webapp.session_files_service.disk_prune_record.last_result == {"error": "disk failed"}
+
+
+def test_session_files_disk_prune_submits_to_jobd_without_a_web_worker_thread(monkeypatch):
+    submissions = []
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = SimpleNamespace(
+        produce=lambda *args, **kwargs: submissions.append((args, kwargs)) or (
+            {"ok": True, "job": {"job_id": "prune-1", "status": "queued"}},
+            b"",
+        ),
+    )
+    monkeypatch.setattr(
+        app_module.threading,
+        "Thread",
+        lambda **_kwargs: pytest.fail("session-files cache prune must not create a web-process thread"),
+    )
+    try:
+        assert webapp.request_session_files_disk_cache_prune("write") is True
+    finally:
+        webapp.control_server.stop()
+
+    assert len(submissions) == 1
+    args, kwargs = submissions[0]
+    assert args[0] == "session_files_cache_prune"
+    assert args[1] == {
+        "cache_dir": str(app_module.SESSION_FILES_CACHE_DIR),
+        "max_age_seconds": app_module.SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS,
+        "max_bytes": app_module.SESSION_FILES_DISK_CACHE_MAX_BYTES,
+        "batch_size": app_module.SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
+    }
+    assert kwargs == {
+        "priority": "maintenance",
+        "generation": 1,
+        "coalesce_key": "session-files-cache-prune",
+        "delivery": "receipt",
+    }
 
 
 def test_session_files_disk_prune_parallel_state_is_retired():
@@ -6322,17 +7369,6 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert len(signal_starts) == 1 and len(signal_stops) == 1
         webapp.start_client_event_watcher()
         assert webapp.client_watch_service.event_watcher_record.worker is not None
-
-        event_record = webapp.client_watch_service.event_watcher_record
-        fail_once(lambda: webapp.start_client_directory_poll(event_record))
-        assert event_record.directory_poll_worker is None
-        assert webapp.start_client_directory_poll(event_record) is True
-
-        fail_once(webapp.request_session_files_disk_cache_prune)
-        assert webapp.session_files_service.disk_prune_record.running is False
-        assert webapp.session_files_service.disk_prune_record.worker is None
-        assert webapp.session_files_service.disk_prune_record.next_at == 0.0
-        assert webapp.request_session_files_disk_cache_prune() is True
 
         fail_once(webapp.start_input_heartbeat_worker)
         assert webapp.input_heartbeat_record.worker is None
@@ -6447,6 +7483,27 @@ def test_update_client_watch_roots_filters_and_expires(monkeypatch):
         webapp.control_server.stop()
 
 
+def test_unchanged_client_watch_descriptor_refreshes_ttl_without_restarting_snapshot_work(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    wakes = []
+    snapshots = []
+    monkeypatch.setattr(webapp, "wake_client_event_watcher", lambda: wakes.append("wake"))
+    monkeypatch.setattr(webapp, "start_client_watch_snapshot_publish", lambda: snapshots.append("snapshot") or True)
+    subscriber, _queue = webapp.client_events.subscribe(channels="files", client_id="browser-a")
+    descriptor = {"client_id": "browser-a", "roots": ["/repo"], "files": ["/repo/open.py"]}
+    try:
+        webapp.update_client_watch_roots(descriptor)
+        webapp.update_client_watch_roots(descriptor)
+        webapp.update_client_watch_roots({**descriptor, "roots": ["/repo-next"]})
+
+        assert wakes == ["wake", "wake"]
+        assert snapshots == ["snapshot", "snapshot"]
+        assert webapp.client_watch_service.descriptors["browser-a"].descriptor_generation == 2
+    finally:
+        webapp.client_events.unsubscribe(subscriber)
+        webapp.control_server.stop()
+
+
 def test_client_watch_descriptors_union_contract_and_release_on_final_sse_disconnect(monkeypatch, tmp_path):
     """Two browser identities must never replace one another's Finder demand."""
     monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", tmp_path / "watch-index.json")
@@ -6541,7 +7598,7 @@ def test_client_watch_roots_are_shared_across_app_instances(monkeypatch, tmp_pat
         assert app1.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
         assert app2.client_watch_roots_snapshot() == ["/repo/one", "/repo/two"]
         assert not (tmp_path / "watch-index.json").exists()
-        owner_files = sorted((tmp_path / "watch-index.json.owners").glob("*.json"))
+        owner_files = sorted(app1.watch_root_index.owner_dir.glob("*.json"))
         assert len(owner_files) == 2
         owner_payloads = [json.loads(path.read_text(encoding="utf-8")) for path in owner_files]
         assert sorted(payload["owner_id"] for payload in owner_payloads) == sorted([app1.watch_root_owner_id, app2.watch_root_owner_id])
@@ -6707,559 +7764,40 @@ def test_filesystem_change_summary_counts_entry_changes():
     ]
 
 
-def test_poll_client_events_once_publishes_changed_signatures(monkeypatch):
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp([])
-    events = []
-    settings_signatures = [("settings", 1), ("settings", 2)]
-    transcript_signatures = [("transcripts", 1), ("transcripts", 2)]
-    filesystem_signatures = [
-        (("/repo", ("/repo", "dir", 100, 0, (("old.txt", "file", 100, 10),))),),
-        (("/repo", ("/repo", "dir", 200, 0, (("new.txt", "file", 100, 10),))),),
-    ]
-    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
-    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
-    monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
-    monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: ["/repo"])
-    monkeypatch.setattr(webapp, "filesystem_push_payload", lambda roots: (_ for _ in ()).throw(AssertionError("diff-only fs_changed must not list directories")))
-    reindex_calls = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    schedule_calls = []
-    monkeypatch.setattr(app_module.file_index, "schedule_refreshes", lambda: schedule_calls.append(True) or 0)
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        webapp.client_watch_service.filesystem_last_full_at = time.monotonic()
-        webapp.set_session_files_cache(("k",), {"files": []}, HTTPStatus.OK)
-        webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at = 1.0
-        webapp.activity_transcript_service.transcripts_payload_cache_record.payload = {"sessions": {}}
-        assert webapp.poll_client_events_once() == []
-        assert webapp.poll_client_events_once() == ["settings_changed", "transcripts_changed", "fs_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert [event_type for event_type, _payload in events] == ["settings_changed", "transcripts_changed", "fs_changed"]
-    fs_payload = events[-1][1]
-    assert fs_payload["refresh"] is True
-    assert fs_payload["mode"] == "diff"
-    assert fs_payload["token"]
-    assert "directories" not in fs_payload
-    assert fs_payload["change_summary"]["roots_changed"] == 1
-    assert fs_payload["change_summary"]["entries_added"] == 1
-    assert fs_payload["change_summary"]["entries_removed"] == 1
-    assert reindex_calls == [(["/repo/new.txt", "/repo/old.txt"], "fs-watch")]
-    assert schedule_calls == [True]
-    assert "listing_summary" not in fs_payload
-    assert webapp.session_files_service.cache != {}
-    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload is None
-    assert webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at is None
-
-
-def test_native_filesystem_changes_ignore_excluded_descendants(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    git_file = root / ".git" / "FETCH_HEAD"
-    git_file.parent.mkdir(parents=True)
-    git_file.write_text("origin\n", encoding="utf-8")
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    record.filesystem_skip_dirs = frozenset({".git"})
-    reindex_calls = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("excluded event must not publish fs_changed")))
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(1, str(git_file))}) == []
-    finally:
-        webapp.control_server.stop()
-
-    assert reindex_calls == []
-
-
-def test_native_filesystem_watch_configuration_canonicalizes_roots(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    monkeypatch.setattr(webapp, "filesystem_roots_for_watch", lambda sessions: [str(root)])
-    monkeypatch.setattr(webapp, "files_for_watch", lambda: [])
-    monkeypatch.setattr(webapp, "background_files_for_watch", lambda: [])
-    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": {}}})
-    try:
-        roots, watch_paths, transcripts, skip_dirs = webapp.native_filesystem_watch_configuration()
-    finally:
-        webapp.control_server.stop()
-
-    assert roots == (str(root.resolve()),)
-    assert str(root.resolve()) in watch_paths
-    assert str(app_module.common.TMUX_AI_STATUS_PATH.parent.resolve()) in watch_paths
-    assert transcripts == ()
-    assert app_module.filesystem.SEARCH_SKIP_DIRS <= skip_dirs
-
-
-def test_native_filesystem_changes_refresh_shared_attention_acks(monkeypatch, tmp_path):
-    status_path = tmp_path / "tmux-AI-status.json"
-    status_path.write_text(json.dumps({"attention_acks": {"rev": 1, "keys": {"prompt:1": 123.0}}}), encoding="utf-8")
-    monkeypatch.setattr(app_module.common, "TMUX_AI_STATUS_PATH", status_path)
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    published = []
-    follower_notifications = []
-    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)) or {})
-    monkeypatch.setattr(webapp, "notify_background_client_event_followers", lambda *args: follower_notifications.append(args))
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(1, str(status_path))}) == ["attention_acks_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert webapp.attention_ack_keys == {"prompt:1": 123.0}
-    assert published[0][0] == ("attention_acks_changed", {"acknowledged": ["prompt:1"], "acknowledged_at": {"prompt:1": 123.0}})
-    assert published[0][1]["trigger"] == "native-watch"
-    assert len(follower_notifications) == 1
-
-
-def test_native_filesystem_changes_ignore_blocked_credentials(monkeypatch):
-    secret = Path(app_module.filesystem.AUTH_CONFIG_PATH)
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(secret.parent.parent),)
-    record.filesystem_watch_paths = (str(secret.parent.parent),)
-    reindex_calls = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(1, str(secret))}) == []
-    finally:
-        webapp.control_server.stop()
-
-    assert reindex_calls == []
-
-
-def test_native_filesystem_changes_reindex_and_publish_one_batch(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    changed = root / "src" / "main.py"
-    changed.parent.mkdir(parents=True)
-    changed.write_text("print('ok')\n", encoding="utf-8")
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    reindex_calls = []
-    published = []
-    invalidated_paths = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    monkeypatch.setattr(app_module, "invalidate_git_metadata_paths", lambda paths: invalidated_paths.append(paths) or set())
-    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
-    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [f"session-files:{trigger}"])
-    try:
-        events = webapp.handle_native_filesystem_changes(record, {(1, str(changed))})
-    finally:
-        webapp.control_server.stop()
-
-    assert reindex_calls == [([str(changed.resolve())], "native-watch")]
-    assert invalidated_paths == [[changed.resolve()]]
-    assert events == ["fs_changed", "session-files:native-watch"]
-    assert published[0][0] == [str(root)]
-    assert published[0][1]["trigger"] == "native-watch"
-    assert published[0][1]["change_summary"]["event_paths"] == 1
-
-
-def test_native_filesystem_change_matrix_routes_create_edit_delete_and_rename(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    created = root / "created.py"
-    edited = root / "edited.py"
-    renamed = root / "renamed.py"
-    deleted = root / "deleted.py"
-    created.write_text("created\n", encoding="utf-8")
-    edited.write_text("edited\n", encoding="utf-8")
-    renamed.write_text("renamed\n", encoding="utf-8")
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    reindex_calls = []
-    published = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
-    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
-    try:
-        events = webapp.handle_native_filesystem_changes(record, {
-            (1, str(created)),  # create
-            (2, str(edited)),  # edit
-            (3, str(deleted)),  # delete
-            (3, str(root / "old-name.py")),
-            (1, str(renamed)),  # rename arrives as delete + create
-        })
-    finally:
-        webapp.control_server.stop()
-
-    assert events == ["fs_changed"]
-    assert reindex_calls == [([str(path.resolve()) for path in sorted((created, edited, deleted, root / "old-name.py", renamed))], "native-watch")]
-    assert published[0][1]["change_summary"]["event_paths"] == 5
-
-
-def test_native_filesystem_changes_route_directory_atomic_replacement(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    replacement = root / "replacement"
-    replacement.mkdir()
-    removed = root / "old-replacement"
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    reindex_calls = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
-    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda *_args, **_kwargs: ["fs_changed"])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(3, str(removed)), (1, str(replacement))}) == ["fs_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert reindex_calls == [([str(removed.resolve()), str(replacement.resolve())], "native-watch")]
-
-
-def test_native_filesystem_changes_keep_symlink_escape_out_of_routing(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_text("private\n", encoding="utf-8")
-    link = root / "escape"
-    link.symlink_to(outside)
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    monkeypatch.setattr(app_module.filesystem, "_ensure_path_allowed", lambda path: (_ for _ in ()).throw(app_module.filesystem.FilesystemError(f"blocked {path}")))
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(2, str(link))}) == []
-    finally:
-        webapp.control_server.stop()
-
-
-def test_publish_native_files_changed_covers_visible_and_background_files(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    visible = root / "visible.py"
-    background = root / "background.py"
-    visible.write_text("visible\n", encoding="utf-8")
-    background.write_text("background\n", encoding="utf-8")
-    webapp = app_module.TmuxWebtermApp([])
-    published = []
-    monkeypatch.setattr(webapp, "files_for_watch", lambda: [str(visible)])
-    monkeypatch.setattr(webapp, "background_files_for_watch", lambda: [str(background)])
-    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)))
-    try:
-        assert webapp.publish_native_files_changed([visible, background]) == ["files_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert [item["path"] for item in published[0][0][1]["files"]] == [str(background.resolve()), str(visible.resolve())]
-
-
-def test_native_filesystem_changes_route_settings_atomic_replace(monkeypatch, tmp_path):
-    settings = tmp_path / "settings.yaml"
-    settings.write_text("appearance: {}\n", encoding="utf-8")
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_watch_paths = (str(tmp_path),)
-    webapp.client_watch_service.settings_signature = ("before",)
-    published = []
-    monkeypatch.setattr(app_module, "SETTINGS_PATH", settings)
-    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: ("after",))
-    monkeypatch.setattr(webapp, "settings_payload", lambda: {"settings": {"appearance": {"theme": "dark"}}})
-    monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)))
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(3, str(settings.with_suffix(".tmp"))), (1, str(settings))}) == ["settings_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert published[0][0][0] == "settings_changed"
-    assert published[0][1]["trigger"] == "native-watch"
-
-
-def test_native_filesystem_changes_route_transcript_append(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    transcript = root / "agent.jsonl"
-    transcript.write_text('{"type":"message"}\n', encoding="utf-8")
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_watch_paths = (str(root),)
-    record.filesystem_transcripts = (str(transcript),)
-    calls = []
-    monkeypatch.setattr(webapp, "clear_transcript_caches", lambda: calls.append("clear"))
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, *_args, **_kwargs: calls.append(event_type))
-    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="": calls.append(f"context:{trigger}") or [])
-    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="": calls.append(f"activity:{trigger}") or [])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": calls.append(f"session-files:{trigger}") or [])
-    try:
-        assert webapp.handle_native_filesystem_changes(record, {(2, str(transcript))}) == ["transcripts_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert calls == ["clear", "transcripts_changed", "context:native-watch", "activity:native-watch", "session-files:native-watch"]
-
-
-def test_native_filesystem_changes_do_not_reindex_modified_directory_metadata(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    changed = root / "src"
-    changed.mkdir(parents=True)
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    reindex_calls = []
-    published = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
-    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: published.append((roots, kwargs)) or ["fs_changed"])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
-    try:
-        events = webapp.handle_native_filesystem_changes(record, {(2, str(changed))})
-    finally:
-        webapp.control_server.stop()
-
-    assert events == ["fs_changed"]
-    assert reindex_calls == []
-    assert published[0][1]["change_summary"] == {
-        "roots_changed": 1,
-        "roots_added": 0,
-        "roots_removed": 0,
-        "event_paths": 1,
-        "indexed_paths": 0,
-    }
-
-
-def test_native_filesystem_metadata_invalidation_ignores_only_modified_watch_roots(tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-
-    assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root, (str(root),)) is False
-    assert webapp.native_filesystem_path_requires_metadata_invalidation(2, root / "src", (str(root),)) is True
-    assert webapp.native_filesystem_path_requires_metadata_invalidation(1, root, (str(root),)) is True
-    assert webapp.native_filesystem_path_requires_metadata_invalidation(3, root, (str(root),)) is True
-
-    # A repo's own `git status` rewrites `.git/index` and drops lock files; that churn
-    # must NOT invalidate (it self-fed a refresh livelock). Real ref changes still do.
-    for transient in (root / ".git" / "index", root / ".git" / "index.lock", root / ".git" / "refs" / "heads" / "main.lock"):
-        assert webapp.native_filesystem_path_requires_metadata_invalidation(1, transient, (str(root),)) is False, transient
-    for real_change in (root / ".git" / "HEAD", root / ".git" / "refs" / "heads" / "main", root / ".git" / "packed-refs", root / ".git" / "MERGE_HEAD", root / "index"):
-        assert webapp.native_filesystem_path_requires_metadata_invalidation(1, real_change, (str(root),)) is True, real_change
-
-
-def test_native_filesystem_changes_ignore_synthetic_watched_root_added_event(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_roots = (str(root),)
-    record.filesystem_watch_paths = (str(root),)
-    reindex_calls = []
-    monkeypatch.setattr(app_module.filesystem, "reindex_roots_for_paths", lambda paths, reason="": reindex_calls.append((paths, reason)) or [])
-    monkeypatch.setattr(webapp, "filesystem_watch_signature_for_roots", lambda roots: ((str(root), (str(root), "dir", 1, 0, ())),))
-    monkeypatch.setattr(webapp, "publish_filesystem_ready_event", lambda roots, **kwargs: ["fs_changed"])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="": [])
-    try:
-        events = webapp.handle_native_filesystem_changes(record, {(1, str(root))})
-    finally:
-        webapp.control_server.stop()
-
-    assert events == ["fs_changed"]
-    assert reindex_calls == []
-
-
-def test_native_filesystem_watcher_uses_one_record_owned_watch_thread(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    changed = root / "src" / "main.py"
-    changed.parent.mkdir(parents=True)
-    changed.write_text("print('ok')\n", encoding="utf-8")
-    entered = threading.Event()
-    delivered = threading.Event()
-    watch_calls = []
-
-    def fake_watch(*paths, **kwargs):
-        watch_calls.append((paths, kwargs))
-        entered.set()
-        yield {(1, str(changed))}
-        while not kwargs["stop_event"].wait(0.01):
-            pass
-
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    monkeypatch.setattr(webapp, "background_can_run", lambda role: role == app_module.BACKGROUND_ROLE_WATCH_ROOTS)
-    monkeypatch.setattr(webapp, "native_filesystem_watch_configuration", lambda: ((str(root),), (str(root),), (), frozenset()))
-    monkeypatch.setattr(app_module, "watchfiles_watch", fake_watch)
-    monkeypatch.setattr(webapp, "handle_native_filesystem_changes", lambda current, changes: delivered.set() or [])
-    try:
-        assert webapp.start_native_filesystem_watcher(record) is True
-        assert entered.wait(timeout=1.0)
-        assert delivered.wait(timeout=1.0)
-        record.stop_event.set()
-        record.filesystem_stop_event.set()
-        worker = record.filesystem_worker
-        assert worker is not None
-        worker.join(timeout=1.0)
-        assert worker.is_alive() is False
-    finally:
-        record.stop_event.set()
-        record.filesystem_stop_event.set()
-        webapp.control_server.stop()
-
-    paths, kwargs = watch_calls[0]
-    assert paths == (str(root),)
-    assert kwargs["debounce"] == app_module.NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS
-    assert kwargs["stop_event"] is not record.stop_event
-
-
-def test_native_filesystem_watcher_reconfigures_without_leaking_the_old_watch(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    entered = threading.Event()
-    reconfigured = threading.Event()
-    watch_stop_events = []
-
-    def fake_watch(*_paths, **kwargs):
-        watch_stop_events.append(kwargs["stop_event"])
-        entered.set()
-        if len(watch_stop_events) == 2:
-            reconfigured.set()
-        while not kwargs["stop_event"].wait(0.01):
-            pass
-        if False:
-            yield set()
-
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    monkeypatch.setattr(webapp, "background_can_run", lambda role: role == app_module.BACKGROUND_ROLE_WATCH_ROOTS)
-    monkeypatch.setattr(webapp, "native_filesystem_watch_configuration", lambda: ((str(root),), (str(root),), (), frozenset()))
-    monkeypatch.setattr(app_module, "watchfiles_watch", fake_watch)
-    try:
-        assert webapp.start_native_filesystem_watcher(record) is True
-        assert entered.wait(timeout=1.0)
-        webapp.request_native_filesystem_watch_reconfigure()
-        assert reconfigured.wait(timeout=1.0)
-        assert watch_stop_events[0].is_set() is True
-        assert watch_stop_events[0] is not watch_stop_events[1]
-    finally:
-        record.stop_event.set()
-        record.filesystem_stop_event.set()
-        worker = record.filesystem_worker
-        if worker is not None:
-            worker.join(timeout=1.0)
-        webapp.control_server.stop()
-
-
-def test_native_filesystem_watch_loss_coalesces_reconciliation_and_fallback(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    record.filesystem_healthy = True
-    record.next_file_poll_at = 999.0
-    record.next_background_file_poll_at = 999.0
-    record.next_signature_poll_at = 999.0
-    starts = []
-    events = []
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: 100.0)
-    monkeypatch.setattr(webapp, "start_client_directory_poll", lambda current: starts.append(current) or (len(starts) == 1))
-    monkeypatch.setattr(webapp, "log_event", lambda *args, **kwargs: events.append((args, kwargs)))
-    try:
-        assert webapp.handle_native_filesystem_watch_loss(record, reason="watch-error", diagnostic="overflow") is True
-    finally:
-        webapp.control_server.stop()
-
-    assert record.filesystem_healthy is False
-    assert record.next_file_poll_at == 100.0
-    assert record.next_background_file_poll_at == 100.0
-    assert record.next_signature_poll_at == 100.0
-    assert record.next_filesystem_retry_at == 100.0 + app_module.NATIVE_FILESYSTEM_RETRY_SECONDS
-    assert starts == [record]
-    assert events[0][0][1] == "native_filesystem_watch_loss"
-    assert events[0][0][3]["reason"] == "watch-error"
-
-
-def test_native_filesystem_watcher_error_normalizes_to_watch_loss(monkeypatch, tmp_path):
-    root = tmp_path / "repo"
-    root.mkdir()
-    webapp = app_module.TmuxWebtermApp([])
-    record = webapp.client_watch_service.event_watcher_record
-    losses = []
-
-    def fake_watch(*_paths, **_kwargs):
-        raise RuntimeError("native queue overflow")
-        yield set()
-
-    def capture_loss(current, **kwargs):
-        losses.append((current, kwargs))
-        current.stop_event.set()
-        return True
-
-    monkeypatch.setattr(webapp, "native_filesystem_watch_configuration", lambda: ((str(root),), (str(root),), (), frozenset()))
-    monkeypatch.setattr(app_module, "watchfiles_watch", fake_watch)
-    monkeypatch.setattr(webapp, "handle_native_filesystem_watch_loss", capture_loss)
-    try:
-        webapp.native_filesystem_watch_loop(record)
-    finally:
-        record.stop_event.set()
-        webapp.control_server.stop()
-
-    assert losses == [(record, {"reason": "watch-error", "diagnostic": "native queue overflow"})]
-
-
-def test_client_event_watch_runs_file_fallback_after_native_watch_loss(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    subscriber_id, _subscriber_queue = webapp.client_events.subscribe(channels={"files"})
-    record = webapp.client_watch_service.event_watcher_record
-
-    class StopAfterOneWait:
-        def clear(self):
-            return None
-
-        def wait(self, _timeout=None):
-            record.stop_event.set()
-            return True
-
-    calls = []
-    record.filesystem_healthy = False
-    record.next_file_poll_at = 0.0
-    record.next_background_file_poll_at = 0.0
-    record.next_filesystem_retry_at = 999999.0
-    record.next_signature_poll_at = 999999.0
-    record.wake_event = StopAfterOneWait()
-    monkeypatch.setattr(webapp, "poll_client_file_events_once", lambda: calls.append("visible") or [])
-    monkeypatch.setattr(webapp, "poll_client_background_file_events_once", lambda: calls.append("background") or [])
-    try:
-        webapp.client_event_watch_loop(record)
-    finally:
-        webapp.client_events.unsubscribe(subscriber_id)
-        webapp.control_server.stop()
-
-    assert calls == ["visible", "background"]
-
 
 def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     events = []
-    listed_roots = []
+    submitted_roots = []
     signatures = [
         (("/repo", ("/repo", "dir", 100, 0, (("one.txt", "file", 100, 10),))),),
         (("/repo", ("/repo", "dir", 200, 0, (("two.txt", "file", 200, 20),))),),
         (("/repo", ("/repo", "dir", 300, 0, (("three.txt", "file", 300, 30),))),),
     ]
 
-    def fake_push_payload(roots):
-        listed_roots.append(list(roots))
-        return {
-            "roots": list(roots),
-            "directories": [{"path": root, "status": 200, "ok": True, "data": {"path": root, "entries": []}} for root in roots],
-            "listing_summary": {"roots_requested": len(roots), "roots_listed": len(roots), "roots_error": 0, "entries_listed": 0, "files_listed": 0, "dirs_listed": 0},
-            "compute_ms": 1.0,
-        }
+    class ReadyBatchJob:
+        def produce(self, task, payload, **kwargs):
+            assert task == "filesystem_batch"
+            signature = signatures[0 if not submitted_roots else 2][0][1]
+            submitted_roots.append([request["path"] for request in payload["requests"]])
+            responses = [
+                {
+                    "id": request["id"],
+                    "ok": True,
+                    "status": 200,
+                    "payload": {"path": request["path"], "entries": []},
+                    "watch_signature": list(signature),
+                }
+                for request in payload["requests"]
+            ]
+            return {
+                "ok": True,
+                "state": "ready",
+                "job": {"job_id": f"job-{len(submitted_roots)}", "status": "completed", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
+            }, json.dumps({"responses": responses, "performance": {"operation_ms": 1.0}}).encode("utf-8")
 
-    monkeypatch.setattr(webapp, "filesystem_push_payload", fake_push_payload)
+    webapp.job_client = ReadyBatchJob()
     monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
     try:
         assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[0]) == ["fs_changed"]
@@ -7274,10 +7812,55 @@ def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeyp
     assert events[1][1]["refresh"] is True
     assert "directories" not in events[1][1]
     assert events[2][1]["directories"]
-    assert listed_roots == [["/repo"], ["/repo"]]
+    assert submitted_roots == [["/repo"], ["/repo"]]
 
 
-def test_filesystem_watch_diff_payload_lists_only_changed_roots(monkeypatch):
+def test_filesystem_watch_signature_for_roots_matches_watch_batch_signature(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "watched.txt").write_text("value\n", encoding="utf-8")
+    submitted = []
+
+    class ReadyBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submitted.append((task, copy.deepcopy(payload), dict(kwargs)))
+            product = app_module.filesystem.filesystem_batch_result(payload)
+            return {
+                "ok": True,
+                "state": "ready",
+                "job": {"job_id": "", "status": "completed", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
+            }, json.dumps(product).encode("utf-8")
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ReadyBatchJob()
+    payload = {
+        "client_scope": "browser",
+        "requests": [{
+            "id": "root-list",
+            "type": "list",
+            "path": str(root),
+            "trigger_counts": {"watch-diff": 1},
+            "include_watch_signature": True,
+        }],
+    }
+    try:
+        batch, status = webapp.fs_batch_http_payload(payload)
+        assert status == HTTPStatus.OK, batch
+        response = batch["responses"][0]
+        assert response["ok"] is True, response
+        assert webapp.filesystem_watch_signature_for_roots([str(root)]) == ((
+            str(root),
+            app_module.immutable_watch_signature(response["watch_signature"]),
+        ),)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert submitted[0][0] == "filesystem_batch"
+    assert submitted[0][1]["requests"][0]["include_watch_signature"] is True
+
+
+def test_filesystem_watch_diff_plan_lists_only_changed_roots():
     webapp = app_module.TmuxWebtermApp([])
     previous = (
         ("/repo", ("/repo", "dir", 100, 0, (("old.txt", "file", 100, 10),))),
@@ -7288,54 +7871,550 @@ def test_filesystem_watch_diff_payload_lists_only_changed_roots(monkeypatch):
         ("/unchanged", ("/unchanged", "dir", 100, 0, (("same.txt", "file", 100, 10),))),
         ("/added-root", ("/added-root", "dir", 100, 0, (("fresh.txt", "file", 100, 10),))),
     )
-    listed_roots = []
-
-    def fake_push_payload(roots):
-        listed_roots.append(list(roots))
-        return {
-            "roots": list(roots),
-            "directories": [
-                {"path": root, "status": 200, "ok": True, "data": {"path": root, "entries": []}}
-                for root in roots
-            ],
-            "listing_summary": {"roots_requested": len(roots), "roots_listed": len(roots), "roots_error": 0, "entries_listed": 0, "files_listed": 0, "dirs_listed": 0},
-            "compute_ms": 1.0,
-        }
-
-    monkeypatch.setattr(webapp, "filesystem_push_payload", fake_push_payload)
     try:
         since = webapp.record_filesystem_watch_snapshot(previous)
         current_token = webapp.record_filesystem_watch_snapshot(current)
-        payload = webapp.filesystem_watch_diff_payload(since)
+        payload, roots = webapp.filesystem_watch_diff_plan(since)
     finally:
         webapp.control_server.stop()
 
     assert payload["mode"] == "diff"
     assert payload["since"] == since
     assert payload["token"] == current_token
-    assert listed_roots == [["/added-root", "/repo"]]
-    assert [item["path"] for item in payload["directories"]] == ["/added-root", "/repo"]
+    assert roots == ["/added-root", "/repo"]
     assert payload["change_summary"]["roots_changed"] == 2
 
 
-def test_filesystem_watch_diff_payload_returns_full_when_since_is_stale(monkeypatch):
+def test_filesystem_watch_diff_request_submits_bounded_jobd_batches_and_completes_via_operation(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    current = tuple(
+        (f"/repo-{index:03d}", (f"/repo-{index:03d}", "dir", index + 1, 0, ()))
+        for index in range(64)
+    )
+    submitted = []
+    product_payloads = {}
+
+    class CompletingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submitted.append((task, payload, kwargs))
+            product_payloads[kwargs["coalesce_key"]] = payload
+            index = len(submitted)
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": f"job-{index}", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, product_key):
+            requests = product_payloads[product_key]["requests"]
+            responses = [
+                {
+                    "id": request["id"],
+                    "ok": True,
+                    "status": 200,
+                    "payload": {"path": request["path"], "entries": []},
+                    "watch_signature": [request["path"], "dir", index + 1, 0, []],
+                }
+                for index, request in enumerate(requests)
+            ]
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+            }, json.dumps({"responses": responses, "performance": {"operation_ms": 1.0}}).encode("utf-8")
+
+    terminal = threading.Event()
+    published = []
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = CompletingBatchJob()
+
+    def capture_event(event_type, payload=None, **kwargs):
+        published.append((event_type, payload, kwargs))
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    monkeypatch.setattr(
+        app_module.filesystem,
+        "list_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("watch-diff request must not list in web")),
+    )
+    try:
+        token = webapp.record_filesystem_watch_snapshot(current)
+        payload, status = webapp.filesystem_watch_diff_http_payload(
+            since_token="missing",
+            request_id="r-web-watch-diff",
+        )
+        operation_id = payload["operation"]["id"]
+        assert terminal.wait(2.0), "accepted watch-diff product did not publish terminal completion"
+        result, result_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["state"] == "queued"
+    assert payload["request"]["id"] == "r-web-watch-diff"
+    assert payload["operation"]["kind"] == "fs_watch_diff"
+    assert payload["operation"]["context"]["token"] == token
+    assert [len(call[1]["requests"]) for call in submitted] == [64]
+    assert all(call[0] == "filesystem_batch" for call in submitted)
+    assert all(call[2]["delivery"] == "ready_or_receipt" for call in submitted)
+    assert result_status == HTTPStatus.OK
+    assert result["state"] == "ready"
+    assert [directory["path"] for directory in result["data"]["directories"]] == [item[0] for item in current]
+    assert [response["id"] for response in result["data"]["responses"]] == list(range(64))
+    assert result["data"]["listing_summary"]["roots_listed"] == 64
+    assert result["data"]["token"]
+    assert webapp.filesystem_watch_record_for_token(result["data"]["token"])["signature"] == current
+    assert published[-1][0] == "operation_terminal"
+    assert published[-1][1]["operation"]["id"] == operation_id
+
+
+def test_filesystem_watch_diff_warm_calls_return_ready_without_another_jobd_rpc(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    current = (("/repo", ("/repo", "dir", 1, 0, ())),)
+    product_body = json.dumps({
+        "responses": [{
+            "id": 0,
+            "ok": True,
+            "status": 200,
+            "payload": {"path": "/repo", "entries": []},
+            "watch_signature": ["/repo", "dir", 1, 0, []],
+        }],
+        "performance": {"operation_ms": 1.0},
+    }).encode("utf-8")
+    submissions = []
+    produce_started = threading.Event()
+
+    class WarmBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submissions.append((task, payload, kwargs))
+            produce_started.set()
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-watch", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, product_key):
+            assert product_key == submissions[0][2]["coalesce_key"]
+            return {"ok": True, "state": "ready", "generation": 1, "inflight": False}, product_body
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = WarmBatchJob()
+    accept_operation = webapp.queued_delivery_ledger.accept_operation
+
+    def accept_after_producer_started(**kwargs):
+        assert produce_started.wait(0.5), "cold producer did not overlap durable receipt persistence"
+        return accept_operation(**kwargs)
+
+    monkeypatch.setattr(webapp.queued_delivery_ledger, "accept_operation", accept_after_producer_started)
+
+    def capture_event(event_type, _payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        webapp.record_filesystem_watch_snapshot(current)
+        first, first_status = webapp.filesystem_watch_diff_http_payload(
+            since_token="missing",
+            request_id="r-watch-cold",
+        )
+        second, second_status = webapp.filesystem_watch_diff_http_payload(
+            since_token="missing",
+            request_id="r-watch-warm-1",
+        )
+        third, third_status = webapp.filesystem_watch_diff_http_payload(
+            since_token="missing",
+            request_id="r-watch-warm-2",
+        )
+        assert terminal.wait(2.0), "cold watch-diff operation did not reach its terminal product"
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first_status == HTTPStatus.ACCEPTED
+    assert first["state"] == "queued"
+    assert [first_status, second_status, third_status] == [HTTPStatus.ACCEPTED, HTTPStatus.OK, HTTPStatus.OK]
+    assert [second["mode"], third["mode"]] == ["full", "full"]
+    assert [response["id"] for response in second["responses"]] == [0]
+    assert [response["id"] for response in third["responses"]] == [0]
+    assert len(submissions) == 1
+    assert submissions[0][2]["delivery"] == "ready_or_receipt"
+
+
+def test_filesystem_watch_diff_async_submit_failure_terminalizes_the_accepted_receipt(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    terminal = threading.Event()
+    published = []
+
+    class FailingBatchJob:
+        def produce(self, *_args, **_kwargs):
+            return {
+                "ok": False,
+                "error": "jobd response exceeded deadline",
+                "_transport_error": "timeout",
+            }, b""
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = FailingBatchJob()
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: ["/repo"])
+
+    def capture_event(event_type, payload=None, **kwargs):
+        published.append((event_type, payload, kwargs))
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        receipt, status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-web-watch-submit-failure",
+        )
+        operation_id = receipt["operation"]["id"]
+        assert terminal.wait(2.0), "failed watch-diff submit did not publish terminal completion"
+        result, result_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert receipt["request"]["id"] == "r-web-watch-submit-failure"
+    assert result_status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result["state"] == "failed"
+    assert result["request"]["id"] == "r-web-watch-submit-failure"
+    assert result["error"]["details"]["reason"] == "timeout"
+    assert result["error"]["stack"][-1]["operation"] == "jobd.produce"
+    assert published[-1][1]["operation"]["id"] == operation_id
+
+
+def test_filesystem_watch_diff_force_full_acceptance_does_not_submit_refresh_or_scan_in_request_thread(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    roots = ["/repo-a", "/repo-b"]
+    submitted = []
+
+    class PendingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submitted.append((task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-watch", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+    class CapturingCompletionService:
+        stop_event = threading.Event()
+
+        def reserve(self):
+            return True
+
+        def release_reservation(self):
+            raise AssertionError("accepted operation must retain its completion reservation")
+
+        def submit_reserved(self, function, *args):
+            self.submission = (function, args)
+            return True
+
+        def stop(self):
+            self.stop_event.set()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("forced watch-diff acceptance must not refresh or scan in web")
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = PendingBatchJob()
+    webapp.jobd_operation_service = CapturingCompletionService()
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
+    monkeypatch.setattr(app_module, "discover_sessions", forbidden)
+    monkeypatch.setattr(app_module.filesystem, "watch_signature", forbidden)
+    monkeypatch.setattr(app_module.filesystem, "list_directory", forbidden)
+    try:
+        payload, status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-web-force-full",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["request"]["id"] == "r-web-force-full"
+    assert payload["operation"]["progress"]["phase"] == "refreshing_snapshot"
+    assert payload["operation"]["progress"]["producer_state"] == "submitting"
+    assert submitted == []
+    completion, completion_args = webapp.jobd_operation_service.submission
+    assert completion == webapp.complete_filesystem_watch_diff_operation
+    assert completion_args[2] == {"mode": "full", "reason": "forced", "token": "", "removed_roots": []}
+    assert completion_args[3] == roots
+
+
+def test_filesystem_watch_diff_completion_worker_start_failure_is_a_produce_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+
+    class RejectingCompletionService:
+        stop_event = threading.Event()
+
+        def reserve(self):
+            return True
+
+        def release_reservation(self):
+            raise AssertionError("submit_reserved owns the accepted reservation")
+
+        def submit_reserved(self, _function, *_args):
+            return False
+
+        def stop(self):
+            self.stop_event.set()
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.jobd_operation_service = RejectingCompletionService()
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: ["/repo"])
+    try:
+        result, status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-web-worker-start",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result["state"] == "failed"
+    assert result["request"]["id"] == "r-web-worker-start"
+    assert result["error"]["stack"][-1]["operation"] == "jobd.produce"
+
+
+def test_filesystem_watch_diff_rejects_105_roots_without_partial_or_multi_job_submission(monkeypatch):
+    roots = [f"/repo-{index:03d}" for index in range(105)]
+    webapp = app_module.TmuxWebtermApp([])
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
+    monkeypatch.setattr(
+        webapp.job_client,
+        "produce",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("over-limit request must not submit partial jobs")),
+    )
+    try:
+        payload, status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-web-105-roots",
+        )
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert payload["state"] == "failed"
+    assert payload["request"]["id"] == "r-web-105-roots"
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["details"]["roots"] == 105
+    assert payload["error"]["details"]["maximum"] == 64
+
+
+def test_filesystem_watch_diff_releases_completion_reservation_when_operation_acceptance_fails(monkeypatch):
+    current = (("/repo", ("/repo", "dir", 1, 0, ())),)
+
+    class TrackingCompletionService:
+        stop_event = threading.Event()
+
+        def __init__(self):
+            self.reservations = 0
+            self.workers = []
+
+        def reserve(self):
+            self.reservations += 1
+            return True
+
+        def release_reservation(self):
+            self.reservations -= 1
+
+        def submit_reserved(self, function, *args):
+            def run():
+                try:
+                    function(*args)
+                finally:
+                    self.release_reservation()
+
+            worker = threading.Thread(target=run)
+            self.workers.append(worker)
+            worker.start()
+            return True
+
+        def stop(self):
+            self.stop_event.set()
+            for worker in self.workers:
+                worker.join(timeout=2.0)
+
+    pending_batch = app_module.FilesystemWatchBatchProduct(
+        producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:test", generation=1),
+        ready_product={"responses": []},
+    )
+    completion_service = TrackingCompletionService()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.jobd_operation_service = completion_service
+    monkeypatch.setattr(
+        webapp,
+        "submit_filesystem_watch_batches",
+        lambda _roots, _token, **_kwargs: (pending_batch,),
+    )
+
+    def reject_acceptance(**_kwargs):
+        raise RuntimeError("ledger write failed")
+
+    monkeypatch.setattr(webapp.queued_delivery_ledger, "accept_operation", reject_acceptance)
+    try:
+        webapp.record_filesystem_watch_snapshot(current)
+        with pytest.raises(RuntimeError, match="ledger write failed"):
+            webapp.filesystem_watch_diff_http_payload(since_token="missing")
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert completion_service.reservations == 0
+
+
+def test_periodic_filesystem_full_frame_submits_jobd_without_inline_listing(monkeypatch):
+    current = tuple(
+        (f"/repo-{index:03d}", (f"/repo-{index:03d}", "dir", index + 1, 0, ()))
+        for index in range(64)
+    )
+    roots = [item[0] for item in current]
+    submitted = []
+    published = []
+
+    class PendingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submitted.append((task, payload, kwargs))
+            index = len(submitted)
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": f"job-{index}", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+    class CapturingCompletionService:
+        stop_event = threading.Event()
+
+        def reserve(self):
+            return True
+
+        def release_reservation(self):
+            return None
+
+        def submit_reserved(self, function, *args):
+            self.submission = (function, args)
+            return True
+
+        def stop(self):
+            self.stop_event.set()
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = PendingBatchJob()
+    webapp.jobd_operation_service = CapturingCompletionService()
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published.append((event_type, payload or {})))
+    monkeypatch.setattr(
+        app_module.filesystem,
+        "list_directory",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("periodic full frame must not list in web")),
+    )
+    try:
+        events = webapp.publish_filesystem_ready_event(roots, current_signature=current, force_full=True)
+        repeated_events = webapp.publish_filesystem_ready_event(roots, current_signature=current, force_full=True)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert events == []
+    assert repeated_events == []
+    assert published == []
+    assert [len(call[1]["requests"]) for call in submitted] == [64]
+    assert all(call[0] == "filesystem_batch" for call in submitted)
+    assert all(call[2]["delivery"] == "ready_or_receipt" for call in submitted)
+
+
+def test_completed_filesystem_full_frame_publishes_latest_token_and_discards_stale_token(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    published = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published.append((event_type, payload or {})))
+    first_signature = (("/repo", ("/repo", "dir", 1, 0, ())),)
+    second_signature = (("/repo", ("/repo", "dir", 2, 0, ())),)
+    try:
+        first_token = webapp.record_filesystem_watch_snapshot(first_signature)
+        with webapp.client_watch_service.lock:
+            webapp.client_watch_service.filesystem_full_inflight_token = first_token
+            webapp.client_watch_service.filesystem_payload_signature = "previous-token"
+        first_payload = {"mode": "full", "token": first_token, "roots": ["/repo"], "directories": []}
+        assert webapp.publish_completed_filesystem_full_payload(first_token, "watch", first_payload) == ["fs_changed"]
+        with webapp.client_watch_service.lock:
+            first_full_at = webapp.client_watch_service.filesystem_last_full_at
+            assert webapp.client_watch_service.filesystem_payload_signature == first_token
+            assert webapp.client_watch_service.filesystem_full_inflight_token == ""
+
+        second_token = webapp.record_filesystem_watch_snapshot(second_signature)
+        with webapp.client_watch_service.lock:
+            webapp.client_watch_service.filesystem_full_inflight_token = first_token
+            webapp.client_watch_service.filesystem_payload_signature = second_token
+        assert webapp.publish_completed_filesystem_full_payload(first_token, "watch", first_payload) == []
+        with webapp.client_watch_service.lock:
+            assert webapp.client_watch_service.filesystem_payload_signature == second_token
+            assert webapp.client_watch_service.filesystem_full_inflight_token == ""
+            assert webapp.client_watch_service.filesystem_last_full_at == first_full_at
+    finally:
+        webapp.control_server.stop()
+
+    assert published == [("fs_changed", first_payload)]
+
+
+def test_periodic_filesystem_full_frame_shutdown_clears_inflight_without_error(monkeypatch):
+    webapp = app_module.TmuxWebtermApp([])
+    token = webapp.record_filesystem_watch_snapshot((("/repo", ("/repo", "dir", 1, 0, ())),))
+    batch = app_module.FilesystemWatchBatchProduct(
+        producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:test", generation=1),
+    )
+    failures = []
+    monkeypatch.setattr(webapp, "record_filesystem_watch_product_failure", lambda error, trigger: failures.append((error, trigger)))
+    with webapp.client_watch_service.lock:
+        webapp.client_watch_service.filesystem_full_inflight_token = token
+    webapp.jobd_operation_service.stop_event.set()
+    try:
+        webapp.complete_filesystem_ready_event(
+            token,
+            "watch",
+            {"mode": "full", "token": token, "removed_roots": []},
+            ["/repo"],
+            (batch,),
+            time.time() + 1.0,
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert failures == []
+    assert webapp.client_watch_service.filesystem_full_inflight_token == ""
+
+
+def test_filesystem_watch_diff_plan_returns_full_when_since_is_stale():
     webapp = app_module.TmuxWebtermApp([])
     current = (
         ("/repo", ("/repo", "dir", 200, 0, (("new.txt", "file", 100, 10),))),
         ("/unchanged", ("/unchanged", "dir", 100, 0, (("same.txt", "file", 100, 10),))),
     )
-    listed_roots = []
-    monkeypatch.setattr(webapp, "filesystem_push_payload", lambda roots: listed_roots.append(list(roots)) or {"roots": list(roots), "directories": [], "listing_summary": {}, "compute_ms": 1.0})
     try:
         token = webapp.record_filesystem_watch_snapshot(current)
-        payload = webapp.filesystem_watch_diff_payload("missing-token")
+        payload, roots = webapp.filesystem_watch_diff_plan("missing-token")
     finally:
         webapp.control_server.stop()
 
     assert payload["mode"] == "full"
     assert payload["reason"] == "stale-since"
     assert payload["token"] == token
-    assert listed_roots == [["/repo", "/unchanged"]]
+    assert roots == ["/repo", "/unchanged"]
 
 
 def test_session_files_ready_skips_unchanged_fs_republish(monkeypatch):
@@ -7354,84 +8433,12 @@ def test_session_files_ready_skips_unchanged_fs_republish(monkeypatch):
     assert [event_type for event_type, _payload in events] == ["session_files_ready"]
 
 
-def test_poll_client_events_once_transcript_change_is_lightweight_timing_regression(monkeypatch):
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp([])
-    events = []
-    settings_signatures = [("settings", 1), ("settings", 1)]
-    transcript_signatures = [("transcripts", 1), ("transcripts", 2)]
-    filesystem_signatures = [(("/repo", ("stable",)),), (("/repo", ("stable",)),)]
-
-    def slow_full_transcript_payload():
-        time.sleep(0.35)
-        return {"sessions": {"slow": {}}}
-
-    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
-    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
-    monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
-    monkeypatch.setattr(webapp, "build_transcripts_payload", slow_full_transcript_payload)
-    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
-    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": [])
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at = 1.0
-        webapp.activity_transcript_service.transcripts_payload_cache_record.payload = {"sessions": {}}
-        assert webapp.poll_client_events_once() == []
-        started = time.perf_counter()
-        assert webapp.poll_client_events_once() == ["transcripts_changed"]
-        elapsed = time.perf_counter() - started
-    finally:
-        webapp.control_server.stop()
-
-    assert elapsed < 0.2
-    assert events == [("transcripts_changed", {"signature": ("transcripts", 2), "refresh": True})]
-    assert "data" not in events[0][1]
-
-
-def test_poll_client_events_once_transcript_content_change_skips_metadata_refresh(monkeypatch):
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp([])
-    settings_signatures = [("settings", 1), ("settings", 1)]
-    transcript_signatures = [("transcripts", 1), ("transcripts", 1)]
-    transcript_content_signatures = [("content", 1), ("content", 2)]
-    filesystem_signatures = [(("/repo", ("stable",)),), (("/repo", ("stable",)),)]
-    context_triggers = []
-    session_file_triggers = []
-    published_events = []
-    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
-    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
-    monkeypatch.setattr(webapp, "transcript_content_watch_signature", lambda sessions: transcript_content_signatures.pop(0))
-    monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
-    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": context_triggers.append(trigger) or ["context_items_ready"])
-    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": session_file_triggers.append(trigger) or ["session_files_ready"])
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published_events.append((event_type, payload or {})))
-    try:
-        webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at = 1.0
-        webapp.activity_transcript_service.transcripts_payload_cache_record.payload = {"sessions": {"cached": {}}}
-        webapp.activity_transcript_service.transcript_tail_cache = {("tail",): (1.0, "cached")}
-        webapp.activity_transcript_service.context_items_cache = {("context",): (1.0, [{"cached": True}])}
-        assert webapp.poll_client_events_once() == []
-        assert webapp.poll_client_events_once() == ["context_items_ready", "session_files_ready"]
-    finally:
-        webapp.control_server.stop()
-
-    assert context_triggers == ["transcript_content_changed"]
-    assert session_file_triggers == ["transcript_content_changed"]
-    assert published_events == []
-    assert webapp.activity_transcript_service.transcripts_payload_cache_record.stored_at == 1.0
-    assert webapp.activity_transcript_service.transcripts_payload_cache_record.payload == {"sessions": {"cached": {}}}
-    assert webapp.activity_transcript_service.transcript_tail_cache == {}
-    assert webapp.activity_transcript_service.context_items_cache == {}
-
 
 def test_publish_context_items_ready_events_on_transcript_watch_routes_through_jobd(monkeypatch, tmp_path):
     # Checkbox 8: transcript-identity watch events must invalidate the typed jobd transcript_view
-    # product, not parse inline. publish_context_items_ready_events (called from
-    # poll_client_events_once on transcripts_changed/transcript_content_changed, a server-side
-    # watch loop) calls context_items -> transcript_compact_view_bounded, which checkbox 5 already
-    # routes through jobd -- prove that wiring holds for the transcript-watch trigger path.
+    # product, not parse inline. watchd revision handling calls
+    # publish_context_items_ready_events, which reaches transcript_compact_view_bounded and the
+    # existing jobd owner; prove that wiring holds for the transcript-watch trigger path.
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "watched"}}) + "\n", encoding="utf-8")
     info = _single_agent_session_info("5", transcript, tmp_path)
@@ -7440,9 +8447,15 @@ def test_publish_context_items_ready_events_on_transcript_watch_routes_through_j
     submitted_tasks = []
 
     class TrackingJobClient:
-        def submit(self, task, payload, **kwargs):
+        def produce(self, task, payload, **kwargs):
             submitted_tasks.append(task)
-            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
+            return {
+                "ok": True,
+                "state": "queued",
+                "coalesced": False,
+                "job": {"job_id": "job-1", "status": "running"},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
 
         def result(self, job_id):
             return {"ok": True, "job": {"status": "running"}}
@@ -7460,17 +8473,15 @@ def test_publish_context_items_ready_events_on_transcript_watch_routes_through_j
     finally:
         webapp.control_server.stop()
 
-    assert events == ["context_items_ready"]
-    assert published == ["context_items_ready"]
-    # A perpetually-pending product polls/resubmits, but every submission is the jobd product
-    # task -- never an inline parse.
+    assert events == []
+    assert published == []
+    # A pending product remains owned by jobd and is not mislabeled as a ready push.
     assert submitted_tasks and set(submitted_tasks) == {"transcript_view"}
 
 
 def test_publish_session_files_ready_events_on_fs_watch_routes_through_jobd_not_inline(monkeypatch):
-    # Checkbox 8: filesystem/transcript watch events (poll_client_events_once, a server-side
-    # watch loop, never a browser poll) must invalidate the typed jobd product, not recompute
-    # inline. publish_session_files_ready_events uses cache-aware session_files_payload(),
+    # Checkbox 8: filesystem/transcript watchd events must invalidate the typed jobd product,
+    # not recompute inline. publish_session_files_ready_events uses cache-aware session_files_payload(),
     # which checkbox 9 already routes through compute_session_files_payload_via_jobd -- prove
     # that wiring holds for the fs-watch/transcript-watch trigger path specifically.
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
@@ -7548,131 +8559,6 @@ def test_dependency_invalidation_counts_are_bounded_by_trigger_not_by_event_volu
     assert webapp.client_watch_service.invalidation_counts == {"fs_changed": 2, "transcripts_changed": 2}
 
 
-def test_poll_client_events_once_refreshes_session_files_on_transcript_change(monkeypatch):
-    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
-    webapp = app_module.TmuxWebtermApp([])
-    settings_signatures = [("settings", 1), ("settings", 1)]
-    transcript_signatures = [("transcripts", 1), ("transcripts", 2)]
-    filesystem_signatures = [(("/repo", ("stable",)),), (("/repo", ("stable",)),)]
-    session_file_triggers = []
-    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: settings_signatures.pop(0))
-    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: transcript_signatures.pop(0))
-    monkeypatch.setattr(webapp, "filesystem_roots_watch_signature", lambda sessions: filesystem_signatures.pop(0))
-    monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(webapp, "publish_context_items_ready_events", lambda trigger="watch": [])
-    monkeypatch.setattr(webapp, "publish_activity_summary_ready_events", lambda trigger="watch": [])
-    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda trigger="watch": session_file_triggers.append(trigger) or ["session_files_ready"])
-    try:
-        assert webapp.poll_client_events_once() == []
-        assert webapp.poll_client_events_once() == ["transcripts_changed", "session_files_ready"]
-    finally:
-        webapp.control_server.stop()
-
-    assert session_file_triggers == ["transcripts_changed"]
-
-
-def test_poll_client_file_events_once_publishes_active_file_changes(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    events = []
-    signatures = [
-        (("/repo/DOIT.51.md", ("/repo/DOIT.51.md", "file", 100, 10)),),
-        (("/repo/DOIT.51.md", ("/repo/DOIT.51.md", "file", 200, 12)),),
-    ]
-    monkeypatch.setattr(webapp, "files_watch_signature", lambda: signatures.pop(0))
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        assert webapp.poll_client_file_events_once() == []
-        assert webapp.poll_client_file_events_once() == ["files_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert events == [("files_changed", {"files": [{"path": "/repo/DOIT.51.md", "signature": ("/repo/DOIT.51.md", "file", 200, 12)}], "count": 1})]
-
-
-def test_poll_client_background_file_events_once_uses_own_signature(monkeypatch):
-    events = []
-    signatures = [
-        (("/repo/README.md", ("/repo/README.md", "file", 100, 10)),),
-        (("/repo/README.md", ("/repo/README.md", "file", 200, 12)),),
-    ]
-    webapp = app_module.TmuxWebtermApp([])
-    monkeypatch.setattr(webapp, "background_files_watch_signature", lambda: signatures.pop(0))
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        assert webapp.poll_client_background_file_events_once() == []
-        assert webapp.poll_client_background_file_events_once() == ["files_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert events == [("files_changed", {"files": [{"path": "/repo/README.md", "signature": ("/repo/README.md", "file", 200, 12)}], "count": 1})]
-
-
-def test_filesystem_roots_for_watch_auto_indexes_active_directory(monkeypatch, tmp_path):
-    repo = tmp_path / "repo"
-    src = repo / "src"
-    watched = tmp_path / "watched"
-    transcript = tmp_path / "transcripts" / "codex.jsonl"
-    src.mkdir(parents=True)
-    info = SessionInfo(
-        session="5",
-        panes=[
-            PaneInfo(
-                session="5",
-                window="0",
-                pane="0",
-                pane_id="%5",
-                target="5:0.0",
-                current_path=str(src),
-                command="codex",
-                active=True,
-                window_active=True,
-                title="codex",
-                pid=123,
-            )
-        ],
-        selected_pane=PaneInfo(
-            session="5",
-            window="0",
-            pane="0",
-            pane_id="%5",
-            target="5:0.0",
-            current_path=str(src),
-            command="codex",
-            active=True,
-            window_active=True,
-            title="codex",
-            pid=123,
-        ),
-        agents=[
-            AgentInfo(
-                session="5",
-                kind="codex",
-                pid=123,
-                pane_target="5:1.0",
-                command="codex",
-                cwd=str(repo),
-                status=None,
-                session_id="session-5",
-                transcript=str(transcript),
-                error=None,
-            )
-        ],
-    )
-    monkeypatch.setattr(app_module, "WATCH_INDEX_PATH", tmp_path / "watch-index.json")
-    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": {"companion_dirs": []}}})
-    monkeypatch.setattr(app_module.filesystem, "git_root_for_path", lambda path: str(repo) if str(path).startswith(str(repo)) else "")
-    webapp = app_module.TmuxWebtermApp([])
-    try:
-        webapp.update_client_watch_roots({"roots": [str(watched)]})
-        roots = webapp.filesystem_roots_for_watch({"5": info})
-    finally:
-        webapp.control_server.stop()
-
-    assert str(watched) in roots
-    assert str(repo) in roots
-    assert str(src) not in roots
-    assert str(transcript.parent) not in roots
-
 
 def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsing(monkeypatch, tmp_path):
     transcript = tmp_path / "codex.jsonl"
@@ -7705,32 +8591,33 @@ def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsin
         def __init__(self):
             self.submissions = []
 
-        def submit(self, task, payload, **kwargs):
+        def produce(self, task, payload, **kwargs):
             self.submissions.append((task, payload, kwargs))
-            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
-
-        def result(self, job_id):
-            assert job_id == "job-1"
+            if len(self.submissions) == 1:
+                return {
+                    "ok": True,
+                    "state": "queued",
+                    "coalesced": False,
+                    "job": {"job_id": "job-1", "status": "running"},
+                    "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+                }, b""
             stat = transcript.stat()
+            body = json.dumps({
+                "read_generation": [stat.st_mtime_ns, stat.st_size],
+                "generation": [stat.st_mtime_ns, stat.st_size],
+                "identity": [stat.st_dev, stat.st_ino],
+                "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}],
+                "compact_lines": [],
+                "since_items": [],
+                "since_stats": {},
+            }).encode("utf-8")
             return {
                 "ok": True,
-                "job": {
-                    "status": "completed",
-                    "result": {
-                        "read_generation": [stat.st_mtime_ns, stat.st_size],
-                        "generation": [stat.st_mtime_ns, stat.st_size],
-                        "identity": [stat.st_dev, stat.st_ino],
-                        "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}],
-                        "compact_lines": [],
-                        "since_items": [],
-                        "since_stats": {},
-                    },
-                },
-            }
-
-        def product(self, coalesce_key, timeout=0.5):
-            # Cold first pass: nothing materialized yet, so the pending path stays pending.
-            return {"ok": True, "state": "none", "generation": 0}, b""
+                "state": "ready",
+                "coalesced": True,
+                "job": {"job_id": "job-1", "status": "completed", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
+            }, body
 
     monkeypatch.setattr(app_module, "tail_file_lines", unexpected_tail_file_lines)
     webapp = app_module.TmuxWebtermApp(["5"])
@@ -7751,10 +8638,11 @@ def test_context_items_uses_bounded_jobd_facts_without_request_time_local_parsin
     assert first["items"] == []
     assert second["pending"] is False
     assert second["items"] == [{"role": "user", "timestamp": "", "cwd": "", "text": "Check latency"}]
-    assert len(worker.submissions) == 1
-    assert worker.submissions[0][0] == "transcript_view"
+    assert len(worker.submissions) == 2
+    assert {submission[0] for submission in worker.submissions} == {"transcript_view"}
     # The coalesce key is byte-generation-stripped so appends supersede rather than re-key forever.
     coalesce_key = worker.submissions[0][2]["coalesce_key"]
+    assert worker.submissions[1][2]["coalesce_key"] == coalesce_key
     assert coalesce_key.startswith(f"transcript:v{app_module.TRANSCRIPT_PARSER_GENERATION}:")
     assert str(transcript.stat().st_mtime_ns) not in coalesce_key
 
@@ -7781,6 +8669,1326 @@ def _single_agent_session_info(session: str, transcript: Path, tmp_path: Path) -
     )
 
 
+@pytest.mark.parametrize(
+    ("method_name", "operation_kind"),
+    (("context_tail", "context_tail"), ("context_items", "context_items")),
+)
+def test_context_http_boundaries_accept_one_jobd_product_without_request_thread_polling(
+    monkeypatch,
+    tmp_path,
+    method_name,
+    operation_kind,
+):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "pending"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    request_thread = threading.current_thread().name
+    actions = []
+
+    class PendingProductJob:
+        def produce(self, task, payload, **kwargs):
+            actions.append(("produce", threading.current_thread().name))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-1", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def result(self, job_id):
+            actions.append(("result", threading.current_thread().name))
+            return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
+
+        def submit(self, *_args, **_kwargs):
+            actions.append(("submit", threading.current_thread().name))
+            return {"ok": True, "job": {"job_id": "legacy-submit"}}
+
+        def product(self, *_args, **_kwargs):
+            actions.append(("product", threading.current_thread().name))
+            return {"ok": True, "state": "pending", "generation": 0}, b""
+
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = PendingProductJob()
+    monkeypatch.setattr(
+        app_module.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(AssertionError("context request must not sleep")),
+    )
+    try:
+        method = webapp.context_tail if method_name == "context_tail" else webapp.context_items
+        payload, status = method("5", 20)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["state"] == "queued"
+    assert payload["request"]["id"].startswith("r-")
+    assert payload["operation"]["id"].startswith("op-")
+    assert payload["operation"]["kind"] == operation_kind
+    assert payload["operation"]["context"] == {"messages": 20, "session": "5"}
+    assert [action for action, thread_name in actions if thread_name == request_thread] == ["produce"]
+
+
+def test_context_product_receipt_completes_through_operation_event_and_replay(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "complete me"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    stat = transcript.stat()
+
+    class CompletingProductJob:
+        def produce(self, task, payload, **kwargs):
+            return {
+                "ok": True,
+                "state": "queued",
+                "coalesced": False,
+                "job": {"job_id": "job-context", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def result(self, job_id):
+            assert job_id == "job-context"
+            return {
+                "ok": True,
+                "job": {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "result": {
+                        "generation": [stat.st_mtime_ns, stat.st_size],
+                        "read_generation": [stat.st_mtime_ns, stat.st_size],
+                        "identity": [stat.st_dev, stat.st_ino],
+                        "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "complete me"}],
+                        "compact_lines": ["complete me"],
+                        "since_items": [],
+                        "since_stats": {},
+                    },
+                },
+            }
+
+    terminal = threading.Event()
+    published = []
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = CompletingProductJob()
+
+    def capture_event(event_type, payload=None, **kwargs):
+        published.append((event_type, payload, kwargs))
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        receipt, status = webapp.context_items("5", 20)
+        assert status == HTTPStatus.ACCEPTED
+        operation_id = receipt["operation"]["id"]
+        assert terminal.wait(2.0), "accepted context product did not publish terminal completion"
+        result, result_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert result_status == HTTPStatus.OK
+    assert result["state"] == "ready"
+    assert result["data"]["items"] == [{"role": "user", "timestamp": "", "cwd": "", "text": "complete me"}]
+    assert published[-1][0] == "operation_terminal"
+    assert published[-1][1]["operation"]["id"] == operation_id
+    assert replay == published[-1][1]
+
+
+def test_context_product_completed_without_mapping_terminalizes_protocol_failure(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "malformed"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+
+    class MalformedCompletionJob:
+        def produce(self, task, payload, **kwargs):
+            return {
+                "ok": True,
+                "state": "queued",
+                "coalesced": False,
+                "job": {"job_id": "job-context", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def result(self, job_id):
+            assert job_id == "job-context"
+            return {"ok": True, "job": {"job_id": job_id, "status": "completed", "result": []}}
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = MalformedCompletionJob()
+    original_publish = webapp.publish_client_event
+
+    def capture_event(event_type, payload=None, **kwargs):
+        original_publish(event_type, payload, **kwargs)
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        receipt, status = webapp.context_items("5", 20)
+        assert status == HTTPStatus.ACCEPTED
+        operation_id = receipt["operation"]["id"]
+        assert terminal.wait(0.5), "malformed completed product did not terminalize promptly"
+        result, result_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert result_status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result["state"] == "failed"
+    assert result["error"]["message"]["fallback"] == "malformed completed jobd product"
+
+
+def test_context_product_unexpected_completion_failure_terminalizes_operation(monkeypatch, tmp_path):
+    transcript = tmp_path / "codex.jsonl"
+    transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "explode"}}) + "\n", encoding="utf-8")
+    info = _single_agent_session_info("5", transcript, tmp_path)
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+
+    class CompletingProductJob:
+        def produce(self, task, payload, **kwargs):
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-context", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def result(self, job_id):
+            assert job_id == "job-context"
+            return {"ok": True, "job": {"job_id": job_id, "status": "completed", "result": {}}}
+
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp(["5"])
+    webapp.job_client = CompletingProductJob()
+    monkeypatch.setattr(webapp, "cache_transcript_product_result", lambda producer, result: (_ for _ in ()).throw(RuntimeError("cache exploded")))
+
+    def capture_event(event_type, payload=None, **kwargs):
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        receipt, status = webapp.context_items("5", 20)
+        assert status == HTTPStatus.ACCEPTED
+        operation_id = receipt["operation"]["id"]
+        assert terminal.wait(0.5), "unexpected completion failure left the accepted operation open"
+        result, result_status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert result_status == HTTPStatus.INTERNAL_SERVER_ERROR
+    assert result["state"] == "failed"
+    assert result["error"]["message"]["fallback"] == "cache exploded"
+
+
+def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    actions = []
+
+    class CompletingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            actions.append(("produce", threading.current_thread().name, task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-fs-batch", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, product_key):
+            actions.append(("product", threading.current_thread().name, product_key))
+            body = json.dumps({
+                "responses": [
+                    {"id": 0, "ok": True, "status": 200, "payload": {"path": "/repo", "entries": []}},
+                    {"id": 1, "ok": True, "status": 200, "payload": {"path": "/repo", "kind": "dir"}},
+                ],
+                "performance": {"batch_size": 2},
+            }).encode("utf-8")
+            return {"ok": True, "state": "ready", "generation": 1, "inflight": False}, body
+
+    terminal = threading.Event()
+    published = []
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = CompletingBatchJob()
+
+    def capture_event(event_type, payload=None, **kwargs):
+        published.append((event_type, payload, kwargs))
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    request_thread = threading.current_thread().name
+    batch = {
+        "client_scope": "browser",
+        "requests": [
+            {"id": "list", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 1}},
+            {"id": "info", "type": "info", "path": "/repo", "trigger_counts": {"tree-render": 1}},
+        ],
+    }
+    try:
+        receipt, status = webapp.fs_batch_http_payload(batch)
+        assert status == HTTPStatus.ACCEPTED
+        operation_id = receipt["operation"]["id"]
+        assert receipt["operation"]["kind"] == "fs_batch"
+        assert receipt["operation"]["context"]["product_key"].startswith("fs-batch:")
+        assert terminal.wait(2.0), "accepted filesystem batch did not publish terminal completion"
+        result, result_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [action[0] for action in actions if action[1] == request_thread] == ["produce"]
+    produce = actions[0]
+    assert produce[2] == "filesystem_batch"
+    assert produce[3] == {
+        **batch,
+        "requests": [
+            {**batch["requests"][0], "id": 0},
+            {**batch["requests"][1], "id": 1},
+        ],
+    }
+    assert produce[4]["delivery"] == "ready_or_receipt"
+    assert result_status == HTTPStatus.OK
+    assert all(response["ok"] is True for response in result["data"]["responses"])
+    assert [response["id"] for response in result["data"]["responses"]] == ["list", "info"]
+    assert published[-1][0] == "operation_terminal"
+    assert replay == published[-1][1]
+
+
+def _filesystem_json_product(body: bytes) -> dict[str, object]:
+    return {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+
+
+def test_filesystem_operation_cold_receipt_leaves_request_thread_before_worker_finishes(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    actions = []
+    release = threading.Event()
+    terminal = threading.Event()
+    published = []
+
+    class BlockingFilesystemJob:
+        def produce(self, task, payload, **kwargs):
+            actions.append(("produce", threading.current_thread().name, task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-fs-read", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, product_key):
+            actions.append(("product", threading.current_thread().name, product_key))
+            assert release.wait(2.0)
+            body = json.dumps({"path": "/repo/note.txt", "content": "offloaded"}).encode("utf-8")
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+                "product": {
+                    "format": "json",
+                    "content_type": "application/json; charset=utf-8",
+                    "length": len(body),
+                    "sha256": hashlib.sha256(body).hexdigest(),
+                    "disposition": "inline",
+                    "filename": "",
+                },
+            }, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = BlockingFilesystemJob()
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    request_thread = threading.current_thread().name
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read",
+            operation="read",
+            path="/repo/note.txt",
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert response.payload["operation"]["kind"] == "filesystem_operation"
+        assert not terminal.wait(0.05)
+        release.set()
+        assert terminal.wait(2.0)
+        operation_id = response.payload["operation"]["id"]
+        terminal_result, terminal_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [action[0] for action in actions if action[1] == request_thread] == ["produce"]
+    assert terminal_status == HTTPStatus.OK
+    assert terminal_result["data"] == {"path": "/repo/note.txt", "content": "offloaded"}
+    assert replay == published[-1]
+    assert replay["result"] == terminal_result
+    assert replay["status"] == HTTPStatus.OK
+
+
+def test_duplicate_operation_terminalization_appends_and_publishes_once(monkeypatch, tmp_path):
+    state_path = tmp_path / "operations.json"
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", state_path)
+    webapp = app_module.TmuxWebtermApp([])
+    published = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **kwargs: published.append((event_type, payload, kwargs)))
+    receipt = webapp.queued_delivery_ledger.accept_operation(
+        request_id="r-terminal-once",
+        route="GET /api/fs/read",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-terminal-once"},
+        kind="filesystem_operation",
+        context={"operation": "read", "path": "/repo/file.txt"},
+    )
+    operation_id = receipt["operation"]["id"]
+    ready = {"state": "ready", "request": receipt["request"], "data": {"path": "/repo/file.txt", "content": "stable"}}
+    conflicting = {"state": "failed", "request": receipt["request"], "error": "duplicate must not replace ready"}
+    try:
+        first = webapp.terminalize_operation(operation_id, ready, HTTPStatus.OK)
+        second = webapp.terminalize_operation(operation_id, conflicting, HTTPStatus.INTERNAL_SERVER_ERROR)
+        status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first == replay
+    assert second is None
+    assert status == (ready, HTTPStatus.OK)
+    assert replay["result"] == ready
+    assert replay["status"] == HTTPStatus.OK
+    assert [(event_type, payload) for event_type, payload, _kwargs in published] == [("operation_terminal", replay)]
+    assert len(state_path.read_text(encoding="utf-8").splitlines()) == 2, "acceptance plus exactly one terminal append"
+
+
+def test_conflicting_operation_terminalization_race_appends_and_publishes_once(monkeypatch, tmp_path):
+    state_path = tmp_path / "operations.json"
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", state_path)
+    webapp = app_module.TmuxWebtermApp([])
+    published = []
+    monkeypatch.setattr(
+        webapp,
+        "publish_client_event",
+        lambda event_type, payload=None, **kwargs: published.append((event_type, payload, kwargs)),
+    )
+    receipt = webapp.queued_delivery_ledger.accept_operation(
+        request_id="r-terminal-race",
+        route="GET /api/fs/read",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-terminal-race"},
+        kind="filesystem_operation",
+        context={"operation": "read", "path": "/repo/file.txt"},
+    )
+    operation_id = receipt["operation"]["id"]
+    ready = {"state": "ready", "request": receipt["request"], "data": {"content": "winner-a"}}
+    failed = {"state": "failed", "request": receipt["request"], "error": "winner-b"}
+    barrier = threading.Barrier(2)
+
+    def terminalize(result, status):
+        barrier.wait(timeout=2.0)
+        return webapp.terminalize_operation(operation_id, result, status)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = (
+                executor.submit(terminalize, ready, HTTPStatus.OK),
+                executor.submit(terminalize, failed, HTTPStatus.INTERNAL_SERVER_ERROR),
+            )
+            outcomes = [future.result() for future in futures]
+        status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert sum(outcome is not None for outcome in outcomes) == 1
+    assert replay is not None and status == (replay["result"], HTTPStatus(replay["status"]))
+    assert [(event_type, payload) for event_type, payload, _kwargs in published] == [("operation_terminal", replay)]
+    assert len(state_path.read_text(encoding="utf-8").splitlines()) == 2, "acceptance plus one winning terminal"
+
+
+@pytest.mark.parametrize(
+    ("status", "message_key"),
+    (
+        (HTTPStatus.NOT_FOUND, "common.pathNotFound"),
+        (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "fs.error.tooLarge"),
+        (HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "fs.error.binary"),
+    ),
+)
+def test_filesystem_operation_cold_failure_replay_preserves_typed_status(monkeypatch, tmp_path, status, message_key):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    terminal = threading.Event()
+    published = []
+    filesystem_error = {
+        "error": f"typed filesystem failure {int(status)}",
+        "user_message": {"key": message_key, "params": {"path": "/repo/note.txt"}, "fallback": "typed failure"},
+        "status": int(status),
+        "path": "/repo/note.txt",
+    }
+
+    class FailingFilesystemJob:
+        def produce(self, _task, _payload, **kwargs):
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-fs-failed", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, _product_key):
+            return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+        def result(self, job_id):
+            assert job_id == "job-fs-failed"
+            return {
+                "ok": False,
+                "job": {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "failure": {"filesystem_error": filesystem_error, "status": int(status)},
+                },
+            }
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = FailingFilesystemJob()
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read",
+            operation="read",
+            path="/repo/note.txt",
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert terminal.wait(2.0)
+        operation_id = response.payload["operation"]["id"]
+        result, result_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert result_status == status, (result, replay)
+    assert result["state"] == "failed" and result["request"]["id"].startswith("r-")
+    assert result["error"]["message"] == filesystem_error["user_message"]
+    assert result["error"]["details"] == {
+        "status": int(status), "path": "/repo/note.txt", "operation_id": operation_id,
+        "diagnostic": filesystem_error["error"],
+    }
+    assert result["error"]["stack"][-1]["code"] in {
+        "path_not_found", "request_too_large", "unsupported_media_type",
+    }
+    assert replay == published[-1]
+    assert replay["result"] == result
+    assert replay["status"] == status
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_status", "message_key"),
+    (
+        ("missing", HTTPStatus.NOT_FOUND, "common.pathNotFound"),
+        ("too-large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "fs.error.tooLarge"),
+        ("binary", HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "fs.error.binary"),
+    ),
+)
+def test_filesystem_operation_real_jobd_cold_failure_preserves_every_terminal_boundary(
+    monkeypatch,
+    tmp_path,
+    case,
+    expected_status,
+    message_key,
+):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    path = tmp_path / f"{case}.txt"
+    if case == "too-large":
+        with path.open("wb") as stream:
+            stream.truncate(jobd.filesystem.MAX_READ_BYTES + 1)
+    elif case == "binary":
+        path.write_bytes(b"abc\0def")
+
+    socket_path = tmp_path / "jobd.sock"
+    broker = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+    broker_thread = threading.Thread(target=broker.run, daemon=True)
+    broker_thread.start()
+    real_client = jobd.JobClient(socket_path)
+    result_responses = []
+
+    class TrackingJobClient:
+        def produce(self, *args, **kwargs):
+            return real_client.produce(*args, **kwargs)
+
+        def product(self, *args, **kwargs):
+            return real_client.product(*args, **kwargs)
+
+        def result(self, *args, **kwargs):
+            response = real_client.result(*args, **kwargs)
+            result_responses.append(response)
+            return response
+
+    deadline = time.monotonic() + 2.0
+    while not real_client.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert real_client.registry.healthy() is True
+
+    terminal = threading.Event()
+    published = []
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = TrackingJobClient()
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read",
+            operation="read",
+            path=str(path),
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert response.payload["operation"]["kind"] == "filesystem_operation"
+        assert terminal.wait(5.0)
+        operation_id = response.payload["operation"]["id"]
+        result, result_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+        real_client.request({"action": "shutdown"})
+        broker_thread.join(timeout=2.0)
+
+    assert broker_thread.is_alive() is False
+    assert result_responses
+    process_failure = result_responses[-1]["job"]["failure"]
+    filesystem_error = process_failure["filesystem_error"]
+    assert process_failure["status"] == expected_status
+    assert filesystem_error["status"] == expected_status
+    assert filesystem_error["user_message"]["key"] == message_key
+    assert result_status == expected_status
+    assert result["state"] == "failed" and result["request"]["id"].startswith("r-")
+    assert result["error"]["message"] == filesystem_error["user_message"]
+    assert result["error"]["details"] == {
+        "status": int(expected_status), "path": str(path), "operation_id": operation_id,
+        "diagnostic": filesystem_error["error"],
+    }
+    assert result["error"]["stack"][-1]["code"] in {
+        "path_not_found", "request_too_large", "unsupported_media_type",
+    }
+    assert replay == published[-1]
+    assert replay["result"] == result
+    assert replay["status"] == expected_status
+
+
+def test_warm_filesystem_operation_typed_failure_returns_before_receipt_admission(monkeypatch):
+    filesystem_error = {
+        "error": "path not found: /repo/missing.txt",
+        "user_message": {"key": "common.pathNotFound", "params": {"path": "/repo/missing.txt"}, "fallback": "File not found"},
+        "status": int(HTTPStatus.NOT_FOUND),
+        "path": "/repo/missing.txt",
+    }
+
+    class ImmediateFailureJob:
+        def produce(self, *_args, **_kwargs):
+            return {
+                "ok": False,
+                "job": {"status": "failed", "failure": {"filesystem_error": filesystem_error, "status": int(HTTPStatus.NOT_FOUND)}},
+            }, b""
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ImmediateFailureJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read",
+            operation="read",
+            path="/repo/missing.txt",
+        )
+        open_operations = webapp.queued_delivery_ledger.open_operations()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    assert response.payload == {**filesystem_error, "terminal": True}
+    assert open_operations == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        {"ok": False, "error": "unknown task"},
+        {"ok": False, "_transport_error": "unavailable", "error": "jobd transport unavailable"},
+    ),
+    ids=("unknown-task", "transport-failure"),
+)
+def test_warm_filesystem_operation_non_filesystem_failures_remain_generic(failure):
+    class ImmediateGenericFailureJob:
+        def produce(self, *_args, **_kwargs):
+            return copy.deepcopy(failure), b""
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ImmediateGenericFailureJob()
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read",
+            operation="read",
+            path="/repo/file.txt",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert response.payload["state"] == "failed"
+    assert response.payload["error"]["code"] == "service_unavailable"
+    assert "user_message" not in response.payload
+
+
+@pytest.mark.parametrize("failure_kind", ("worker-crash", "malformed-product"))
+def test_cold_filesystem_operation_non_filesystem_failures_terminalize_generic(monkeypatch, tmp_path, failure_kind):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    terminal = threading.Event()
+    published = []
+
+    class GenericColdFailureJob:
+        def produce(self, _task, _payload, **kwargs):
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": f"job-{failure_kind}", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+        def product(self, _product_key):
+            if failure_kind == "malformed-product":
+                body = b"not-json"
+                return {
+                    "ok": True,
+                    "state": "ready",
+                    "generation": 1,
+                    "inflight": False,
+                    "product": {"format": "json", "content_type": "application/json", "length": len(body)},
+                }, body
+            return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+        def result(self, job_id):
+            assert failure_kind == "worker-crash"
+            assert job_id == "job-worker-crash"
+            return {
+                "ok": False,
+                "job": {"job_id": job_id, "status": "failed", "error": "worker crashed", "failure": {"error": "worker crashed"}},
+            }
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = GenericColdFailureJob()
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/read",
+            operation="read",
+            path="/repo/file.txt",
+        )
+        assert response.status == HTTPStatus.ACCEPTED
+        assert terminal.wait(2.0)
+        operation_id = response.payload["operation"]["id"]
+        result, result_status = webapp.operation_status_payload(operation_id)
+        replay = webapp.operation_replay_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert result_status in {HTTPStatus.SERVICE_UNAVAILABLE, HTTPStatus.INTERNAL_SERVER_ERROR}
+    assert result["state"] == "failed"
+    assert result["error"]["code"] in {"service_unavailable", "producer_failed"}
+    assert "user_message" not in result
+    assert replay == published[-1]
+    assert replay["result"] == result
+    assert replay["status"] == result_status
+
+
+def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receipt():
+    body = b"\x00raw\xff"
+    product = {
+        "format": "opaque_bytes",
+        "content_type": "application/octet-stream",
+        "length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+    calls = []
+
+    class RelayJob:
+        def relay(self, task, payload, **kwargs):
+            calls.append((task, payload, kwargs))
+            return {"ok": True, "state": "ready", "product": product}, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RelayJob()
+    try:
+        response = webapp.filesystem_operation_relay(
+            route="GET /api/fs/raw",
+            operation="raw",
+            path="/repo/payload.bin",
+            args={"download": False, "max_bytes": 1024},
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert calls == [("filesystem_operation", {
+        "op": "raw",
+        "path": "/repo/payload.bin",
+        "args": {"download": False, "max_bytes": 1024},
+    }, {"deadline_ms": int(app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)})]
+    assert response.status == HTTPStatus.OK
+    assert response.payload is None
+    assert response.body == body
+    assert response.product == product
+    assert not hasattr(response, "promise")
+
+
+def test_filesystem_operation_relay_uses_shared_typed_failure_normalizer():
+    filesystem_error = {
+        "error": "path not found: /repo/missing.bin",
+        "user_message": {"key": "common.pathNotFound", "params": {"path": "/repo/missing.bin"}, "fallback": "File not found"},
+        "status": int(HTTPStatus.NOT_FOUND),
+        "path": "/repo/missing.bin",
+    }
+
+    class RelayFailureJob:
+        def relay(self, *_args, **_kwargs):
+            return {
+                "ok": False,
+                "job": {"status": "failed", "failure": {"filesystem_error": filesystem_error, "status": int(HTTPStatus.NOT_FOUND)}},
+            }, b""
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RelayFailureJob()
+    try:
+        response = webapp.filesystem_operation_relay(
+            route="GET /api/fs/raw",
+            operation="raw",
+            path="/repo/missing.bin",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    assert response.payload == {**filesystem_error, "terminal": True}
+    assert "terminal" not in filesystem_error
+
+
+def test_filesystem_operation_submission_is_stable_per_scope_and_watchd_revision():
+    first_payload, first_key = app_module.filesystem_operation_submission(
+        "list",
+        "/repo/./src",
+        {"limit": "400"},
+        scope="share-token-a",
+        generation="watchd:epoch-a:7",
+    )
+    second_payload, second_key = app_module.filesystem_operation_submission(
+        "list",
+        "/repo/src",
+        {"limit": "400"},
+        scope="share-token-a",
+        generation="watchd:epoch-a:7",
+    )
+    _, other_scope_key = app_module.filesystem_operation_submission(
+        "list",
+        "/repo/src",
+        {"limit": "400"},
+        scope="share-token-b",
+        generation="watchd:epoch-a:7",
+    )
+    _, newer_revision_key = app_module.filesystem_operation_submission(
+        "list",
+        "/repo/src",
+        {"limit": "400"},
+        scope="share-token-a",
+        generation="watchd:epoch-a:8",
+    )
+
+    assert first_payload == {"op": "list", "path": "/repo/src", "args": {"limit": "400"}}
+    assert second_payload == first_payload
+    assert first_key == second_key
+    assert other_scope_key != first_key
+    assert newer_revision_key != first_key
+
+
+def test_filesystem_operation_reuses_one_watchd_scoped_product_key(monkeypatch):
+    body = b'{"path":"/repo/src","entries":[]}'
+    product = {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+    coalesce_keys = []
+
+    class ReadyJob:
+        def produce(self, _task, _payload, **kwargs):
+            coalesce_keys.append(kwargs["coalesce_key"])
+            return {"ok": True, "state": "ready", "product": product}, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ReadyJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        first = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/repo/./src",
+            scope="user:readonly:alice",
+        )
+        second = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/repo/src",
+            scope="user:readonly:alice",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first.product == product
+    assert second.product == product
+    assert coalesce_keys[0] == coalesce_keys[1]
+
+
+def test_warm_filesystem_operation_relays_produce_bytes_without_a_second_product_read(monkeypatch):
+    body = b'{"path":"/repo/src","entries":[]}'
+    product = {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(body),
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+    calls = []
+
+    class ReadyJob:
+        def produce(self, task, payload, **kwargs):
+            calls.append(("produce", task, payload, kwargs))
+            return {"ok": True, "state": "ready", "product": product}, body
+
+        def product(self, *_args, **_kwargs):
+            raise AssertionError("warm product metadata must be returned by the produce relay")
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ReadyJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/repo/src",
+            scope="user:readonly:alice",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.OK
+    assert response.payload is None
+    assert response.body == body
+    assert response.product == product
+    assert not hasattr(response, "promise")
+    assert [call[0] for call in calls] == ["produce"]
+
+
+def test_cold_terminal_then_same_key_warm_adds_no_receipt_or_terminal(monkeypatch, tmp_path):
+    state_path = tmp_path / "operations.json"
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", state_path)
+    body = b'{"path":"/repo/src","entries":[]}'
+    product = _filesystem_json_product(body)
+    terminal = threading.Event()
+    published = []
+    produce_calls = 0
+
+    class ColdThenWarmJob:
+        def produce(self, _task, _payload, **kwargs):
+            nonlocal produce_calls
+            produce_calls += 1
+            if produce_calls == 1:
+                return {
+                    "ok": True,
+                    "state": "queued",
+                    "job": {"job_id": "job-cold-warm", "status": "running", "generation": kwargs["generation"]},
+                    "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+                }, b""
+            return {"ok": True, "state": "ready", "product": product}, body
+
+        def product(self, _product_key):
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+                "product": product,
+            }, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ColdThenWarmJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    try:
+        cold = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/repo/src",
+            scope="user:readonly:alice",
+        )
+        assert cold.status == HTTPStatus.ACCEPTED
+        assert terminal.wait(2.0)
+        journal_before = state_path.read_bytes()
+        warm = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/repo/src",
+            scope="user:readonly:alice",
+        )
+        journal_after = state_path.read_bytes()
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert warm.status == HTTPStatus.OK
+    assert warm.body == body and warm.product == product
+    assert len(published) == 1
+    assert journal_after == journal_before
+    assert len(journal_after.splitlines()) == 2, "one acceptance and one terminal are durable"
+    assert diagnostics["queued_delivery_frames"] == []
+    assert diagnostics["outstanding_queued"] == []
+
+
+@pytest.mark.parametrize("caller_count", (2, 8, 32))
+def test_concurrent_warm_filesystem_same_key_callers_do_not_mutate_ledgers(monkeypatch, caller_count):
+    body = b'{"path":"/repo/file.txt","diff":"stable"}'
+    product = _filesystem_json_product(body)
+    barrier = threading.Barrier(caller_count)
+    coalesce_keys = []
+    calls_lock = threading.Lock()
+
+    class ConcurrentWarmJob:
+        def produce(self, _task, _payload, **kwargs):
+            with calls_lock:
+                coalesce_keys.append(kwargs["coalesce_key"])
+            barrier.wait(timeout=2.0)
+            return {"ok": True, "state": "ready", "product": product}, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ConcurrentWarmJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        with ThreadPoolExecutor(max_workers=caller_count) as executor:
+            responses = list(executor.map(
+                lambda _index: webapp.filesystem_operation_http_payload(
+                    route="GET /api/fs/diff",
+                    operation="diff",
+                    path="/repo/file.txt",
+                    args={"from_ref": "HEAD", "to_ref": "current"},
+                    scope="user:readonly:alice",
+                ),
+                range(caller_count),
+            ))
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+        operations = webapp.queued_delivery_ledger.open_operations()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert all(response.status == HTTPStatus.OK for response in responses)
+    assert all(response.body == body and response.product == product for response in responses)
+    assert len(set(coalesce_keys)) == 1
+    assert diagnostics["queued_delivery_frames"] == []
+    assert diagnostics["outstanding_queued"] == []
+    assert operations == []
+
+
+@pytest.mark.parametrize(
+    ("route", "operation", "args"),
+    (
+        ("GET /api/fs/list", "list", {}),
+        ("GET /api/fs/search", "search", {"query": "needle", "limit": 20, "recursive": True}),
+        ("GET /api/fs/index-status", "index_status", {}),
+        ("GET /api/fs/read", "read", {}),
+        ("GET /api/fs/info", "info", {}),
+        ("GET /api/fs/diff", "diff", {"from_ref": "HEAD", "to_ref": "current"}),
+        ("GET /api/blame", "blame", {"ref": "HEAD"}),
+        ("GET /api/fs/count", "count", {}),
+    ),
+)
+def test_retained_filesystem_reads_scope_and_revision_warm_without_ledger_mutation(
+    monkeypatch,
+    route,
+    operation,
+    args,
+):
+    body = json.dumps({"operation": operation}, separators=(",", ":")).encode("utf-8")
+    product = _filesystem_json_product(body)
+    generation = ["watchd:epoch-a:7"]
+    keys = []
+
+    class RetainedReadJob:
+        def produce(self, _task, _payload, **kwargs):
+            keys.append(kwargs["coalesce_key"])
+            return {"ok": True, "state": "ready", "product": product}, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RetainedReadJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: generation[0])
+    try:
+        first = webapp.filesystem_operation_http_payload(
+            route=route, operation=operation, path="/repo/file.txt", args=args,
+            scope="user:readonly:alice",
+        )
+        generation[0] = "watchd:epoch-a:8"
+        revised = webapp.filesystem_operation_http_payload(
+            route=route, operation=operation, path="/repo/file.txt", args=args,
+            scope="user:readonly:alice",
+        )
+        other_scope = webapp.filesystem_operation_http_payload(
+            route=route, operation=operation, path="/repo/file.txt", args=args,
+            scope="user:readonly:bob",
+        )
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert all(response.status == HTTPStatus.OK for response in (first, revised, other_scope))
+    assert len(keys) == len(set(keys)) == 3
+    assert diagnostics["queued_delivery_frames"] == []
+    assert diagnostics["outstanding_queued"] == []
+
+
+@pytest.mark.parametrize("operation", ("write", "delete", "unindex", "rename", "mkdir"))
+def test_immediate_filesystem_mutations_create_no_phantom_delivery_state(monkeypatch, operation):
+    body = json.dumps({"operation": operation, "ok": True}, separators=(",", ":")).encode("utf-8")
+    product = _filesystem_json_product(body)
+
+    class ImmediateMutationJob:
+        def produce(self, _task, _payload, **_kwargs):
+            return {"ok": True, "state": "ready", "product": product}, body
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = ImmediateMutationJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route=f"POST /api/fs/{operation}", operation=operation, path="/repo/file.txt",
+            args={"content": "next", "new_name": "renamed.txt"}, scope="user:admin:alice",
+        )
+        diagnostics = webapp.queued_delivery_ledger.diagnostics()
+        operations = webapp.queued_delivery_ledger.open_operations()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.OK
+    assert response.body == body and response.product == product
+    assert not hasattr(response, "promise")
+    assert diagnostics["queued_delivery_frames"] == []
+    assert diagnostics["outstanding_queued"] == []
+    assert operations == []
+
+
+def test_warm_filesystem_operation_timeout_falls_through_to_a_cold_receipt(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    calls = []
+
+    class TimeoutThenReceiptJob:
+        def produce(self, _task, _payload, **kwargs):
+            calls.append(kwargs["delivery"])
+            if kwargs["delivery"] == "ready_or_receipt":
+                return {"ok": False, "_transport_error": "timeout", "error": "timeout"}, b""
+            return {"ok": True, "state": "queued", "job": {"job_id": "job-timeout", "status": "queued"}}, b""
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = TimeoutThenReceiptJob()
+    monkeypatch.setattr(webapp, "filesystem_operation_product_generation", lambda: "watchd:epoch-a:7")
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list", operation="list", path="/repo/src", scope="user:readonly:alice",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.ACCEPTED
+    assert response.payload["operation"]["kind"] == "filesystem_operation"
+    assert calls == ["ready_or_receipt", "receipt"]
+
+
+def test_filesystem_batch_ready_product_reuses_stable_key_and_materializes_current_ids(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    submissions = []
+    product_body = json.dumps({
+        "responses": [
+            {"id": 0, "ok": True, "status": 200, "payload": {"path": "/repo/a", "entries": []}},
+            {"id": 1, "ok": True, "status": 200, "payload": {"path": "/repo/b", "kind": "dir"}},
+        ],
+        "performance": {"batch_size": 2, "operation_ms": 1.0},
+    }).encode("utf-8")
+
+    class ReadyBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submissions.append((task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "ready",
+                "job": {"job_id": "", "status": "completed", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
+            }, product_body
+
+    class ImmediateCompletionService:
+        stop_event = threading.Event()
+
+        def __init__(self):
+            self.reservations = 0
+
+        def reserve(self):
+            self.reservations += 1
+            return True
+
+        def release_reservation(self):
+            self.reservations -= 1
+
+        def submit_reserved(self, *_args):
+            raise AssertionError("ready filesystem batch must not start an operation completion")
+
+        def stop(self):
+            self.stop_event.set()
+
+    webapp = app_module.TmuxWebtermApp([])
+    completion_service = ImmediateCompletionService()
+    webapp.job_client = ReadyBatchJob()
+    webapp.jobd_operation_service = completion_service
+    first = {
+        "client_scope": "browser",
+        "requests": [
+            {"id": "first-a", "type": "list", "path": "/repo/a", "trigger_counts": {"tree-render": 1}},
+            {"id": "first-b", "type": "info", "path": "/repo/b", "trigger_counts": {"tree-render": 1}},
+        ],
+    }
+    second = copy.deepcopy(first)
+    second["requests"][0]["id"] = "second-a"
+    second["requests"][1]["id"] = "second-b"
+    changed_token = copy.deepcopy(second)
+    changed_token["watch_token"] = "watch-token-next"
+    try:
+        first_result, first_status = webapp.fs_batch_http_payload(first)
+        second_result, second_status = webapp.fs_batch_http_payload(second)
+        _changed_result, changed_status = webapp.fs_batch_http_payload(changed_token)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert [first_status, second_status, changed_status] == [HTTPStatus.OK, HTTPStatus.OK, HTTPStatus.OK]
+    assert [response["id"] for response in first_result["responses"]] == ["first-a", "first-b"]
+    assert [response["id"] for response in second_result["responses"]] == ["second-a", "second-b"]
+    assert [submission[0] for submission in submissions] == ["filesystem_batch"] * 3
+    assert [request["id"] for request in submissions[0][1]["requests"]] == [0, 1]
+    assert submissions[0][1] == submissions[1][1]
+    assert submissions[0][2]["coalesce_key"] == submissions[1][2]["coalesce_key"]
+    assert submissions[2][2]["coalesce_key"] != submissions[1][2]["coalesce_key"]
+    assert submissions[0][2]["coalesce_key"].startswith("fs-batch:")
+    assert [submission[2]["delivery"] for submission in submissions] == ["ready_or_receipt"] * 3
+    assert completion_service.reservations == 0
+
+
+def test_filesystem_batch_capacity_refusal_does_not_submit_an_orphan_job(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.jobd_operation_service = state_services.JobdOperationService(worker_limit=1, operation_limit=1)
+    assert webapp.jobd_operation_service.reserve() is True
+    submissions = []
+    webapp.job_client = SimpleNamespace(produce=lambda *args, **kwargs: submissions.append((args, kwargs)))
+    try:
+        result, status = webapp.fs_batch_http_payload({
+            "requests": [{"id": "list", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 1}}],
+        })
+    finally:
+        webapp.jobd_operation_service.release_reservation()
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result["state"] == "failed"
+    assert result["error"]["code"] == "service_busy"
+    assert submissions == []
+
+
+def test_jobd_operation_service_bounds_accepted_completion_capacity():
+    service = state_services.JobdOperationService(worker_limit=1, operation_limit=1)
+    started = threading.Event()
+    release = threading.Event()
+
+    def work():
+        started.set()
+        assert release.wait(2.0)
+
+    assert service.reserve() is True
+    assert service.submit_reserved(work) is True
+    assert started.wait(2.0)
+    assert service.reserve() is False
+    future = next(iter(service.futures))
+    release.set()
+    future.result(timeout=2.0)
+    assert service.reserve() is True
+    service.release_reservation()
+    service.stop()
+
+
 def test_transcript_compact_view_serves_last_known_good_product_stale_during_append(monkeypatch, tmp_path):
     transcript = tmp_path / "codex.jsonl"
     transcript.write_text(json.dumps({"payload": {"type": "user_message", "message": "old"}}) + "\n", encoding="utf-8")
@@ -7803,15 +10011,14 @@ def test_transcript_compact_view_serves_last_known_good_product_stale_during_app
     }).encode("utf-8")
 
     class StaleProductJob:
-        def submit(self, task, payload, **kwargs):
-            return {"ok": True, "coalesced": False, "job": {"job_id": "job-newer"}}
-
-        def result(self, job_id):
-            # The newer-generation parse is still building.
-            return {"ok": True, "job": {"status": "running"}}
-
-        def product(self, coalesce_key, timeout=0.5):
-            return {"ok": True, "state": "stale", "generation": 1}, product_body
+        def produce(self, task, payload, **kwargs):
+            return {
+                "ok": True,
+                "state": "stale",
+                "coalesced": False,
+                "job": {"job_id": "job-newer", "status": "running", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 1},
+            }, product_body
 
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.job_client = StaleProductJob()
@@ -7839,31 +10046,26 @@ def test_transcript_compact_view_rejects_replaced_inode_result(monkeypatch, tmp_
         def __init__(self):
             self.submissions = 0
 
-        def submit(self, task, payload, **kwargs):
+        def produce(self, task, payload, **kwargs):
             self.submissions += 1
-            return {"ok": True, "coalesced": False, "job": {"job_id": "job-1"}}
-
-        def result(self, job_id):
             # Same [mtime, size] as the live file, but a DIFFERENT device+inode: a replaced file
             # that coincidentally reproduced the byte generation must not satisfy this key.
+            body = json.dumps({
+                "generation": [stat.st_mtime_ns, stat.st_size],
+                "read_generation": [stat.st_mtime_ns, stat.st_size],
+                "identity": [stat.st_dev + 1, stat.st_ino + 1],
+                "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "from a replaced file"}],
+                "compact_lines": [],
+                "since_items": [],
+                "since_stats": {},
+            }).encode("utf-8")
             return {
                 "ok": True,
-                "job": {
-                    "status": "completed",
-                    "result": {
-                        "generation": [stat.st_mtime_ns, stat.st_size],
-                        "read_generation": [stat.st_mtime_ns, stat.st_size],
-                        "identity": [stat.st_dev + 1, stat.st_ino + 1],
-                        "items": [{"role": "user", "timestamp": "", "cwd": "", "text": "from a replaced file"}],
-                        "compact_lines": [],
-                        "since_items": [],
-                        "since_stats": {},
-                    },
-                },
-            }
-
-        def product(self, coalesce_key, timeout=0.5):
-            return {"ok": True, "state": "none", "generation": 0}, b""
+                "state": "ready",
+                "coalesced": self.submissions > 1,
+                "job": {"job_id": "job-1", "status": "completed", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
+            }, body
 
     webapp = app_module.TmuxWebtermApp(["5"])
     worker = ReplacedInodeJob()
@@ -7893,15 +10095,15 @@ def test_bumping_transcript_parser_generation_busts_cached_transcript_job(monkey
         def __init__(self):
             self.coalesce_keys = []
 
-        def submit(self, task, payload, **kwargs):
+        def produce(self, task, payload, **kwargs):
             self.coalesce_keys.append(kwargs.get("coalesce_key"))
-            return {"ok": True, "coalesced": False, "job": {"job_id": f"job-{len(self.coalesce_keys)}"}}
-
-        def result(self, job_id):
-            return {"ok": True, "job": {"status": "running"}}
-
-        def product(self, coalesce_key, timeout=0.5):
-            return {"ok": True, "state": "none", "generation": 0}, b""
+            return {
+                "ok": True,
+                "state": "queued",
+                "coalesced": False,
+                "job": {"job_id": f"job-{len(self.coalesce_keys)}", "status": "running"},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
 
     webapp = app_module.TmuxWebtermApp(["5"])
     worker = SubmitTrackingJob()
@@ -7930,13 +10132,7 @@ def test_context_items_bounded_wrapper_resolves_warm_product_without_local_parse
     stat = transcript.stat()
 
     class WarmProductJob:
-        def submit(self, task, payload, **kwargs):
-            return {"ok": True, "coalesced": True, "job": {"job_id": "job-1"}}
-
-        def result(self, job_id):
-            return {"ok": True, "job": {"status": "running"}}
-
-        def product(self, coalesce_key, timeout=0.5):
+        def produce(self, task, payload, **kwargs):
             body = json.dumps({
                 "generation": [stat.st_mtime_ns - 1, stat.st_size - 1],
                 "read_generation": [stat.st_mtime_ns - 1, stat.st_size - 1],
@@ -7946,7 +10142,13 @@ def test_context_items_bounded_wrapper_resolves_warm_product_without_local_parse
                 "since_items": [],
                 "since_stats": {},
             }).encode("utf-8")
-            return {"ok": True, "state": "ready", "generation": 1}, body
+            return {
+                "ok": True,
+                "state": "ready",
+                "coalesced": True,
+                "job": {"job_id": "job-1", "status": "completed", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 1},
+            }, body
 
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.job_client = WarmProductJob()
@@ -8157,24 +10359,13 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
-        "generated_at": "2026-05-31T00:00:00+00:00",
-        "session_order": ["5"],
-        "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
-        "sessions": {
-            "5": {
-                "session": "5",
-                "agent": "codex",
-                "agent_label": "Codex",
-                "active": True,
-                "repos": ["/repo/yolomux"],
-                "files": {"count": 1, "added": 2, "removed": 0},
-                "work": "editor fixes",
-                "local": "Codex session 5 is active in yolomux.",
-            }
-        },
-        "errors": [],
-    })
+    monkeypatch.setattr(
+        webapp,
+        "activity_summary_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled activity summary must not serve deterministic fallback")
+        ),
+    )
     try:
         payload, status = webapp.yoagent_controller.yoagent_chat({"message": "what is session 5 doing?"})
     finally:
@@ -8183,8 +10374,9 @@ def test_yoagent_chat_uses_deterministic_fallback(monkeypatch):
     assert status == HTTPStatus.OK
     assert payload["backend_used"] == "deterministic"
     assert payload["fallback"] is False
-    assert "editor fixes" in payload["answer"]
-    assert "tmux session `5`" in payload["context_lines"][1]
+    assert "No AI agent activity is available yet." in payload["answer"]
+    assert any("capability: YOLOmux can read tmux panes" in line for line in payload["context_lines"])
+    assert all("tmux session `5`" not in line for line in payload["context_lines"])
 
 
 def test_yoagent_chat_sends_to_accepting_agent_pane_without_extra_confirmation(monkeypatch):
@@ -11595,14 +13787,13 @@ def test_yoagent_capability_question_is_grounded_and_readonly(monkeypatch):
     webapp = app_module.TmuxWebtermApp(["5"])
     webapp.warm_metadata_cache_async = lambda sessions: None
     monkeypatch.setattr(webapp, "yoagent_settings", lambda: {"backend": "deterministic", "invocation": "cli"})
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
-        "generated_at": "2026-05-31T00:00:00+00:00",
-        "session_order": ["5"],
-        "global": {"headline": "You have 1 AI agent working on editor fixes across yolomux."},
-        "capabilities": app_module.yoagent_capabilities_payload(),
-        "sessions": {},
-        "errors": [],
-    })
+    monkeypatch.setattr(
+        webapp,
+        "activity_summary_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("static capability answers must not call the disabled activity summary")
+        ),
+    )
     try:
         payload, status = webapp.yoagent_controller.yoagent_chat({"message": "Can YO!agent read, poll, monitor, notify, and send commands to tmux panes?"})
     finally:
@@ -12762,7 +14953,7 @@ def test_self_update_requires_xterm_assets_before_restart(monkeypatch, tmp_path)
     webapp = app_module.TmuxWebtermApp.__new__(app_module.TmuxWebtermApp)
     monkeypatch.setattr(app_module.common, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(app_module.common, "git", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
-    monkeypatch.setattr(app_module, "ensure_xterm_runtime_assets", lambda _root: (False, "npm is required to install xterm runtime assets"))
+    monkeypatch.setattr(app_module, "ensure_xterm_runtime_assets", lambda _root: (False, "tracked xterm vendor asset is missing"))
     monkeypatch.setattr(webapp, "_spawn_self_restart", lambda: (_ for _ in ()).throw(AssertionError("must not restart without xterm assets")))
 
     result = webapp.perform_self_update()
@@ -12772,7 +14963,7 @@ def test_self_update_requires_xterm_assets_before_restart(monkeypatch, tmp_path)
     assert "xterm" in result["error"]
     assert result["user_message"]["key"] == "update.result.assetsUnavailable"
     assert result["user_message"]["fallback"] == result["error"]
-    assert any("xterm assets" in step for step in result["plan"])
+    assert "validate tracked xterm vendor assets" in result["plan"]
 
 
 def test_self_update_restarts_after_xterm_assets_are_ready(monkeypatch, tmp_path):
@@ -12901,27 +15092,30 @@ def test_visible_session_and_upload_errors_keep_diagnostics_with_locale_keys(mon
     assert no_files["error"] == "no files supplied"
     assert no_files["user_message"]["key"] == "upload.error.noFiles"
 
-def test_ensure_xterm_runtime_assets_downloads_static_fallback_without_npm(monkeypatch, tmp_path):
-    downloads = []
-    real_run = app_module.subprocess.run
+def test_ensure_xterm_runtime_assets_uses_only_tracked_vendor_files(monkeypatch, tmp_path):
+    vendor_dir = tmp_path / "static" / "vendor"
+    vendor_dir.mkdir(parents=True)
+    for name in app_module.XTERM_RUNTIME_ASSETS:
+        (vendor_dir / name).write_text(f"vendor-{name}", encoding="utf-8")
+        (tmp_path / "static" / name).write_text(f"contaminated-{name}", encoding="utf-8")
 
-    def fake_which(name):
-        return "/usr/bin/curl" if name == "curl" else None
-
-    def fake_run(args, **_kwargs):
-        if Path(args[0]).name != "curl":
-            return real_run(args, **_kwargs)
-        downloads.append(args)
-        output = Path(args[args.index("--output") + 1])
-        output.write_text("asset", encoding="utf-8")
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr(app_module.shutil, "which", fake_which)
-    monkeypatch.setattr(app_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(app_module.shutil, "which", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("package tools must not be probed")))
+    monkeypatch.setattr(app_module.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("asset installers must not run")))
 
     assert app_module.ensure_xterm_runtime_assets(tmp_path) == (True, "")
     assert app_module.xterm_runtime_assets_ready(tmp_path) is True
-    assert [args[-1] for args in downloads] == [details["url"] for details in app_module.XTERM_RUNTIME_ASSETS.values()]
+    assert {(vendor_dir / name).read_text(encoding="utf-8") for name in app_module.XTERM_RUNTIME_ASSETS} == {
+        f"vendor-{name}" for name in app_module.XTERM_RUNTIME_ASSETS
+    }
+    assert {(tmp_path / "static" / name).read_text(encoding="utf-8") for name in app_module.XTERM_RUNTIME_ASSETS} == {
+        f"contaminated-{name}" for name in app_module.XTERM_RUNTIME_ASSETS
+    }
+
+    (vendor_dir / "xterm.js").unlink()
+    assert app_module.ensure_xterm_runtime_assets(tmp_path) == (
+        False,
+        "tracked xterm vendor assets are missing: static/vendor/xterm.js",
+    )
 
 
 def _self_restart_context(monkeypatch, tmp_path, argv, *, main_module_name=None):
@@ -13224,26 +15418,24 @@ def test_session_files_index_updates_append_a_journal_instead_of_rewriting_the_b
     """A durable cache write must not read and rewrite the whole O(historical
     entries) JSON index; it appends one journal line, reads merge base+journal,
     and a full rewrite folds the journal in and truncates it."""
-    webapp = object.__new__(app_module.TmuxWebtermApp)
-    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "cache")
-
-    base = webapp.session_files_disk_cache_index_path()
-    journal = webapp.session_files_disk_cache_index_journal_path()
-    webapp.update_session_files_disk_cache_index("sig-a", size=10, mtime=1.0)
-    webapp.update_session_files_disk_cache_index("sig-b", size=20, mtime=2.0)
-    webapp.update_session_files_disk_cache_index("sig-a", size=30, mtime=3.0)  # later wins
+    cache_dir = tmp_path / "cache"
+    base = app_module.session_files.disk_cache_index_path(cache_dir)
+    journal = base.with_name(base.name + ".journal")
+    app_module.session_files.update_disk_cache_index(cache_dir, "sig-a", size=10, mtime=1.0)
+    app_module.session_files.update_disk_cache_index(cache_dir, "sig-b", size=20, mtime=2.0)
+    app_module.session_files.update_disk_cache_index(cache_dir, "sig-a", size=30, mtime=3.0)  # later wins
 
     assert not base.exists()  # the base was never rewritten per write
     assert len(journal.read_text(encoding="utf-8").splitlines()) == 3
-    merged = webapp.read_session_files_disk_cache_index_unlocked()
+    merged = app_module.session_files._read_disk_cache_index_unlocked(base)
     assert merged["entries"]["sig-a"] == {"size": 30, "mtime": 3.0}
     assert merged["entries"]["sig-b"] == {"size": 20, "mtime": 2.0}
 
     # A full rewrite (the prune path) folds the merged view into the base and
     # truncates the journal; the merged view is unchanged afterwards.
-    webapp.write_session_files_disk_cache_index_unlocked(merged)
+    app_module.session_files._write_disk_cache_index_unlocked(base, merged)
     assert base.exists() and not journal.exists()
-    assert webapp.read_session_files_disk_cache_index_unlocked()["entries"] == merged["entries"]
+    assert app_module.session_files._read_disk_cache_index_unlocked(base)["entries"] == merged["entries"]
 
 
 def test_session_files_durable_cache_replaces_one_file_per_logical_view(tmp_path, monkeypatch):

@@ -10,7 +10,9 @@ from yolomux_lib.stats_current import revision
 
 def test_daemon_revision_covers_every_module_loaded_by_the_writer_process():
     assert revision._CURRENT_MODULES == (
+        "browser_family.py",
         "families.py",
+        "host_collectors.py",
         "identity.py",
         "materializer.py",
         "migration.py",

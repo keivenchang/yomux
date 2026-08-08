@@ -312,6 +312,47 @@ def test_process_once_skips_capture_after_initial_tmux_activity_observation():
     assert worker.last_action == "idle; tmux activity quiet"
 
 
+def test_process_once_refuses_to_approve_when_activity_gate_fails():
+    module = DummyProcessModule({
+        "visible": True,
+        "type": "bash",
+        "hash": "gate-failure",
+        "action": "option1",
+        "selected_option": 1,
+        "yes_selected": True,
+        "command": "echo must-not-run",
+    })
+    events: list[tuple[str, str, str, dict[str, Any]]] = []
+
+    def failing_gate(_target: str) -> bool:
+        raise OSError("activity unavailable")
+
+    worker = auto_approve_worker.AutoApproveWorker(
+        "6",
+        interval=0.01,
+        capture_gate=failing_gate,
+        event_callback=lambda target, event_type, message, details: events.append(
+            (target, event_type, message, details)
+        ),
+    )
+    worker.capture_gate_observed = True
+
+    acted = worker.process_once(module)
+
+    assert acted is False
+    assert module.capture_calls == []
+    assert module.sent == []
+    assert worker.last_action == "tmux activity gate error"
+    assert events == [(
+        "6", "worker_error", "tmux activity gate error", {
+            "message_key": "yolo.status.activityGateError",
+            "message_params": {},
+            "reason": "activity_gate_failed",
+            "error": "activity unavailable",
+        },
+    )]
+
+
 def test_process_once_self_stops_after_repeated_missing_capture():
     events: list[tuple[str, str, str, dict[str, Any]]] = []
     module = MissingPaneModule()

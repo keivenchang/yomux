@@ -3,16 +3,20 @@
 """Focused contracts for independent current stats family scheduling."""
 
 import threading
+import time
 
 import pytest
 
-from yolomux_lib.stats_current import scheduler
+from yolomux_lib.stats_current import runtime, scheduler
 from yolomux_lib.stats_current import storage
 
 
-def test_manifest_defines_the_complete_independently_scheduled_family_set():
+def test_manifest_and_web_scheduler_ownership_are_explicit():
     assert scheduler.COLLECTED_FAMILIES == {
         "cpu", "agent_status", "gpu", "service_load", "system_memory", "agent_tokens",
+    }
+    assert runtime.WEB_COLLECTED_FAMILIES == {
+        "agent_status", "service_load", "system_memory", "agent_tokens",
     }
 
 
@@ -188,12 +192,41 @@ def test_demand_idle_demand_rotates_storage_epochs_and_keeps_atoms_landing(tmp_p
 
 
 def test_early_wake_keeps_current_epoch_until_the_next_natural_boundary(tmp_path):
+    class Clock:
+        monotonic_now = 0.0
+        wall_now = 100.0
+
+        def monotonic(self):
+            return self.monotonic_now
+
+        def wall(self):
+            return self.wall_now + self.monotonic_now
+
+    class Wake:
+        def __init__(self, stop, clock):
+            self.stop = stop
+            self.clock = clock
+            self.waits = 0
+
+        def wait(self, _timeout):
+            self.waits += 1
+            if self.waits == 2:
+                self.clock.monotonic_now = 0.02
+                return True
+            if self.waits == 3:
+                self.clock.monotonic_now = 0.10
+                return False
+            if self.waits > 3:
+                self.stop.set()
+            return False
+
+        def clear(self):
+            pass
+
     database_path = tmp_path / storage.DATABASE_FILENAME
+    clock = Clock()
     cadence = [0.08]
     attempts = []
-    first_pass = threading.Event()
-    second_pass = threading.Event()
-    third_pass = threading.Event()
 
     def collect(attempt):
         index = len(attempts)
@@ -211,22 +244,22 @@ def test_early_wake_keeps_current_epoch_until_the_next_natural_boundary(tmp_path
                 usage_atoms=(_usage_atom(f"wake-atom-{index}", attempt.scheduled_at),),
             )
         attempts.append(attempt)
-        (first_pass, second_pass, third_pass)[min(index, 2)].set()
+        if index == 0:
+            cadence[0] = 0.16
 
     family_scheduler = scheduler.FamilyScheduler(
         (scheduler.CollectorJob("agent_tokens", collect, lambda: cadence[0]),),
         owner_generation=lambda: 5,
+        wall_clock=clock.wall,
+        monotonic=clock.monotonic,
     )
-    try:
-        assert family_scheduler.start() is True
-        assert first_pass.wait(1)
-        cadence[0] = 0.16
-        assert family_scheduler.wake("agent_tokens") is True
-        assert family_scheduler.wake("agent_tokens") is True
-        assert second_pass.wait(1)
-        assert third_pass.wait(1)
-    finally:
-        family_scheduler.stop()
+    family_scheduler._epochs["agent_tokens"] = 1
+    worker = scheduler._Worker(
+        family_scheduler._workers["agent_tokens"].job,
+        Wake(family_scheduler._stop, clock),
+    )
+
+    family_scheduler._run_family(worker, 5, 1)
 
     with storage.Store.open_reader(database_path) as store:
         snapshot = store.read_snapshot()
@@ -336,6 +369,62 @@ def test_restart_after_cadence_rotation_does_not_reuse_an_epoch_identity():
     ]
 
 
+def test_late_deadline_reports_the_entire_skipped_window_and_rotates_epoch():
+    class Clock:
+        monotonic_now = 0.0
+        wall_now = 100.0
+
+        def monotonic(self):
+            return self.monotonic_now
+
+        def wall(self):
+            return self.wall_now + self.monotonic_now
+
+    class Wake:
+        def __init__(self, stop, clock):
+            self.stop = stop
+            self.clock = clock
+            self.waits = 0
+
+        def wait(self, _timeout):
+            self.waits += 1
+            if self.waits == 2:
+                self.clock.monotonic_now = 6.0
+            elif self.waits > 2:
+                self.stop.set()
+            return False
+
+        def clear(self):
+            pass
+
+    clock = Clock()
+    missed = []
+    attempts = []
+
+    def collect(attempt):
+        attempts.append(attempt)
+        if len(attempts) == 1:
+            clock.monotonic_now = 5.0
+
+    family_scheduler = scheduler.FamilyScheduler(
+        (scheduler.CollectorJob("cpu", collect, lambda: 1.0, missed.append),),
+        owner_generation=lambda: 7,
+        wall_clock=clock.wall,
+        monotonic=clock.monotonic,
+    )
+    family_scheduler._epochs["cpu"] = 1
+    worker = scheduler._Worker(family_scheduler._workers["cpu"].job, Wake(family_scheduler._stop, clock))
+
+    family_scheduler._run_family(worker, 7, 1)
+
+    assert missed == [scheduler.CollectorMiss("cpu", "7:cpu:1", 101.0, 106.0, 1.0, 7)]
+    assert [(item.epoch_id, item.epoch_started_at, item.scheduled_at) for item in attempts] == [
+        ("7:cpu:1", 100.0, 100.0),
+        ("7:cpu:2", 106.0, 106.0),
+    ]
+    assert family_scheduler.status()["cpu"].missed_cycles == 5
+
+
 @pytest.mark.parametrize(
     "job",
     (
@@ -356,3 +445,76 @@ def test_invalid_or_absent_owner_generation_does_not_start_threads():
     )
     assert family_scheduler.start() is False
     assert family_scheduler.status()["cpu"].attempts == 0
+
+
+def test_budget_follow_up_wake_cannot_run_a_family_faster_than_its_floor():
+    """A self-issued backlog follow-up must not turn the worker into a spin loop.
+
+    The live agent_tokens worker ran 41 cycles in 30s against a 10s cadence and
+    burned 87% of a core: every budget-exhausted scan woke itself with no delay,
+    so the collector's rate was set by how fast its own body ran.
+    """
+
+    floor_seconds = 0.3
+    starts = []
+    done = threading.Event()
+
+    def collect(attempt):
+        starts.append(time.monotonic())
+        if len(starts) >= 3:
+            done.set()
+            return
+        assert family_scheduler.wake(
+            "agent_tokens", min_interval_seconds=floor_seconds,
+        ) is True
+
+    family_scheduler = scheduler.FamilyScheduler(
+        (scheduler.CollectorJob("agent_tokens", collect, lambda: 30.0),),
+        owner_generation=lambda: 1,
+    )
+    try:
+        assert family_scheduler.start() is True
+        assert done.wait(5), "follow-up wakes never produced three attempts"
+    finally:
+        family_scheduler.stop()
+
+    gaps = [later - earlier for earlier, later in zip(starts, starts[1:])]
+    assert len(gaps) == 2
+    assert all(gap >= floor_seconds for gap in gaps), gaps
+    # The floor must not become a cadence: a refresh wake still runs at once.
+    assert all(gap < 5.0 for gap in gaps), gaps
+
+
+def test_refresh_wake_without_a_floor_still_runs_immediately():
+    starts = []
+    done = threading.Event()
+
+    def collect(attempt):
+        starts.append(time.monotonic())
+        if len(starts) >= 3:
+            done.set()
+            return
+        assert family_scheduler.wake("agent_tokens") is True
+
+    family_scheduler = scheduler.FamilyScheduler(
+        (scheduler.CollectorJob("agent_tokens", collect, lambda: 30.0),),
+        owner_generation=lambda: 1,
+    )
+    try:
+        assert family_scheduler.start() is True
+        assert done.wait(5), "an unfloored wake did not run immediately"
+    finally:
+        family_scheduler.stop()
+
+    assert starts[-1] - starts[0] < 0.3
+
+
+def test_wake_rejects_a_non_finite_minimum_interval():
+    family_scheduler = scheduler.FamilyScheduler(
+        (scheduler.CollectorJob("agent_tokens", lambda attempt: None),),
+        owner_generation=lambda: 1,
+    )
+    with pytest.raises(scheduler.SchedulerError, match="min_interval_seconds"):
+        family_scheduler.wake("agent_tokens", min_interval_seconds=float("nan"))
+    with pytest.raises(scheduler.SchedulerError, match="min_interval_seconds"):
+        family_scheduler.wake("agent_tokens", min_interval_seconds=-1.0)

@@ -9,6 +9,7 @@ from decimal import Decimal
 from yolomux_lib.pricing_catalog import PricingCatalog, ResolvedRate
 from yolomux_lib.stats_current import materializer, pricing, storage
 from yolomux_lib.stats_current import service as service_module
+from tests.cross_layer_matrix import observed_fixture_atoms
 
 
 def _atom(
@@ -78,6 +79,20 @@ def _total_cost(generation):
     )
 
 
+def test_every_model_discovered_from_observed_transcript_usage_is_priced(tmp_path):
+    atoms = observed_fixture_atoms()
+    assert atoms, "the observed transcript corpus must emit billable usage"
+    resolver = pricing.UsagePriceProjector(PricingCatalog(tmp_path / "pricing"))
+
+    unpriced = sorted({
+        (atom.payload["provider"], atom.payload["model"], atom.direction, atom.cache_role)
+        for atom in atoms
+        if not resolver(atom).priced
+    })
+
+    assert unpriced == []
+
+
 class CountingCatalog:
     def __init__(self):
         self.status_calls = 0
@@ -123,7 +138,7 @@ def test_seed_priced_model_projects_exact_nonzero_integer_micro_usd(tmp_path):
     assert isinstance(projection.micro_usd, int)
     assert projection.evidence is not None
     assert projection.evidence.catalog_model == "gpt-5.6-sol"
-    assert projection.evidence.catalog_revision == 3
+    assert projection.evidence.catalog_revision == 4
     assert projection.evidence.rate_usd == "30.00"
     assert projection.evidence.rate_scale == 1_000_000
     assert projection.evidence.source_kind == "seed"

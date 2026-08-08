@@ -1,5 +1,6 @@
 import sqlite3
 import time
+from pathlib import Path
 
 import pytest
 
@@ -347,6 +348,87 @@ def test_root_notification_does_not_schedule_an_unbounded_incremental_rewalk(tmp
 
     assert file_index.mark_path_dirty(root) == []
     assert index.dirty_paths == set()
+
+
+@pytest.mark.parametrize("owner_can_build", [False, True])
+def test_reindex_batch_coalesces_dirty_paths_once(monkeypatch, tmp_path, owner_can_build):
+    _clear_registry()
+    root = (tmp_path / "root").resolve()
+    package = root / "package"
+    package.mkdir(parents=True)
+    sibling = root / "package-other.py"
+    sibling.write_text("sibling\n", encoding="utf-8")
+    child = package / "child.py"
+    child.write_text("child\n", encoding="utf-8")
+    index = file_index.RootIndex(root)
+    with file_index._REGISTRY_LOCK:
+        file_index._REGISTRY[str(root)] = index
+    calls = []
+    original_coalesced_paths = file_index._coalesced_paths
+
+    def record_coalesce(paths):
+        calls.append(set(paths))
+        return original_coalesced_paths(paths)
+
+    monkeypatch.setattr(file_index, "_coalesced_paths", record_coalesce)
+    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: owner_can_build)
+    monkeypatch.setattr(file_index, "request_background_owner_refresh", lambda _payload: {})
+    monkeypatch.setattr(file_index, "schedule_refreshes", lambda: 0)
+    monkeypatch.setattr(filesystem.search, "_ensure_search_index", lambda _root, operation="": (index, {}))
+    try:
+        assert filesystem.search.reindex_roots_for_paths([
+            str(child),
+            str(sibling),
+            str(package),
+            str(child),
+        ], reason="native-watch") == [str(root)]
+        diagnostics = file_index.runtime_diagnostics()["roots"][0]
+    finally:
+        _clear_registry()
+
+    assert len(calls) == 1
+    assert index.dirty_paths == {package, sibling}
+    assert index.dirty_mark_batches == 1
+    assert index.dirty_mark_paths == 3
+    assert index.last_dirty_batch_paths == 3
+    assert index.last_dirty_before_coalesce == 3
+    assert index.last_dirty_after_coalesce == 2
+    assert index.max_dirty_before_coalesce == 3
+    assert diagnostics["dirty_mark_batches"] == 1
+    assert diagnostics["dirty_mark_paths"] == 3
+    assert diagnostics["last_dirty_batch_paths"] == 3
+    assert diagnostics["last_dirty_before_coalesce"] == 3
+    assert diagnostics["last_dirty_after_coalesce"] == 2
+    assert diagnostics["max_dirty_before_coalesce"] == 3
+
+
+def test_coalesced_paths_matches_legacy_containment_for_unordered_corpora():
+    def legacy_coalesced_paths(paths):
+        result = []
+        for path in sorted(set(paths), key=lambda item: (len(item.parts), str(item))):
+            contained = False
+            for parent in result:
+                try:
+                    path.relative_to(parent)
+                except ValueError:
+                    continue
+                contained = True
+                break
+            if not contained:
+                result.append(path)
+        return result
+
+    corpora = [
+        [Path("/repo/a/b.py"), Path("/repo/a"), Path("/repo/a/b.py"), Path("/repo/application.py")],
+        [Path("/repo/app/file.py"), Path("/repo/application/file.py"), Path("/repo/app"), Path("/repo/application")],
+        [Path("/a/b"), Path("/a"), Path("/ab"), Path("/a-b"), Path("/a/b/c")],
+        [Path("/one"), Path("/two/child"), Path("/two"), Path("/three")],
+        [Path("/"), Path("/repo"), Path("/repo/file.py"), Path("/other")],
+    ]
+    for paths in corpora:
+        expected = legacy_coalesced_paths(paths)
+        assert file_index._coalesced_paths(set(paths)) == expected
+        assert file_index._coalesced_paths(set(reversed(paths))) == expected
 
 
 def test_incremental_refresh_ignores_skipped_descendant_without_scanning_retained_entries(tmp_path, monkeypatch):

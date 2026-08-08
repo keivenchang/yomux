@@ -2,6 +2,7 @@ from pathlib import Path
 import re
 
 import conftest as suite_conftest
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,95 @@ def test_browser_filename_markers_and_selenium_guard_cover_selective_imports(tmp
     selenium_test = tmp_path / "test_selective.py"
     selenium_test.write_text("from selenium.webdriver import Chrome\n", encoding="utf-8")
     assert suite_conftest._test_path_imports_selenium(selenium_test) is True
+
+
+def test_selenium_guard_allows_explicitly_mixed_browser_and_nonbrowser_module(tmp_path):
+    path = tmp_path / "test_mixed.py"
+    path.write_text("from selenium.webdriver import Chrome\n", encoding="utf-8")
+
+    class Item:
+        def __init__(self, nodeid, markers=(), fixtures=()):
+            self.path = path
+            self.nodeid = nodeid
+            self.markers = list(markers)
+            self.fixturenames = list(fixtures)
+
+        def add_marker(self, marker, append=True):
+            if append:
+                self.markers.append(marker.mark)
+            else:
+                self.markers.insert(0, marker.mark)
+
+        def get_closest_marker(self, name):
+            return next((marker for marker in self.markers if marker.name == name), None)
+
+    items = [
+        Item("test_mixed.py::test_unit_contract", (pytest.mark.no_browser.mark,)),
+        Item("test_mixed.py::test_browser_contract", (pytest.mark.browser.mark,), ("browser",)),
+    ]
+
+    suite_conftest.pytest_collection_modifyitems(None, items)
+
+    assert items[0].get_closest_marker("no_browser") is not None
+    assert items[1].get_closest_marker("browser") is not None
+
+
+def test_selenium_guard_allows_exact_selection_of_explicit_nonbrowser_item(tmp_path):
+    path = tmp_path / "test_mixed.py"
+    path.write_text("from selenium.webdriver import Chrome\n", encoding="utf-8")
+
+    class Item:
+        def __init__(self):
+            self.path = path
+            self.nodeid = "test_mixed.py::test_unit_contract"
+            self.fixturenames = []
+
+        def add_marker(self, _marker, append=True):
+            del append
+
+        def get_closest_marker(self, name):
+            return pytest.mark.no_browser.mark if name == "no_browser" else None
+
+    suite_conftest.pytest_collection_modifyitems(None, [Item()])
+
+
+@pytest.mark.parametrize(
+    "markers, expected",
+    [
+        ((), "must carry exactly one of the browser or no_browser markers"),
+        (
+            (pytest.mark.browser.mark, pytest.mark.no_browser.mark),
+            "must carry exactly one of the browser or no_browser markers",
+        ),
+    ],
+)
+def test_selenium_guard_rejects_unowned_or_contradictory_mixed_module_item(tmp_path, markers, expected):
+    path = tmp_path / "test_mixed.py"
+    path.write_text("from selenium.webdriver import Chrome\n", encoding="utf-8")
+
+    class Item:
+        def __init__(self, nodeid, item_markers=(), fixtures=()):
+            self.path = path
+            self.nodeid = nodeid
+            self.markers = list(item_markers)
+            self.fixturenames = list(fixtures)
+
+        def add_marker(self, marker, append=True):
+            if append:
+                self.markers.append(marker.mark)
+            else:
+                self.markers.insert(0, marker.mark)
+
+        def get_closest_marker(self, name):
+            return next((marker for marker in self.markers if marker.name == name), None)
+
+    items = [
+        Item("test_mixed.py::test_unit_contract", markers),
+        Item("test_mixed.py::test_browser_contract", (pytest.mark.browser.mark,), ("browser",)),
+    ]
+
+    with pytest.raises(pytest.UsageError, match=expected):
+        suite_conftest.pytest_collection_modifyitems(None, items)
 
 
 def test_live_port_guard_scans_nested_python_and_top_level_javascript():

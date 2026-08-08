@@ -1,0 +1,1057 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+import subprocess
+import time
+from contextlib import contextmanager
+from http import HTTPStatus
+from http.client import HTTPConnection
+from types import SimpleNamespace
+from urllib.parse import urlencode
+
+import pytest
+from selenium.common.exceptions import TimeoutException
+from selenium.webdriver.support.ui import WebDriverWait
+
+from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tests.browser_helpers.browser_layout import assert_live_runtime_boot_healthy
+from tests.browser_helpers.browser_layout import browser  # noqa: F401
+from tests.browser_helpers.browser_console import assert_browser_journey_error_free
+from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
+from tests.browser_helpers.browser_console import validate_server_log_ring_payload
+from tests.browser_helpers.browser_console import validate_server_log_ring_transition
+from tests.browser_helpers.browser_layout import start_browser_share_server
+from tests.browser_helpers.browser_layout import start_isolated_browser_share_app
+from tests.browser_helpers.browser_layout import stop_browser_share_server
+from tests.browser_helpers.browser_layout import stop_isolated_browser_share_app
+from tests.gate_harness import repeat
+from tests.gate_harness import gate_runtime_paths  # noqa: F401
+from tests.gate_harness import retire_expected_fixture_typed_api_failure
+from tests.gate_harness import wait_for_browser_boot
+from tests.terminal_state_guard import assert_terminal_transition
+from yolomux_lib import filesystem
+from yolomux_lib.server_logs import SERVER_LOGS
+
+
+pytestmark = pytest.mark.socket
+
+FILE_OPEN_BUDGET_SECONDS = 0.5
+EDITOR_GLOBALS = {
+    "fileEditorItemFor": "function",
+    "fileEditorPanelsForPath": "function",
+    "markOpenFileMissing": "function",
+    "openFileInEditor": "function",
+    "clientEventDemandDescriptor": "function",
+}
+
+
+def _auth_header() -> dict[str, str]:
+    encoded = base64.b64encode(b"gate-admin:gate-password").decode("ascii")
+    return {"Authorization": f"Basic {encoded}"}
+
+
+def _request_once(
+    port: int,
+    path: str,
+    *,
+    response_times: list[float] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    connection = HTTPConnection("127.0.0.1", port, timeout=5)
+    started = time.perf_counter()
+    try:
+        connection.request("GET", path, headers=_auth_header())
+        response = connection.getresponse()
+        result = response.status, dict(response.getheaders()), response.read()
+        if response_times is not None:
+            response_times.append(time.perf_counter() - started)
+        return result
+    finally:
+        connection.close()
+
+
+def _request(
+    port: int,
+    path: str,
+    *,
+    response_times: list[float] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """Consume one filesystem receipt through its exact terminal HTTP result."""
+
+    status, headers, body = _request_once(port, path, response_times=response_times)
+    if status != HTTPStatus.ACCEPTED:
+        return status, headers, body
+    receipt = json.loads(body)
+    assert receipt["state"] == "queued" and receipt.get("terminal") is not True, receipt
+    request_id = receipt["request"]["id"]
+    operation = receipt["operation"]
+    operation_id = operation["id"]
+    status_url = operation["status_url"]
+    assert status_url == f"/api/operations/{operation_id}", receipt
+    events_url = operation["events_url"]
+    connection = HTTPConnection("127.0.0.1", port, timeout=5)
+    terminal_event = None
+    event_type = ""
+    try:
+        connection.request("GET", events_url, headers=_auth_header())
+        response = connection.getresponse()
+        assert response.status == HTTPStatus.OK, (response.status, response.read())
+        while terminal_event is None:
+            line = response.readline()
+            assert line, f"filesystem operation {operation_id} event stream ended before terminalization"
+            if line.startswith(b"event: "):
+                event_type = line.decode("utf-8").removeprefix("event: ").strip()
+            elif event_type == "operation_terminal" and line.startswith(b"data: "):
+                terminal_event = json.loads(line.decode("utf-8").removeprefix("data: "))["payload"]
+    finally:
+        connection.close()
+    assert terminal_event["operation"]["id"] == operation_id, terminal_event
+    assert terminal_event["result"]["request"]["id"] == request_id, terminal_event
+    status, headers, body = _request_once(port, status_url, response_times=response_times)
+    payload = json.loads(body)
+    assert status == terminal_event["status"], (status, terminal_event)
+    assert payload == terminal_event["result"], (payload, terminal_event)
+    assert payload["state"] in {"ready", "failed"}, payload
+    return status, headers, body
+
+
+@contextmanager
+def _running_server(monkeypatch: pytest.MonkeyPatch, gate_runtime_paths):
+    runtime = start_isolated_browser_share_app(
+        monkeypatch,
+        gate_runtime_paths.root,
+        dangerously_yolo=False,
+    )
+    server = None
+    thread = None
+    try:
+        server, thread = start_browser_share_server(
+            monkeypatch,
+            runtime.paths.config_dir,
+            runtime.app,
+            auth_bypass=True,
+        )
+        yield SimpleNamespace(port=server.server_address[1], server=server)
+    finally:
+        if server is not None and thread is not None:
+            stop_browser_share_server(server, thread)
+        stop_isolated_browser_share_app(runtime)
+
+
+@pytest.fixture
+def gate_browser_runtime(browser, monkeypatch, gate_runtime_paths):
+    runtime = start_isolated_browser_share_app(monkeypatch, gate_runtime_paths.root, dangerously_yolo=False)
+    assert runtime.paths.config_dir.parent == gate_runtime_paths.root
+    assert runtime.paths.state_dir.parent == gate_runtime_paths.root
+    auto_approve_payload = {
+        "session_order": runtime.sessions,
+        "sessions": {
+            session: {"target": session, "enabled": False, "last_action": "off"}
+            for session in runtime.sessions
+        },
+        "rules": {"path": str(gate_runtime_paths.config_dir / "yolo-rules.yaml"), "source": "default", "rules": [], "errors": []},
+    }
+    monkeypatch.setattr(
+        runtime.app,
+        "auto_approve_status_bytes",
+        lambda session=None: (json.dumps(auto_approve_payload).encode("utf-8"), HTTPStatus.OK),
+    )
+    server, thread = start_browser_share_server(monkeypatch, gate_runtime_paths.config_dir, runtime.app, auth_bypass=True)
+    session = runtime.sessions[0]
+    browser.get(f"http://127.0.0.1:{server.server_address[1]}/?{urlencode({'sessions': session, 'layout': 'left', 'tabs': f'left:{session}'})}")
+    assert_live_runtime_boot_healthy(browser, "regression-gate", timeout=12)
+    wait_for_browser_boot(browser, globals_required=EDITOR_GLOBALS, dom_anchors=("#grid",), timeout=12)
+    try:
+        yield SimpleNamespace(browser=browser, runtime=runtime, server=server, session=session)
+    finally:
+        stop_browser_share_server(server, thread, browser=browser)
+        stop_isolated_browser_share_app(runtime)
+
+
+def _open_editor(gate_browser_runtime, target, expected):
+    browser = gate_browser_runtime.browser
+    metrics = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const expected = arguments[1];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            const item = await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
+            const ready = await window.__yolomuxTestWaitFor(() => {
+              const panel = fileEditorPanelsForPath(path)[0];
+              return panel?._cmView?.state?.doc?.toString?.() === expected && Boolean(panel.querySelector('.cm-content'));
+            }, {timeoutMs: 10000, description: `CodeMirror content for ${path}`});
+            const panel = fileEditorPanelsForPath(path)[0];
+            const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`);
+            done({
+              ready,
+              item,
+              text: panel?._cmView?.state?.doc?.toString?.() || '',
+              path: panel ? fileEditorPanelPath(panel) : '',
+              tabConnected: tab?.isConnected === true,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+          }
+        })();
+        """,
+        str(target),
+        expected,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["ready"] is True, metrics
+    assert metrics["text"] == expected and metrics["text"], metrics
+    assert metrics["path"] == str(target), metrics
+    assert metrics["tabConnected"] is True, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+    return metrics
+
+
+def _wait_for_active_watchd_descriptor(gate_browser_runtime, target, descriptor_field):
+    app = gate_browser_runtime.runtime.app
+    target_path = str(target.resolve(strict=False))
+    last_state = {}
+
+    def watchd_ready(_driver):
+        with app.client_watch_service.lock:
+            record = app.client_watch_service.event_watcher_record
+            matching_descriptors = {
+                descriptor_id: descriptor.descriptor_generation
+                for descriptor_id, descriptor in app.client_watch_service.descriptors.items()
+                if target_path in getattr(descriptor, descriptor_field)
+            }
+            acknowledged_descriptors = {
+                descriptor_id: record.watchd_descriptor_generations.get(descriptor_id)
+                for descriptor_id in matching_descriptors
+            }
+            exact_descriptor_active = any(
+                acknowledged_descriptors[descriptor_id] == descriptor_generation
+                for descriptor_id, descriptor_generation in matching_descriptors.items()
+            )
+            last_state.clear()
+            last_state.update({
+                "target": target_path,
+                "descriptor_field": descriptor_field,
+                "matching_descriptor_generations": matching_descriptors,
+                "acknowledged_descriptor_generations": acknowledged_descriptors,
+                "requested_generation": record.watchd_synced_generation,
+                "applied_generation": record.watchd_applied_generation,
+                "active_generation": record.watchd_active_generation,
+                "epoch": record.watchd_epoch,
+                "revision": record.watchd_revision,
+                "state": record.watchd_state,
+                "healthy": record.filesystem_healthy,
+                "lease_id_present": bool(record.watchd_lease_id),
+                "descriptor_ids": sorted(record.watchd_descriptor_ids),
+                "failure_action": record.watchd_failure_action,
+                "failure_error_code": record.watchd_failure_error_code,
+                "failure_count": record.watchd_failure_count,
+            })
+            if (
+                record.watchd_worker is None
+                or not record.watchd_lease_id
+                or not record.watchd_descriptor_ids
+                or not record.watchd_epoch
+                or not record.filesystem_healthy
+                or record.watchd_state not in {"ready", "polling"}
+                or record.watchd_synced_generation <= 0
+                or record.watchd_applied_generation < record.watchd_synced_generation
+                or record.watchd_active_generation < record.watchd_synced_generation
+                or not exact_descriptor_active
+            ):
+                return False
+            latest = app.client_watch_service.filesystem_history[-1] if app.client_watch_service.filesystem_history else {}
+            return {
+                "epoch": record.watchd_epoch,
+                "revision": record.watchd_revision,
+                "token": str(latest.get("token") or ""),
+                "watch_generation": record.watchd_applied_generation,
+                "active_watch_generation": record.watchd_active_generation,
+            }
+
+    try:
+        return WebDriverWait(gate_browser_runtime.browser, 10).until(watchd_ready)
+    except TimeoutException as error:
+        daemon_status = app.watch_client.runtime_status()
+        last_state["daemon_error"] = daemon_status.get("last_failure")
+        last_state["daemon_fallback"] = daemon_status.get("fallback")
+        raise AssertionError(f"watchd descriptor did not become active: {last_state}") from error
+
+
+def _wait_for_watchd_path_change(gate_browser_runtime, baseline, target, history_field):
+    app = gate_browser_runtime.runtime.app
+    target_path = str(target.resolve(strict=False))
+    last_state = {}
+
+    def watchd_changed(_driver):
+        with app.client_watch_service.lock:
+            record = app.client_watch_service.event_watcher_record
+            latest = app.client_watch_service.filesystem_history[-1] if app.client_watch_service.filesystem_history else {}
+            last_state.update({
+                "filesystem_healthy": record.filesystem_healthy,
+                "state": record.watchd_state,
+                "epoch": record.watchd_epoch,
+                "revision": record.watchd_revision,
+                "synced_generation": record.watchd_synced_generation,
+                "applied_generation": record.watchd_applied_generation,
+                "active_generation": record.watchd_active_generation,
+                "failure_action": record.watchd_failure_action,
+                "failure_error_code": record.watchd_failure_error_code,
+                "failure_count": record.watchd_failure_count,
+                "latest_epoch": str(latest.get("watchd_epoch") or ""),
+                "latest_revision": int(latest.get("watchd_revision") or 0),
+                "latest_generation": int(latest.get("watch_generation") or 0),
+                "latest_active_generation": int(latest.get("active_watch_generation") or 0),
+                "latest_changed_paths": tuple(latest.get("changed_paths") or ()),
+                "latest_files_changed": tuple(
+                    item.get("path")
+                    for item in latest.get("files_changed", [])
+                    if isinstance(item, dict)
+                ),
+            })
+            if not record.filesystem_healthy or record.watchd_state not in {"ready", "polling"}:
+                return False
+            for history_record in reversed(app.client_watch_service.filesystem_history):
+                epoch = str(history_record.get("watchd_epoch") or "")
+                revision = int(history_record.get("watchd_revision") or 0)
+                if epoch != baseline["epoch"] or revision <= baseline["revision"]:
+                    continue
+                values = history_record.get(history_field)
+                if history_field == "files_changed" and isinstance(values, list):
+                    matched = any(item.get("path") == target_path for item in values if isinstance(item, dict))
+                else:
+                    matched = isinstance(values, (list, tuple)) and target_path in values
+                if matched:
+                    return {
+                        "epoch": epoch,
+                        "revision": revision,
+                        "token": str(history_record.get("token") or ""),
+                        "watch_generation": int(history_record.get("watch_generation") or 0),
+                        "active_watch_generation": int(history_record.get("active_watch_generation") or 0),
+                    }
+            return False
+
+    try:
+        return WebDriverWait(gate_browser_runtime.browser, 10).until(
+            watchd_changed,
+            message=f"real watchd {history_field} revision for {target}",
+        )
+    except TimeoutException as error:
+        daemon_status = app.watch_client.runtime_status()
+        last_state["daemon_error"] = daemon_status.get("last_failure")
+        last_state["daemon_fallback"] = daemon_status.get("fallback")
+        raise AssertionError(
+            f"real watchd {history_field} revision missing for {target}: {last_state}"
+        ) from error
+
+
+def _wait_for_file_event_stream(gate_browser_runtime, target):
+    result = gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const previousSyncedAt = Number(serverWatchRootsState.syncedAt || 0);
+        syncServerWatchRoots({immediate: true, force: true});
+        window.__yolomuxTestWaitFor(() => {
+          const descriptor = clientEventDemandDescriptor();
+          return descriptor.channels.includes('files')
+            && clientEventTransportState.connected === true
+            && Number(serverWatchRootsState.syncedAt || 0) > previousSyncedAt
+            && serverWatchRootsState.inFlight !== true
+            && visibleFileEditorWatchFiles().includes(path);
+        }, {timeoutMs: 10000, description: `files SSE registration for ${path}`}).then(done, error => done({error: String(error?.stack || error)}));
+        """,
+        str(target),
+    )
+    assert result is True, result
+
+    gate_browser_runtime.file_event_watchd = _wait_for_active_watchd_descriptor(
+        gate_browser_runtime,
+        target,
+        "files",
+    )
+
+
+def _publish_file_change(gate_browser_runtime, target):
+    baseline = gate_browser_runtime.file_event_watchd
+    gate_browser_runtime.file_event_watchd = _wait_for_watchd_path_change(
+        gate_browser_runtime,
+        baseline,
+        target,
+        "files_changed",
+    )
+
+
+def _type_dirty_text(gate_browser_runtime, target, text):
+    browser = gate_browser_runtime.browser
+    panel_selector = f'.file-editor-panel[data-file-path="{str(target)}"]'
+    autosave = browser.execute_script(
+        """
+        const path = arguments[0];
+        fileEditorAutosaveEnabled = false;
+        rescheduleAllFileAutosaves();
+        return {
+          enabled: fileEditorAutosaveEnabled,
+          pending: fileEditorAutosaveTimers.has(path),
+        };
+        """,
+        str(target),
+    )
+    assert autosave == {"enabled": False, "pending": False}, autosave
+    content = browser.find_element("css selector", f"{panel_selector} .cm-content")
+    content.click()
+    content.send_keys("\ue010", "\ue007", text)
+    result = browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const text = arguments[1];
+        const done = arguments[arguments.length - 1];
+        window.__yolomuxTestWaitFor(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          return state?.dirty === true && panel?._cmView?.state?.doc?.toString?.().includes(text);
+        }, {timeoutMs: 5000, description: `dirty CodeMirror buffer for ${path}`}).then(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          done({
+            content: state?.content || '',
+            text: panel?._cmView?.state?.doc?.toString?.() || '',
+            dirty: state?.dirty === true,
+            autosaveEnabled: fileEditorAutosaveEnabled,
+            autosavePending: fileEditorAutosaveTimers.has(path),
+          });
+        }, error => done({error: String(error?.stack || error)}));
+        """,
+        str(target),
+        text,
+    )
+    assert not result.get("error"), result
+    assert result["dirty"] is True and text in result["text"], result
+    assert result["autosaveEnabled"] is False and result["autosavePending"] is False, result
+    return result["text"]
+
+
+def _dirty_conflict_snapshot(gate_browser_runtime, target, expected_text, previous_signature=""):
+    return gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const expected = arguments[1];
+        const previousSignature = arguments[2];
+        const done = arguments[arguments.length - 1];
+        const signature = state => JSON.stringify(state?.externalChanged || {});
+        window.__yolomuxTestWaitFor(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          const status = panel?.querySelector('.file-editor-status-message');
+          return state?.dirty === true
+            && Boolean(state.externalChanged)
+            && (!previousSignature || signature(state) !== previousSignature)
+            && panel?._cmView?.state?.doc?.toString?.() === expected
+            && status?.textContent?.trim()
+            && getComputedStyle(status).display !== 'none';
+        }, {timeoutMs: 10000, description: `visible external-change conflict for ${path}`}).then(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          const item = panel?.dataset?.layoutItem || '';
+          const status = panel?.querySelector('.file-editor-status-message');
+          done({
+            dirty: state?.dirty === true,
+            text: panel?._cmView?.state?.doc?.toString?.() || '',
+            signature: signature(state),
+            path: panel ? fileEditorPanelPath(panel) : '',
+            item,
+            tabConnected: Boolean(item && document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`)),
+            missing: state?.kind === 'missing' || state?.externalMissing === true,
+            status: status?.textContent?.trim() || '',
+            statusDisplay: status ? getComputedStyle(status).display : 'none',
+            body: document.body.innerText,
+          });
+        }, error => done({error: String(error?.stack || error)}));
+        """,
+        str(target),
+        expected_text,
+        previous_signature,
+    )
+
+
+A8_FRAME_COUNTS = (1, 3, 2, 5, 1, 4, 2, 6, 3, 1)
+
+
+def _a8_wait_varying_subsecond_interval(gate_browser_runtime, iteration):
+    frame_count = A8_FRAME_COUNTS[iteration - 1]
+    result = gate_browser_runtime.browser.execute_async_script(
+        """
+        let remaining = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const next = () => {
+          remaining -= 1;
+          if (remaining <= 0) done(true);
+          else requestAnimationFrame(next);
+        };
+        requestAnimationFrame(next);
+        """,
+        frame_count,
+    )
+    assert result is True
+
+
+def _a8_replace_inode(target, text, iteration):
+    replacement = target.with_name(f".{target.name}.a8-{iteration}.tmp")
+    replacement.write_text(text, encoding="utf-8")
+    inode_before = target.stat().st_ino
+    started = time.perf_counter()
+    os.replace(replacement, target)
+    elapsed = time.perf_counter() - started
+    inode_after = target.stat().st_ino
+    assert inode_after != inode_before, f"replace {iteration} did not swap the inode"
+    assert elapsed < 1.0, f"replace {iteration} took {elapsed:.3f}s"
+    return elapsed
+
+
+def _a8_latch_transient_inode_miss(gate_browser_runtime, target):
+    """Deliver the old-inode delete/move signal while the replacement path is resolvable."""
+    assert target.is_file(), f"replacement path vanished before transient miss: {target}"
+    metrics = gate_browser_runtime.browser.execute_script(
+        """
+        const path = arguments[0];
+        markOpenFileMissing(path);
+        const state = fileState.get(path);
+        const panel = fileEditorPanelsForPath(path)[0];
+        const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+        const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`);
+        return {
+          missing: state?.externalMissing === true,
+          tabMissing: tab?.classList.contains('file-missing') === true,
+          missingBadge: Boolean(tab?.querySelector('.file-tab-missing-badge')),
+        };
+        """,
+        str(target),
+    )
+    assert metrics == {"missing": True, "tabMissing": True, "missingBadge": True}, metrics
+
+
+def _a8_recovered_snapshot(gate_browser_runtime, target, expected_text, expected_view_mode="edit"):
+    return gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const expected = arguments[1];
+        const expectedViewMode = arguments[2];
+        const done = arguments[arguments.length - 1];
+        window.__yolomuxTestWaitFor(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`);
+          const text = panel?._cmView?.state?.doc?.toString?.() || '';
+          return state?.externalMissing !== true
+            && state?.kind === 'text'
+            && text === expected
+            && tab?.isConnected === true
+            && !tab.classList.contains('file-missing')
+            && !tab.querySelector('.file-tab-missing-badge')
+            && editorViewModeFor(path, item) === expectedViewMode;
+        }, {timeoutMs: 10000, description: `A8 inode-swap recovery for ${path}`}).then(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`);
+          done({
+            text: panel?._cmView?.state?.doc?.toString?.() || '',
+            missing: state?.externalMissing === true,
+            tabMissing: tab?.classList.contains('file-missing') === true,
+            missingBadge: Boolean(tab?.querySelector('.file-tab-missing-badge')),
+            viewMode: editorViewModeFor(path, item),
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          });
+        }, error => done({error: String(error?.stack || error)}));
+        """,
+        str(target),
+        expected_text,
+        expected_view_mode,
+    )
+
+
+def _a8_missing_snapshot(gate_browser_runtime, target):
+    return gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        window.__yolomuxTestWaitFor(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`);
+          const status = panel?.querySelector('.file-editor-status-message');
+          return state?.externalMissing === true
+            && tab?.classList.contains('file-missing') === true
+            && Boolean(tab.querySelector('.file-tab-missing-badge'))
+            && Boolean(status?.textContent?.trim());
+        }, {timeoutMs: 10000, description: `A8 genuine missing state for ${path}`}).then(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          const item = panel?.dataset?.layoutItem || fileEditorItemFor(path);
+          const tab = document.querySelector(`.dockview-pane-tab[data-pane-tab="${CSS.escape(item)}"]`);
+          done({
+            missing: state?.externalMissing === true,
+            tabMissing: tab?.classList.contains('file-missing') === true,
+            missingBadge: Boolean(tab?.querySelector('.file-tab-missing-badge')),
+            status: panel?.querySelector('.file-editor-status-message')?.textContent?.trim() || '',
+            text: panel?._cmView?.state?.doc?.toString?.() || '',
+            rendered: [...(panel?.querySelectorAll('.cm-content') || [])].map(node => node.textContent || '').join('\\n'),
+          });
+        }, error => done({error: String(error?.stack || error)}));
+        """,
+        str(target),
+    )
+
+
+@pytest.mark.no_browser
+def test_a1_existing_file_opens_twenty_consecutive_times_under_budget(monkeypatch, tmp_path, gate_runtime_paths):
+    """A1: GET /api/fs/read must terminalize the exact existing-file content 20 consecutive times under 500 ms without 503."""
+    expected = "gate file content\n"
+    target = tmp_path / "existing.txt"
+    target.write_text(expected, encoding="utf-8")
+    path = f"/api/fs/read?{urlencode({'path': str(target)})}"
+
+    with _running_server(monkeypatch, gate_runtime_paths) as runtime:
+        prime_status, _prime_headers, prime_body = _request(runtime.port, path)
+        prime = json.loads(prime_body)
+        assert prime_status == HTTPStatus.OK and prime["state"] == "ready", prime
+        assert prime["data"]["content"] == expected, prime
+        for iteration in range(1, 21):
+            response_times = []
+            status, _headers, body = _request(runtime.port, path, response_times=response_times)
+            payload = json.loads(body)
+            assert status != HTTPStatus.SERVICE_UNAVAILABLE, f"iteration {iteration} returned 503: {payload}"
+            assert status == HTTPStatus.OK, f"iteration {iteration} returned {status}: {payload}"
+            assert payload["state"] == "ready", payload
+            assert payload["data"]["content"] == expected, f"iteration {iteration} returned the wrong content"
+            assert response_times and max(response_times) < FILE_OPEN_BUDGET_SECONDS, (
+                f"iteration {iteration} finite response took {max(response_times):.3f}s"
+            )
+
+
+@pytest.mark.browser
+def test_a2_editor_renders_exact_disk_content_in_codemirror(gate_browser_runtime, tmp_path):
+    """A2: opening a fixture file in the browser must render a non-empty CodeMirror document whose text exactly matches the file on disk, not merely return a successful API payload."""
+    expected = "rendered through the real file API\n"
+    target = tmp_path / "a2-rendered.txt"
+    target.write_text(expected, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, expected)
+
+
+@pytest.mark.browser
+def test_a3_clean_buffer_converges_after_external_rewrite(gate_browser_runtime, tmp_path):
+    """A3: after an external process rewrites an open file whose editor buffer is clean, the rendered CodeMirror document must converge to the new disk content without a manual reload."""
+    target = tmp_path / "a3-clean.txt"
+    original = "clean original\n"
+    replacement = "clean external replacement\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    _wait_for_file_event_stream(gate_browser_runtime, target)
+    gate_browser_runtime.browser.execute_script("document.activeElement?.blur?.(); document.body.focus();")
+    target.write_text(replacement, encoding="utf-8")
+    _publish_file_change(gate_browser_runtime, target)
+    metrics = gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const expected = arguments[1];
+        const done = arguments[arguments.length - 1];
+        window.__yolomuxTestWaitFor(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
+        }, {timeoutMs: 10000, description: `clean external reload for ${path}`}).then(() => {
+          const state = fileState.get(path);
+          const panel = fileEditorPanelsForPath(path)[0];
+          done({text: panel?._cmView?.state?.doc?.toString?.() || '', dirty: state?.dirty === true, externalChanged: Boolean(state?.externalChanged), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
+        }, error => done({error: String(error?.stack || error)}));
+        """,
+        str(target),
+        replacement,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["text"] == replacement and metrics["dirty"] is False and metrics["externalChanged"] is False, metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
+def test_a3_explicit_reload_waits_for_exact_bytes_after_external_rewrite(gate_browser_runtime, tmp_path):
+    """A3 amend: an explicit reload renders exact bytes from its queued operation terminal."""
+    target = tmp_path / "a3-explicit-reload.txt"
+    original = "content before explicit reload\n"
+    replacement = "fresh external bytes after explicit reload\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    target.write_text(replacement, encoding="utf-8")
+    replacement_payload = filesystem.read_file(str(target))
+    metrics = gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const expected = arguments[1];
+        const replacementPayload = arguments[2];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const nativeFetch = window.fetch.bind(window);
+          const key = `gate-exact-read:${path}`;
+          const operationId = 'op-gate-a3-reload';
+          const requestId = 'r-gate-a3-reload';
+          let reads = 0;
+          window.fetch = async (input, options = {}) => {
+            const url = new URL(String(input), location.href);
+            if (url.pathname !== '/api/fs/read' || url.searchParams.get('path') !== path) {
+              return nativeFetch(input, options);
+            }
+            reads += 1;
+            if (reads === 1) {
+              return new Response(JSON.stringify({
+                state: 'queued',
+                request: {id: requestId},
+                operation: {
+                  id: operationId,
+                  kind: 'filesystem_operation',
+                  status_url: `/api/operations/${operationId}`,
+                  events_url: `/api/client-events?operation_id=${operationId}`,
+                  cursor: {epoch: 'gate-a3', seq: 0},
+                  context: {operation: 'read', path, product_key: key},
+                },
+              }), {
+                status: 202,
+                headers: {'Content-Type': 'application/json'},
+              });
+            }
+            return nativeFetch(input, options);
+          };
+          try {
+            const reload = reloadOpenFileFromDisk(path, {force: true});
+            await window.__yolomuxTestWaitFor(() => reads === 1, {
+              timeoutMs: 3000,
+              description: `queued explicit reload for ${path}`,
+            });
+            handleClientPushEventNow('operation_terminal', {
+              operation: {id: operationId, kind: 'filesystem_operation', cursor: {epoch: 'gate-a3', seq: 1}},
+              result: {
+                state: 'ready',
+                request: {id: requestId},
+                data: replacementPayload,
+                quality: {complete: true, stale: false},
+                warnings: [],
+              },
+            });
+            await reload;
+            await window.__yolomuxTestWaitFor(() => {
+              const state = fileState.get(path);
+              const panel = fileEditorPanelsForPath(path)[0];
+              return state?.dirty === false && panel?._cmView?.state?.doc?.toString?.() === expected;
+            }, {timeoutMs: 10000, description: `exact explicit reload for ${path}`});
+            const state = fileState.get(path);
+            const panel = fileEditorPanelsForPath(path)[0];
+            done({
+              reads,
+              text: panel?._cmView?.state?.doc?.toString?.() || '',
+              original: state?.original || '',
+              kind: state?.kind || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), reads});
+          } finally {
+            window.fetch = nativeFetch;
+          }
+        })();
+        """,
+        str(target),
+        replacement,
+        replacement_payload,
+    )
+    assert not metrics.get("error"), metrics
+    assert metrics["reads"] == 1, metrics
+    assert metrics["text"] == replacement and metrics["original"] == replacement, metrics
+    assert metrics["kind"] == "text", metrics
+    assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+
+
+@pytest.mark.browser
+def test_a4_dirty_buffer_survives_external_rewrite_and_surfaces_conflict(gate_browser_runtime, tmp_path):
+    """A4: after typing unsaved text and externally rewriting that same file, the rendered CodeMirror document must preserve the user's unsaved text and the editor must show a visible conflict state; this test remains in the same file as A3."""
+    target = tmp_path / "a4-dirty.txt"
+    original = "dirty original\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    _wait_for_file_event_stream(gate_browser_runtime, target)
+    dirty_text = _type_dirty_text(gate_browser_runtime, target, "user unsaved text")
+    target.write_text("external rewrite must not win\n", encoding="utf-8")
+    _publish_file_change(gate_browser_runtime, target)
+    metrics = _dirty_conflict_snapshot(gate_browser_runtime, target, dirty_text)
+    assert not metrics.get("error"), metrics
+    assert metrics["dirty"] is True and metrics["text"] == dirty_text, metrics
+    assert metrics["path"] == str(target) and metrics["tabConnected"] is True and metrics["missing"] is False, metrics
+    assert metrics["status"] and metrics["statusDisplay"] != "none", metrics
+
+
+@pytest.mark.browser
+def test_a5_subsecond_replace_keeps_editor_path_tab_and_content_state(gate_browser_runtime, tmp_path):
+    """A5: across 10 cp-or-mv replacements completed in under one second at varying sub-second intervals, the editor must retain the same path and tab, never render File not found, and show either new clean content or the preserved dirty buffer with a visible conflict notice."""
+    target = tmp_path / "a5-replaced.txt"
+    source = tmp_path / "a5-source.txt"
+    original = "replace original\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    _wait_for_file_event_stream(gate_browser_runtime, target)
+    dirty_text = _type_dirty_text(gate_browser_runtime, target, "ten-replace unsaved buffer")
+    frame_counts = (1, 2, 4, 3, 1, 5, 2, 4, 1, 3)
+    previous_signature = ""
+
+    def replace_once(iteration):
+        nonlocal previous_signature
+        frame_count = frame_counts[iteration - 1]
+        gate_browser_runtime.browser.execute_async_script(
+            """
+            let remaining = arguments[0];
+            const done = arguments[arguments.length - 1];
+            const next = () => {
+              remaining -= 1;
+              if (remaining <= 0) done(true);
+              else requestAnimationFrame(next);
+            };
+            requestAnimationFrame(next);
+            """,
+            frame_count,
+        )
+        source.write_text(f"external replacement {iteration} with distinct size {'x' * iteration}\n", encoding="utf-8")
+        started = time.perf_counter()
+        subprocess.run(["cp", "-f", str(source), str(target)], check=True, timeout=0.9)
+        elapsed = time.perf_counter() - started
+        assert elapsed < 1.0, f"replace {iteration} took {elapsed:.3f}s"
+        _publish_file_change(gate_browser_runtime, target)
+        metrics = _dirty_conflict_snapshot(gate_browser_runtime, target, dirty_text, previous_signature)
+        assert not metrics.get("error"), metrics
+        assert metrics["dirty"] is True and metrics["text"] == dirty_text, metrics
+        assert metrics["path"] == str(target) and metrics["tabConnected"] is True, metrics
+        assert metrics["missing"] is False and metrics["status"] and metrics["statusDisplay"] != "none", metrics
+        assert "File not found" not in metrics["body"], metrics
+        previous_signature = metrics["signature"]
+        return elapsed
+
+    elapsed_replaces = repeat(10, replace_once)
+    assert len(set(frame_counts)) > 1
+    assert len(elapsed_replaces) == 10 and max(elapsed_replaces) < 1.0
+
+
+@pytest.mark.no_browser
+def test_a6_rapid_read_connection_close_and_reopen_completes_every_request(monkeypatch, tmp_path, gate_runtime_paths):
+    """A6: 10 rapid open/close/reopen cycles for the same file must return the exact content on both opens in every cycle, with each HTTP response fully consumed and no request left pending."""
+    expected = "rapid reopen content\n"
+    target = tmp_path / "rapid.txt"
+    target.write_text(expected, encoding="utf-8")
+    path = f"/api/fs/read?{urlencode({'path': str(target)})}"
+
+    with _running_server(monkeypatch, gate_runtime_paths) as runtime:
+        for iteration in range(1, 11):
+            for phase in ("open", "reopen"):
+                status, _headers, body = _request(runtime.port, path)
+                payload = json.loads(body)
+                assert status == HTTPStatus.OK, f"cycle {iteration} {phase} returned {status}: {payload}"
+                assert payload["state"] == "ready", payload
+                assert payload["data"]["content"] == expected, f"cycle {iteration} {phase} returned the wrong content"
+
+
+@pytest.mark.browser
+def test_a6_reopen_replaces_cached_not_found_after_file_is_created(gate_browser_runtime, tmp_path):
+    """A6 amend: creating a file after a typed not-found must make an explicit reopen render its bytes."""
+    target = tmp_path / "a6-created-after-miss.txt"
+    expected = "created after the typed not-found was cached\n"
+    missing = gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const originalRegister = registerApiOperationReceipt;
+        let operationId = '';
+        let pendingObserved = false;
+        registerApiOperationReceipt = pending => {
+          const record = originalRegister(pending);
+          operationId = String(record?.id || '');
+          pendingObserved = Boolean(operationId && apiOperationState.pending.has(operationId));
+          return record;
+        };
+        (async () => {
+          try {
+            await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
+            await window.__yolomuxTestWaitFor(() => {
+              const state = fileState.get(path);
+              return operationId && !apiOperationState.pending.has(operationId) && state?.kind === 'error';
+            }, {timeoutMs: 10000, description: `typed terminal missing-file result for ${path}`});
+            const state = fileState.get(path);
+            done({
+              kind: state?.kind || '',
+              missing: state?.externalMissing === true,
+              status: state?.error?.status || 0,
+              operationId,
+              pendingObserved,
+              terminalObserved: Boolean(operationId && !apiOperationState.pending.has(operationId) && state?.kind === 'error'),
+            });
+          } catch (error) {
+            done({error: String(error?.stack || error), operationId, pendingObserved});
+          } finally {
+            registerApiOperationReceipt = originalRegister;
+          }
+        })();
+        """,
+        str(target),
+    )
+    assert not missing.get("error"), missing
+    assert missing["kind"] == "error" and missing["missing"] is True, missing
+    assert_terminal_transition(
+        contract_id="jobd-product-operation-completion",
+        pending_observed=missing["pendingObserved"],
+        terminal_observed=missing["terminalObserved"],
+        evidence=missing,
+    )
+
+    target.write_text(expected, encoding="utf-8")
+    reopened = gate_browser_runtime.browser.execute_async_script(
+        """
+        const path = arguments[0];
+        const expected = arguments[1];
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          try {
+            await openFileInEditor(path, {name: path.split('/').at(-1)}, {userInitiated: true, viewMode: 'edit'});
+            await window.__yolomuxTestWaitFor(() => {
+              const state = fileState.get(path);
+              const panel = fileEditorPanelsForPath(path)[0];
+              return state?.kind === 'text'
+                && state.externalMissing !== true
+                && panel?._cmView?.state?.doc?.toString?.() === expected;
+            }, {timeoutMs: 10000, description: `created file content after reopen for ${path}`});
+            const state = fileState.get(path);
+            const panel = fileEditorPanelsForPath(path)[0];
+            done({
+              kind: state?.kind || '',
+              missing: state?.externalMissing === true,
+              text: panel?._cmView?.state?.doc?.toString?.() || '',
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
+            });
+          } catch (error) {
+            const state = fileState.get(path);
+            const panel = fileEditorPanelsForPath(path)[0];
+            done({
+              error: String(error?.stack || error),
+              kind: state?.kind || '',
+              missing: state?.externalMissing === true,
+              original: state?.original || '',
+              content: state?.content || '',
+              text: panel?._cmView?.state?.doc?.toString?.() || '',
+              loading: state?.loading === true,
+            });
+          }
+        })();
+        """,
+        str(target),
+        expected,
+    )
+    assert not reopened.get("error"), reopened
+    assert reopened["kind"] == "text" and reopened["missing"] is False, reopened
+    assert reopened["text"] == expected, reopened
+    expected_api_error = consume_only_expected_js_debug_api_error(
+        gate_browser_runtime.browser,
+        path="/api/fs/read",
+        status=HTTPStatus.NOT_FOUND,
+        method="GET",
+        query={"path": str(target)},
+    )
+    retire_expected_fixture_typed_api_failure(
+        gate_browser_runtime.browser,
+        gate_browser_runtime.server,
+        expected_api_error,
+        method="GET",
+        path="/api/fs/read",
+        source="jobd-operation",
+        code="path_not_found",
+    )
+    assert reopened["errors"] == [expected_api_error] and reopened["rejections"] == [], reopened
+    assert_browser_journey_error_free(gate_browser_runtime.browser)
+
+
+@pytest.mark.no_browser
+def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_path, gate_runtime_paths):
+    """A7: GET /api/fs/read for a missing file must return 404 with the machine-readable common.pathNotFound reason, never 503 or a transport-failure reason rendered as File not found."""
+    target = tmp_path / "missing.txt"
+    path = f"/api/fs/read?{urlencode({'path': str(target)})}"
+
+    with _running_server(monkeypatch, gate_runtime_paths) as runtime:
+        status, _headers, body = _request(runtime.port, path)
+
+        payload = json.loads(body)
+        assert status == HTTPStatus.NOT_FOUND, payload
+        assert payload["state"] == "failed"
+        assert payload["error"]["code"] == "path_not_found"
+        assert payload["error"]["message"]["key"] == "common.pathNotFound"
+        assert payload["error"]["message"]["params"] == {"path": str(target)}
+        assert payload["error"]["details"]["status"] == HTTPStatus.NOT_FOUND
+        assert payload["error"]["details"]["path"] == str(target)
+        operation_id = payload["error"]["details"]["operation_id"]
+        assert operation_id.startswith("op-")
+        assert "transport" not in payload["error"]["message"]["key"].lower()
+
+        start = validate_server_log_ring_payload(runtime.server._fixture_server_log_boundary)
+        current = validate_server_log_ring_payload(SERVER_LOGS.payload())
+        transition = validate_server_log_ring_transition(start, current)
+        failures = [
+            entry for entry in transition["newLogs"]
+            if str(entry.get("level") or "").lower() in {"warning", "error"}
+        ]
+        assert transition["droppedCount"] == 0
+        assert [(entry["source"], entry["category"]) for entry in failures] == [
+            ("jobd-operation", "operation"),
+            ("api-response", "api"),
+        ]
+        messages = [json.loads(entry["message"]) for entry in failures]
+        assert [message["code"] for message in messages] == ["path_not_found", "path_not_found"]
+        assert [message["request"]["id"] for message in messages] == [
+            payload["request"]["id"], payload["request"]["id"],
+        ]
+        assert messages[0]["operation"]["id"] == operation_id
+        runtime.server._fixture_server_log_boundary = current
+
+
+@pytest.mark.browser
+def test_a8_editor_recovers_from_ten_atomic_inode_swaps_and_reports_real_delete(gate_browser_runtime, tmp_path):
+    """A8 editor: ten varying sub-second os.replace inode swaps must converge without reload/reopen, clear both body and tab missing state, and a real deletion must still render the missing state."""
+    target = tmp_path / "a8-editor.txt"
+    original = "A8 editor original\n"
+    target.write_text(original, encoding="utf-8")
+    _open_editor(gate_browser_runtime, target, original)
+    _wait_for_file_event_stream(gate_browser_runtime, target)
+    gate_browser_runtime.browser.execute_script("document.activeElement?.blur?.(); document.body.focus();")
+
+    def replace_once(iteration):
+        _a8_wait_varying_subsecond_interval(gate_browser_runtime, iteration)
+        replacement = f"A8 editor inode replacement {iteration} {'x' * iteration}\n"
+        elapsed = _a8_replace_inode(target, replacement, iteration)
+        _a8_latch_transient_inode_miss(gate_browser_runtime, target)
+        _publish_file_change(gate_browser_runtime, target)
+        metrics = _a8_recovered_snapshot(gate_browser_runtime, target, replacement)
+        assert not metrics.get("error"), metrics
+        assert metrics["text"] == replacement and metrics["missing"] is False, metrics
+        assert metrics["tabMissing"] is False and metrics["missingBadge"] is False, metrics
+        assert metrics["errors"] == [] and metrics["rejections"] == [], metrics
+        return elapsed
+
+    elapsed_replaces = repeat(10, replace_once)
+    assert len(set(A8_FRAME_COUNTS)) > 1
+    assert len(elapsed_replaces) == 10 and max(elapsed_replaces) < 1.0
+
+    target.unlink()
+    _publish_file_change(gate_browser_runtime, target)
+    missing = _a8_missing_snapshot(gate_browser_runtime, target)
+    assert not missing.get("error"), missing
+    assert missing["missing"] is True and missing["tabMissing"] is True and missing["missingBadge"] is True, missing
+    assert missing["status"], missing

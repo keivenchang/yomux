@@ -1,11 +1,22 @@
 import json
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from tests.browser_helpers import browser_layout as browser_layout_module
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
+from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_errors
+from tests.browser_helpers.browser_console import read_browser_console_log
+from tests.gate_harness import assert_fixture_client_event_demand_claimed
+from tests.gate_harness import claim_fixture_client_event_demand
 from tools.static_build import build_asset
+from yolomux_lib.local_services import client as local_service_client_module
+from yolomux_lib.server_logs import ServerLogRing
+from yolomux_lib.watchd_client import WatchClient
 
 
 def test_browser_wait_timeout_has_one_xdist_only_floor():
@@ -17,6 +28,22 @@ def test_browser_wait_timeout_has_one_xdist_only_floor():
 def test_session_scoped_browser_reuse_is_the_default(monkeypatch):
     monkeypatch.delenv(SESSION_SCOPED_BROWSER_REUSE_ENV, raising=False)
     assert browser_layout_module._browser_fixture_scope(fixture_name="browser", config=None) == "session"
+
+
+def test_browser_bundle_guard_passes_through_static_build_failure(monkeypatch):
+    """The browser gate must expose --check's specific failure, not invent one."""
+    completed = subprocess.CompletedProcess(
+        args=[],
+        returncode=1,
+        stdout="",
+        stderr="stale static assets: yolomux.js\n",
+    )
+    monkeypatch.setattr(browser_layout_module.subprocess, "run", lambda *_args, **_kwargs: completed)
+    monkeypatch.setattr(browser_layout_module, "_BUNDLE_FRESHNESS_CHECKED", False)
+
+    with pytest.raises(AssertionError) as raised:
+        browser_layout_module._require_current_generated_bundle()
+    assert str(raised.value) == "stale static assets: yolomux.js\n"
 
 
 def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatch):
@@ -61,6 +88,9 @@ def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatc
 
     assert ("close",) in calls
     assert ("get", "about:blank") in calls
+    assert calls.index(("get", "about:blank")) < next(
+        index for index, call in enumerate(calls) if call[0] == "script" and "document.body.focus" in call[1]
+    )
     assert ("log", "browser") in calls
     assert ("size", *DEFAULT_BROWSER_WINDOW_SIZE) in calls
     cdp = [(call[1], call[2]) for call in calls if call[0] == "cdp"]
@@ -70,6 +100,74 @@ def test_reused_browser_reset_closes_popouts_and_clears_profile_state(monkeypatc
     assert ("Emulation.setEmulatedMedia", {"features": []}) in cdp
     assert ("Storage.clearDataForOrigin", {"origin": "http://current.test", "storageTypes": "all"}) in cdp
     assert ("Storage.clearDataForOrigin", {"origin": "http://fixture.test", "storageTypes": "all"}) in cdp
+
+
+def test_generic_browser_teardown_gates_local_diagnostics_without_requesting_server_logs(monkeypatch):
+    class Driver:
+        current_url = "about:blank"
+        ring_requests = 0
+
+        def execute_script(self, source):
+            if source == "return location.origin;":
+                return "http://fixture.test"
+            if "const isArray = Array.isArray(jsDebugEvents)" in source:
+                warning = {
+                    "id": 17,
+                    "level": "warning",
+                    "message": "mock retained JS warning",
+                    "source": "browser",
+                }
+                js_debug = {
+                    "reachable": True,
+                    "isArray": True,
+                    "events": [warning],
+                    "errors": [warning],
+                    "receiptBarrier": {
+                        "epoch": "all",
+                        "accepted": 0,
+                        "pending": 0,
+                        "retrying": 0,
+                        "rejected": 0,
+                        "dropped": 0,
+                        "quiescent": True,
+                        "blocking": [],
+                    },
+                }
+                if "window.location.replace('about:blank')" in source:
+                    return {
+                        "jsDebug": js_debug,
+                        "journey": {"reachable": False, "visitedSurfaces": []},
+                    }
+                return js_debug
+            if "const state = window.__yolomuxBrowserJourneyGate" in source:
+                return {"reachable": False, "visitedSurfaces": []}
+            raise AssertionError(f"unexpected browser script: {source}")
+
+        def execute_async_script(self, source):
+            if "/api/logs" in source:
+                self.ring_requests += 1
+                raise AssertionError("generic browser teardown requested /api/logs")
+            raise AssertionError(f"unexpected async browser script: {source}")
+
+        def get_log(self, kind):
+            assert kind == "browser"
+            return [{"level": "SEVERE", "message": "mock retained Chrome failure"}]
+
+    class Node:
+        funcargs = {"browser": Driver()}
+
+    class Request:
+        node = Node()
+
+    monkeypatch.setattr(browser_layout_module, "_reset_reused_browser_state", lambda *_args, **_kwargs: None)
+    teardown = _reset_browser_state.__wrapped__(Request())
+    next(teardown)
+    with pytest.raises(AssertionError) as raised:
+        next(teardown)
+
+    assert "mock retained JS warning" in str(raised.value)
+    assert "mock retained Chrome failure" in str(raised.value)
+    assert Node.funcargs["browser"].ring_requests == 0
 
 
 def test_browser_document_wait_helper_reports_values_and_timeout_context(browser, tmp_path):
@@ -543,21 +641,45 @@ def test_session_popover_agent_row_wraps_text_after_compact_state_and_ai_control
     assert metrics["scrollWidth"] <= metrics["clientWidth"], metrics
 
 
-def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path):
-    cases = [
-        {"tone": "attention", "pulsing": True, "expected_fill": "#dc2626", "window_index": 2},
-        {"tone": "attention", "pulsing": False, "expected_fill": "#dc2626", "window_index": 3},
-        {"tone": "cooldown", "pulsing": True, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 4},
-        {"tone": "cooldown", "pulsing": False, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 5},
-    ]
-    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
-    browser.execute_script(
+SUBWINDOW_GRAY_ACKNOWLEDGEMENT_DURATION_MS = 1200
+SUBWINDOW_GRAY_ACKNOWLEDGEMENT_STEP_COUNT = 10
+SUBWINDOW_GRAY_PAINT_POSITIONS_MS = (100, 500, 1000)
+SUBWINDOW_GRAY_SAMPLE_LABELS = ["before", "immediate", *(f"{position}ms" for position in SUBWINDOW_GRAY_PAINT_POSITIONS_MS), "removed"]
+
+
+def subwindow_gray_cases(*window_indexes):
+    """Return the acknowledgement cases for the requested sub-window indexes."""
+
+    catalogue = {
+        2: {"tone": "attention", "pulsing": True, "expected_fill": "#dc2626", "window_index": 2},
+        3: {"tone": "attention", "pulsing": False, "expected_fill": "#dc2626", "window_index": 3},
+        4: {"tone": "cooldown", "pulsing": True, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 4},
+        5: {"tone": "cooldown", "pulsing": False, "expected_fill": ui_pin("agentStatusCooldown"), "window_index": 5},
+    }
+    return [catalogue[index] for index in window_indexes]
+
+
+def install_subwindow_gray_harness(browser, cases):
+    """Seed the attention/cooldown sub-windows and take custody of the acknowledgement clock.
+
+    The gray acknowledgement marker is bounded by wall time twice over: the retirement
+    ``setTimeout`` the product arms for its promised interval, and the lazy
+    ``visual.untilMs > Date.now()`` check every render repeats.  A contended renderer that runs
+    the sampling task late therefore reads a marker that already retired, which is a scheduling
+    artefact rather than a product regression.  Freezing ``Date.now`` and taking custody of that
+    one timer leaves the ordering, the acknowledgement/readback path and the deferred
+    acknowledgement POST exactly as production runs them.
+    """
+
+    return browser.execute_script(
         """
         const cases = arguments[0];
+        const durationMs = arguments[1];
+        const stepCount = arguments[2];
         const now = Date.now() / 1000;
-        agentStatusPulsePeriodMs = 1200;
-        document.documentElement.style.setProperty('--pulse-duration', '1.2s');
-        document.documentElement.style.setProperty('--status-pulse-step-count', '10');
+        agentStatusPulsePeriodMs = durationMs;
+        document.documentElement.style.setProperty('--pulse-duration', `${durationMs / 1000}s`);
+        document.documentElement.style.setProperty('--status-pulse-step-count', String(stepCount));
         setAttentionAnimationClockDelay();
         workflowTransitionGlowSeconds = 60;
         const acknowledgementKeyFor = (item, tone) => JSON.stringify([
@@ -601,79 +723,213 @@ def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(brow
           };
           return {label, gray: dot?.classList.contains('agent-window-status-dot--acknowledging') || false, pulsing: dot?.classList.contains('agent-window-status-dot--subwindow-pulse') || false, fill: style?.getPropertyValue('--subwindow-status-glyph-fill').trim() || '', opacity: Number(style?.opacity || 0), animationName: style?.animationName || '', animationDuration: style?.animationDuration || '', animationDelay: style?.animationDelay || '', animationIterationCount: style?.animationIterationCount || '', animationTimingFunction: style?.animationTimingFunction || '', acknowledgement: {pending: record?.pending === true, recorded: record?.recordedAt !== null && record?.recordedAt !== undefined, state: stateRow?.attention_acknowledged === true || stateRow?.cooldown_acknowledged === true, fixture: fixtureRow?.attention_acknowledged === true || fixtureRow?.cooldown_acknowledged === true}, before: pseudo('::before'), after: pseudo('::after')};
         };
-        window.__subwindowGrayClickSamples = Object.fromEntries(cases.map(item => [String(item.window_index), [read(item.window_index, 'before')]]));
-        window.__subwindowGrayClicked = new Set();
-        document.addEventListener('pointerdown', event => {
-          const button = event.target?.closest?.('[data-window-session="1"][data-window-index]');
+        const realDateNow = Date.now.bind(Date);
+        const realSetTimeout = window.setTimeout.bind(window);
+        const originalHandleWindowStepButtonClick = handleWindowStepButtonClick;
+        const originalShowAgentWindowAcknowledgementVisual = showAgentWindowAcknowledgementVisual;
+        const clock = {nowMs: realDateNow()};
+        Date.now = () => clock.nowMs;
+        const harness = {
+          clock,
+          read,
+          findButton,
+          handled: [],
+          retirements: {},
+          samples: Object.fromEntries(cases.map(item => [String(item.window_index), [read(item.window_index, 'before')]])),
+          suppressAcknowledgementVisual: () => { showAgentWindowAcknowledgementVisual = () => false; },
+          restoreAcknowledgementVisual: () => { showAgentWindowAcknowledgementVisual = originalShowAgentWindowAcknowledgementVisual; },
+          restore: () => {
+            Date.now = realDateNow;
+            handleWindowStepButtonClick = originalHandleWindowStepButtonClick;
+            showAgentWindowAcknowledgementVisual = originalShowAgentWindowAcknowledgementVisual;
+          },
+        };
+        window.__subwindowGrayHarness = harness;
+        handleWindowStepButtonClick = function (event) {
+          const button = event?.currentTarget?.closest?.('[data-window-index]') || event?.target?.closest?.('[data-window-index]');
           const index = Number(button?.dataset?.windowIndex);
-            const samples = window.__subwindowGrayClickSamples[String(index)];
-            if (!samples || window.__subwindowGrayClicked.has(index)) return;
-                    window.__subwindowGrayClicked.add(index);
-                    const clickedAt = performance.now();
-                    const captureAt = (label, currentTime) => {
-                      refreshAgentWindowActivityDisplays();
-                      const dot = findButton(index)?.querySelector('.agent-window-status-dot');
-                      dot?.style.setProperty('--agent-status-acknowledgement-delay', '0s');
-                      const animation = dot?.getAnimations().find(item => item.animationName === 'agent-status-acknowledgement-fade');
-                      if (animation) {
-                        animation.pause();
-                        animation.currentTime = currentTime;
-                      }
-                      samples.push(read(index, label));
-                    };
-                    const captureSettled = () => {
-                      refreshAgentWindowActivityDisplays();
-                      const sample = read(index, 'settled');
-              if (!sample.gray || performance.now() - clickedAt >= 3000) samples.push(sample);
-              else setTimeout(captureSettled, 100);
+          const samples = harness.samples[String(index)];
+          if (!samples || harness.handled.includes(index)) {
+            originalHandleWindowStepButtonClick(event);
+            return;
+          }
+          const scheduled = new Map();
+          window.setTimeout = function (handler, delay, ...rest) {
+            const id = realSetTimeout(handler, delay, ...rest);
+            scheduled.set(id, handler);
+            return id;
+          };
+          try {
+            originalHandleWindowStepButtonClick(event);
+          } finally {
+            window.setTimeout = realSetTimeout;
+          }
+          // Only the retirement timer moves under test control. The record names its own timer id,
+          // so the deferred acknowledgement POST and the status-refresh timers keep production's
+          // schedule, and the callback captured here is the exact one the product would have run.
+          for (const record of agentWindowActivityRecords.values()) {
+            const visual = record.acknowledgementVisual;
+            if (!visual || !scheduled.has(visual.timer)) continue;
+            harness.retirements[String(index)] = {
+              run: scheduled.get(visual.timer),
+              untilMs: visual.untilMs,
+              startedAtMs: visual.startedAtMs,
+              durationMs: visual.durationMs,
             };
-                setTimeout(() => {
-                  captureAt('100ms', 100);
-                  captureAt('500ms', 500);
-                  captureAt('1000ms', 1000);
-                }, 0);
-            setTimeout(captureSettled, 1400);
-        }, {capture: true});
-        return window.__subwindowGrayClickSamples;
+            clearTimeout(visual.timer);
+          }
+          harness.handled.push(index);
+          samples.push(read(index, 'immediate'));
+        };
+        return {handled: harness.handled, retirements: Object.keys(harness.retirements)};
         """,
         cases,
+        SUBWINDOW_GRAY_ACKNOWLEDGEMENT_DURATION_MS,
+        SUBWINDOW_GRAY_ACKNOWLEDGEMENT_STEP_COUNT,
     )
-    for case in cases:
-        selector = f'[data-window-session="1"][data-window-index="{case["window_index"]}"]'
-        click_visible_selector(browser, selector)
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script("return Object.values(window.__subwindowGrayClickSamples || {}).every(samples => samples.length === 5)")
+
+
+def click_subwindow_gray_button(browser, window_index):
+    """Click one sub-window button and assert the product handled it synchronously."""
+
+    click_visible_selector(browser, f'[data-window-session="1"][data-window-index="{window_index}"]')
+    handled = browser.execute_script("return window.__subwindowGrayHarness.handled;")
+    assert handled and handled[-1] == window_index, handled
+
+
+def capture_subwindow_gray_paint(browser, positions=SUBWINDOW_GRAY_PAINT_POSITIONS_MS):
+    """Sample the acknowledgement fade at fixed animation positions instead of wall-clock ones."""
+
+    return browser.execute_script(
+        """
+        const harness = window.__subwindowGrayHarness;
+        for (const index of Object.keys(harness.samples)) {
+          for (const position of arguments[0]) {
+            refreshAgentWindowActivityDisplays();
+            const dot = harness.findButton(Number(index))?.querySelector('.agent-window-status-dot');
+            dot?.style.setProperty('--agent-status-acknowledgement-delay', '0s');
+            const animation = dot?.getAnimations().find(item => item.animationName === 'agent-status-acknowledgement-fade');
+            if (animation) {
+              animation.pause();
+              animation.currentTime = position;
+            }
+            harness.samples[index].push(harness.read(Number(index), `${position}ms`));
+          }
+        }
+        return harness.samples;
+        """,
+        list(positions),
     )
-    samples_by_window = browser.execute_script("return window.__subwindowGrayClickSamples")
+
+
+def expire_subwindow_gray_acknowledgements(browser, window_indexes):
+    """Run the product's own retirement callback for the named windows, then sample removal."""
+
+    return browser.execute_script(
+        """
+        const harness = window.__subwindowGrayHarness;
+        const ran = [];
+        for (const index of arguments[0].map(String)) {
+          const retirement = harness.retirements[index];
+          if (!retirement) continue;
+          retirement.run();
+          harness.clock.nowMs = Math.max(harness.clock.nowMs, retirement.untilMs);
+          ran.push(Number(index));
+        }
+        refreshAgentWindowActivityDisplays();
+        for (const index of Object.keys(harness.samples)) harness.samples[index].push(harness.read(Number(index), 'removed'));
+        return {ran, samples: harness.samples};
+        """,
+        list(window_indexes),
+    )
+
+
+def assert_subwindow_gray_acknowledgement_sequence(case, samples, expected_gray):
+    """Assert one sub-window's red/yellow -> gray -> removed acknowledgement sequence."""
+
+    evidence = {"case": case, "samples": samples}
+    duration_seconds = SUBWINDOW_GRAY_ACKNOWLEDGEMENT_DURATION_MS / 1000
+    assert [sample["label"] for sample in samples] == SUBWINDOW_GRAY_SAMPLE_LABELS, evidence
+    before = samples[0]
+    assert before["gray"] is False and before["pulsing"] is case["pulsing"] and before["fill"] == case["expected_fill"], evidence
+    for sample in samples[1:-1]:
+        detail = {"case": case, "sample": sample}
+        assert sample["gray"] is True and sample["pulsing"] is False and sample["fill"] == "#9aa5b1", f"acknowledgement sample {sample['label']!r} must render gray: {detail}"
+        assert sample["animationName"] == "agent-status-acknowledgement-fade", detail
+        assert sample["animationDuration"] == f"{duration_seconds:g}s", detail
+        assert -duration_seconds <= float(sample["animationDelay"].removesuffix("s")) <= 0, detail
+        assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith(f"steps({SUBWINDOW_GRAY_ACKNOWLEDGEMENT_STEP_COUNT}"), detail
+        assert float(sample["before"]["width"].removesuffix("px")) > 0, detail
+        assert float(sample["before"]["height"].removesuffix("px")) > 0, detail
+        assert sample["before"]["background"] == expected_gray, detail
+        if case["tone"] == "cooldown":
+            assert float(sample["after"]["width"].removesuffix("px")) > 0, detail
+            assert float(sample["after"]["height"].removesuffix("px")) > 0, detail
+            assert sample["after"]["background"] == expected_gray, detail
+    paint = samples[2:-1]
+    assert all(earlier["opacity"] > later["opacity"] for earlier, later in zip(paint, paint[1:])), evidence
+    assert paint[-1]["opacity"] > 0, evidence
+    assert paint[0]["opacity"] >= 0.8 and paint[-1]["opacity"] <= 0.6, evidence
+    assert paint[0]["opacity"] - paint[-1]["opacity"] >= 0.4, evidence
+    removed = samples[-1]
+    assert removed["gray"] is False and removed["fill"] == "", f"acknowledgement must be removed once the retirement callback runs: {{'case': {case}, 'sample': {removed}}}"
+
+
+def test_subwindow_attention_turns_gray_across_tmux_readback_before_removal(browser, tmp_path):
+    cases = subwindow_gray_cases(2, 3, 4, 5)
+    window_indexes = [case["window_index"] for case in cases]
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    install_subwindow_gray_harness(browser, cases)
+    for window_index in window_indexes:
+        click_subwindow_gray_button(browser, window_index)
+    retirements = browser.execute_script("return window.__subwindowGrayHarness.retirements;")
+    assert sorted(int(index) for index in retirements) == window_indexes, retirements
+    # The promised gray interval stays part of the contract; the test owns when it elapses, not how
+    # promptly a contended renderer got around to running the timer that would have elapsed it.
+    for index, retirement in retirements.items():
+        assert retirement["durationMs"] == SUBWINDOW_GRAY_ACKNOWLEDGEMENT_DURATION_MS, (index, retirement)
+        assert retirement["untilMs"] - retirement["startedAtMs"] == SUBWINDOW_GRAY_ACKNOWLEDGEMENT_DURATION_MS, (index, retirement)
+    capture_subwindow_gray_paint(browser)
+    samples_by_window = expire_subwindow_gray_acknowledgements(browser, window_indexes)["samples"]
+    browser.execute_script("window.__subwindowGrayHarness.restore();")
     expected_gray = browser.execute_script(
         "return window.__yolomuxTestHelpers.probePaint('background:var(--muted)').background"
     )
     for case in cases:
-        samples = samples_by_window[str(case["window_index"])]
-        evidence = {"case": case, "samples": samples}
-        assert samples[0]["gray"] is False and samples[0]["pulsing"] is case["pulsing"] and samples[0]["fill"] == case["expected_fill"], evidence
-        for sample in samples[1:4]:
-            assert sample["gray"] is True and sample["pulsing"] is False and sample["fill"] == "#9aa5b1", evidence
-            assert sample["animationName"] == "agent-status-acknowledgement-fade", evidence
-            assert sample["animationDuration"] == "1.2s", evidence
-            assert -1.2 <= float(sample["animationDelay"].removesuffix("s")) <= 0, evidence
-            assert sample["animationIterationCount"] == "1" and sample["animationTimingFunction"].startswith("steps(10"), evidence
-            assert float(sample["before"]["width"].removesuffix("px")) > 0, evidence
-            assert float(sample["before"]["height"].removesuffix("px")) > 0, evidence
-            assert sample["before"]["background"] == expected_gray, evidence
-            if case["tone"] == "cooldown":
-                assert float(sample["after"]["width"].removesuffix("px")) > 0, evidence
-                assert float(sample["after"]["height"].removesuffix("px")) > 0, evidence
-                assert sample["after"]["background"] == expected_gray, evidence
-        assert samples[1]["opacity"] > samples[2]["opacity"] > samples[3]["opacity"] > 0, evidence
-        assert samples[1]["opacity"] >= 0.8 and samples[3]["opacity"] <= 0.6, evidence
-        assert samples[1]["opacity"] - samples[3]["opacity"] >= 0.4, evidence
-        assert samples[4]["gray"] is False and samples[4]["fill"] == "", {
-            "case": case,
-            "acknowledgement": samples[4]["acknowledgement"],
-            "gray": samples[4]["gray"],
-            "fill": samples[4]["fill"],
-        }
+        assert_subwindow_gray_acknowledgement_sequence(case, samples_by_window[str(case["window_index"])], expected_gray)
+
+
+def test_subwindow_attention_gray_sequence_detects_missing_gray_and_missing_removal(browser, tmp_path):
+    """Negative control: the deterministic sequence must go red on each invariant it claims to hold.
+
+    A gray that never arrives and a marker that never retires are the two failures the positive
+    test exists to catch, so both are produced here for real in the running page and the shared
+    checker is required to reject each one by name.
+    """
+
+    cases = subwindow_gray_cases(2, 4)
+    missing_gray_case, missing_removal_case = cases
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    install_subwindow_gray_harness(browser, cases)
+    browser.execute_script("window.__subwindowGrayHarness.suppressAcknowledgementVisual();")
+    click_subwindow_gray_button(browser, missing_gray_case["window_index"])
+    browser.execute_script("window.__subwindowGrayHarness.restoreAcknowledgementVisual();")
+    click_subwindow_gray_button(browser, missing_removal_case["window_index"])
+    retirements = browser.execute_script("return window.__subwindowGrayHarness.retirements;")
+    assert sorted(int(index) for index in retirements) == [missing_removal_case["window_index"]], retirements
+    capture_subwindow_gray_paint(browser)
+    # No window is expired, so the marker clicked with a live visual never retires.
+    samples_by_window = expire_subwindow_gray_acknowledgements(browser, [])["samples"]
+    browser.execute_script("window.__subwindowGrayHarness.restore();")
+    expected_gray = browser.execute_script(
+        "return window.__yolomuxTestHelpers.probePaint('background:var(--muted)').background"
+    )
+    with pytest.raises(AssertionError) as missing_gray:
+        assert_subwindow_gray_acknowledgement_sequence(missing_gray_case, samples_by_window[str(missing_gray_case["window_index"])], expected_gray)
+    assert "acknowledgement sample 'immediate' must render gray" in str(missing_gray.value)
+    with pytest.raises(AssertionError) as missing_removal:
+        assert_subwindow_gray_acknowledgement_sequence(missing_removal_case, samples_by_window[str(missing_removal_case["window_index"])], expected_gray)
+    assert "acknowledgement must be removed once the retirement callback runs" in str(missing_removal.value)
 
 
 def test_session_tabs_reserve_an_invisible_status_ball_without_number_padding(browser, tmp_path):
@@ -1347,8 +1603,9 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
             dispatch('pointerup', startX + Math.max(60, rect.width * 0.08), startY + 2, 44);
             const heldZoomed = jsDebugGraphZoomDomain !== null;
             clearDebugGraphZoom();
+            const currentSvg = panel.querySelector('.js-debug-line-chart');
             done({
-              touchAction: getComputedStyle(svg).touchAction,
+              touchAction: getComputedStyle(currentSvg).getPropertyValue('touch-action').trim(),
               wiggle,
               vertical,
               horizontal,
@@ -1370,7 +1627,6 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
         const svg = panel.querySelector('.js-debug-line-chart');
         const rect = svg.getBoundingClientRect();
         graph.dataset.jsDebugGraphRenderedAt = '1';
-        window.__trustedStatsTouchSvg = svg;
         return {
           start: {x: rect.left + rect.width * 0.2, y: rect.top + rect.height * 0.5},
           end: {x: rect.left + rect.width * 0.8, y: rect.top + rect.height * 0.5},
@@ -1385,7 +1641,19 @@ def test_current_stats_touch_charts_distinguish_scroll_wiggle_and_deliberate_zoo
         "Input.dispatchTouchEvent",
         {"type": "touchStart", "touchPoints": [touch_point(points["start"]["x"], points["start"]["y"])]},
     )
-    browser.execute_async_script("const done = arguments[0]; setTimeout(done, 220);")
+    armed = browser.execute_async_script(
+        """
+        const done = arguments[0];
+        setTimeout(() => {
+          window.__trustedStatsTouchSvg = jsDebugGraphSelectionState?.svg || null;
+          done({
+            selecting: jsDebugGraphSelectionState !== null,
+            connected: window.__trustedStatsTouchSvg?.isConnected === true,
+          });
+        }, 220);
+        """
+    )
+    assert armed == {"selecting": True, "connected": True}, armed
     for step in range(1, 9):
         fraction = step / 8
         x = points["start"]["x"] + (points["end"]["x"] - points["start"]["x"]) * fraction
@@ -1556,7 +1824,7 @@ def test_current_stats_resolution_switch_keeps_old_chart_through_pending_watchdo
             requests.push(resolution);
             if (resolution === 300 && ++targetAttempts <= 4) {
               return {
-                status: 503,
+                status: 202,
                 json: async () => ({status: 'pending', retry_after_seconds: 1}),
               };
             }
@@ -1827,158 +2095,1067 @@ def test_current_stats_api_sse_log_preserves_reader_scroll_in_place_and_on_rebui
     assert result["bottomDistance"] <= 1, result
 
 
-def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path):
-    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+def test_current_stats_logs_visible_polling_refresh_scroll_and_narrow_layout(browser, tmp_path, monkeypatch):
+    secret = "fixture-share-token-never-log"
+    socket_path = tmp_path / "watchd-producer.sock"
+    watchd_client = WatchClient(socket_path=socket_path)
+    watchd_logs = ServerLogRing()
+
+    def fail_watchd_request(*_args, **_kwargs):
+        raise TimeoutError("watchd wait_revision response-read timeout after 2.2s")
+
+    with monkeypatch.context() as producer_patch:
+        producer_patch.setattr(local_service_client_module, "local_service_request", fail_watchd_request)
+        producer_patch.setattr(local_service_client_module, "emit_server_log", watchd_logs.emit)
+        watchd_response = watchd_client.wait_revision("fixture-epoch", 7, timeout=1.2)
+    watchd_records = watchd_logs.payload()["logs"]
+    assert watchd_response["_transport_error"] == "timeout"
+    assert len(watchd_records) == 1
+    watchd_record = watchd_records[0]
+    assert watchd_record["source"] == "local-service:watchd"
+    assert watchd_record["category"] == "transport"
+    assert watchd_record["route"] == "local-service:watchd"
+    assert watchd_record["event"] == "wait_revision"
+    assert watchd_record["delivery"] == "timeout"
+    assert watchd_record["requestId"]
+    assert "action=wait_revision" in watchd_record["message"]
+    assert "client_elapsed_ms=" in watchd_record["message"]
+    assert "TimeoutError: watchd wait_revision response-read timeout" in watchd_record["message"]
+
+    register_browser_new_document_script(
+        browser,
+        """
+        Object.defineProperty(globalThis, 'YOLOmuxStatsCurrent', {
+          configurable: true,
+          get() { return null; },
+          set(value) { globalThis.__logsFixtureStatsCurrent = value; },
+        });
+        """,
+    )
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1")
     WebDriverWait(browser, 8).until(
         lambda driver: driver.execute_script(
-            "return document.querySelectorAll('[data-js-debug-subtab]').length === 4;"
-        )
-    )
-    browser.execute_script("document.querySelector('[data-js-debug-subtab=\"logs\"]').click();")
-    logs = WebDriverWait(browser, 8).until(
-        lambda driver: driver.execute_script(
             """
-            const view = document.querySelector('[data-js-debug-subview="logs"]');
-            const text = view?.textContent?.trim() || '';
-            return view && !view.hidden && text.length > 0 ? {
-              visible: view.offsetParent !== null,
-              toolbar: Boolean(view.querySelector('.js-debug-logs-toolbar')),
-              levels: view.querySelectorAll('[data-js-debug-log-level]').length,
-              list: Boolean(view.querySelector('.js-debug-log-list')),
-            } : false;
-            """
-        )
-    )
-    assert logs == {"visible": True, "toolbar": True, "levels": 4, "list": True}, logs
-    return
-    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
-    WebDriverWait(browser, 5).until(
-        lambda driver: driver.execute_script(
-            """
-            return typeof pollJsCurrentStatsLogs === 'function'
-              && document.querySelector('[data-current-stats-subtab="logs"]') !== null;
+            return typeof recordJsDebugEvent === 'function'
+              && typeof applyLayoutSlots === 'function'
+              && typeof debugLogsTextForClipboard === 'function'
+              && document.querySelector('.js-debug-panel') === null;
             """
         )
     )
     metrics = browser.execute_async_script(
         r"""
         const done = arguments[arguments.length - 1];
+        const watchdRecord = arguments[0];
         const originalFetch = window.fetch;
+        const originalApiFetchJson = apiFetchJson;
+        const originalApiFetchJsonQuiet = apiFetchJsonQuiet;
+        const originalRunDebugCopy = runDebugCopy;
+        const originalDateNow = Date.now;
+        const originalStatsCurrent = globalThis.YOLOmuxStatsCurrent;
+        const statsCurrentModule = globalThis.__logsFixtureStatsCurrent;
         const style = document.createElement('style');
         style.textContent = `
-          [data-current-stats-subview="logs"] {
-            height: 120px !important;
-            overflow: auto !important;
-            padding-bottom: 160px !important;
-          }
-          [data-current-stats-logs] {
-            height: 80px !important;
-            max-height: 80px !important;
+          [data-js-debug-log-list] {
+            height: 96px !important;
+            max-height: 96px !important;
             overflow: auto !important;
           }
+          [data-js-debug-log-entry] { min-height: 72px !important; }
         `;
         document.head.appendChild(style);
-        const requests = {system: 0, logs: 0};
-        const logsPayload = revision => ({
-          logs: Array.from({length: 120}, (_unused, index) => ({
-            revision,
-            marker: `log-revision-${revision}`,
-            index,
-            message: `bounded log ${index} ${'y'.repeat(100)}`,
-          })),
+        const requests = {logs: 0, stats: 0, activity: 0};
+        const secret = 'fixture-share-token-never-log';
+        const tokenized = label => `${label}?token=${secret}`;
+        const countSecret = value => JSON.stringify(value).split(secret).length - 1;
+        const serverRecords = [];
+        let failNextStatsSnapshot = false;
+        let failNextActivity = false;
+        let initialPhase = null;
+        const logsPayload = () => ({
+          ok: true,
+          epoch: 'fixture-server-log-epoch',
+          logs: serverRecords.flatMap(record => [record, record]),
+          sequence: serverRecords.at(-1)?.id || 0,
+          capacity: 500,
+          dropped: {count: 0, first_id: null, last_id: null, by_level: {}},
         });
         window.fetch = (url, options = {}) => {
           const path = new URL(String(url), location.href).pathname;
           if (path === '/api/logs') {
             requests.logs += 1;
-            return Promise.resolve(new Response(JSON.stringify(logsPayload(requests.logs)), {
+            return Promise.resolve(new Response(JSON.stringify(logsPayload()), {
               status: 200,
               headers: {'Content-Type': 'application/json'},
             }));
           }
-          if (path === '/api/system-status') {
-            requests.system += 1;
-            return Promise.resolve(new Response(JSON.stringify({marker: 'unexpected system poll'}), {
-              status: 200,
+          if (path === '/api/stats-snapshot' && failNextStatsSnapshot) {
+            failNextStatsSnapshot = false;
+            requests.stats += 1;
+            return Promise.resolve(new Response(JSON.stringify({error: 'stats snapshot unavailable <script>'}), {
+              status: 503,
+              statusText: 'Service Unavailable',
+              headers: {'Content-Type': 'application/json'},
+            }));
+          }
+          // The activity ledger behind the tabber activity graph is the one activity data source a
+          // browser can still fail against; /api/activity-summary is admission-disabled process-wide.
+          if (path === '/api/activity' && failNextActivity) {
+            failNextActivity = false;
+            requests.activity += 1;
+            return Promise.resolve(new Response(JSON.stringify({error: 'activity ledger unavailable <script>'}), {
+              status: 503,
+              statusText: 'Service Unavailable',
               headers: {'Content-Type': 'application/json'},
             }));
           }
           return originalFetch(url, options);
         };
         (async () => {
-          const panel = document.querySelector('.js-debug-panel');
-          await pollJsCurrentStatsSystem();
-          await pollJsCurrentStatsLogs();
-          const hiddenRequests = {...requests};
-
-          panel.querySelector('[data-current-stats-subtab="logs"]').click();
+          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
+          jsDebugCurrentObservationState.timer = null;
+          const uploadCaptures = [];
+          apiFetchJsonQuiet = async (url, options = {}) => {
+            if (new URL(String(url), location.href).pathname !== '/api/stats-observations') {
+              return originalApiFetchJsonQuiet(url, options);
+            }
+            const body = JSON.parse(options.body);
+            uploadCaptures.push(body);
+            return {
+              ok: true,
+              accepted: body.observations.length,
+              duplicates: 0,
+              observation_receipts: body.observations.map(observation => ({
+                event_id: observation.event_id,
+                disposition: 'accepted',
+              })),
+            };
+          };
+          await flushJsDebugCurrentObservations();
+          uploadCaptures.length = 0;
+          clearJsDebugEvents();
+          Date.now = () => Date.parse('2026-01-15T12:34:55.000Z');
+          recordJsDebugStatsDiagnostic('warning', 'fixture warning <script>', {
+            category: 'fixture_warning',
+            requestId: tokenized('r-warning'),
+            route: '/api/fixture-warning',
+            eventType: 'fixture-warning',
+            deliveryOutcome: 'failed',
+          });
+          Date.now = () => Date.parse('2026-01-15T12:34:56.000Z');
+          recordJsDebugEvent('client_failure', {
+            category: 'fixture_error',
+            message: 'fixture error <script>',
+            requestId: tokenized('r-error'),
+            route: '/api/fixture-error',
+            eventType: 'fixture-error',
+            deliveryOutcome: 'failed',
+          });
+          const initialProducerEvents = jsDebugEvents.filter(event => (
+            event?.category === 'fixture_warning' || event?.category === 'fixture_error'
+          ));
+          Date.now = originalDateNow;
+          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
+          jsDebugCurrentObservationState.timer = null;
+          await flushJsDebugCurrentObservations();
+          const initialHiddenPoll = await pollDebugLogs();
+          const initialHiddenRequests = requests.logs;
+          loadJsDebugStatsUiPreferences();
+          jsDebugSubTab = 'logs';
+          saveJsDebugStatsUiPreferences();
+          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
+            focusSession: debugPaneItemId,
+            prune: false,
+            forceFull: true,
+          });
           await window.__yolomuxTestWaitFor(
             () => requests.logs === 1
-              && panel.querySelector('[data-current-stats-logs]')?.textContent.includes('log-revision-1'),
-            {timeoutMs: 2000, intervalMs: 10, description: 'current Logs first visible response'},
+              && document.querySelectorAll('article[data-js-debug-log-entry]').length === 2,
+            {timeoutMs: 3000, intervalMs: 10, description: 'exact two-row rendered client Logs phase'},
           );
-          const view = panel.querySelector('[data-current-stats-subview="logs"]');
-          let list = view.querySelector('[data-current-stats-logs]');
-          view.scrollTop = 65;
-          list.scrollTop = 50;
-          const scrollBefore = {view: view.scrollTop, list: list.scrollTop};
-          await pollJsCurrentStatsSystem();
-          const systemWhileLogsVisible = requests.system;
-          view.querySelector('[data-current-stats-logs-refresh]').click();
+          const initialView = document.querySelector('[data-js-debug-subview="logs"]');
+          const initialPhaseRows = () => [...initialView.querySelectorAll('[data-js-debug-log-entry]')].map(row => ({
+            id: row.dataset.jsDebugLogId || '',
+            level: row.dataset.level || '',
+            source: row.querySelector('[data-js-debug-log-source]')?.textContent.trim() || '',
+            category: row.querySelector('[data-js-debug-log-category]')?.textContent.trim() || '',
+            message: row.querySelector('.js-debug-log-message')?.textContent || '',
+            requestId: row.querySelector('[data-js-debug-log-request-id]')?.textContent.trim() || '',
+            route: row.querySelector('[data-js-debug-log-route]')?.textContent.trim() || '',
+            event: row.querySelector('[data-js-debug-log-event]')?.textContent.trim() || '',
+            delivery: row.querySelector('[data-js-debug-log-delivery]')?.textContent.trim() || '',
+            articleChildren: row.querySelectorAll('article, script').length,
+          }));
+          const twoRows = initialPhaseRows();
+          const initialWarningButton = initialView.querySelector('[data-js-debug-log-level="warning"]');
+          const initialErrorButton = initialView.querySelector('[data-js-debug-log-level="error"]');
+          initialWarningButton.click();
+          const twoRowErrorOnly = initialPhaseRows();
+          initialWarningButton.click();
+          initialErrorButton.click();
+          const twoRowWarningOnly = initialPhaseRows();
+          initialErrorButton.click();
+          let initialCopied = '';
+          runDebugCopy = text => { initialCopied = String(text); return Promise.resolve(true); };
+          initialView.querySelector('[data-js-debug-logs-copy]').click();
+          await Promise.resolve();
+          runDebugCopy = originalRunDebugCopy;
+          const initialStorageSnapshot = {
+            local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
+            session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
+          };
+          initialPhase = {
+            hiddenPoll: initialHiddenPoll,
+            hiddenRequests: initialHiddenRequests,
+            rows: twoRows,
+            errorOnly: twoRowErrorOnly,
+            warningOnly: twoRowWarningOnly,
+            copied: initialCopied,
+            secretOccurrences: {
+              retainedClientCollection: countSecret(jsDebugEvents),
+              dom: countSecret(initialView.innerHTML),
+              clipboard: countSecret(initialCopied),
+              storage: countSecret(initialStorageSnapshot),
+              upload: countSecret(uploadCaptures),
+            },
+            uploadObservationCount: uploadCaptures.reduce((count, batch) => count + batch.observations.length, 0),
+            clientProducerIds: Object.fromEntries(
+              initialProducerEvents.map(event => [event.category, event.id]),
+            ),
+          };
+          applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
           await window.__yolomuxTestWaitFor(
-            () => requests.logs === 2
-              && view.querySelector('[data-current-stats-logs]')?.textContent.includes('log-revision-2'),
-            {timeoutMs: 2000, intervalMs: 10, description: 'current Logs explicit refresh'},
+            () => !itemIsActivePaneTab(debugPaneItemId),
+            {timeoutMs: 2000, intervalMs: 10, description: 'two-row Logs phase closed'},
           );
-          list = view.querySelector('[data-current-stats-logs]');
-          const scrollAfter = {view: view.scrollTop, list: list.scrollTop};
-          const status = view.querySelector('[role="status"]').textContent.replace(/\s+/g, ' ').trim();
+          clearRuntimeInterval('debug-logs');
+          await window.__yolomuxTestWaitFor(
+            () => jsDebugLogsState.inFlight === false,
+            {timeoutMs: 2000, intervalMs: 10, description: 'two-row Logs poll settled'},
+          );
+          jsDebugLogsState.payload = [];
+          jsDebugLogsState.error = '';
+          jsDebugLogsState.updatedAt = 0;
+          requests.logs = 0;
+          clearJsDebugEvents();
+          if (typeof statsCurrentModule?.createController !== 'function') {
+            throw new Error('fixture did not retain the YOLOmuxStatsCurrent module');
+          }
+          let statsNow = 0;
+          let nextStatsTimerId = 1;
+          const statsTimers = new Map();
+          const statsClock = {
+            now: () => statsNow,
+            setTimeout: (callback, delay) => {
+              const id = nextStatsTimerId++;
+              statsTimers.set(id, {at: statsNow + delay, callback});
+              return id;
+            },
+            clearTimeout: id => statsTimers.delete(id),
+          };
+          const advanceStatsClock = async milliseconds => {
+            const target = statsNow + milliseconds;
+            while (true) {
+              const due = [...statsTimers.entries()]
+                .filter(([_id, timer]) => timer.at <= target)
+                .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+              if (!due) break;
+              statsNow = due[1].at;
+              statsTimers.delete(due[0]);
+              due[1].callback();
+              await Promise.resolve();
+              await Promise.resolve();
+            }
+            statsNow = target;
+            await Promise.resolve();
+            await Promise.resolve();
+          };
+          const zeroCostDimensions = Object.fromEntries(
+            ['input', 'cache_read', 'cache_write_5m', 'cache_write_1h', 'output', 'other']
+              .map(name => [name, {tokens: 0, micro_usd: 0, api_list_micro_usd: 0}]),
+          );
+          const statsController = statsCurrentModule.createController({
+            capabilities: {
+              resolution_choices: [1, 10, 60, 300],
+              max_buckets: 600,
+              min_buckets: 12,
+              max_live_cadence_seconds: 60,
+              ranges: [{
+                range_seconds: 300,
+                auto_resolution_seconds: 1,
+                explicit_resolution_seconds: [1],
+                buckets: {1: 300},
+              }],
+            },
+            savedRange: 300,
+            savedResolution: 1,
+            clientId: 'rendered-logs-real-producer',
+            clock: statsClock,
+            onFailure: failure => recordJsDebugCurrentStatsFailure(failure),
+          });
+          Date.now = () => Date.parse('2026-01-15T12:34:57.000Z');
+          statsController.acceptSnapshot({
+            protocol_version: 2,
+            range_seconds: 300,
+            requested_resolution: 1,
+            resolution_seconds: 1,
+            window_start: 0,
+            window_end: 300,
+            generated_at: 300,
+            source_generation: 1,
+            cache_generation: 1,
+            rightmost_open: false,
+            buckets: [],
+            no_data: [],
+            cost_report: {
+              schema_version: 3,
+              total_micro_usd: 0,
+              total_api_list_micro_usd: 0,
+              total_tokens: 0,
+              dimensions: zeroCostDimensions,
+              priced: {atoms: 0, tokens: 0},
+              unpriced: {atoms: 0, tokens: 0},
+              models: [],
+              agents: [],
+              evidence: [],
+              catalog_revision: 0,
+              omissions: {models: 0, agents: 0, evidence: 0},
+              reasoning_available: false,
+            },
+          });
+          statsController.start();
+          await advanceStatsClock(4001);
+          statsController.stop();
+          Date.now = () => Date.parse('2026-01-15T12:34:58.000Z');
+          let statsSnapshotFailure = '';
+          try {
+            failNextStatsSnapshot = true;
+            await apiFetchJson(tokenized('/api/stats-snapshot'), {cache: 'no-store'});
+          } catch (error) {
+            statsSnapshotFailure = String(error?.message || error);
+          }
+          Date.now = () => Date.parse('2026-01-15T12:34:59.000Z');
+          failNextActivity = true;
+          await fetchTabberActivity({visible: true});
+          Date.now = originalDateNow;
+          // fetchTabberActivity keeps the last snapshot and swallows the rejection, so the retained
+          // api record is the only evidence the activity graph lost its data.
+          const activityEvent = jsDebugEvents.find(event => (
+            event?.type === 'api' && event?.endpoint === '/api/activity' && event?.status === 503
+          ));
+          const activityFailure = activityEvent === undefined ? null : {
+            endpoint: String(activityEvent.endpoint || ''),
+            status: activityEvent.status,
+            ok: activityEvent.ok,
+            method: String(activityEvent.method || ''),
+          };
+          // Two api producers share the 'api' category, so records are keyed by endpoint.
+          const producerKey = event => (
+            event?.type === 'api' ? `api:${event.endpoint}` : String(event?.category || event?.type || '')
+          );
+          const clientProducerEvents = jsDebugEvents.filter(event => (
+            event?.category === 'stats_stream'
+              || (event?.type === 'api'
+                && ['/api/stats-snapshot', '/api/activity'].includes(event?.endpoint)
+                && event?.status === 503)
+          ));
+          if (clientProducerEvents.length !== 3) {
+            throw new Error(`expected three client producer records, received ${clientProducerEvents.length}`);
+          }
+          serverRecords.push(watchdRecord);
+          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
+          jsDebugCurrentObservationState.timer = null;
+          await flushJsDebugCurrentObservations();
+          const hiddenPoll = await pollDebugLogs();
+          const hiddenRequests = requests.logs;
+
+          loadJsDebugStatsUiPreferences();
+          jsDebugSubTab = 'logs';
+          saveJsDebugStatsUiPreferences();
+          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
+            focusSession: debugPaneItemId,
+            prune: false,
+            forceFull: true,
+          });
+          await window.__yolomuxTestWaitFor(
+            () => itemIsActivePaneTab(debugPaneItemId)
+              && document.querySelector('[data-js-debug-subview="logs"]:not([hidden])'),
+            {timeoutMs: 2000, intervalMs: 10, description: 'three-producer Logs phase visible'},
+          );
+          await window.__yolomuxTestWaitFor(
+            () => jsDebugLogsState.inFlight === false,
+            {timeoutMs: 2000, intervalMs: 10, description: 'three-producer automatic Logs poll settled'},
+          );
+          await pollDebugLogs({force: true});
+          try {
+            await window.__yolomuxTestWaitFor(
+              () => requests.logs === 1
+                && document.querySelectorAll('article[data-js-debug-log-entry]').length === 4,
+              {timeoutMs: 3000, intervalMs: 10, description: 'rendered merged Logs rows'},
+            );
+              } catch (error) {
+                throw new Error(`${error.message}; state=${JSON.stringify({
+                  requests: requests.logs,
+                  rows: [...document.querySelectorAll('article[data-js-debug-log-entry]')].map(row => row.dataset.jsDebugLogId),
+                })}`);
+              }
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          refreshDebugPanelsFromEvents({force: true});
+          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          let panel = document.querySelector('.js-debug-panel');
+          let view = panel.querySelector('[data-js-debug-subview="logs"]');
+          let list = view.querySelector('[data-js-debug-log-list]');
+          const rowSnapshot = () => [...view.querySelectorAll('[data-js-debug-log-entry]')].map(row => ({
+            id: row.dataset.jsDebugLogId || '',
+            owner: row.dataset.jsDebugLogOwner || '',
+            level: row.dataset.level,
+            time: row.querySelector('time')?.textContent.trim() || '',
+            source: row.querySelector('[data-js-debug-log-source]')?.textContent.trim() || '',
+            category: row.querySelector('[data-js-debug-log-category]')?.textContent.trim() || '',
+            message: row.querySelector('.js-debug-log-message')?.textContent || '',
+            text: row.textContent.replace(/\s+/g, ' ').trim(),
+            requestId: row.querySelector('[data-js-debug-log-request-id]')?.textContent.trim() || '',
+            route: row.querySelector('[data-js-debug-log-route]')?.textContent.trim() || '',
+            event: row.querySelector('[data-js-debug-log-event]')?.textContent.trim() || '',
+            delivery: row.querySelector('[data-js-debug-log-delivery]')?.textContent.trim() || '',
+            tagName: row.tagName,
+            articleChildren: row.querySelectorAll('article, script').length,
+          }));
+          const initialRows = rowSnapshot();
+          const initialHtml = view.innerHTML;
+          const initialArticles = [...view.querySelectorAll('[data-js-debug-log-entry]')].map(row => row.outerHTML);
+          const levelGroup = view.querySelector('.js-debug-log-levels');
+          const freshSelection = {
+            levels: [...jsDebugLogsState.levels].sort(),
+            pressed: [...levelGroup.querySelectorAll('[data-js-debug-log-level]')]
+              .filter(button => button.getAttribute('aria-pressed') === 'true')
+              .map(button => button.dataset.jsDebugLogLevel)
+              .sort(),
+          };
+          const renderedSemantics = {
+            listTag: list.tagName,
+            listLabel: list.getAttribute('aria-label') || '',
+            levelGroupRole: levelGroup.getAttribute('role') || '',
+            levelGroupLabel: levelGroup.getAttribute('aria-label') || '',
+            rowTags: initialRows.map(row => row.tagName),
+          };
+          const normalizedRecords = debugMergedLogRecords();
+          const recognizedRecords = normalizedRecords.filter(record => (
+            clientProducerEvents.some(event => record.id === `client:${event.id}`)
+              || record.id === `server:${serverRecords[0].id}`
+          ));
+          const producerArticleCounts = Object.fromEntries(
+            recognizedRecords.map(record => [
+              record.id,
+              [...view.querySelectorAll('[data-js-debug-log-entry]')]
+                .filter(row => row.dataset.jsDebugLogId === record.id).length,
+            ]),
+          );
+
+          const warningButton = view.querySelector('[data-js-debug-log-level="warning"]');
+          const errorButton = view.querySelector('[data-js-debug-log-level="error"]');
+          warningButton.click();
+          const errorOnly = rowSnapshot();
+          warningButton.click();
+          errorButton.click();
+          const warningOnly = rowSnapshot();
+          errorButton.click();
+
+          list = view.querySelector('[data-js-debug-log-list]');
+          list.scrollTop = Math.min(60, list.scrollHeight - list.clientHeight);
+          const scrollBefore = list.scrollTop;
+          await pollDebugLogs({force: true});
+          list = view.querySelector('[data-js-debug-log-list]');
+          const scrollAfter = list.scrollTop;
+          const visibleRequests = requests.logs;
+
+          let copied = '';
+          runDebugCopy = text => { copied = String(text); return Promise.resolve(true); };
+          view.querySelector('[data-js-debug-logs-copy]').click();
+          await Promise.resolve();
 
           panel.style.width = '260px';
           panel.style.maxWidth = '260px';
           const panelRect = panel.getBoundingClientRect();
-          const listRect = list.getBoundingClientRect();
+          const listRect = view.querySelector('[data-js-debug-log-list]').getBoundingClientRect();
           const narrow = {
             listInside: listRect.left >= panelRect.left - 1 && listRect.right <= panelRect.right + 1,
-            listBounded: list.scrollWidth <= list.clientWidth + 1,
-            rowsWrap: [...list.querySelectorAll('li')].every(row => getComputedStyle(row).overflowWrap === 'anywhere'),
+            listBounded: listRect.width <= panelRect.width + 1,
+            rowsWrap: [...view.querySelectorAll('[data-js-debug-log-entry]')].every(row => getComputedStyle(row.querySelector('.js-debug-log-message')).overflowWrap === 'anywhere'),
           };
 
-          panel.querySelector('[data-current-stats-subtab="graph"]').click();
-          await pollJsCurrentStatsSystem();
-          await pollJsCurrentStatsLogs();
-          const requestsAfterHiddenPolls = {...requests};
+          applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
+          await window.__yolomuxTestWaitFor(
+            () => !itemIsActivePaneTab(debugPaneItemId),
+            {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats closed'},
+          );
+          const closePoll = await pollDebugLogs();
+          const requestsAfterClose = requests.logs;
+          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
+            focusSession: debugPaneItemId,
+            prune: false,
+            forceFull: true,
+          });
+          await window.__yolomuxTestWaitFor(
+            () => itemIsActivePaneTab(debugPaneItemId)
+              && document.querySelector('[data-js-debug-subview="logs"]:not([hidden])'),
+            {timeoutMs: 2000, intervalMs: 10, description: 'YO!stats reopened on Logs'},
+          );
+          panel = document.querySelector('.js-debug-panel');
+          view = panel.querySelector('[data-js-debug-subview="logs"]');
+          const reopenedRows = rowSnapshot();
+
+          view.querySelector('[data-js-debug-log-level="warning"]').click();
+          view.querySelector('[data-js-debug-log-level="error"]').click();
+          const emptySelection = {
+            size: jsDebugLogsState.levels.size,
+            rows: view.querySelectorAll('[data-js-debug-log-entry]').length,
+            pressed: [...view.querySelectorAll('[data-js-debug-log-level]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.jsDebugLogLevel),
+          };
+          const storageSnapshot = {
+            local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
+            session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
+          };
+          const secretOccurrences = {
+            retainedClientRecords: countSecret(clientProducerEvents),
+            retainedClientCollection: countSecret(jsDebugEvents),
+            retainedServerCollection: countSecret(jsDebugLogsState.payload),
+            normalizedRecords: countSecret(normalizedRecords),
+            renderedArticles: countSecret(initialArticles),
+            clipboard: countSecret(copied),
+            persistence: countSecret(storageSnapshot),
+            upload: countSecret(uploadCaptures),
+          };
+          clearJsDebugEvents();
+          jsDebugLogsState.payload = [];
           done({
+            hiddenPoll,
             hiddenRequests,
-            systemWhileLogsVisible,
-            logRequests: requests.logs,
-            requestsAfterHiddenPolls,
+            visibleRequests,
+            closePoll,
+            requestsAfterClose,
+            initialRows,
+            initialHtml,
+            freshSelection,
+            renderedSemantics,
+            producerArticleCounts,
+            errorOnly,
+            warningOnly,
             scrollBefore,
             scrollAfter,
-            status,
-            rowCount: list.querySelectorAll('li').length,
+            copied,
             narrow,
+            reopenedRows,
+            emptySelection,
+            recognizedRecords,
+            clientProducerIds: Object.fromEntries(
+              clientProducerEvents.map(event => [producerKey(event), event.id]),
+            ),
+            clientProducerRequestIds: Object.fromEntries(
+              clientProducerEvents.map(event => [producerKey(event), event.requestId || '']),
+            ),
+            statsSnapshotFailure,
+            statsSnapshotRequests: requests.stats,
+            activityFailure,
+            activityRequests: requests.activity,
+            activitySummaryEnabled,
+            receiptBarrier: jsDebugCurrentObservationReceiptBarrier(),
+            producerReceipts: [...jsDebugCurrentObservationState.receipts.values()]
+              .filter(receipt => [...initialProducerEvents, ...clientProducerEvents]
+                .some(event => event.id === receipt.eventId))
+              .map(receipt => ({key: receipt.key, eventId: receipt.eventId, status: receipt.status})),
+            secretOccurrences,
+            secret,
+            initialPhase,
           });
         })().catch(error => done({error: String(error?.stack || error)})).finally(() => {
           window.fetch = originalFetch;
+          apiFetchJson = originalApiFetchJson;
+          apiFetchJsonQuiet = originalApiFetchJsonQuiet;
+          runDebugCopy = originalRunDebugCopy;
+          Date.now = originalDateNow;
+          applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
+          globalThis.YOLOmuxStatsCurrent = originalStatsCurrent;
           style.remove();
           clearRuntimeInterval('debug-system');
           clearRuntimeInterval('debug-logs');
-          jsCurrentStatsAbortPoll('system');
-          jsCurrentStatsAbortPoll('logs');
+          if (jsDebugCurrentObservationState.timer !== null) clearTimeout(jsDebugCurrentObservationState.timer);
+          jsDebugCurrentObservationState.timer = null;
+          clearJsDebugEvents();
+          jsDebugLogsState.payload = [];
+        });
+        """,
+        watchd_record,
+    )
+    assert metrics.get("error") is None, metrics
+    initial_phase = metrics["initialPhase"]
+    redacted = "[redacted-share-token]"
+    initial_producer_ids = initial_phase["clientProducerIds"]
+    assert initial_producer_ids["fixture_error"] == initial_producer_ids["fixture_warning"] + 1, metrics
+    expected_two_rows = [
+        {
+            "id": f"client:{initial_producer_ids['fixture_error']}",
+            "level": "error",
+            "source": "browser",
+            "category": "fixture_error",
+            "message": "fixture error <script>",
+            "requestId": f"r-error?token={redacted}",
+            "route": "/api/fixture-error",
+            "event": "fixture-error",
+            "delivery": "failed",
+            "articleChildren": 0,
+        },
+        {
+            "id": f"client:{initial_producer_ids['fixture_warning']}",
+            "level": "warning",
+            "source": "browser",
+            "category": "fixture_warning",
+            "message": "YO!stats: fixture warning <script>",
+            "requestId": f"r-warning?token={redacted}",
+            "route": "/api/fixture-warning",
+            "event": "fixture-warning",
+            "delivery": "failed",
+            "articleChildren": 0,
+        },
+    ]
+    assert initial_phase["hiddenPoll"] is False and initial_phase["hiddenRequests"] == 0, metrics
+    assert initial_phase["rows"] == expected_two_rows, metrics
+    assert initial_phase["errorOnly"] == expected_two_rows[:1], metrics
+    assert initial_phase["warningOnly"] == expected_two_rows[1:], metrics
+    assert initial_phase["secretOccurrences"] == {"retainedClientCollection": 0, "dom": 0, "clipboard": 0, "storage": 0, "upload": 0}, metrics
+    assert initial_phase["uploadObservationCount"] == 2, metrics
+    for row in expected_two_rows:
+        assert row["message"] in initial_phase["copied"], metrics
+        assert f"request={row['requestId']}" in initial_phase["copied"], metrics
+    assert metrics["hiddenPoll"] is False and metrics["hiddenRequests"] == 0, metrics
+    assert metrics["visibleRequests"] == 2, metrics
+    assert metrics["closePoll"] is False and metrics["requestsAfterClose"] == 2, metrics
+    row_fields = ("id", "owner", "level", "source", "category", "message", "requestId", "route", "event", "delivery")
+    row_contract = lambda row: {field: row[field] for field in row_fields}
+    client_producer_ids = metrics["clientProducerIds"]
+    assert client_producer_ids["stats_stream"] > initial_producer_ids["fixture_error"], metrics
+    assert client_producer_ids["api:/api/stats-snapshot"] == client_producer_ids["stats_stream"] + 1, metrics
+    assert client_producer_ids["api:/api/activity"] == client_producer_ids["api:/api/stats-snapshot"] + 1, metrics
+    assert metrics["statsSnapshotFailure"] == "stats snapshot unavailable <script>", metrics
+    assert metrics["statsSnapshotRequests"] == 1, metrics
+    # /api/activity-summary is admission-disabled process-wide, so the tabber activity ledger is the
+    # only activity-graph data source whose failure a browser can still record.
+    assert metrics["activitySummaryEnabled"] is False, metrics
+    assert metrics["activityFailure"] == {
+        "endpoint": "/api/activity",
+        "status": 503,
+        "ok": False,
+        "method": "GET",
+    }, metrics
+    assert metrics["activityRequests"] == 1, metrics
+    activity_api_message = metrics["initialRows"][1]["message"]
+    assert activity_api_message.startswith("GET /api/activity?"), metrics
+    assert " | HTTP 503" in activity_api_message, metrics
+    assert "timings=" in activity_api_message, metrics
+    stats_api_message = metrics["initialRows"][2]["message"]
+    assert stats_api_message.startswith(f"GET /api/stats-snapshot?token={redacted} | HTTP 503"), metrics
+    assert "timings=" in stats_api_message, metrics
+    stats_warning_row = {
+        "id": f"client:{client_producer_ids['stats_stream']}",
+        "owner": "client",
+        "level": "warning",
+        "source": "browser",
+        "category": "stats_stream",
+        "message": "YO!stats stream generation stalled for more than 3s",
+        "requestId": "",
+        "route": "/api/stats-stream",
+        "event": "stats-generation",
+        "delivery": "stalled",
+    }
+    stats_api_error_row = {
+        "id": f"client:{client_producer_ids['api:/api/stats-snapshot']}",
+        "owner": "client",
+        "level": "error",
+        "source": "browser",
+        "category": "api",
+        "message": stats_api_message,
+        "requestId": metrics["clientProducerRequestIds"]["api:/api/stats-snapshot"],
+        "route": "/api/stats-snapshot",
+        "event": "",
+        "delivery": "",
+    }
+    activity_api_error_row = {
+        "id": f"client:{client_producer_ids['api:/api/activity']}",
+        "owner": "client",
+        "level": "error",
+        "source": "browser",
+        "category": "api",
+        "message": activity_api_message,
+        "requestId": metrics["clientProducerRequestIds"]["api:/api/activity"],
+        "route": "/api/activity",
+        "event": "",
+        "delivery": "",
+    }
+    watchd_error_row = {
+        "id": f"server:{watchd_record['id']}",
+        "owner": "server",
+        "level": "error",
+        "source": "local-service:watchd",
+        "category": "transport",
+        "message": watchd_record["message"],
+        "requestId": watchd_record["requestId"],
+        "route": "local-service:watchd",
+        "event": "wait_revision",
+        "delivery": "timeout",
+    }
+    assert len(metrics["initialRows"]) == 4, metrics
+    assert [row_contract(row) for row in metrics["initialRows"]] == [
+        watchd_error_row,
+        activity_api_error_row,
+        stats_api_error_row,
+        stats_warning_row,
+    ], metrics
+    assert [row_contract(row) for row in metrics["errorOnly"]] == [
+        watchd_error_row,
+        activity_api_error_row,
+        stats_api_error_row,
+    ], metrics
+    assert [row_contract(row) for row in metrics["warningOnly"]] == [stats_warning_row], metrics
+    assert metrics["freshSelection"] == {"levels": ["error", "warning"], "pressed": ["error", "warning"]}, metrics
+    assert metrics["renderedSemantics"]["listTag"] == "DIV", metrics
+    assert metrics["renderedSemantics"]["listLabel"], metrics
+    assert metrics["renderedSemantics"]["levelGroupRole"] == "group", metrics
+    assert metrics["renderedSemantics"]["levelGroupLabel"], metrics
+    assert metrics["renderedSemantics"]["rowTags"] == ["ARTICLE", "ARTICLE", "ARTICLE", "ARTICLE"], metrics
+    assert metrics["producerArticleCounts"] == {
+        activity_api_error_row["id"]: 1,
+        stats_api_error_row["id"]: 1,
+        stats_warning_row["id"]: 1,
+        watchd_error_row["id"]: 1,
+    }, metrics
+    assert metrics["receiptBarrier"]["quiescent"] is True, metrics
+    assert metrics["receiptBarrier"]["accepted"] == 5, metrics
+    assert metrics["receiptBarrier"]["pending"] == 0 and metrics["receiptBarrier"]["retrying"] == 0, metrics
+    assert [receipt["eventId"] for receipt in metrics["producerReceipts"]] == [
+        initial_producer_ids["fixture_warning"],
+        initial_producer_ids["fixture_error"],
+        client_producer_ids["stats_stream"],
+        client_producer_ids["api:/api/stats-snapshot"],
+        client_producer_ids["api:/api/activity"],
+    ], metrics
+    assert len({receipt["key"] for receipt in metrics["producerReceipts"]}) == 5, metrics
+    assert {receipt["status"] for receipt in metrics["producerReceipts"]} == {"accepted"}, metrics
+    assert metrics["reopenedRows"] == metrics["initialRows"], metrics
+    assert [row["time"] for row in metrics["initialRows"]] == [
+        watchd_record["wallTime"],
+        "2026-01-15 04:34:59 PST",
+        "2026-01-15 04:34:58 PST",
+        "2026-01-15 04:34:57 PST",
+    ], metrics
+    assert metrics["scrollBefore"] > 0 and metrics["scrollAfter"] == metrics["scrollBefore"], metrics
+    assert all(row["articleChildren"] == 0 for row in metrics["initialRows"]), metrics
+    assert metrics["secret"] not in metrics["initialHtml"], metrics
+    assert metrics["secret"] not in metrics["copied"], metrics
+    for row in (activity_api_error_row, stats_api_error_row, stats_warning_row, watchd_error_row):
+        assert row["message"] in metrics["copied"], metrics
+        if row["requestId"]:
+            assert f"request={row['requestId']}" in metrics["copied"], metrics
+    assert metrics["secretOccurrences"] == {
+        "retainedClientRecords": 0,
+        "retainedClientCollection": 0,
+        "retainedServerCollection": 0,
+        "normalizedRecords": 0,
+        "renderedArticles": 0,
+        "clipboard": 0,
+        "persistence": 0,
+        "upload": 0,
+    }, metrics
+    assert len(metrics["recognizedRecords"]) == 4, metrics
+    # Both api producers carry the same classification tuple, so this compares a sorted list rather
+    # than a set: a set would silently accept three records where four are required.
+    assert sorted(
+        (record["owner"], record["level"], record["source"], record["category"])
+        for record in metrics["recognizedRecords"]
+    ) == sorted([
+        ("client", "warning", "browser", "stats_stream"),
+        ("client", "error", "browser", "api"),
+        ("client", "error", "browser", "api"),
+        ("server", "error", "local-service:watchd", "transport"),
+    ]), metrics
+    assert {record["route"] for record in metrics["recognizedRecords"]} == {
+        "/api/stats-stream",
+        "/api/stats-snapshot",
+        "/api/activity",
+        "local-service:watchd",
+    }, metrics
+    recognized_by_id = {record["id"]: record for record in metrics["recognizedRecords"]}
+    assert redacted not in json.dumps(recognized_by_id[stats_warning_row["id"]]), metrics
+    assert redacted in recognized_by_id[stats_api_error_row["id"]]["message"], metrics
+    assert redacted not in json.dumps(recognized_by_id[activity_api_error_row["id"]]), metrics
+    assert redacted not in json.dumps(recognized_by_id[watchd_error_row["id"]]), metrics
+    assert all(metrics["narrow"].values()), metrics
+    assert metrics["emptySelection"] == {"size": 0, "rows": 0, "pressed": []}, metrics
+
+    reload_url = browser.current_url.split("?", 1)[0] + "?sessions=1"
+    browser.get(reload_url)
+    wait_for_live_runtime_bundle(browser, timeout=8, expected_url=reload_url)
+    browser.execute_script(
+        """
+        window.__logsReloadOriginalStatsCurrent = globalThis.YOLOmuxStatsCurrent;
+        globalThis.YOLOmuxStatsCurrent = null;
+        applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
+          focusSession: debugPaneItemId,
+          prune: false,
+          forceFull: true,
         });
         """
     )
-    assert metrics.get("error") is None, metrics
-    assert metrics["hiddenRequests"] == {"system": 0, "logs": 0}, metrics
-    assert metrics["systemWhileLogsVisible"] == 0, metrics
-    assert metrics["logRequests"] == 2, metrics
-    assert metrics["requestsAfterHiddenPolls"] == {"system": 0, "logs": 2}, metrics
-    assert metrics["scrollBefore"]["view"] > 0 and metrics["scrollBefore"]["list"] > 0, metrics
-    assert metrics["scrollAfter"] == metrics["scrollBefore"], metrics
-    assert metrics["status"] == "120 recent log records", metrics
-    assert metrics["rowCount"] == 120, metrics
-    assert all(metrics["narrow"].values()), metrics
+    reloaded = WebDriverWait(browser, 8).until(
+        lambda driver: driver.execute_script(
+            """
+            const view = document.querySelector('[data-js-debug-subview="logs"]');
+            if (!view || view.hidden) return false;
+            return {
+              levelSize: jsDebugLogsState.levels.size,
+              rows: view.querySelectorAll('[data-js-debug-log-entry]').length,
+              pressed: [...view.querySelectorAll('[data-js-debug-log-level]')].filter(button => button.getAttribute('aria-pressed') === 'true').map(button => button.dataset.jsDebugLogLevel),
+              secretOccurrences: JSON.stringify({
+                local: Object.fromEntries(Object.keys(localStorage).map(key => [key, localStorage.getItem(key)])),
+                session: Object.fromEntries(Object.keys(sessionStorage).map(key => [key, sessionStorage.getItem(key)])),
+              }).split('fixture-share-token-never-log').length - 1,
+            };
+            """
+        )
+    )
+    assert reloaded == {"levelSize": 0, "rows": 0, "pressed": [], "secretOccurrences": 0}, reloaded
+    browser.execute_script(
+        """
+        applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
+        globalThis.YOLOmuxStatsCurrent = window.__logsReloadOriginalStatsCurrent;
+        """
+    )
+
+    # The empty saved level set above hides rows while no records exist, so it cannot by itself prove
+    # the saved filter survived the reload.  Save a non-empty level set, reload with records present,
+    # and require the reloaded filter to drop the warning record and keep the error record.
+    persisted_logs = ServerLogRing()
+    persisted_error = persisted_logs.emit(
+        "error",
+        "local-service:watchd",
+        "persisted-filter watchd upsert response-read timeout after 0.5s",
+        category="transport",
+        request_id="r-persisted-error",
+        route="local-service:watchd",
+        event="upsert",
+        delivery="timeout",
+    )
+    persisted_warning = persisted_logs.emit(
+        "warning",
+        "local-service:statusd",
+        "persisted-filter statusd refresh degraded",
+        category="transport",
+        request_id="r-persisted-warning",
+        route="local-service:statusd",
+        event="refresh",
+        delivery="degraded",
+    )
+    persisted_payload = persisted_logs.payload()
+    # Duplicate every record so the reloaded merge still has to collapse repeats into one row each.
+    persisted_payload["logs"] = [dict(entry) for entry in persisted_payload["logs"] for _ in range(2)]
+    browser.execute_script(
+        """
+        globalThis.YOLOmuxStatsCurrent = null;
+        applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
+          focusSession: debugPaneItemId,
+          prune: false,
+          forceFull: true,
+        });
+        """
+    )
+    try:
+        WebDriverWait(browser, 8).until(
+            lambda driver: driver.execute_script(
+                """
+                const view = document.querySelector('[data-js-debug-subview="logs"]');
+                return Boolean(view) && !view.hidden;
+                """
+            )
+        )
+    except TimeoutException:
+        raise AssertionError(
+            "Logs subview never reopened before the non-empty level-set reload: "
+            + json.dumps(browser.execute_script(
+                """
+                return {
+                  panel: document.querySelector('.js-debug-panel') !== null,
+                  subTab: typeof jsDebugSubTab === 'string' ? jsDebugSubTab : '',
+                  views: [...document.querySelectorAll('[data-js-debug-subview]')]
+                    .map(view => ({name: view.dataset.jsDebugSubview, hidden: view.hidden})),
+                };
+                """
+            ))
+        )
+    saved_levels = browser.execute_script(
+        """
+        const view = document.querySelector('[data-js-debug-subview="logs"]');
+        view.querySelector('[data-js-debug-log-level="error"]').click();
+        const stored = JSON.parse(window.localStorage.getItem(jsDebugStatsUiPreferencesStorageKey) || '{}');
+        return {
+          levels: [...jsDebugLogsState.levels].sort(),
+          storedLevels: stored.logLevels,
+          storedSubTab: stored.subTab,
+          pressed: [...document.querySelectorAll('[data-js-debug-log-level]')]
+            .filter(button => button.getAttribute('aria-pressed') === 'true')
+            .map(button => button.dataset.jsDebugLogLevel)
+            .sort(),
+        };
+        """
+    )
+    assert saved_levels == {
+        "levels": ["error"],
+        "storedLevels": ["error"],
+        "storedSubTab": "logs",
+        "pressed": ["error"],
+    }, saved_levels
+    browser.get(reload_url)
+    wait_for_live_runtime_bundle(browser, timeout=8, expected_url=reload_url)
+    reloaded_poll = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const payload = arguments[0];
+        (async () => {
+          globalThis.YOLOmuxStatsCurrent = null;
+          applyLayoutSlots(layoutFromSessionList([debugPaneItemId]), {
+            focusSession: debugPaneItemId,
+            prune: false,
+            forceFull: true,
+          });
+          await window.__yolomuxTestWaitFor(
+            () => document.querySelector('[data-js-debug-subview="logs"]:not([hidden])') !== null,
+            {timeoutMs: 3000, intervalMs: 10, description: 'reloaded Logs subview visible'},
+          );
+          await window.__yolomuxTestWaitFor(
+            () => jsDebugLogsState.inFlight === false,
+            {timeoutMs: 3000, intervalMs: 10, description: 'reloaded automatic Logs poll settled'},
+          );
+          const originalFetch = window.fetch;
+          window.__persistedLogsRequests = 0;
+          window.__persistedLogsRestoreFetch = () => { window.fetch = originalFetch; };
+          window.fetch = (url, options = {}) => {
+            if (new URL(String(url), location.href).pathname === '/api/logs') {
+              window.__persistedLogsRequests += 1;
+              return Promise.resolve(new Response(JSON.stringify(payload), {
+                status: 200,
+                headers: {'Content-Type': 'application/json'},
+              }));
+            }
+            return originalFetch(url, options);
+          };
+          const polled = await pollDebugLogs({force: true});
+          done({
+            polled,
+            logsError: jsDebugLogsState.error,
+            requests: window.__persistedLogsRequests,
+            payloadLength: jsDebugLogsState.payload.length,
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """,
+        persisted_payload,
+    )
+    assert reloaded_poll == {
+        "polled": True,
+        "logsError": "",
+        "requests": 1,
+        "payloadLength": 4,
+    }, reloaded_poll
+    persisted_row_fields =("id", "owner", "level", "source", "category", "message", "requestId", "route", "event", "delivery")
+    persisted_rows_script = """
+        const view = document.querySelector('[data-js-debug-subview="logs"]');
+        if (!view || view.hidden) return false;
+        return {
+          levels: [...jsDebugLogsState.levels].sort(),
+          pressed: [...view.querySelectorAll('[data-js-debug-log-level]')]
+            .filter(button => button.getAttribute('aria-pressed') === 'true')
+            .map(button => button.dataset.jsDebugLogLevel)
+            .sort(),
+          serverRecordCount: jsDebugLogsState.payload.length,
+          rows: [...view.querySelectorAll('article[data-js-debug-log-entry]')].map(row => ({
+            id: row.dataset.jsDebugLogId || '',
+            owner: row.dataset.jsDebugLogOwner || '',
+            level: row.dataset.level || '',
+            source: row.querySelector('[data-js-debug-log-source]')?.textContent.trim() || '',
+            category: row.querySelector('[data-js-debug-log-category]')?.textContent.trim() || '',
+            message: row.querySelector('.js-debug-log-message')?.textContent || '',
+            requestId: row.querySelector('[data-js-debug-log-request-id]')?.textContent.trim() || '',
+            route: row.querySelector('[data-js-debug-log-route]')?.textContent.trim() || '',
+            event: row.querySelector('[data-js-debug-log-event]')?.textContent.trim() || '',
+            delivery: row.querySelector('[data-js-debug-log-delivery]')?.textContent.trim() || '',
+          })),
+          viewText: view.textContent,
+        };
+    """
+    persisted_error_row = {
+        "id": f"server:{persisted_error['id']}",
+        "owner": "server",
+        "level": "error",
+        "source": persisted_error["source"],
+        "category": persisted_error["category"],
+        "message": persisted_error["message"],
+        "requestId": persisted_error["requestId"],
+        "route": persisted_error["route"],
+        "event": persisted_error["event"],
+        "delivery": persisted_error["delivery"],
+    }
+    persisted_warning_row = {
+        "id": f"server:{persisted_warning['id']}",
+        "owner": "server",
+        "level": "warning",
+        "source": persisted_warning["source"],
+        "category": persisted_warning["category"],
+        "message": persisted_warning["message"],
+        "requestId": persisted_warning["requestId"],
+        "route": persisted_warning["route"],
+        "event": persisted_warning["event"],
+        "delivery": persisted_warning["delivery"],
+    }
+    persisted_probe = {}
+
+    def _persisted_logs_rendered(driver):
+        state = driver.execute_script(persisted_rows_script)
+        if state:
+            persisted_probe["state"] = state
+        return state if state and state["serverRecordCount"] >= 4 else False
+
+    try:
+        persisted_state = WebDriverWait(browser, 8).until(_persisted_logs_rendered)
+    except TimeoutException:
+        raise AssertionError(
+            "reloaded Logs never received the persisted server records: "
+            + json.dumps({
+                "probe": persisted_probe,
+                "logsRequests": browser.execute_script("return window.__persistedLogsRequests ?? null;"),
+                "panel": browser.execute_script("return document.querySelector('.js-debug-panel') !== null;"),
+            })
+        )
+    assert browser.execute_script("return window.__persistedLogsRequests;") == 1, persisted_state
+    assert persisted_state["levels"] == ["error"], persisted_state
+    assert persisted_state["pressed"] == ["error"], persisted_state
+    assert [
+        {field: row[field] for field in persisted_row_fields} for row in persisted_state["rows"]
+    ] == [persisted_error_row], persisted_state
+    assert persisted_warning["message"] not in persisted_state["viewText"], persisted_state
+    restored_state = browser.execute_script(
+        """
+        document.querySelector('[data-js-debug-subview="logs"] [data-js-debug-log-level="warning"]').click();
+        """
+        + persisted_rows_script
+    )
+    assert restored_state["levels"] == ["error", "warning"], restored_state
+    assert [
+        {field: row[field] for field in persisted_row_fields} for row in restored_state["rows"]
+    ] == [persisted_warning_row, persisted_error_row], restored_state
+    browser.execute_script(
+        """
+        window.__persistedLogsRestoreFetch();
+        clearRuntimeInterval('debug-logs');
+        applyLayoutSlots(layoutFromSessionList(['1']), {focusSession: '1', prune: false, forceFull: true});
+        """
+    )
 
 
 def _status_ball_tone_score(image, dpr, rest_rect, peak_rect, tone, *, stride=2):
@@ -4858,8 +6035,8 @@ def test_terminal_wheel_routes_alt_screen_lines_to_xterm_and_normal_lines_to_tmu
             normalForwarded: forwarded.slice(beforeNormal),
             tmuxScrollFrames,
             alternateAfterSwitch: sessionPaneIsAlternateScreen('1'),
-            errors: window.__bootErrors || [],
-            rejections: window.__bootRejections || [],
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         }, 60);
         """
@@ -5059,7 +6236,7 @@ def test_terminal_app_modified_arrows_route_to_tmux_scrollback_boundaries(browse
                 try { return JSON.parse(message); } catch (_error) { return null; }
               })
               .filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
-            done({pageLines, historyUp, historyDown, frames, errors: window.__bootErrors || [], rejections: window.__bootRejections || []});
+            done({pageLines, historyUp, historyDown, frames, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }, 60);
         }, 60);
         """
@@ -5105,7 +6282,7 @@ def test_terminal_page_keys_route_by_screen_mode_and_shift_forces_scrollback(bro
           const alternateShift = dispatch('PageDown', true);
           setTimeout(() => {
             const frames = socket.sent.map(message => { try { return JSON.parse(message); } catch (_error) { return null; } }).filter(message => message?.type === 'tmux-scroll' || message?.type === 'input');
-            done({pageLines, normal, alternatePlain, alternateShift, frames, errors: window.__bootErrors || [], rejections: window.__bootRejections || []});
+            done({pageLines, normal, alternatePlain, alternateShift, frames, errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }, 60);
         }, 60);
         """
@@ -5342,7 +6519,7 @@ def test_mock_agent_prompt_payload_renders_ask_attention_in_live_browser(browser
             monkeypatch,
             tmp_path,
             session_commands={
-                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/agent_clients/{agent}.py --mock"
+                spec["session"]: f"cd {REPO_ROOT} && exec python3 tools/mockers/{agent}.py --mock"
                 for agent, spec in specs.items()
             },
             columns=120,
@@ -5820,7 +6997,7 @@ def test_live_touch_terminal_launcher_drags_and_toggles_palette(browser, tmp_pat
           const drag=(node,dx,dy,id)=>{const r=node.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2;pointer(node,'pointerdown',id,x,y,1);pointer(node,'pointermove',id,x+dx,y+dy,1);pointer(node,'pointerup',id,x+dx,y+dy,0);};
           const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const state=()=>{const value=terminalMobileAccessoryState('1');return {open:value.open,x:value.x,y:value.y};};
-          (async()=>{const frames=[];terminals.get('1').socket={readyState:WebSocket.OPEN,send(frame){frames.push(JSON.parse(frame));}};const initial={barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};tap(launcher,71);await settle();const opened={bar:box(bar),pane:box(pane),grabber:box(grabber),close:box(close),barHidden:bar.hidden,launcherHidden:launcher.hidden,placement:bar.dataset.terminalMobilePlacement,state:state(),first:bar.firstElementChild===grabber,second:bar.children[1]===close,third:bar.children[2]===content,actions:[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort()};const beforeContentDrag=state();drag(content,-90,-40,72);await settle();const afterContentDrag=state();drag(grabber,-120,-80,73);await settle();const dragged={bar:box(bar),pane:box(pane),barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};tap(bar.querySelector('[data-terminal-mobile-key="tab"]'),74);await settle();tap(close,75);await settle();const closed={barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state(),launcher:box(launcher)};tap(launcher,76);await settle();const reopened={bar:box(bar),pane:box(pane),barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};done({initial,opened,beforeContentDrag,afterContentDrag,dragged,closed,reopened,frames,errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
+          (async()=>{const frames=[];terminals.get('1').socket={readyState:WebSocket.OPEN,send(frame){frames.push(JSON.parse(frame));}};const initial={barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};tap(launcher,71);await settle();const opened={bar:box(bar),pane:box(pane),grabber:box(grabber),close:box(close),barHidden:bar.hidden,launcherHidden:launcher.hidden,placement:bar.dataset.terminalMobilePlacement,state:state(),first:bar.firstElementChild===grabber,second:bar.children[1]===close,third:bar.children[2]===content,actions:[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort()};const beforeContentDrag=state();drag(content,-90,-40,72);await settle();const afterContentDrag=state();drag(grabber,-120,-80,73);await settle();const dragged={bar:box(bar),pane:box(pane),barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};tap(bar.querySelector('[data-terminal-mobile-key="tab"]'),74);await settle();tap(close,75);await settle();const closed={barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state(),launcher:box(launcher)};tap(launcher,76);await settle();const reopened={bar:box(bar),pane:box(pane),barHidden:bar.hidden,launcherHidden:launcher.hidden,state:state()};done({initial,opened,beforeContentDrag,afterContentDrag,dragged,closed,reopened,frames,errors:jsDebugFailureEvents('error')});})().catch(error=>done({error:String(error?.stack||error)}));
             """)
         metrics["shiftSticky"] = browser.execute_script(
             """
@@ -5878,7 +7055,7 @@ def test_live_touch_terminal_keeps_two_fixed_pages_and_closes(browser, tmp_path)
           const settle=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
           const visibleActions=()=>[...bar.querySelectorAll('[data-terminal-mobile-key]')].filter(button=>button.getClientRects().length>0).map(button=>button.dataset.terminalMobileKey).sort();
           const surfaceState=()=>({launchers:[...pane.querySelectorAll('[data-terminal-mobile-toggle="1"]')].map(node=>node.hidden),bars:[...pane.querySelectorAll('[data-terminal-mobile-keybar="1"]')].map(node=>node.hidden)});
-          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),arrowJoinBorders={up:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')).borderBottomColor,down:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')).borderTopColor,left:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')).borderRightColor,right:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')).borderLeftColor},primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,arrowJoinBorders,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),escape:box(primaryPage.querySelector('[data-terminal-mobile-key="escape"]')),tab:box(primaryPage.querySelector('[data-terminal-mobile-key="tab"]')),shift:box(primaryPage.querySelector('[data-terminal-mobile-key="shift"]')),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),prefix:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-prefix"]')),backspace:box(primaryPage.querySelector('[data-terminal-mobile-key="backspace"]')),more:box(primaryPage.querySelector('[data-terminal-mobile-key="more"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),up:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),down:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),left:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),more:box(morePage.querySelector('[data-terminal-mobile-key="more"]')),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:window.__bootErrors||[]});})().catch(error=>done({error:String(error?.stack||error)}));
+          (async()=>{tap(launcher);await settle();pane.append(staleLauncher,staleBar);await settle();const primaryPage=bar.querySelector('[data-terminal-mobile-page="primary"]'),grabber=bar.querySelector('.mobile-terminal-key-grabber'),grabberStyle=getComputedStyle(grabber),arrowJoinBorders={up:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')).borderBottomColor,down:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')).borderTopColor,left:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')).borderRightColor,right:getComputedStyle(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')).borderLeftColor},primary={pane:box(pane),bar:box(bar),page:box(primaryPage),close:box(close),grabber:box(grabber),grabberBackground:grabberStyle.backgroundColor,grabberBorder:grabberStyle.borderBottomWidth,arrowJoinBorders,launcherHidden:launcher.hidden,barHidden:bar.hidden,surfaces:surfaceState(),actions:visibleActions(),escape:box(primaryPage.querySelector('[data-terminal-mobile-key="escape"]')),tab:box(primaryPage.querySelector('[data-terminal-mobile-key="tab"]')),shift:box(primaryPage.querySelector('[data-terminal-mobile-key="shift"]')),interrupt:box(primaryPage.querySelector('[data-terminal-mobile-key="interrupt"]')),prefix:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-prefix"]')),backspace:box(primaryPage.querySelector('[data-terminal-mobile-key="backspace"]')),more:box(primaryPage.querySelector('[data-terminal-mobile-key="more"]')),copy:box(primaryPage.querySelector('[data-terminal-mobile-key="copy"]')),paste:box(primaryPage.querySelector('[data-terminal-mobile-key="command-v"]')),pgUp:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-up"]')),pgDown:box(primaryPage.querySelector('[data-terminal-mobile-key="tmux-scroll-down"]')),up:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-up"]')),down:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-down"]')),ctrl:box(primaryPage.querySelector('[data-terminal-mobile-key="ctrl"]')),alt:box(primaryPage.querySelector('[data-terminal-mobile-key="alt"]')),cmd:box(primaryPage.querySelector('[data-terminal-mobile-key="cmd"]')),left:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-left"]')),right:box(primaryPage.querySelector('[data-terminal-mobile-key="arrow-right"]')),enter:box(primaryPage.querySelector('[data-terminal-mobile-key="enter"]'))};const more=primaryPage.querySelector('[data-terminal-mobile-key="more"]');tap(more);await settle();const morePage=bar.querySelector('[data-terminal-mobile-page="more"]'),overflow={bar:box(bar),page:box(morePage),more:box(morePage.querySelector('[data-terminal-mobile-key="more"]')),interrupt:box(morePage.querySelector('[data-terminal-mobile-key="interrupt"]')),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(morePage.querySelector('[data-terminal-mobile-key="more"]'));await settle();const primaryAgain={bar:box(bar),actions:visibleActions(),moreState:terminalMobileAccessoryState('1').more};tap(close);await settle();done({primary,overflow,primaryAgain,closed:{barHidden:bar.hidden,launcherHidden:launcher.hidden,open:terminalMobileAccessoryState('1').open,surfaces:surfaceState()},errors:jsDebugFailureEvents('error')});})().catch(error=>done({error:String(error?.stack||error)}));
         """)
     finally:
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
@@ -5942,7 +7119,7 @@ def test_live_touch_terminal_palette_replaces_launcher_at_every_pane_corner(brow
               const launcherBox=box(launcher);state.open=true;syncTerminalMobileAccessoryState('1');const barBox=box(bar);
               results.push({x,y,launcher:launcherBox,bar:barBox,launcherHidden:launcher.hidden,barHidden:bar.hidden,inside:barBox.left>=paneBox.left-.5&&barBox.right<=paneBox.right+.5&&barBox.top>=paneBox.top-.5&&barBox.bottom<=paneBox.bottom+.5,overlaps:barBox.left<=launcherBox.right+.5&&barBox.right>=launcherBox.left-.5&&barBox.top<=launcherBox.bottom+.5&&barBox.bottom>=launcherBox.top-.5});
             }
-            return {pane:paneBox,results,errors:window.__bootErrors||[]};
+            return {pane:paneBox,results,errors:jsDebugFailureEvents('error')};
             """
         )
     finally:
@@ -6007,7 +7184,7 @@ def test_live_touch_terminal_modifier_double_tap_locks_until_tapped_again(browse
             const lockedAfterKeys = {...terminalMobileAccessoryState('1')};
             const offTap = sendTerminalMobileAccessoryInput('1', 'ctrl');
             const offState = {...terminalMobileAccessoryState('1')};
-            return {persistentBeforeModifier, oneShotTap, oneShotKey, oneShotAfter, oneShotFrames, firstTap, secondTap, firstKey, secondKey, offTap, lockedBefore, lockedAfterKeys, offState, lockedHtml, frames: window.__mobileModifierFrames, errors: window.__bootErrors || []};
+            return {persistentBeforeModifier, oneShotTap, oneShotKey, oneShotAfter, oneShotFrames, firstTap, secondTap, firstKey, secondKey, offTap, lockedBefore, lockedAfterKeys, offState, lockedHtml, frames: window.__mobileModifierFrames, errors: jsDebugFailureEvents('error')};
             """
         )
     finally:
@@ -6500,8 +7677,8 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
                         panelNeedsApproval: panel?.classList.contains('needs-exec-pane') || false,
                       };
                     }),
-                    errors: window.__bootErrors || [],
-                    rejections: window.__bootRejections || [],
+                    errors: jsDebugFailureEvents('error'),
+                    rejections: jsDebugFailureEvents('rejection'),
                   };
                   return snapshot.ok ? snapshot : false;
               }, {timeoutMs: 15000, intervalMs: 500, description: 'real agent prompt attention UI'});
@@ -6586,7 +7763,7 @@ def test_real_agent_prompts_render_ask_attention_in_live_server(browser, monkeyp
         )
     finally:
         if server is not None and thread is not None:
-            stop_browser_share_server(server, thread)
+            stop_browser_share_server(server, thread, browser=browser)
         elif app is not None:
             app.control_server.stop()
         stop_isolated_tmux_runtime(tmux_runtime)
@@ -6713,35 +7890,83 @@ def test_yoagent_activity_snapshot_stays_before_newer_answer(browser, tmp_path):
             "return typeof openInfoSubTab === 'function' && typeof applyYoagentConversationPayload === 'function'"
         )
     )
-    order = browser.execute_async_script(
+    result = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
         (async () => {
           await openInfoSubTab('yoagent');
-          applyActivitySummaryPayloadFromPush({
-            generated_at: '2026-07-10T02:02:38Z',
-            global: {headline: 'activity snapshot'},
-            sessions: {},
-            session_order: [],
-          }, {refreshStartupSnapshot: true});
-          showYoagentStartupInfoForLatestActivity();
-          applyYoagentConversationPayload({messages: [
-            {role: 'assistant', content: 'older answer', createdAt: '2026-07-10T01:50:00Z'},
-            {role: 'assistant', content: 'latest answer', createdAt: '2026-07-10T02:11:52Z'},
-          ], pending_waits: []});
-          renderYoagentPanel({preserveDraft: true, scrollBottom: true});
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          const rows = [...document.querySelectorAll('#yoagent-content .yoagent-chat-history > .yoagent-message')];
-          done(rows.map(row => row.textContent).map(text => (
-            text.includes('older answer') ? 'older'
-              : text.includes('activity snapshot') ? 'snapshot'
-                : text.includes('latest answer') ? 'latest'
-                  : 'other'
-          )).filter(item => item !== 'other'));
+          const originalApiFetchJson = apiFetchJson;
+          const originalPrewarmYoagent = prewarmYoagent;
+          const requests = [];
+          let prewarmCalls = 0;
+          try {
+            apiFetchJson = (url, options = {}) => {
+              requests.push(String(url));
+              return originalApiFetchJson(url, options);
+            };
+            prewarmYoagent = (...args) => {
+              prewarmCalls += 1;
+              return originalPrewarmYoagent(...args);
+            };
+            const accepted = applyActivitySummaryPayloadFromPush({
+              generated_at: '2026-07-10T02:02:38Z',
+              global: {headline: 'activity snapshot'},
+              sessions: {},
+              session_order: [],
+            }, {refreshStartupSnapshot: true});
+            const activityRequests = [...requests];
+            const activityPrewarmCalls = prewarmCalls;
+            apiFetchJson = originalApiFetchJson;
+            prewarmYoagent = originalPrewarmYoagent;
+            showYoagentStartupInfoForLatestActivity();
+            applyYoagentConversationPayload({messages: [
+              {role: 'assistant', content: 'older answer', createdAt: '2026-07-10T01:50:00Z'},
+              {role: 'assistant', content: 'latest answer', createdAt: '2026-07-10T02:11:52Z'},
+            ], pending_waits: []});
+            renderYoagentPanel({preserveDraft: true, scrollBottom: true});
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const content = document.querySelector('#yoagent-content');
+            const rows = [...content.querySelectorAll('.yoagent-chat-history > .yoagent-message')];
+            done({
+              accepted,
+              order: rows.map(row => row.textContent).map(text => (
+                text.includes('older answer') ? 'older'
+                  : text.includes('activity snapshot') ? 'snapshot'
+                    : text.includes('latest answer') ? 'latest'
+                      : 'other'
+              )).filter(item => item !== 'other'),
+              disabledCount: content.querySelectorAll('[data-activity-summary-disabled="true"]').length,
+              injectedHeadlineVisible: content.textContent.includes('activity snapshot'),
+              enabled: activitySummaryEnabled,
+              refreshing: activitySummaryState.refreshing,
+              status: activitySummaryState.payload?.status || '',
+              reason: activitySummaryState.payload?.reason || '',
+              activityChannels: [...clientEventRepairChannels(['activity_summary_ready'])]
+                .filter(channel => channel === 'activity'),
+              requests: activityRequests,
+              prewarmCalls: activityPrewarmCalls,
+            });
+          } finally {
+            apiFetchJson = originalApiFetchJson;
+            prewarmYoagent = originalPrewarmYoagent;
+          }
         })().catch(error => done({error: String(error && error.stack || error)}));
         """
     )
-    assert order == ["older", "snapshot", "latest"]
+    assert result.get("error") is None, result
+    assert result == {
+        "accepted": False,
+        "order": ["older", "latest"],
+        "disabledCount": 1,
+        "injectedHeadlineVisible": False,
+        "enabled": False,
+        "refreshing": False,
+        "status": "feature_disabled",
+        "reason": "async_replacement_required",
+        "activityChannels": [],
+        "requests": [],
+        "prewarmCalls": 0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -6874,8 +8099,8 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path, lab
                 toolPreviewText: toolPreview?.textContent || '',
                 toolStreamText: toolStream?.textContent || '',
                 streamingBodyText: streamingBody?.textContent || '',
-                errors: window.__bootErrors || [],
-                rejections: window.__bootRejections || [],
+                errors: jsDebugFailureEvents('error'),
+                rejections: jsDebugFailureEvents('rejection'),
               };
             };
             (async () => {
@@ -7011,8 +8236,12 @@ def test_yoagent_busy_chat_uses_one_vertical_scroll_owner(browser, tmp_path, lab
               measured.chatRequestBodies = fetchCalls.filter(call => call.path === '/api/yoagent/chat').map(call => JSON.parse(call.body || '{}'));
               window.fetch = originalFetch;
               done(measured);
-            })().catch(error => done({error: String(error && error.stack || error), errors: window.__bootErrors || [], rejections: window.__bootRejections || []}));
+            })().catch(error => done({error: String(error && error.stack || error), errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')}));
             """
+        )
+        consume_only_expected_js_debug_api_errors(
+            browser,
+            ({"path": "/api/yoagent/chat", "method": "POST", "query": {}, "error": "aborted"},),
         )
         assert metrics.get("error") is None, (label, metrics)
         assert metrics["errors"] == [], (label, metrics)
@@ -8247,8 +9476,8 @@ def test_generated_app_boots_live_runtime_without_browser_errors(browser, tmp_pa
     metrics = browser.execute_script(
         """
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           fetchPaths: window.__bootFetches.map(item => `${item.method} ${item.path}`),
           sockets: window.__bootSockets,
           menuButtons: Array.from(document.querySelectorAll('.app-menu')).map(menu => {
@@ -8304,6 +9533,8 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
             "return typeof selectSession === 'function' && typeof tmuxWindow === 'function' && document.querySelector('#panel-1 .terminal .xterm')"
         )
     )
+    ownership = claim_fixture_client_event_demand(browser)
+    assert ownership["bound"]["sourceOrigin"] == ownership["bound"]["pageOrigin"]
     metrics = browser.execute_async_script(
         """
         const done = arguments[0];
@@ -8318,12 +9549,17 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
             if (transcriptMetadataState.payload?.sessions) delete transcriptMetadataState.payload.sessions['2'];
             const tabStarted = performance.now();
             void selectSession('2', {userInitiated: true});
-            await new Promise(resolve => requestAnimationFrame(resolve));
             const tabState = document.querySelector('#term-2 [data-terminal-connection-state]');
             const tabAck = {
               elapsedMs: performance.now() - tabStarted,
               visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
               state: tabState?.dataset.terminalConnectionState || '',
+            };
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const tabFrameState = document.querySelector('#term-2 [data-terminal-connection-state]');
+            const tabFrameAck = {
+              visible: activeSessions.includes('2') && document.querySelector('#panel-2')?.isConnected === true,
+              state: tabFrameState?.dataset.terminalConnectionState || '',
             };
             resolveEnsure(false);
             await window.__yolomuxTestWaitFor(
@@ -8343,11 +9579,16 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
               : originalApiFetchJson(url, options);
             const windowStarted = performance.now();
             tmuxWindow('1', {windowIndex: 2}, 'window 2');
-            await new Promise(resolve => requestAnimationFrame(resolve));
             const switching = document.querySelector('#term-1 [data-terminal-connection-state="switching"]');
             const windowAck = {
               elapsedMs: performance.now() - windowStarted,
               state: switching?.dataset.terminalConnectionState || '',
+              dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
+            };
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const windowFrameState = document.querySelector('#term-1 [data-terminal-connection-state="switching"]');
+            const windowFrameAck = {
+              state: windowFrameState?.dataset.terminalConnectionState || '',
               dimmed: document.querySelector('#term-1')?.classList.contains('terminal-connection-pending') || false,
             };
             rejectWindow(new Error('switch failed'));
@@ -8361,7 +9602,8 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
             window.fetch = () => Promise.resolve(new Response('{}', {status: 200, headers: {'Content-Type': 'application/json'}}));
             await apiFetch('/api/test-recovery');
             return {
-              tabAck, failedTab, windowAck, windowCleared: !terminalConnectionStateNode('1'),
+              tabAck, tabFrameAck, failedTab, windowAck, windowFrameAck,
+              windowCleared: !terminalConnectionStateNode('1'),
               backendHealth: {shown: Boolean(degraded), cleared: !document.querySelector('[data-backend-health]')},
             };
           } finally {
@@ -8373,15 +9615,26 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
         """
     )
     assert "error" not in metrics, metrics
+    expected_api_errors = consume_only_expected_js_debug_api_errors(
+        browser,
+        tuple(
+            {"path": f"/api/test-{suffix}", "method": "GET", "query": {}, "error": "server unavailable"}
+            for suffix in ("a", "b", "c")
+        ),
+    )
+    assert len(expected_api_errors) == 3, metrics
     assert metrics["tabAck"]["elapsedMs"] <= 50, metrics
     assert metrics["tabAck"]["visible"] is True, metrics
     assert metrics["tabAck"]["state"] == "connecting", metrics
+    assert metrics["tabFrameAck"] == {"visible": True, "state": "connecting"}, metrics
     assert metrics["failedTab"] == {"stillVisible": True, "retry": True}, metrics
     assert metrics["windowAck"]["elapsedMs"] <= 50, metrics
     assert metrics["windowAck"]["state"] == "switching", metrics
     assert metrics["windowAck"]["dimmed"] is True, metrics
+    assert metrics["windowFrameAck"] == {"state": "switching", "dimmed": True}, metrics
     assert metrics["windowCleared"] is True, metrics
     assert metrics["backendHealth"] == {"shown": True, "cleared": True}, metrics
+    assert_fixture_client_event_demand_claimed(browser)
 
 
 TMUX_WINDOW_SWITCH_FIXTURE_PANES = [
@@ -8762,7 +10015,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
             grid_height=560,
         )
     except AssertionError as error:
-        raise AssertionError(f"{error}; browser_log={browser.get_log('browser')}") from error
+        raise AssertionError(f"{error}; browser_log={read_browser_console_log(browser)}") from error
     WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             "return document.querySelector('#panel-__chat__ [data-chat-input]') && window.__eventSources.length > 0"
@@ -8799,8 +10052,8 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
           panelClasses: panel?.className || '',
           panelGridRows: getComputedStyle(panel).gridTemplateRows,
           olderButton: panel?.querySelector('[data-chat-load-older]') !== null,
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         };
         grid.style.height = originalGridHeight;
         return result;
@@ -9334,6 +10587,13 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
         retry_body,
     )
     assert after_retry == {"stored": 1, "requests": 2, "rendered": 1}, "retry reuses the same client UUID and replaces the pending row"
+    consume_only_expected_js_debug_api_errors(
+        browser,
+        (
+            {"path": "/api/chat/send", "method": "POST", "query": {}, "error": "fixture dropped chat response"},
+            {"path": "/api/chat/send", "method": "POST", "query": {}, "error": "fixture chat send failed before insert"},
+        ),
+    )
 
     browser.execute_script(
         """
@@ -9441,6 +10701,7 @@ def test_yochat_live_panel_unicode_status_search_and_emoji_geometry(browser, tmp
             media_url,
         )
     )
+    assert_only_expected_browser_network_error(browser, url=media_url, reason="404")
     browser.execute_script("selectSession(chatItemId, {userInitiated: true})")
     reload_result = browser.execute_async_script(
         """
@@ -9991,8 +11252,8 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
                 label: command.querySelector('.app-menu-label')?.textContent?.trim() || '',
                 iconClass: command.querySelector('.app-menu-ui-icon')?.className || '',
               })),
-              errors: window.__bootErrors || [],
-              rejections: window.__bootRejections || [],
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             };
             """,
             menu_id,
@@ -10048,7 +11309,6 @@ def test_live_app_menu_dropdowns_open_switch_and_expose_hover_state(browser, tmp
                 "YO!agent",
                 "YO!chat",
                 "YO!info",
-                "YO!share...",
                 "YO!stats",
             ], metrics
             icons = {command["label"]: command["iconClass"] for command in yo_commands}
@@ -10127,11 +11387,16 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
         button?.click();
         requestAnimationFrame(() => requestAnimationFrame(() => {
           const popover = wrapper?.querySelector(':scope > .app-menu-popover');
+          const focusedCommand = popover?.querySelector('.app-menu-command:not([disabled])');
+          focusedCommand?.focus();
+          const focusedCommandKey = String(focusedCommand?.dataset?.menuTargetItem || focusedCommand?.getAttribute?.('aria-label') || '');
           const cached = {
             open: wrapper?.classList.contains('open') || false,
             rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
             text: popover?.textContent || '',
             requested: typeof resolveMetadata === 'function',
+            focusedCommandKey,
+            focused: document.activeElement === focusedCommand,
           };
           const workGraph = {
             version: 1,
@@ -10156,23 +11421,35 @@ def test_tabs_menu_keeps_cached_rows_visible_while_live_metadata_refreshes(brows
           window.__yolomuxTestWaitFor(
             () => (popover?.textContent || '').includes('menu-live-branch'),
             {description: 'live Tabs menu metadata'},
-          ).then(() => done({
-            cached,
-            final: {
-              open: wrapper?.classList.contains('open') || false,
-              text: popover?.textContent || '',
-              rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
-            },
-            errors: window.__bootErrors || [],
-          }), error => done({error: String(error?.stack || error)}));
+          ).then(() => {
+            const refreshedAt = performance.now();
+            return window.__yolomuxTestWaitFor(
+              () => performance.now() - refreshedAt > popoverHideDelayMs + 50,
+              {description: 'Tabs menu remains focused beyond its hide delay'},
+            );
+          }).then(() => {
+            const currentFocused = document.activeElement?.closest?.('.app-menu-command');
+            done({
+              cached,
+              final: {
+                open: wrapper?.classList.contains('open') || false,
+                text: popover?.textContent || '',
+                rows: Array.from(popover?.querySelectorAll('.app-menu-tab-command') || []).length,
+                focusedCommandKey: String(currentFocused?.dataset?.menuTargetItem || currentFocused?.getAttribute?.('aria-label') || ''),
+              },
+              errors: jsDebugFailureEvents('error'),
+            });
+          }, error => done({error: String(error?.stack || error)}));
         }));
         """
     )
     assert result.get("error") is None, result
     assert result["cached"]["open"] is True and result["cached"]["rows"] >= 1, result
+    assert result["cached"]["focused"] is True and result["cached"]["focusedCommandKey"], result
     assert "menu-live-branch" not in result["cached"]["text"], result
     assert result["cached"]["requested"] is True, result
     assert result["final"]["open"] is True and result["final"]["rows"] >= 1, result
+    assert result["final"]["focusedCommandKey"] == result["cached"]["focusedCommandKey"], result
     assert "menu-live-branch" in result["final"]["text"], result
     assert result["errors"] == [], result
 
@@ -10302,8 +11579,8 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
             expanded: button?.getAttribute('aria-expanded') || '',
             visible: Boolean(popover && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '0') > 0.9 && rect.width > 20 && rect.height > 20),
             labels: Array.from(popover?.querySelectorAll(':scope > .app-menu-submenu-wrap > .app-menu-command') || []).map(node => node.textContent.replace(/\\s+/g, ' ').trim()),
-            errors: window.__bootErrors || [],
-            rejections: window.__bootRejections || [],
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         }, 300);
         """
@@ -10496,8 +11773,8 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
             connected: clientEventTransportState.connected,
             className: markerAfter?.className || '',
             autoApproveFetches: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -10507,6 +11784,96 @@ def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_
     assert result["ready"] is True, result
     assert result["connected"] is True, result
     assert result["autoApproveFetches"] >= 2, result
+    assert result["errors"] == []
+    assert result["rejections"] == []
+
+
+def test_live_runtime_fake_client_event_source_guards_initial_ready_but_keeps_reconnect_ready(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1"])
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const source = new EventSource('/api/client-events?channels=core&client_id=fixture-ready-guard');
+        let readyDeliveries = 0;
+        source.addEventListener('ready', () => { readyDeliveries += 1; });
+        source.emit('ready');
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const afterScheduledReady = readyDeliveries;
+          source.emit('ready');
+          const afterReconnectReady = readyDeliveries;
+          source.close();
+          done({afterScheduledReady, afterReconnectReady, closed: source.closed === true});
+        }));
+        """
+    )
+    assert result == {"afterScheduledReady": 1, "afterReconnectReady": 2, "closed": True}, result
+
+
+def test_client_event_auto_approve_delta_updates_yolo_marker_without_refetch(browser, tmp_path):
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        sessions=["1"],
+        auto_approve_payload={
+            "agent_window_snapshot_revision": 1,
+            "session_order": ["1"],
+            "sessions": {"1": {"target": "1", "enabled": False, "last_action": "off", "screen": {"key": "idle"}}},
+            "rules": {"path": "/home/test/.config/yolomux/yolo-rules.yaml", "source": "default", "rules": [], "errors": []},
+        },
+    )
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script(
+            "return window.__terminalOpened >= 1 && document.querySelector('[data-yolo-session=\"1\"]') !== null && window.__eventSources.length > 0"
+        )
+    )
+    result = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const source = (window.__eventSources || []).find(item => item.url.startsWith('/api/client-events?channels='));
+          const marker = () => document.querySelector('[data-yolo-session="1"]');
+          if (!source || !marker()) return {error: 'missing marker or client-events source'};
+          const autoApproveFetchesBefore = window.__bootFetches.filter(item => item.path === '/api/auto-approve').length;
+          source.emit('auto_approve_changed', {
+            epoch: 'server-delta',
+            resource: 'auto_approve_changed',
+            base_resource_revision: 0,
+            resource_revision: 1,
+            payload: {data: window.__fixtureAutoApprovePayload},
+          });
+          source.emit('auto_approve_changed', {
+            epoch: 'server-delta',
+            resource: 'auto_approve_changed',
+            base_resource_revision: 1,
+            resource_revision: 2,
+            payload: {
+              patch: true,
+              collection: 'sessions',
+              changes: {'1': {target: '1', enabled: false, last_action: 'off', screen: {key: 'working'}}},
+              removed_keys: [],
+              fields: {agent_window_snapshot_revision: 2},
+              removed_fields: [],
+            },
+          });
+          const ready = await window.__yolomuxTestWaitFor(() => marker()?.classList.contains('working'));
+          return {
+            ready,
+            className: marker()?.className || '',
+            state: autoApproveStates.get('1'),
+            resourceRevision: clientEventTransportState.resourceRevisions.get('auto_approve_changed'),
+            autoApproveFetchesBefore,
+            autoApproveFetchesAfter: window.__bootFetches.filter(item => item.path === '/api/auto-approve').length,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
+          };
+        })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
+        """
+    )
+    assert "error" not in result, result
+    assert result["ready"] is True, result
+    assert result["state"]["screen"]["key"] == "working", result
+    assert result["resourceRevision"] == 2, result
+    assert result["autoApproveFetchesAfter"] == result["autoApproveFetchesBefore"], result
     assert result["errors"] == []
     assert result["rejections"] == []
 
@@ -10551,8 +11918,8 @@ def test_auto_approve_refresh_rebuilds_pane_tab_to_show_restored_yolo(browser, t
           statusDot: !!tab()?.querySelector('.session-agent-activity-marker .agent-window-status-dot.status-indicator--working'),
           statusDotPulseMin: statusDotStyle?.getPropertyValue('--agent-status-pulse-min-opacity').trim() || '',
           statusDotKeyframeOpacities: statusDotAnimation ? statusDotAnimation.effect.getKeyframes().map(frame => frame.opacity) : [],
-          errors: window.__bootErrors || [],
-          rejections: window.__bootRejections || [],
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         };
         """
     )
@@ -10705,8 +12072,8 @@ def test_yocost_preferences_and_retained_totals_show_marginal_and_api_list_price
             restoredScrollLeft: document.querySelector('[data-js-debug-cost-table="agent"]')?.closest('.js-debug-cost-table-wrap')?.scrollLeft || 0,
             expectedScrollLeft,
             calculationTables: report?.querySelectorAll('[data-js-debug-cost-table="calculation"]').length || 0,
-            errors: window.__bootErrors || [],
-            rejections: window.__bootRejections || [],
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -11236,8 +12603,8 @@ def test_active_color_radios_recolor_live_pane_chrome(browser, tmp_path):
         yoloProbe.remove();
         shortcutProbe.remove();
         return {
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
           rootAccent: rootStyle.getPropertyValue('--active-accent').trim(),
           bodyAccent: bodyStyle.getPropertyValue('--active-accent').trim(),
           rootRgb: rootStyle.getPropertyValue('--active-accent-rgb').trim(),
@@ -12347,7 +13714,7 @@ def test_share_host_editor_snapshot_tracks_codemirror_cursor_after_typing(browse
           const {frame} = window.__yolomuxTestHelpers;
           const waitFor = window.__yolomuxTestWaitFor;
           const ready = await waitFor(() => panelNodes.get(item)?._cmView?.scrollDOM);
-          if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: window.__bootErrors || [], bootRejections: window.__bootRejections || []};
+          if (!ready) return {error: 'CodeMirror editor did not initialize', bootErrors: jsDebugFailureEvents('error'), bootRejections: jsDebugFailureEvents('rejection')};
           const panel = panelNodes.get(item);
           const view = panel._cmView;
           fileEditorViewState.set(item, {scrollTop: 0, scrollLeft: 0, anchor: 0, head: 0, scrollSnapshot: null});
@@ -12529,8 +13896,8 @@ def test_long_markdown_editor_scroll_survives_preferences_tab_roundtrip(browser,
               scrollHeight: scroller?.scrollHeight || 0,
               clientHeight: scroller?.clientHeight || 0,
               cmText: panel?.querySelector?.('.file-editor-codemirror-panel')?.textContent?.slice(0, 80) || '',
-              bootErrors: window.__bootErrors || [],
-              bootRejections: window.__bootRejections || [],
+              bootErrors: jsDebugFailureEvents('error'),
+              bootRejections: jsDebugFailureEvents('rejection'),
             };
           }
           const panel = panelNodes.get(item);
@@ -15335,9 +16702,9 @@ def test_transient_surfaces_use_viewport_clamped_readable_capacities(browser, tm
             assert metrics["surfaces"][name]["width"] > old_cap, (name, metrics)
 
 
-def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser, tmp_path):
-    page = tmp_path / "dialog-capacity-ownership.html"
-    page.write_text(
+def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser):
+    page = serve_repo_fixture_page(
+        "dialog-capacity-ownership.html",
         page_html(
             """
             <div id="host-about" class="modal app-modal-overlay open about-open"><div id="host-about-dialog" class="modal-dialog"></div></div>
@@ -15351,12 +16718,11 @@ def test_dialog_capacity_tokens_keep_host_and_replay_geometry_in_sync(browser, t
             <div class="file-editor-dialog-backdrop app-modal-overlay"><div id="editor-dialog" class="file-editor-dialog"></div></div>
             """
         ),
-        encoding="utf-8",
     )
 
     def geometry(width, theme):
         browser.set_window_size(width, 720)
-        browser.get(page.as_uri())
+        browser.get(fixture_page_url(page))
         return browser.execute_script(
             """
             document.body.className = arguments[0];

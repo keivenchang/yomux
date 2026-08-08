@@ -14,6 +14,9 @@ def clear_transcript_lookup_cache():
     # the lookup cache is now a shared TtlCache (was a hand-rolled dict + lock).
     sessions._TRANSCRIPT_LOOKUP_CACHE.clear()
     sessions._PROCESS_LSOF_PATH_CACHE.clear()
+    # The per-rollout header/tail cwd memos outlive the lookup TTL by design; a test that seeds a
+    # fresh tmp tree must start from the same empty state the lookup cache does.
+    sessions.clear_transcript_cwd_memos()
 
 
 def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
@@ -35,8 +38,8 @@ def test_list_processes_uses_bsd_ps_command_keyword(monkeypatch):
 def test_classify_agent_requires_an_agent_entry_point():
     assert sessions.classify_agent("/Users/me/.local/bin/claude --resume abc") == "claude"
     assert sessions.classify_agent("node /home/me/.local/bin/codex resume abc") == "codex"
-    assert sessions.classify_agent("python3 tools/agent_clients/claude.py --mock") == "claude"
-    assert sessions.classify_agent("python3 tools/agent_clients/codex.py --mock") == "codex"
+    assert sessions.classify_agent("python3 tools/mockers/claude.py --mock") == "claude"
+    assert sessions.classify_agent("python3 tools/mockers/codex.py --mock") == "codex"
     assert sessions.classify_agent("rg -n claude yolomux_lib tests") is None
     assert sessions.classify_agent("python3 -m pytest -k codex") is None
     assert sessions.classify_agent("git commit -m 'fix claude notifications'") is None
@@ -674,7 +677,7 @@ def test_pane_process_label_recognizes_merged_mock_entrypoints():
         _pane(100),
         [
             ProcessInfo(pid=100, ppid=1, command="bash"),
-            ProcessInfo(pid=321, ppid=100, command="python3 tools/agent_clients/codex.py --mock"),
+            ProcessInfo(pid=321, ppid=100, command="python3 tools/mockers/codex.py --mock"),
         ],
     )
     assert label == "codex"
@@ -684,7 +687,7 @@ def test_pane_process_label_recognizes_merged_mock_entrypoints():
         _pane(100),
         [
             ProcessInfo(pid=100, ppid=1, command="bash"),
-            ProcessInfo(pid=654, ppid=100, command="python3 tools/agent_clients/claude.py --mock"),
+            ProcessInfo(pid=654, ppid=100, command="python3 tools/mockers/claude.py --mock"),
         ],
     )
     assert label == "claude"
@@ -864,3 +867,201 @@ def test_codex_transcript_meta_caches_by_identity_but_not_empty_meta(tmp_path):
     finally:
         Path.open = original_open
     assert reads == []
+
+
+def _write_codex_rollout(path: Path, *, header_cwd: str, tail_lines: int = 400) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"type": "session_meta", "payload": {"cwd": header_cwd}})]
+    lines.extend(json.dumps({"type": "event", "message": f"line {index}"}) for index in range(tail_lines))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def test_unresolvable_codex_cwd_is_not_rescanned_on_every_collector_sample(tmp_path, monkeypatch):
+    """A miss costs a full double scan of every rollout tail; the collector must not repay it
+    on every sample. Measured on the live host: one unresolvable cwd was 1.17-1.23s of CPU and
+    160 of the 173 tail_file_lines calls in one discover_sessions(enrich_paths=True)."""
+
+    clear_transcript_lookup_cache()
+    sessions.clear_transcript_cwd_memos()
+    root = tmp_path / "codex" / "sessions"
+    for index in range(12):
+        _write_codex_rollout(root / "2026" / "06" / f"rollout-2026-06-01T{index:02d}.jsonl", header_cwd="/repo/other")
+    missing_cwd = "/repo/deleted-tree"
+
+    tail_calls = []
+    original_tail = sessions.tail_file_lines
+    monkeypatch.setattr(
+        sessions, "tail_file_lines",
+        lambda path, count: tail_calls.append(path) or original_tail(path, count),
+    )
+    clock = _FakeClock()
+    monkeypatch.setattr(sessions._TRANSCRIPT_LOOKUP_CACHE, "clock", clock)
+
+    assert sessions.find_recent_codex_transcript(missing_cwd, root=root) is None
+    first_sample_tails = len(tail_calls)
+    assert first_sample_tails > 0, "the first miss is expected to read the rollout tails"
+
+    # Six more samples at the busiest collector cadence, spanning past the negative TTL.
+    tail_calls.clear()
+    for _ in range(6):
+        clock.advance(10.0)
+        assert sessions.find_recent_codex_transcript(missing_cwd, root=root) is None
+    assert tail_calls == []
+
+
+def test_new_codex_rollout_is_found_after_an_unresolvable_lookup(tmp_path, monkeypatch):
+    clear_transcript_lookup_cache()
+    sessions.clear_transcript_cwd_memos()
+    root = tmp_path / "codex" / "sessions"
+    day = root / "2026" / "06"
+    for index in range(5):
+        _write_codex_rollout(day / f"rollout-2026-06-01T{index:02d}.jsonl", header_cwd="/repo/other")
+    cwd = "/repo/late-starter"
+    clock = _FakeClock()
+    monkeypatch.setattr(sessions._TRANSCRIPT_LOOKUP_CACHE, "clock", clock)
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) is None
+
+    fresh = day / "rollout-2026-06-01T99.jsonl"
+    _write_codex_rollout(fresh, header_cwd=cwd)
+    clock.advance(sessions.TRANSCRIPT_LOOKUP_NEGATIVE_CACHE_TTL_SECONDS + 1.0)
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == fresh
+
+
+def test_resumed_codex_rollout_appended_after_a_miss_is_still_found(tmp_path, monkeypatch):
+    """The per-file tail memo is keyed on (mtime, size), so an appended rollout is re-read."""
+
+    clear_transcript_lookup_cache()
+    sessions.clear_transcript_cwd_memos()
+    root = tmp_path / "codex" / "sessions"
+    day = root / "2026" / "06"
+    resumed = day / "rollout-2026-06-01T00.jsonl"
+    _write_codex_rollout(resumed, header_cwd="/repo/other", tail_lines=3)
+    cwd = "/repo/resumed-here"
+    clock = _FakeClock()
+    monkeypatch.setattr(sessions._TRANSCRIPT_LOOKUP_CACHE, "clock", clock)
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) is None
+
+    with resumed.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"payload": {"arguments": json.dumps({"workdir": cwd})}}) + "\n")
+    clock.advance(sessions.TRANSCRIPT_LOOKUP_NEGATIVE_CACHE_TTL_SECONDS + 1.0)
+
+    assert sessions.find_recent_codex_transcript(cwd, root=root) == resumed
+
+
+def test_codex_transcript_tail_memo_survives_only_while_the_file_is_unchanged(tmp_path, monkeypatch):
+    sessions.clear_transcript_cwd_memos()
+    rollout = tmp_path / "rollout-memo.jsonl"
+    rollout.write_text(json.dumps({"cwd": "/repo/one"}) + "\n", encoding="utf-8")
+    reads = []
+    original_tail = sessions.tail_file_lines
+    monkeypatch.setattr(
+        sessions, "tail_file_lines",
+        lambda path, count: reads.append(path) or original_tail(path, count),
+    )
+
+    assert sessions.memoized_codex_transcript_tail_cwds(rollout) == frozenset({"/repo/one"})
+    assert sessions.memoized_codex_transcript_tail_cwds(rollout) == frozenset({"/repo/one"})
+    assert reads == [rollout]
+
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"cwd": "/repo/two"}) + "\n")
+    assert sessions.memoized_codex_transcript_tail_cwds(rollout) == frozenset({"/repo/one", "/repo/two"})
+    assert reads == [rollout, rollout]
+
+
+def test_claude_transcript_cwd_memo_invalidates_on_append_replacement_and_unlink(tmp_path, monkeypatch):
+    """A stale cwd mis-attributes a pane to the wrong agent, so every way the file can change counts.
+
+    The watchd revision bridge resolves this for every pane on every revision and a Claude
+    transcript is multi-hundred-MB JSONL: it was 82% of the whole web process in a live sampling
+    profile. Memoizing it is only safe if all four identity fields are checked.
+    """
+
+    sessions.clear_transcript_cwd_memos()
+    transcript = tmp_path / "claude.jsonl"
+    record = lambda cwd: json.dumps({"cwd": cwd}) + "\n"
+    transcript.write_text(record("/repo/one"), encoding="utf-8")
+    reads = []
+    original_tail = sessions.tail_file_lines
+    monkeypatch.setattr(
+        sessions, "tail_file_lines",
+        lambda path, count: reads.append(path) or original_tail(path, count),
+    )
+
+    assert sessions.claude_transcript_latest_cwd(transcript) == "/repo/one"
+    assert sessions.claude_transcript_latest_cwd(transcript) == "/repo/one"
+    assert reads == [transcript], "an unchanged transcript must cost one stat, not a re-tail"
+
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(record("/repo/two"))
+    assert sessions.claude_transcript_latest_cwd(transcript) == "/repo/two"
+
+    # Replaced at the same path, forced to the same size AND the same st_mtime_ns: only the
+    # inode differs, which is why the identity carries st_dev/st_ino as well.
+    replaced = transcript.stat()
+    successor = tmp_path / "successor.jsonl"
+    successor.write_text(record("/repo/one") + record("/repo/six"), encoding="utf-8")
+    assert successor.stat().st_size == replaced.st_size
+    os.replace(successor, transcript)
+    os.utime(transcript, ns=(replaced.st_atime_ns, replaced.st_mtime_ns))
+    assert transcript.stat().st_ino != replaced.st_ino
+    assert transcript.stat().st_mtime_ns == replaced.st_mtime_ns
+    assert sessions.claude_transcript_latest_cwd(transcript) == "/repo/six"
+
+    # An append whose mtime lands in the same tick — what a filesystem with coarser than
+    # nanosecond mtime granularity (NFS, some tmpfs/HFS+) does — is caught by st_size alone.
+    appended = transcript.stat()
+    with transcript.open("a", encoding="utf-8") as handle:
+        handle.write(record("/repo/ten"))
+    os.utime(transcript, ns=(appended.st_atime_ns, appended.st_mtime_ns))
+    assert transcript.stat().st_mtime_ns == appended.st_mtime_ns
+    assert transcript.stat().st_size != appended.st_size
+    assert sessions.claude_transcript_latest_cwd(transcript) == "/repo/ten"
+
+    # A vanished transcript drops its own entry rather than orphaning one per deleted file.
+    assert str(transcript) in sessions._CLAUDE_LATEST_CWD_MEMO
+    transcript.unlink()
+    assert sessions.claude_transcript_latest_cwd(transcript) is None
+    assert str(transcript) not in sessions._CLAUDE_LATEST_CWD_MEMO
+    assert sessions.claude_transcript_latest_cwd(None) is None
+
+
+def test_transcript_tail_memos_stay_bounded_under_churn(tmp_path):
+    """One entry per path and a hard cap: a long-lived server must not leak a memo per transcript."""
+
+    sessions.clear_transcript_cwd_memos()
+    transcript = tmp_path / "churn.jsonl"
+    for index in range(6):
+        transcript.write_text(json.dumps({"cwd": f"/repo/{index}"}) + "\n" + "x" * index, encoding="utf-8")
+        assert sessions.claude_transcript_latest_cwd(transcript) == f"/repo/{index}"
+    assert list(sessions._CLAUDE_LATEST_CWD_MEMO) == [str(transcript)], "rewrites must supersede, not accumulate"
+
+    for index in range(sessions._TRANSCRIPT_MEMO_MAX + 1):
+        sessions.store_bounded_memo(sessions._CLAUDE_LATEST_CWD_MEMO, f"/p/{index}", ((0, 0, 0, 0), None), sessions._TRANSCRIPT_MEMO_MAX)
+    assert len(sessions._CLAUDE_LATEST_CWD_MEMO) <= sessions._TRANSCRIPT_MEMO_MAX
+    sessions.clear_transcript_cwd_memos()
+
+
+def test_bounded_memo_evicts_its_oldest_half_at_the_bound():
+    memo = {}
+    for index in range(10):
+        sessions.store_bounded_memo(memo, index, index, 10)
+    assert list(memo) == list(range(10))
+
+    sessions.store_bounded_memo(memo, 10, 10, 10)
+
+    assert list(memo) == list(range(5, 11))

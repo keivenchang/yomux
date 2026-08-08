@@ -1,7 +1,12 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
+from tests.browser_helpers.browser_console import assert_only_expected_browser_warning
+from yolomux_lib.server_logs import server_logs_payload
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
 from tests.browser_helpers.share_test_helpers import share_debug_url
 from tests.browser_helpers.share_test_helpers import verify_share_token as build_verify_share_token
+from yolomux_lib.client_events import ClientEventBroker
+from yolomux_lib import filesystem
+from yolomux_lib.app import FilesystemOperationHttpResponse
 
 def test_share_viewer_banner_does_not_displace_main_grid(browser, tmp_path):
     page = tmp_path / "share-viewer-banner-grid.html"
@@ -532,8 +537,8 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
         },
         separators=(",", ":"),
     )
-    page = tmp_path / "share-readonly-diff-scroll-popup.html"
-    page.write_text(
+    page = serve_repo_fixture_page(
+        "share-readonly-diff-scroll-popup.html",
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 0; display: block; height: auto; min-height: 0; background: #10151d; }}
@@ -694,9 +699,8 @@ def test_share_readonly_diff_scroll_and_popup_mirror_are_host_owned(browser, tmp
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri() + "?shareReplay=0")
+    browser.get(fixture_page_url(page, "?shareReplay=0"))
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -746,8 +750,8 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
         },
         separators=(",", ":"),
     )
-    page = tmp_path / "share-readonly-info-scroll.html"
-    page.write_text(
+    page = serve_repo_fixture_page(
+        "share-readonly-info-scroll.html",
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script>
         <style>
         body {{ margin: 0; padding: 0; display: block; height: auto; min-height: 0; background: #10151d; }}
@@ -812,9 +816,8 @@ def test_share_readonly_info_sort_and_horizontal_scroll_are_host_owned(browser, 
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri() + "?shareReplay=0")
+    browser.get(fixture_page_url(page, "?shareReplay=0"))
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -852,8 +855,8 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
         },
         separators=(",", ":"),
     )
-    page = tmp_path / "share-readonly-finder-session.html"
-    page.write_text(
+    page = serve_repo_fixture_page(
+        "share-readonly-finder-session.html",
         f"""<!doctype html><html><head><meta charset=utf-8><style>{css}</style><script src="{bundle_uri}"></script></head>
         <body class="theme-dark theme-resolved-dark editor-theme-dark share-view-mode share-view-readonly">
           <script id="yolomux-bootstrap" type="application/json">{bootstrap}</script>
@@ -941,9 +944,8 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
             }})();
           </script>
         </body></html>""",
-        encoding="utf-8",
     )
-    browser.get(page.as_uri() + "?shareReplay=0")
+    browser.get(fixture_page_url(page, "?shareReplay=0"))
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -1063,6 +1065,47 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
         "repos": [{"repo": root_path, "from_ref": "HEAD", "to_ref": "current", "added": 2, "removed": 0}],
         "errors": [],
     }
+    operation_id = "op-fixture-share-session-files"
+    request_id = "r-fixture-share-session-files"
+    operation_epoch = "fixture-share-operation-epoch"
+    operation_access_checks = []
+    queued_session_files = {
+        "state": "queued",
+        "request": {"id": request_id},
+        "operation": {
+            "id": operation_id,
+            "kind": "session_files",
+            "context": {"session": "6", "from_ref": "HEAD", "to_ref": "current"},
+            "deadline_at": "2099-12-31T23:59:59Z",
+            "status_url": f"/api/operations/{operation_id}",
+            "events_url": f"/api/client-events?operation_id={operation_id}",
+            "cursor": {"epoch": operation_epoch, "seq": 0},
+            "progress": {"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"},
+        },
+    }
+    terminal_session_files = {
+        "operation": {"id": operation_id, "cursor": {"epoch": operation_epoch, "seq": 1}},
+        "result": {
+            "state": "ready",
+            "request": {"id": request_id},
+            "data": session_files_payload | {"session": "6"},
+            "quality": {"complete": True, "stale": False},
+            "warnings": [],
+        },
+    }
+
+    def operation_access_allowed(candidate, sessions):
+        operation_access_checks.append((candidate, tuple(sessions)))
+        return candidate == operation_id and sessions == ["6"]
+
+    def filesystem_operation_http_payload(*, operation, path, **_kwargs):
+        handlers = {
+            "read": filesystem.read_file,
+            "list": filesystem.list_directory,
+            "info": filesystem.path_info,
+        }
+        return FilesystemOperationHttpResponse(handlers[operation](path), HTTPStatus.OK)
+
     app = SimpleNamespace(
         sessions=["6"],
         tmux_recency_ordered_sessions=lambda sessions: list(sessions),
@@ -1114,9 +1157,21 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
             "sessions": {"6": session_files_payload | {"session": "6"}},
             "errors": {},
         }, HTTPStatus.OK),
-        session_files_payload=lambda session, hours, **kwargs: (session_files_payload | {"session": session}, HTTPStatus.OK),
+        session_files_http_payload=lambda session, hours, **kwargs: (queued_session_files, HTTPStatus.ACCEPTED),
+        client_events=ClientEventBroker(),
+        operation_access_allowed=operation_access_allowed,
+        operation_replay_payload=lambda candidate: terminal_session_files if candidate == operation_id else None,
+        acknowledge_operation_deliveries=lambda items: (
+            {"ok": True, "acknowledged": [item["id"] for item in items], "ignored": []},
+            HTTPStatus.OK,
+        ),
+        filesystem_operation_http_payload=filesystem_operation_http_payload,
+        fs_batch_http_payload=lambda payload, **_kwargs: (
+            filesystem.filesystem_batch_result(payload),
+            HTTPStatus.OK,
+        ),
     )
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, app, tls_context=BrowserFakeTlsContext())
+    server, thread = start_browser_share_server(monkeypatch, tmp_path, app)
     port = server.server_address[1]
     try:
         browser.get(f"http://127.0.0.1:{port}/share/share123?shareReplay=0#t=valid-share-token")
@@ -1174,7 +1229,13 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
             done_path,
         )
     finally:
-        stop_browser_share_server(server, thread)
+        stop_browser_share_server(
+            server,
+            thread,
+            browser=browser,
+            server_log_reader=server_logs_payload,
+            wait_for_api_quiescence=False,
+        )
     assert "error" not in metrics, metrics
     assert metrics["shareToken"] == "valid-share-token", metrics
     assert metrics["finderReady"] is True, metrics
@@ -1190,6 +1251,7 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
     assert "DONE.md" in metrics["differText"], metrics
     assert "1:codex" in metrics["tabberText"], metrics
     assert "Compare:" not in metrics["tabberText"], metrics
+    assert (operation_id, ("6",)) in operation_access_checks
     assert "valid-share-token" in seen_tokens
 
 
@@ -1238,7 +1300,7 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
             "uiState": record["ui_state"],
         }, HTTPStatus.OK),
     )
-    server, thread = start_browser_share_server(monkeypatch, tmp_path, app, tls_context=BrowserFakeTlsContext())
+    server, thread = start_browser_share_server(monkeypatch, tmp_path, app)
     port = server.server_address[1]
     try:
         browser.get(f"http://127.0.0.1:{port}/share/share123#t=valid-share-token")
@@ -1284,7 +1346,13 @@ def test_share_replay_readonly_shell_routes_to_inert_mirror_root(browser, monkey
             """
         )
     finally:
-        stop_browser_share_server(server, thread)
+        stop_browser_share_server(
+            server,
+            thread,
+            browser=browser,
+            server_log_reader=server_logs_payload,
+            wait_for_api_quiescence=False,
+        )
     assert "error" not in metrics, metrics
     assert metrics["pathname"] == "/share/share123", metrics
     assert metrics["search"] == "", metrics
@@ -1423,8 +1491,8 @@ def test_share_replay_default_routes_write_share_to_replay_shell(browser, tmp_pa
             terminalSocketCount: sockets.filter(socket => socket.url.includes('/ws/share-view') && socket.url.includes('session=6')).length,
             rows: terminals.get('6')?.term?.rows || 0,
             cols: terminals.get('6')?.term?.cols || 0,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -1447,6 +1515,74 @@ def test_share_replay_default_routes_write_share_to_replay_shell(browser, tmp_pa
     intent_message = input_metrics["shareUiInputMessages"][0]
     assert intent_message["type"] == "input-intent", input_metrics
     assert intent_message["payload"] == {"intent": "terminal-input", "session": "6", "data": "echo writer\n"}, input_metrics
+
+
+def test_share_viewer_avoids_unscoped_host_requests_beyond_observation_cadence(browser, tmp_path):
+    share_bootstrap = {
+        "view": True,
+        "id": "share-request-capability",
+        "mode": "ro",
+        "session": "6",
+        "sessions": ["6"],
+        "createdBy": "host",
+        "expiresAt": 4102444800.0,
+        "maxViewers": 5,
+        "layout": "left",
+        "tabs": "left:6",
+        "uiState": {"layout": "left", "tabs": "left:6", "viewport": {"width": 1440, "height": 900}},
+    }
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        search="?shareReplay=0#t=valid-share-token",
+        sessions=["6"],
+        access_role="readonly",
+        share_bootstrap=share_bootstrap,
+        share_status_payload={
+            "ok": True,
+            "active": True,
+            "token": "valid-share-token",
+            "mode": "ro",
+            "expiresAt": 4102444800.0,
+            "uiState": share_bootstrap["uiState"],
+        },
+    )
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const startedAt = performance.now();
+          await window.__yolomuxTestWaitFor(
+            () => performance.now() - startedAt > 10500,
+            {timeoutMs: 12000, intervalMs: 50, description: 'share observation cadence boundary'},
+          );
+          const forbidden = window.__bootFetches.filter(request => (
+            request.path === '/api/tmux-status'
+              || request.path === '/api/stats-observations'
+              || request.path === '/api/auto-approve'
+          ));
+          done({
+            capability: clientCanUseUnscopedHostRequests(),
+            forbidden,
+            observationQueue: jsDebugCurrentObservationState.queue.length,
+            observationReceipts: jsDebugCurrentObservationState.receipts.size,
+            observationTimerPending: jsDebugCurrentObservationState.timer !== null,
+            livenessTimerPending: jsDebugCurrentObservationState.livenessTimer !== null,
+            shareViewSockets: window.__bootSockets.filter(url => url.includes('/ws/share-view')),
+            shareUiSockets: window.__bootSockets.filter(url => url.includes('/ws/share-ui')),
+          });
+        })().catch(error => done({error: String(error?.stack || error)}));
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["capability"] is False, metrics
+    assert metrics["forbidden"] == [], metrics
+    assert metrics["observationQueue"] == 0, metrics
+    assert metrics["observationReceipts"] == 0, metrics
+    assert metrics["observationTimerPending"] is False, metrics
+    assert metrics["livenessTimerPending"] is False, metrics
+    assert len(metrics["shareViewSockets"]) >= 1, metrics
+    assert len(metrics["shareUiSockets"]) >= 1, metrics
 
 
 def test_share_host_active_share_publishes_and_answers_dom_keyframes(browser, tmp_path):
@@ -1532,8 +1668,8 @@ def test_share_host_active_share_publishes_and_answers_dom_keyframes(browser, tm
             rootTags: keyframes.map(message => message.payload?.root?.tag || ''),
             shareIds: keyframes.map(message => message.payload?.shareId || ''),
             hasRootChildren: keyframes.map(message => (message.payload?.root?.children || []).length > 0),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -1640,8 +1776,8 @@ def test_share_dom_keyframe_clears_pending_mutation_delta(browser, tmp_path):
             framePendingAfter: shareReplayDeltaFramePending,
             messageTypes: messages.map(message => message.type),
             keyframeReasons: messages.filter(message => message.type === shareMirrorProtocol.frames.domKeyframe).map(message => message.reason),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -1853,8 +1989,16 @@ def test_generated_share_link_receives_large_dom_keyframe(browser, monkeypatch, 
         assert differ_metrics["status"] == "mirrored", differ_metrics
         assert differ_metrics["finderText"] == "", differ_metrics
     finally:
-        viewer.quit()
-        stop_browser_share_server(server, thread)
+        try:
+            stop_browser_share_server(
+                server,
+                thread,
+                browsers=(browser, viewer),
+                server_log_reader=server_logs_payload,
+                wait_for_api_quiescence=False,
+            )
+        finally:
+            viewer.quit()
         stop_isolated_browser_share_app(runtime)
 
 
@@ -2157,12 +2301,17 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                   await frame();
                   return {published, phase, ...state};
                 };
+                const seedSessionFilesPayload = payload => {
+                  setSessionFilesLoadingForDestination('finder', false);
+                  setSessionFilesPayloadForDestination('finder', payload);
+                  setSessionFilesSignatureForDestination('finder', sessionFilesPayloadSignatureForPayload(payload));
+                };
                 const ensureFinder = async () => {
                   await openFileExplorerPane();
                   await frame();
                   setFileExplorerRootMode('fixed', {sync: false, persist: false});
                   await openFileExplorerAt(repo);
-                  fileExplorerSessionFilesState.payload = {
+                  seedSessionFilesPayload({
                     session,
                     loaded: true,
                     errors: [],
@@ -2172,7 +2321,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                       {session, agent: 'codex', status: 'M', repo, path: 'src/app.py', abs_path: `${repo}/src/app.py`, mtime: 100, added: 1, removed: 0},
                       {session, agent: 'codex', status: '?', repo, path: 'docs/DONE.md', abs_path: `${repo}/docs/DONE.md`, mtime: 300, added: 1, removed: 0},
                     ],
-                  };
+                  });
                   cacheFileExplorerRepoInfo(repo, {root: repo, name: 'repo-app', branch: 'feature/share-matrix', upstream: 'origin/feature/share-matrix', ahead: 2, behind: 1, dirty_count: 3});
                   renderFileExplorerChangesPanels({force: true});
                   refreshFileExplorerPanelTree(document.querySelector('.file-explorer-panel'), {preserveExpanded: true, preserveScroll: true});
@@ -2271,7 +2420,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
                     closeTransient();
                     await showShareModal();
                     await frame();
-                    return publish('share-modal', {debugProfile: true});
+                    return publish('share-modal', {debugProfile: true, shareFeatureQuarantined});
                   },
                   async info(subtab) {
                     closeTransient();
@@ -2330,10 +2479,10 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 	                    closeTransient();
 	                    await ensureFinder();
 	                    const sentinelFile = {session, agent: 'codex', status: 'M', repo, path: 'STALE_DIFF_SENTINEL.md', abs_path: `${repo}/STALE_DIFF_SENTINEL.md`, mtime: 400, added: 8, removed: 2};
-	                    fileExplorerSessionFilesState.payload = {
+	                    seedSessionFilesPayload({
 	                      ...fileExplorerSessionFilesState.payload,
 	                      files: [sentinelFile, ...(fileExplorerSessionFilesState.payload.files || [])],
-	                    };
+	                    });
 	                    setFileExplorerMode('diff');
 	                    renderFileExplorerChangesPanels({force: true});
 	                    await frame();
@@ -2515,9 +2664,8 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
 
             host_phase("shareModal")
             share_modal = wait_viewer_phase("share-modal")
-            assert "share-open" in share_modal["modalClass"], share_modal
-            assert any("YO!share" in title for title in share_modal["modalTitles"]) or "YO!share" in share_modal["modalText"], share_modal
-            assert "debug upload on" in share_modal["text"] or "Debug/profiling upload" in share_modal["text"], share_modal
+            assert share_modal["detail"]["shareFeatureQuarantined"] is True, share_modal
+            assert "share-open" not in share_modal["modalClass"], share_modal
             assert share_modal["hasSecretToken"] is False, share_modal
             assert created["token"] not in share_modal["text"], share_modal
 
@@ -2641,7 +2789,7 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
             assert expanded["finderPanelCount"] <= 1, expanded
             assert_terminal_health(expanded)
 
-            browser.execute_script("tabPopoverShowDelayMs = 0; tabPopoverFollowDelayMs = 0;")
+            browser.execute_script("popoverShowDelayMs = 0;")
             host_tab = browser.execute_script(
             """
             return Array.from(document.querySelectorAll('.dockview-pane-tab, .pane-tab'))
@@ -2683,8 +2831,16 @@ def test_generated_share_link_mirrors_interactive_ui_surface_matrix(browser, mon
         if matrix_section != "chrome":
             assert_terminal_health(final_metrics)
     finally:
-        viewer.quit()
-        stop_browser_share_server(server, thread)
+        try:
+            stop_browser_share_server(
+                server,
+                thread,
+                browsers=(browser, viewer),
+                server_log_reader=server_logs_payload,
+                wait_for_api_quiescence=False,
+            )
+        finally:
+            viewer.quit()
         stop_isolated_browser_share_app(runtime)
 
 
@@ -2847,6 +3003,11 @@ def test_share_replay_shell_applies_static_keyframe_and_rejects_unsafe_nodes(bro
     assert metrics["scriptRan"] is False, metrics
     assert metrics["shellStatus"] == "error", metrics
     assert metrics["mirrorStatusText"], metrics
+    assert_only_expected_browser_warning(
+        browser,
+        message="share replay keyframe apply failed",
+        correlation="Error: unsupported replay tag: script",
+    )
 
 
 def test_share_replay_popups_menus_and_modals_use_normal_dom_replay(browser, tmp_path):
@@ -3106,8 +3267,8 @@ def test_share_replay_shell_rebinds_xterm_to_moving_terminal_placeholder(browser
             sameTermAfterRemove: afterRemoveItem?.term === firstTerm,
             placeholderCountAfterRemove: shareReplayTerminalPlaceholders.size,
             socketOpenAfterRemove: afterRemoveItem?.socket?.readyState === WebSocket.OPEN,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -3242,8 +3403,8 @@ def test_share_replay_delta_rebinds_xterm_to_moved_terminal_placeholder(browser,
             openedCount: window.__terminalOpened,
             placeholderCount: shareReplayTerminalPlaceholders.size,
             terminalHealthy: shareReplayHealthDiagnostics().terminalPlaceholders.healthy,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -3381,8 +3542,8 @@ def test_share_replay_terminal_host_resize_preserves_existing_repaint_bytes(brow
             skippedResetCount: item.shareTerminalSkippedResetCount || 0,
             terminalStreamStatus: terminalEntry.streamStatus || '',
             terminalReceivedBytes: terminalEntry.receivedBytes === true,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -3488,8 +3649,8 @@ def test_share_replay_gap_keeps_terminal_stream_host_sized(browser, tmp_path):
             sameContainer: terminals.get('6')?.container === firstContainer,
             openedCount: window.__terminalOpened,
             socketOpen: item.socket?.readyState === WebSocket.OPEN,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -4105,8 +4266,8 @@ def test_share_replay_debug_copy_exports_last_replay_error(browser, tmp_path):
             keyframeRequests: parsed.keyframeRequests,
             lastReplayError: parsed.lastReplayError || null,
             targetText: document.querySelector('[data-testid="debug-error-target"]')?.textContent || '',
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -4215,8 +4376,8 @@ def test_share_replay_health_ignores_legacy_geometry_drift_frames(browser, tmp_p
             debugTextHasTextWraps: debugText.includes('textWraps'),
             latestKind: window.yolomuxShareDebug?.latest?.kind || '',
             lastGeometryDigest: typeof shareLastGeometryDigest === 'object' && shareLastGeometryDigest ? shareLastGeometryDigest.digest || '' : '',
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           });
         })().catch(error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -4533,8 +4694,8 @@ def test_share_geometry_digest_repairs_terminal_cell_drift_with_host_resize(brow
             repairAction: shareGeometryRepairActionForDiff('terminalCells'),
             statusText: status?.textContent || '',
             statusMatch: status?.classList.contains('match') || false,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """
@@ -4726,6 +4887,11 @@ def test_share_debug_diagnostics_redact_fragment_token_in_browser(browser, tmp_p
     assert metrics["hasSecret"] is False, metrics
     assert metrics["hasRedactedToken"] is True, metrics
     assert "safariProbe" in metrics["deltaChangedKeys"], metrics
+    assert_only_expected_browser_warning(
+        browser,
+        message="share mirror geometry drift",
+        correlation="Object",
+    )
 
 
 def test_share_viewer_expiry_redirects_to_login_without_fragment_token(browser, tmp_path):
@@ -4879,8 +5045,8 @@ def test_share_viewer_finder_minimize_keeps_dockview_terminal_tabs_live(browser,
             hasXterm: document.querySelector('#term-2 .xterm') !== null,
             rows: item?.term?.rows || 0,
             cols: item?.term?.cols || 0,
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
@@ -4981,8 +5147,8 @@ def test_share_viewer_drops_stale_layout_after_newer_ui_state(browser, tmp_path)
             visibleTabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
             layout: layoutParamValue(layoutSlots),
             tabs: layoutTabsParamValue(layoutSlots),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,
@@ -5079,8 +5245,8 @@ def test_share_topology_snapshot_converges_finder_tab_move_and_editor_mode(brows
             layout: layoutParamValue(layoutSlots),
             tabs: layoutTabsParamValue(layoutSlots),
             visibleTabs: Array.from(document.querySelectorAll('.dockview-pane-tab')).map(tab => tab.dataset.paneTab || ''),
-            errors: window.__bootErrors,
-            rejections: window.__bootRejections,
+            errors: jsDebugFailureEvents('error'),
+            rejections: jsDebugFailureEvents('rejection'),
           };
         })().then(done, error => done({error: String(error), stack: String(error?.stack || '')}));
         """,

@@ -13,11 +13,12 @@ import pytest
 
 from yolomux_lib import app as app_module, http_routes, session_files, settings as settings_module
 from yolomux_lib.stats_current import materializer as materializer_module
+from yolomux_lib.stats_current import collectors as collectors_module
 from yolomux_lib.stats_current import pricing as pricing_module
 from yolomux_lib.stats_current import runtime as runtime_module
 from yolomux_lib.stats_current import storage as storage_module
 from yolomux_lib.stats_current import usage as usage_module
-from yolomux_lib.stats_current.transcripts import StatsCurrentTranscriptUsageScanner
+from yolomux_lib.stats_current.transcripts import ScannedUsageAtom, StatsCurrentTranscriptUsageScanner, TranscriptUsageScanResult
 
 
 def attempt(family, cadence):
@@ -28,6 +29,20 @@ def attempt(family, cadence):
         scheduled_at=110,
         cadence_seconds=cadence,
         owner_generation=1,
+    )
+
+
+def current_runtime(client, collector_overrides=None):
+    collectors = {
+        family: (lambda _attempt: collectors_module.CollectorFacts())
+        for family in runtime_module.WEB_COLLECTED_FAMILIES
+    }
+    collectors.update(collector_overrides or {})
+    return runtime_module.StatsCurrentRuntime(
+        client,
+        collectors,
+        owner_generation=lambda: 1,
+        token_cadence_seconds=lambda: 10,
     )
 
 
@@ -203,6 +218,59 @@ def test_token_adapter_uses_incremental_structured_atoms_and_keeps_dimensions(tm
     assert appended.usage_atoms[0].payload["quantity"] == 8
 
 
+def test_token_adapter_publishes_emitted_rejected_reason_counters(monkeypatch):
+    invalid = session_files.TranscriptUsageAtom(
+        source="fixture", timestamp=105, event_id="invalid-direction", provider="openai",
+        model="gpt-5.6", model_evidence="fixture", effort="", direction="invalid",
+        modality="text", cache_role="none", unit="tokens", quantity=42,
+        root_thread_id="fixture", agent_thread_id="fixture", parent_thread_id="", depth=0,
+        endpoint="responses", tool_name="", call_id="", pricing_profile="default",
+        service_tier="default", telemetry_complete=True,
+    )
+    result = TranscriptUsageScanResult(
+        (ScannedUsageAtom(invalid, "yo8881|0|codex", "codex"),), (),
+        1, 1, 128, 1, 0, 1, False, 1,
+    )
+
+    class Scanner:
+        def scan(self, _rows):
+            return result
+
+        def commit(self, _receipt_id):
+            return None
+
+        def rollback(self, _receipt_id):
+            return None
+
+        usage_atom_backfill_status_for_scan = staticmethod(
+            StatsCurrentTranscriptUsageScanner.usage_atom_backfill_status_for_scan
+        )
+
+    captured = []
+    client = app_module.StatsCurrentClient()
+    monkeypatch.setattr(client, "set_usage_atom_backfill_status", lambda status: captured.append(status))
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.sessions = []
+    webapp.stats_agent_window_rows = lambda: []
+    webapp.stats_agent_token_rows = lambda _rows: []
+    webapp.settings_payload = lambda: {"settings": {}}
+    webapp.stats_current_process_identity = lambda: ("web-8881", "web", 8881)
+    webapp.stats_current_transcript_usage = Scanner()
+    webapp.stats_current_client = client
+
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.usage_atoms == ()
+    assert captured[0]["scan"] == {
+        "files_read": 1,
+        "records_parsed": 1,
+        "atoms_emitted": 1,
+        "atoms_accepted": 0,
+        "atoms_rejected": 1,
+        "rejection_reasons": {"direction must be one of: input, output": 1},
+    }
+
+
 def test_token_adapter_requests_follow_up_only_for_exhausted_scan_budget():
     results = [
         SimpleNamespace(
@@ -363,8 +431,7 @@ def test_partial_tombstone_append_failure_replays_whole_receipt_then_commits(tmp
             self.calls += 1
             return {"ok": self.calls != self.fail_at, "reason": "injected"}
 
-    failing_runtime = object.__new__(runtime_module.StatsCurrentRuntime)
-    failing_runtime.client = ChunkClient(fail_at=2)
+    failing_runtime = current_runtime(ChunkClient(fail_at=2))
     with pytest.raises(runtime_module.CurrentRuntimeError, match="injected"):
         failing_runtime._append_facts("agent_tokens", first)
     assert failing_runtime.client.calls == 2
@@ -372,8 +439,7 @@ def test_partial_tombstone_append_failure_replays_whole_receipt_then_commits(tmp
 
     replayed = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
     assert tuple(item.event_id for item in replayed.usage_tombstones) == first_ids
-    successful_runtime = object.__new__(runtime_module.StatsCurrentRuntime)
-    successful_runtime.client = ChunkClient()
+    successful_runtime = current_runtime(ChunkClient())
     successful_runtime._append_facts("agent_tokens", replayed)
     assert successful_runtime.client.calls > 1
     assert cache_path.exists()
@@ -440,8 +506,7 @@ def test_accepted_tombstone_with_lost_ack_replays_as_duplicate_then_commits(tmp_
             return {"ok": True, "counts": vars(result)}
 
     client = LostAckClient()
-    current = object.__new__(runtime_module.StatsCurrentRuntime)
-    current.client = client
+    current = current_runtime(client)
     try:
         with pytest.raises(OSError, match="response lost"):
             current._append_facts("agent_tokens", first)
@@ -598,15 +663,12 @@ def test_old_eof_fork_repair_removes_huge_materialized_usage_and_cold_resumes(
             append_results.append(result)
             return {"ok": True, "counts": vars(result)}
 
-    current = object.__new__(runtime_module.StatsCurrentRuntime)
-    current.client = StoreClient()
-
     def collect(current_attempt):
         facts = webapp.collect_current_stats_agent_tokens(current_attempt)
         captured.append(facts)
         return facts
 
-    current._collectors = {"agent_tokens": collect}
+    current = current_runtime(StoreClient(), {"agent_tokens": collect})
     current._collector_callback("agent_tokens")(scheduled_attempt)
 
     assert len(captured) == 1
@@ -700,12 +762,18 @@ def test_delayed_token_scan_uses_profile_effective_when_each_atom_was_observed(t
 
 
 def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
+    """A statusd refresh gap is blank, never a collector failure or measured zero."""
     webapp = object.__new__(app_module.TmuxWebtermApp)
     webapp.sessions = ["yo8881"]
     webapp.stats_agent_window_rows = lambda: []
 
-    with pytest.raises(RuntimeError, match="roster unavailable"):
-        webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+    facts = webapp.collect_current_stats_agent_tokens(attempt("agent_tokens", 10))
+
+    assert facts.observations == ()
+    assert facts.coverage_epochs == ()
+    assert facts.usage_atoms == ()
+    assert facts.usage_tombstones == ()
+    assert facts.receipt is None
 
 
 def test_background_owner_starts_only_the_current_stats_runtime():
@@ -761,6 +829,7 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
         stop_periodic=lambda: calls.append("pricing"),
     )
     webapp.stats_current_runtime = SimpleNamespace(stop=lambda: calls.append("current"))
+    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("jobd"))
     webapp.stop_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not stop")
     webapp.metadata_warm_lock = threading.Lock()
     webapp.metadata_warm_record = SimpleNamespace(stop_event=threading.Event())
@@ -780,7 +849,7 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
 
     webapp.demote_background_owner()
 
-    assert calls == ["pricing", "current", "indexes", "publish"]
+    assert calls == ["pricing", "current", "jobd", "indexes", "publish"]
     assert webapp.activity_transcript_service.tabber_warmer_record.wake.is_set() is False  # fresh replacement record
     assert webapp.metadata_warm_record.stop_event.is_set()
     assert webapp.session_files_service.work_records == {}
@@ -794,11 +863,14 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
         stop_periodic=lambda: calls.append("pricing"),
     )
     webapp.stats_current_runtime = SimpleNamespace(stop=lambda: calls.append("current"))
+    webapp.jobd_operation_service = SimpleNamespace(stop=lambda: calls.append("operations"))
+    webapp.job_client = SimpleNamespace(stop_for_scheduler=lambda: calls.append("jobd"))
     webapp.stop_stats_metric_scheduler = lambda: pytest.fail("legacy scheduler must not stop")
     webapp.approval_client = SimpleNamespace(
         request=lambda *args, **kwargs: calls.append("approval"),
     )
-    webapp.background_owner = SimpleNamespace(stop=lambda: calls.append("owner"))
+    webapp.background_owner = app_module.DisabledBackgroundOwner()
+    webapp.background_owner.stop = lambda: calls.append("owner")
     webapp.yoagent_controller = SimpleNamespace(
         close_yoagent_codex_app_server=lambda: calls.append("yoagent"),
     )
@@ -806,7 +878,7 @@ def test_app_shutdown_stops_current_runtime_not_legacy_scheduler():
 
     webapp.stop_auto_approve_all()
 
-    assert calls == ["pricing", "current", "approval", "owner", "yoagent", "control"]
+    assert calls == ["pricing", "current", "operations", "jobd", "approval", "owner", "yoagent", "control"]
 
 
 def test_legacy_stats_handlers_and_scheduler_bodies_are_deleted():

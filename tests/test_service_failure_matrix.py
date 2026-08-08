@@ -6,6 +6,7 @@ from concurrent.futures.process import BrokenProcessPool
 
 from yolomux_lib import approvald
 from yolomux_lib import jobd
+from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.local_services.registry import LOCAL_SERVICE_BACKOFF_SECONDS
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
@@ -104,8 +105,10 @@ def test_registry_failure_rows_are_visible_bounded_and_backed_off(tmp_path, monk
     assert len(spawned) == 2
 
     record = registry.record_path
-    record.parent.mkdir(parents=True, exist_ok=True)
-    record.write_text('{"pid":999999999,"service":"failingd"}\n', encoding="utf-8")
+    registry._write_record({
+        **current_host_identity().process_record_fields(pid=999999999, start_identity="proc:1"),
+        "service": "failingd",
+    })
     registry._remove_stale_record()
     assert record.exists() is False
 
@@ -120,7 +123,7 @@ def test_registry_failure_rows_are_visible_bounded_and_backed_off(tmp_path, monk
     assert mismatch.status()["healthy"] is False
 
 
-def test_registry_retires_incompatible_socket_owner_without_sidecar_record(tmp_path, monkeypatch):
+def test_registry_refuses_incompatible_socket_owner_without_sidecar_record(tmp_path, monkeypatch):
     clock = [200.0]
     stale_alive = {424_242: True}
     shutdowns = []
@@ -155,19 +158,25 @@ def test_registry_retires_incompatible_socket_owner_without_sidecar_record(tmp_p
     )
 
     assert registry.record_path.exists() is False
-    assert registry.ensure_started() is True
-    assert shutdowns == ["shutdown"]
-    assert len(spawned) == 1
-    assert registry.healthy() is True
+    assert registry.ensure_started() is False
+    assert shutdowns == []
+    assert spawned == []
+    assert registry.status()["process_diagnostic"]["reason"] == "missing_host_identity"
+    assert registry.failure_response()["reason_code"] == "missing_host_identity"
+    lease = registry.acquire_lease()
+    assert lease["error_code"] == "missing_host_identity"
+    assert lease["process_diagnostic"]["reason"] == "missing_host_identity"
+    assert shutdowns == []
+    assert spawned == []
 
 
-def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path):
+def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path, monkeypatch):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     stale = service._queue_record("text_facts", {"text": "old"}, "maintenance", 1, "same")
     service.latest_generation["same"] = 2
     service._supersede_stale_queued("same", 2)
     expired = service._queue_record("text_facts", {"text": "expired"}, "freshness", 1, "expired", deadline_at=time.monotonic() - 1.0)
-    running = service._queue_record("text_facts", {"text": "hang"}, "interactive", 1, "hang", deadline_at=time.monotonic() - 1.0)
+    running = service._queue_record("text_facts", {"text": "hang"}, "freshness", 1, "hang", deadline_at=time.monotonic() - 1.0)
     running.status = "running"
     running.future = Future()
     waiting = service._queue_record("text_facts", {"text": "wait"}, "freshness", 1, "wait")
@@ -180,12 +189,13 @@ def test_jobd_failure_rows_keep_status_and_do_not_fallback_to_main_work(tmp_path
         def shutdown(self, **_kwargs):
             return None
 
-    service.executor = BrokenExecutor()  # type: ignore[assignment]
+    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     for number in range(jobd.JOBD_MAX_QUEUE):
         queued = service._queue_record("text_facts", {"text": str(number)}, "freshness", number, f"queue-{number}")
         queued.status = "queued"
     client = jobd.JobClient(tmp_path / "missing-jobd.sock")
+    monkeypatch.setattr(client.registry, "ensure_started", lambda: False)
 
     assert stale.status == "superseded"
     assert expired.status == "timed_out"

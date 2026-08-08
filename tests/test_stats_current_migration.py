@@ -15,6 +15,7 @@ from yolomux_lib.stats_current import migration
 from yolomux_lib.stats_current import identity
 from yolomux_lib.stats_current.storage import DATABASE_FILENAME
 from yolomux_lib.stats_current.storage import RETENTION_SECONDS
+from yolomux_lib.stats_current.storage import SCHEMA_VERSION
 from yolomux_lib.stats_current.storage import WRITER_FENCE_FILENAME
 from yolomux_lib.stats_current.storage import Observation
 from yolomux_lib.stats_current.storage import Store
@@ -137,7 +138,13 @@ def _create_legacy_database(path: Path, *, unsupported_table: bool = False) -> P
     return path
 
 
-def _create_schema5_database(path: Path, *, malformed: bool = False) -> Path:
+def _create_schema5_database(
+    path: Path,
+    *,
+    malformed: bool = False,
+    writer_protocol: int = migration.V5_MIN_WRITER_PROTOCOL,
+    writer_build: int = migration.V5_MIN_WRITER_BUILD,
+) -> Path:
     """Frozen v5 fixture: direct SQL keeps this test independent of the current Store schema."""
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
@@ -153,7 +160,7 @@ def _create_schema5_database(path: Path, *, malformed: bool = False) -> Path:
     )
     connection.execute(f"PRAGMA application_id = {migration.APPLICATION_ID}")
     connection.execute("PRAGMA user_version = 5")
-    connection.execute("INSERT INTO schema_meta VALUES(1,24,3,7)")
+    connection.execute("INSERT INTO schema_meta VALUES(1,?,?,7)", (writer_protocol, writer_build))
     connection.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?)", ("cpu-1", "cpu", "port:8881", 100.0, "cpu-epoch", 2, json.dumps({"process_percent": 3, "system_percent": 20})))
     connection.execute("INSERT INTO coverage_epochs VALUES(?,?,?,?,?,?,?)", ("cpu", "port:8881", "cpu-epoch", 100.0, None, 1.0, 2))
     connection.execute("INSERT INTO unavailable_spans VALUES(?,?,?,?,?,?,?,?)", ("gpu", "gpu:0", "gap", 90.0, 100.0, 10.0, "lost", 2))
@@ -227,7 +234,7 @@ def _file_state(path: Path) -> tuple[bytes, int]:
     return path.read_bytes(), path.stat().st_mtime_ns
 
 
-def test_schema5_current_database_migrates_original_facts_to_schema6_without_mutating_source(tmp_path):
+def test_schema5_current_database_migrates_original_facts_to_schema7_without_mutating_source(tmp_path):
     state = tmp_path / "state"
     source = _create_schema5_database(state / migration.V5_DATABASE_FILENAME)
     before = _file_state(source)
@@ -243,10 +250,25 @@ def test_schema5_current_database_migrates_original_facts_to_schema6_without_mut
     assert [item.event_id for item in snapshot.observations] == ["cpu-1"]
     assert [item.event_id for item in snapshot.usage_atoms] == ["usage-1"]
     assert len(snapshot.coverage_epochs) == len(snapshot.unavailable_spans) == len(snapshot.migration_reconciliation) == 1
-    assert json.loads((state / WRITER_FENCE_FILENAME).read_text(encoding="utf-8"))["schema_version"] == 6
+    assert json.loads((state / WRITER_FENCE_FILENAME).read_text(encoding="utf-8"))["schema_version"] == SCHEMA_VERSION
 
 
-def test_malformed_schema5_database_never_activates_schema6(tmp_path):
+def test_schema5_current_database_accepts_only_the_released_writer_fence(tmp_path):
+    state = tmp_path / "state"
+    source = _create_schema5_database(
+        state / migration.V5_DATABASE_FILENAME,
+        writer_build=migration.V5_MIN_WRITER_BUILD - 1,
+    )
+    before = _file_state(source)
+
+    with pytest.raises(migration.MigrationError, match="incompatible writer metadata"):
+        migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    assert _file_state(source) == before
+    assert not (state / DATABASE_FILENAME).exists()
+
+
+def test_malformed_schema5_database_never_activates_schema7(tmp_path):
     state = tmp_path / "state"
     source = _create_schema5_database(state / migration.V5_DATABASE_FILENAME, malformed=True)
     before = _file_state(source)
@@ -588,6 +610,21 @@ def test_migration_does_not_follow_retired_source_symlinks(tmp_path, source_name
     assert not (state / DATABASE_FILENAME).exists()
 
 
+def test_fully_unreadable_current_database_reaches_quarantine_recovery(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    current = state / DATABASE_FILENAME
+    current.write_bytes(b"not a sqlite database")
+
+    report = migration.migrate(migration.MigrationInputs(state), completed_at=200)
+
+    issue = next(item for item in report.issues if item.kind == migration.UNREADABLE_CURRENT_DATABASE)
+    quarantined = state / issue.source
+    assert quarantined.is_file()
+    assert quarantined.read_bytes() == b"not a sqlite database"
+    assert report.active_database == current and current.is_file()
+
+
 def test_corrupt_retired_database_is_quarantined_and_empty_current_activates(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
@@ -851,7 +888,7 @@ def test_final_retirement_failure_restores_every_source_and_deactivates_current_
     assert _file_state(shared) == shared_before
     assert _file_state(old_fence) == fence_before
     assert not (state / DATABASE_FILENAME).exists()
-    assert list(state.glob("stats-v6.failed-*.sqlite3"))
+    assert list(state.glob(f"{DATABASE_FILENAME.removesuffix('.sqlite3')}.failed-*.sqlite3"))
     assert (state / migration.RETIREMENT_ARCHIVE_FILENAME).is_file()
     assert (state / migration.RETIREMENT_JOURNAL_FILENAME).is_file()
 

@@ -23,11 +23,21 @@ from yolomux_lib.background_owner import BACKGROUND_ROLE_WATCH_ROOTS
 from yolomux_lib.background_owner import BackgroundOwnerRegistry
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
+from tools.instance_isolation import YOLOMUX_ROOT_ENV
+from tools.instance_isolation import is_managed_instance_port
 
 from _git_helpers import git
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _pin_search_index_root(index, root):
+    root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        index.replace_root_fd(root_fd)
+    finally:
+        os.close(root_fd)
 
 
 def _warm_index_load_latency_budget_seconds(*, cpu_count: int | None = None) -> float:
@@ -49,6 +59,19 @@ def no_detached_local_services(monkeypatch):
 
     monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
     monkeypatch.setattr(app_module.StatsCurrentRuntime, "start", lambda self: True)
+
+    def fixture_process_start_identity(pid):
+        identity = background_owner_module.current_host_identity()
+        return identity.process_start_identity if int(pid) == identity.pid else f"proc:{int(pid) * 10}"
+
+    monkeypatch.setattr(background_owner_module, "process_start_identity", fixture_process_start_identity)
+
+
+def background_process_record(registry, pid, **fields):
+    return {
+        **registry.host_identity.process_record_fields(pid=pid, start_identity=f"proc:{int(pid) * 10}"),
+        **fields,
+    }
 
 
 class FollowerOwner:
@@ -135,8 +158,8 @@ def test_background_owner_prunes_dead_generation_records(monkeypatch, tmp_path):
     registry.generations_dir.mkdir(parents=True)
     dead_path = registry.generations_dir / "dead.json"
     live_path = registry.generations_dir / "live.json"
-    dead_path.write_text(json.dumps({"generation_id": "dead", "pid": 99, "last_heartbeat": 100.0}), encoding="utf-8")
-    live_path.write_text(json.dumps({"generation_id": "live", "pid": 100, "last_heartbeat": 100.0}), encoding="utf-8")
+    dead_path.write_text(json.dumps(background_process_record(registry, 99, generation_id="dead", last_heartbeat=100.0)), encoding="utf-8")
+    live_path.write_text(json.dumps(background_process_record(registry, 100, generation_id="live", last_heartbeat=100.0)), encoding="utf-8")
     monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda pid: pid == 100)
 
     records = registry.live_generation_records()
@@ -165,11 +188,12 @@ def test_background_owner_takeover_requests_release_then_acquires(monkeypatch, t
     registry.publish_generation()
     registry.owner_dir.mkdir(parents=True, exist_ok=True)
     registry.owner_path.write_text(
-        json.dumps({"generation_id": "old", "started_at_ns": 10, "pid": 199, "control_socket": "/tmp/old.sock"}),
+        json.dumps(background_process_record(registry, 199, generation_id="old", started_at_ns=10, control_socket="/tmp/old.sock")),
         encoding="utf-8",
     )
     acquire_results = iter([False, True])
     release_requests = []
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(registry, "acquire_owner_lock", lambda: next(acquire_results))
     monkeypatch.setattr(background_owner_module, "send_yolomux_control_request", lambda owner, request, timeout=2.0: release_requests.append((owner, request, timeout)) or {"ok": True})
 
@@ -310,9 +334,10 @@ def test_background_owner_reports_blocked_unreachable_owner(monkeypatch, tmp_pat
     registry.publish_generation()
     registry.owner_dir.mkdir(parents=True, exist_ok=True)
     registry.owner_path.write_text(
-        json.dumps({"generation_id": "old", "started_at_ns": 10, "pid": 199, "control_socket": "/tmp/missing.sock"}),
+        json.dumps(background_process_record(registry, 199, generation_id="old", started_at_ns=10, control_socket="/tmp/missing.sock")),
         encoding="utf-8",
     )
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda _pid: True)
     monkeypatch.setattr(registry, "acquire_owner_lock", lambda: False)
     monkeypatch.setattr(background_owner_module, "send_yolomux_control_request", lambda *_args, **_kwargs: {"ok": False, "error": "connect failed"})
 
@@ -320,6 +345,105 @@ def test_background_owner_reports_blocked_unreachable_owner(monkeypatch, tmp_pat
 
     assert registry.status == "blocked_by_unreachable_owner"
     assert "connect failed" in registry.last_error
+
+
+def test_background_owner_reclaims_a_live_stale_heartbeat_without_contacting_owner(monkeypatch, tmp_path):
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
+    registry.started_at_ns = 20
+    registry.publish_generation()
+    registry.owner_dir.mkdir(parents=True, exist_ok=True)
+    registry.owner_path.write_text(
+        json.dumps(
+            background_process_record(
+                registry,
+                199,
+                generation_id="old",
+                started_at_ns=10,
+                last_heartbeat=100.0 - background_owner_module.BACKGROUND_OWNER_UNRESPONSIVE_SECONDS - 0.1,
+                control_socket="/tmp/unresponsive-owner.sock",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(registry, "acquire_owner_lock", lambda: True)
+    monkeypatch.setattr(
+        background_owner_module,
+        "send_yolomux_control_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("stale owner must not be contacted")),
+    )
+
+    assert registry.attempt_takeover() is True
+
+    assert registry.is_owner() is True
+    assert registry.status == "owner"
+    assert registry.counters["takeover_success"] == 1
+
+
+def test_background_owner_refuses_to_bypass_a_live_fresh_heartbeat(monkeypatch, tmp_path):
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
+    registry.started_at_ns = 20
+    registry.publish_generation()
+    registry.owner_dir.mkdir(parents=True, exist_ok=True)
+    registry.owner_path.write_text(
+        json.dumps(
+            background_process_record(
+                registry,
+                199,
+                generation_id="old",
+                started_at_ns=10,
+                last_heartbeat=100.0,
+                control_socket="/tmp/healthy-owner.sock",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(registry, "acquire_owner_lock", lambda: True)
+    release_requests = []
+    monkeypatch.setattr(
+        background_owner_module,
+        "send_yolomux_control_request",
+        lambda owner, request, timeout: release_requests.append((owner, request, timeout)) or {"ok": False, "error": "owner retained lease"},
+    )
+
+    assert registry.attempt_takeover() is False
+
+    assert registry.is_owner() is False
+    assert registry.status == "blocked_by_unreachable_owner"
+    assert [request[1]["action"] for request in release_requests] == ["background_release_owner"]
+
+
+def test_background_owner_refuses_takeover_when_owner_liveness_is_uncertain(monkeypatch, tmp_path):
+    registry = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", pid=200, clock=lambda: 100.0)
+    registry.started_at_ns = 20
+    registry.publish_generation()
+    registry.owner_dir.mkdir(parents=True, exist_ok=True)
+    registry.owner_path.write_text(
+        json.dumps(
+            background_process_record(
+                registry,
+                199,
+                generation_id="old",
+                started_at_ns=10,
+                last_heartbeat=100.0,
+                control_socket="/tmp/owner.sock",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        background_owner_module,
+        "process_start_identity",
+        lambda _pid: (_ for _ in ()).throw(PermissionError("identity unavailable")),
+    )
+    monkeypatch.setattr(registry, "acquire_owner_lock", lambda: (_ for _ in ()).throw(AssertionError("uncertain owner must not be reclaimed")))
+
+    assert registry.attempt_takeover() is False
+
+    assert registry.status == "blocked_by_foreign_owner"
+    assert registry.last_error == "process_identity_unavailable"
 
 
 def test_background_owner_self_demotes_when_newer_generation_appears(monkeypatch, tmp_path):
@@ -424,9 +548,10 @@ def test_background_owner_recovers_from_missing_or_corrupt_state(monkeypatch, tm
     registry.release_owner("test-cleanup")
 
 
-def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_path):
+def test_caller_set_root_keeps_background_owner_election(monkeypatch, tmp_path):
     real_registry = app_module.BackgroundOwnerRegistry
     started_at = iter([10, 20])
+    caller_root = {YOLOMUX_ROOT_ENV: str(tmp_path / "caller-root")}
 
     def registry_factory(**kwargs):
         registry = real_registry(owner_dir=tmp_path / "owner", **kwargs)
@@ -440,8 +565,9 @@ def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_pat
     first = app_module.TmuxWebtermApp(["1"])
     second = app_module.TmuxWebtermApp(["1"])
     try:
-        assert first.start_background_owner(port=9901) is True
-        assert second.start_background_owner(port=9903) is True
+        assert is_managed_instance_port(9901, caller_root) is False
+        assert first.start_background_owner(port=9901, managed_instance=is_managed_instance_port(9901, caller_root)) is True
+        assert second.start_background_owner(port=9903, managed_instance=is_managed_instance_port(9903, caller_root)) is True
 
         assert first.background_owner.is_owner() is False
         assert first.background_owner.status == "follower"
@@ -452,6 +578,43 @@ def test_two_app_instances_same_state_dir_elect_newer_owner(monkeypatch, tmp_pat
         second.background_owner.stop()
         first.control_server.stop()
         second.control_server.stop()
+
+
+def test_managed_instance_starts_private_workers_through_the_local_owner_adapter():
+    calls = []
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.control_server = type("Control", (), {"path": "/tmp/control.sock"})()
+    webapp.search_index_can_build = lambda _role: True
+    webapp.log_event = lambda *args, **kwargs: calls.append("event")
+    webapp.job_client = type("Job", (), {"start_for_scheduler": lambda _self: calls.append("job")})()
+    webapp.pricing_refresh_coordinator = type("Pricing", (), {"start_periodic": lambda _self: calls.append("pricing")})()
+    webapp.stats_current_runtime = type("Stats", (), {"start": lambda _self: calls.append("stats")})()
+    webapp.warm_start_session_files_payload_cache = lambda: calls.append("session-files")
+    webapp.warm_start_tabber_activity_cache = lambda: calls.append("tabber")
+    webapp.start_tabber_activity_cache_warmer = lambda: calls.append("tabber-worker")
+    webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
+
+    try:
+        assert webapp.start_background_owner(port=9911, managed_instance=True) is True
+        assert isinstance(webapp.background_owner, app_module.DisabledBackgroundOwner)
+        assert webapp.background_owner.status_payload()["status"] == "local"
+        assert webapp.background_owner.owner_payload()["port"] == 9911
+        assert calls == ["event", "job", "pricing", "stats", "session-files", "tabber", "tabber-worker", "publish"]
+    finally:
+        file_index.set_background_owner_checker(None)
+
+
+def test_local_owner_adapter_preserves_refresh_coalescing_and_generation():
+    owner = app_module.DisabledBackgroundOwner(port=9911)
+
+    first = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same"})
+    second = owner.request_owner_refresh(BACKGROUND_ROLE_SESSION_FILES, {"cache_key": "same"})
+    status = owner.status_payload()
+
+    assert first["local_owner"] is True
+    assert second["coalesced"] is True
+    assert status["generation"]["started_at_ns"] > 0
+    assert status["counters"]["coalesced_refresh_requests"] == 1
 
 
 def test_background_refresh_done_fanout_reaches_follower_client_broker(monkeypatch, tmp_path):
@@ -806,9 +969,10 @@ def test_background_owner_coalesces_duplicate_follower_control_refreshes(monkeyp
     follower = BackgroundOwnerRegistry(owner_dir=tmp_path / "owner", clock=lambda: 100.0, monotonic=lambda: now[0])
     follower.owner_dir.mkdir(parents=True)
     follower.owner_path.write_text(
-        json.dumps({"generation_id": "owner", "pid": 123, "last_heartbeat": 100.0, "control_socket": "/tmp/owner.sock"}),
+        json.dumps(background_process_record(follower, 123, generation_id="owner", last_heartbeat=100.0, control_socket="/tmp/owner.sock")),
         encoding="utf-8",
     )
+    monkeypatch.setattr(background_owner_module, "pid_is_alive", lambda _pid: True)
     control_requests = []
     monkeypatch.setattr(
         background_owner_module,
@@ -1079,27 +1243,39 @@ def test_follower_missing_session_files_uses_bounded_fallback_when_owner_unrespo
     assert "background_refresh_fallback" in {event["type"] for event in events}
 
 
-def test_follower_session_files_http_payload_returns_refreshing_elsewhere(monkeypatch, no_control_socket):
+def test_follower_session_files_http_cache_miss_returns_typed_queued_ack(monkeypatch, no_control_socket):
     webapp = app_module.TmuxWebtermApp(["1"])
     owner = FollowerOwner()
     webapp.background_owner = owner
     info = SessionInfo(session="1", panes=[], selected_pane=None, agents=[])
     monkeypatch.setattr(app_module.session_files, "session_files_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not compute missing session-files HTTP payloads")))
+    monkeypatch.setattr(
+        webapp,
+        "submit_session_files_job",
+        lambda *_args, **_kwargs: (
+            {"ok": True, "job": {"job_id": "job-session-files", "status": "queued"}},
+            "session_files:fixture",
+            1,
+        ),
+    )
+    monkeypatch.setattr(webapp, "complete_session_files_operation", lambda *_args: None)
     try:
-        payload, status = webapp.session_files_payload_for_infos("1", {"1": info}, 24.0)
+        payload, status = webapp.session_files_payload_for_infos("1", {"1": info}, 24.0, accepted_operation=True)
     finally:
         webapp.control_server.stop()
 
-    assert status == HTTPStatus.OK
-    assert payload["files"] == []
-    assert payload["repos"] == []
-    assert payload["cache"]["stale"] is True
-    assert payload["cache"]["refreshing_elsewhere"] is True
-    assert owner.refresh_requests == [BACKGROUND_ROLE_SESSION_FILES]
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["state"] == "queued"
+    assert payload["request"]["id"].startswith("r-")
+    assert payload["operation"]["id"].startswith("op-")
+    assert payload["operation"]["status_url"] == f"/api/operations/{payload['operation']['id']}"
+    assert payload["operation"]["events_url"] == f"/api/client-events?operation_id={payload['operation']['id']}"
+    assert payload["operation"]["context"]["session"] == "1"
+    assert owner.refresh_requests == []
     assert owner.fallbacks == []
 
 
-def test_follower_session_files_http_placeholder_includes_clean_numbered_workdir_repo(monkeypatch, no_control_socket, tmp_path):
+def test_follower_session_files_http_cache_miss_does_not_disguise_clean_repo_as_ready(monkeypatch, no_control_socket, tmp_path):
     webapp = app_module.TmuxWebtermApp(["8002"])
     owner = FollowerOwner()
     webapp.background_owner = owner
@@ -1130,26 +1306,28 @@ def test_follower_session_files_http_placeholder_includes_clean_numbered_workdir
     info = SessionInfo(session="8002", panes=[pane], selected_pane=pane, agents=[])
     monkeypatch.setattr(app_module.session_files, "session_workdir", lambda session: repo if session == "8002" else home)
     monkeypatch.setattr(app_module.session_files, "session_files_payload", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not compute missing session-files HTTP payloads")))
+    monkeypatch.setattr(
+        webapp,
+        "submit_session_files_job",
+        lambda *_args, **_kwargs: (
+            {"ok": True, "job": {"job_id": "job-session-files", "status": "queued"}},
+            "session_files:fixture",
+            1,
+        ),
+    )
+    monkeypatch.setattr(webapp, "complete_session_files_operation", lambda *_args: None)
     try:
-        payload, status = webapp.session_files_payload_for_infos("8002", {"8002": info}, 24.0)
+        payload, status = webapp.session_files_payload_for_infos("8002", {"8002": info}, 24.0, accepted_operation=True)
     finally:
         webapp.control_server.stop()
 
-    assert status == HTTPStatus.OK
-    assert payload["files"] == []
-    assert payload["repos"] == [{
-        "repo": str(repo),
-        "count": 0,
-        "touched_count": 0,
-        "added": 0,
-        "removed": 0,
-        "from_ref": "default",
-        "to_ref": "base",
-        "error": "",
-    }]
-    assert payload["refreshing_elsewhere"] is True
-    assert payload["cache"]["refreshing_elsewhere"] is True
-    assert owner.refresh_requests == [BACKGROUND_ROLE_SESSION_FILES]
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["state"] == "queued"
+    assert payload["request"]["id"].startswith("r-")
+    assert payload["operation"]["id"].startswith("op-")
+    assert payload["operation"]["context"]["session"] == "8002"
+    assert str(repo) not in repr(payload)
+    assert owner.refresh_requests == []
     assert owner.fallbacks == []
 
 
@@ -1270,26 +1448,22 @@ def test_watch_roots_follower_poll_skips_directory_signature_timing_regression(m
         time.sleep(0.35)
         return {"entries": []}
 
-    monkeypatch.setattr(app_module, "filesystem_watch_signature", slow_watch_signature)
+    monkeypatch.setattr(app_module.filesystem, "watch_signature", slow_watch_signature)
     monkeypatch.setattr(app_module.filesystem, "list_directory", slow_list_directory)
     webapp = app_module.TmuxWebtermApp([])
     owner = FollowerOwner()
     webapp.background_owner = owner
-    monkeypatch.setattr(webapp, "settings_watch_signature", lambda: ("settings",))
-    monkeypatch.setattr(webapp, "transcripts_watch_signature", lambda sessions: ("transcripts",))
     try:
-        webapp.update_client_watch_roots({"roots": [str(watched)]})
-        assert webapp.client_watch_roots_snapshot() == [str(watched)]
         started = time.perf_counter()
-        events = webapp.poll_client_events_once()
+        webapp.update_client_watch_roots({"roots": [str(watched)]})
         elapsed = time.perf_counter() - started
+        assert webapp.client_watch_roots_snapshot() == [str(watched)]
     finally:
         webapp.control_server.stop()
 
-    assert events == []
     assert slow_signature_calls == []
     assert list_calls == []
-    assert owner.refresh_requests == [BACKGROUND_ROLE_WATCH_ROOTS]
+    assert owner.refresh_requests == []
     # The assertion above proves the expensive full-index JSON load was not
     # used. Leave scheduler headroom for an xdist-saturated development host.
     assert elapsed < 0.35
@@ -1309,7 +1483,7 @@ def test_search_index_follower_uses_one_shot_fallback_when_owner_unresponsive(mo
         refresh_requests.append((role, payload))
         return {"ok": False, "accepted": False, "role": role, "fallback": True, "error": "timeout"}
 
-    def fallback_walk(root, _current, _tokens, results, _skip_dirs=None):
+    def fallback_walk(root, _current, _tokens, results, _skip_dirs=None, **_kwargs):
         walk_calls.append(root)
         results.append({
             "name": "target.py",
@@ -1404,6 +1578,7 @@ def test_search_index_build_error_clears_building_and_publishes_terminal_state(m
     index.building = True
     index.build_generation = 1
     index.active_generation = 1
+    _pin_search_index_root(index, tmp_path)
     events = []
     file_index.set_background_owner_done_notifier(lambda role, payload: events.append((role, payload)))
     monkeypatch.setattr(file_index, "_walk_root_with_metrics", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
@@ -1411,6 +1586,7 @@ def test_search_index_build_error_clears_building_and_publishes_terminal_state(m
         file_index._run_build(index, set(), generation=1)
     finally:
         file_index.set_background_owner_done_notifier(None)
+        index.close_root_fd()
 
     assert index.building is False
     assert index.last_error == "disk unavailable"
@@ -1712,12 +1888,16 @@ def test_search_index_follower_refetches_manifest_after_owner_build(monkeypatch,
 
         owner_index = file_index.RootIndex(tmp_path)
         owner_index.stop_event = threading.Event()
-        file_index._run_build(
-            owner_index,
-            set(filesystem.search.SEARCH_SKIP_DIRS),
-            exclude_path=filesystem.search.paths._path_is_secret,
-            exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
-        )
+        _pin_search_index_root(owner_index, tmp_path)
+        try:
+            file_index._run_build(
+                owner_index,
+                set(filesystem.search.SEARCH_SKIP_DIRS),
+                exclude_path=filesystem.search.paths._path_is_secret,
+                exclude_signature=filesystem.search.SEARCH_SECRET_EXCLUDE_SIGNATURE,
+            )
+        finally:
+            owner_index.close_root_fd()
         file_index.set_background_owner_checker(lambda _role: False)
         refreshed = filesystem.index_status(str(tmp_path))
         payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
@@ -1741,8 +1921,8 @@ def test_only_owner_starts_search_index_walk_for_shared_root(monkeypatch, tmp_pa
         walk_calls.append(root)
         return [], False
 
-    def synchronous_start_build(index, skip_dirs, exclude_path=None, exclude_signature=""):
-        file_index.walk_root(index.root, skip_dirs, exclude_path=exclude_path)
+    def synchronous_start_build(index, skip_dirs, exclude_path=None, exclude_signature="", operation=""):
+        file_index.walk_root(index.root, skip_dirs, exclude_path=exclude_path, operation=operation)
 
     monkeypatch.setattr(file_index, "walk_root", fake_walk_root)
     monkeypatch.setattr(file_index, "_start_build", synchronous_start_build)

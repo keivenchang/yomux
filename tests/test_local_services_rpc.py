@@ -1,3 +1,4 @@
+import errno
 import json
 import socket
 import threading
@@ -170,6 +171,83 @@ def test_current_rpc_timeout_never_replays_work_through_legacy_fallback(tmp_path
     assert legacy_calls == []
 
 
+@pytest.mark.parametrize(
+    ("service_duration_ms", "expected_error"),
+    [
+        (15.0, "peer_handler_slow"),
+        (3.0, "unattributed_latency"),
+    ],
+)
+def test_current_rpc_deadline_attributes_only_measured_peer_handler_time(
+    tmp_path, monkeypatch, service_duration_ms, expected_error,
+):
+    """A response over the client deadline names only a proven handler span."""
+    envelope = rpc.new_envelope("testd", "status", {"action": "status"}, timeout_seconds=0.01)
+    response_envelope = rpc.LocalRpcEnvelope(
+        service="testd",
+        method="status",
+        request_id=envelope.request_id,
+        trace_id=envelope.trace_id,
+        deadline_ms=envelope.deadline_ms,
+        priority=envelope.priority,
+        owner_generation=envelope.owner_generation,
+        config_generation=envelope.config_generation,
+        payload={"ok": True},
+        service_duration_ms=service_duration_ms,
+    )
+    response = FragmentedConnection([])
+    rpc.write_message(response, response_envelope, response_envelope.payload)
+
+    class DelayedResponseSocket(FragmentedConnection):
+        def __init__(self):
+            super().__init__([response.sent])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _seconds):
+            pass
+
+        def connect(self, _path):
+            pass
+
+    clock = iter((10.0, 10.012))
+    monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: DelayedResponseSocket())
+    monkeypatch.setattr(rpc, "monotonic_clock", lambda: next(clock))
+
+    with pytest.raises(rpc.LocalRpcError, match=expected_error):
+        rpc.request(tmp_path / "testd.sock", envelope, timeout_seconds=0.1)
+
+
+def test_current_rpc_absent_socket_never_replays_work_through_legacy_fallback(tmp_path, monkeypatch):
+    legacy_calls = []
+
+    class MissingSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def settimeout(self, _seconds):
+            pass
+
+        def connect(self, _path):
+            raise FileNotFoundError(errno.ENOENT, "fixture socket absent")
+
+    monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: MissingSocket())
+    monkeypatch.setattr(rpc, "legacy_request", lambda *_args, **_kwargs: legacy_calls.append(True) or {})
+    envelope = rpc.new_envelope("testd", "history", {"action": "history"})
+
+    with pytest.raises(FileNotFoundError, match="fixture socket absent"):
+        rpc.request(tmp_path / "testd.sock", envelope, timeout_seconds=0.1, fallback_legacy=True)
+
+    assert legacy_calls == []
+
+
 def test_local_service_runtime_peer_uid_is_safe_when_unsupported_or_matching(monkeypatch):
     client, server = socket.socketpair()
     try:
@@ -182,17 +260,29 @@ def test_local_service_runtime_peer_uid_is_safe_when_unsupported_or_matching(mon
         server.close()
 
 
+def _wait_for_service_socket(socket_path, expected_mode=0o600):
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if socket_path.exists() and (socket_path.stat().st_mode & 0o777) == expected_mode:
+            return
+        time.sleep(0.01)
+    mode = oct(socket_path.stat().st_mode & 0o777) if socket_path.exists() else "missing"
+    pytest.fail(f"local service socket did not become ready with mode {oct(expected_mode)}: {mode}")
+
+
 def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, peer_uid=None):
     if monkeypatch is not None:
         monkeypatch.setattr(runtime, "peer_uid", lambda _connection: peer_uid)
 
-    def handle(request):
+    def handle(request, request_binary):
         if request.get("action") == "shutdown":
             stop_event.set()
             return {"ok": True, "shutdown": True}, b""
+        if request.get("action") == "raise":
+            raise FileNotFoundError("retired service root")
         if request.get("action") == "oversize_response":
             return {"ok": True, "blob": "x" * (rpc.LOCAL_RPC_MAX_METADATA_BYTES + 1)}, b""
-        return {"ok": True, "echo": request}, b""
+        return {"ok": True, "echo": request, "request_binary": request_binary.decode("utf-8")}, b""
 
     worker = threading.Thread(
         target=lambda: runtime.run_local_rpc_service(
@@ -207,14 +297,7 @@ def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, p
         daemon=True,
     )
     worker.start()
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        if socket_path.exists() and (socket_path.stat().st_mode & 0o777) == 0o600:
-            break
-        time.sleep(0.01)
-    else:
-        mode = oct(socket_path.stat().st_mode & 0o777) if socket_path.exists() else "missing"
-        pytest.fail(f"local service socket did not become ready with mode 0600: {mode}")
+    _wait_for_service_socket(socket_path)
     return worker
 
 
@@ -234,11 +317,170 @@ def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clie
     response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=2.0)
     slow.close()
 
-    assert response == {"ok": True, "echo": {"action": "echo"}}
+    assert response == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
     shutdown = rpc.new_envelope("testd", "shutdown", {"action": "shutdown"})
     assert rpc.request(service_socket_path, shutdown, timeout_seconds=1.0)[0] == {"ok": True, "shutdown": True}
     worker.join(timeout=1.0)
     assert worker.is_alive() is False
+
+
+def test_local_service_runtime_forwards_bounded_request_binary_to_handler(tmp_path, monkeypatch):
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
+    envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
+
+    response, response_binary = rpc.request(
+        service_socket_path,
+        envelope,
+        binary=b"bounded request",
+        timeout_seconds=1.0,
+    )
+
+    assert response == {
+        "ok": True,
+        "echo": {"action": "echo"},
+        "request_binary": "bounded request",
+    }
+    assert response_binary == b""
+    shutdown = rpc.new_envelope("testd", "shutdown", {"action": "shutdown"})
+    assert rpc.request(service_socket_path, shutdown, timeout_seconds=1.0)[0] == {"ok": True, "shutdown": True}
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+
+
+def test_local_service_runtime_carries_accept_read_and_handler_phases(tmp_path, monkeypatch):
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
+    envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(1.0)
+        client.connect(str(service_socket_path))
+        rpc.write_message(client, envelope, envelope.payload)
+        response_envelope, response, _binary, legacy = rpc.read_message(client)
+
+    assert legacy is False
+    assert response == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
+    assert response_envelope is not None
+    assert response_envelope.accept_to_read_ms >= 0.0
+    assert response_envelope.read_complete_ms >= 0.0
+    assert response_envelope.service_duration_ms >= 0.0
+    observed_envelope, observed_response, observed_binary = rpc.request_with_envelope(
+        service_socket_path,
+        rpc.new_envelope("testd", "echo", {"action": "echo"}),
+        timeout_seconds=1.0,
+    )
+    assert observed_response["ok"] is True
+    assert observed_response["echo"] == {"action": "echo"}
+    assert observed_binary == b""
+    assert observed_envelope is not None
+    assert observed_envelope.queue_wait_ms >= 0.0
+    assert observed_envelope.service_duration_ms >= 0.0
+    shutdown = rpc.new_envelope("testd", "shutdown", {"action": "shutdown"})
+    assert rpc.request(service_socket_path, shutdown, timeout_seconds=1.0)[0] == {"ok": True, "shutdown": True}
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+
+
+def test_local_service_runtime_reports_bounded_capacity_rejection(tmp_path, monkeypatch):
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
+
+    def handle(request, _request_binary):
+        if request.get("action") == "hold":
+            started.set()
+            release.wait(timeout=1.0)
+        if request.get("action") == "shutdown":
+            stop_event.set()
+        return {"ok": True}, b""
+
+    worker = threading.Thread(
+        target=lambda: runtime.run_local_rpc_service(
+            socket_path=socket_path, lock_path=lock_path, service_name="testd", stop_event=stop_event,
+            handle=handle, on_idle=lambda: False, on_client=lambda: None, concurrent_handlers=1,
+        ), daemon=True,
+    )
+    worker.start()
+    _wait_for_service_socket(socket_path)
+    first = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    first.settimeout(1.0)
+    first.connect(str(service_socket_path))
+    hold = rpc.new_envelope("testd", "hold", {"action": "hold"})
+    rpc.write_message(first, hold, hold.payload)
+    assert started.wait(timeout=1.0)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
+        second.settimeout(1.0)
+        second.connect(str(service_socket_path))
+        busy = json.loads(second.makefile("rb").readline())
+    release.set()
+    response_envelope, response, _binary, legacy = rpc.read_message(first)
+    first.close()
+    assert legacy is False
+    assert response == {"ok": True}
+    assert response_envelope is not None
+    assert response_envelope.capacity_limit == 1
+    assert response_envelope.capacity_saturated is True
+    assert response_envelope.capacity_rejections == 1
+    assert busy == {"ok": False, "error": "service busy", "queue_wait_ms": pytest.approx(busy["queue_wait_ms"]), "queue_depth": 0, "capacity_limit": 1, "capacity_saturated": True, "capacity_rejected": True, "capacity_rejections": 1}
+    # Response bytes are written before the handler thread releases its bounded slot, so an
+    # immediate shutdown RPC may correctly observe the same saturated capacity. Stop the fixture
+    # through its owned event after all rejection and response-envelope assertions are complete.
+    stop_event.set()
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+
+
+def test_local_service_runtime_does_not_idle_shutdown_with_active_handler(tmp_path):
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
+    idle_checked = threading.Event()
+
+    def handle(_request, _request_binary):
+        started.set()
+        release.wait(timeout=2.0)
+        return {"ok": True}, b""
+
+    def idle_due():
+        idle_checked.set()
+        return True
+
+    worker = threading.Thread(
+        target=lambda: runtime.run_local_rpc_service(
+            socket_path=socket_path, lock_path=lock_path, service_name="testd", stop_event=stop_event,
+            handle=handle, on_idle=idle_due, on_client=lambda: None, concurrent_handlers=1,
+        ), daemon=True,
+    )
+    worker.start()
+    _wait_for_service_socket(socket_path)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(1.0)
+    client.connect(str(service_socket_path))
+    hold = rpc.new_envelope("testd", "hold", {"action": "hold"})
+    rpc.write_message(client, hold, hold.payload)
+    try:
+        assert started.wait(timeout=1.0)
+        assert stop_event.wait(timeout=0.5) is False
+        assert idle_checked.is_set() is False
+        assert worker.is_alive() is True
+    finally:
+        release.set()
+        stop_event.set()
+        client.close()
+        worker.join(timeout=1.0)
 
 
 def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, monkeypatch):
@@ -269,7 +511,29 @@ def test_local_service_runtime_caps_oversize_responses_without_exiting(tmp_path,
     echo = rpc.new_envelope("testd", "echo", {"action": "echo"})
 
     assert rpc.request(service_socket_path, oversize, timeout_seconds=1.0)[0] == {"ok": False, "error": "response too large"}
-    assert rpc.request(service_socket_path, echo, timeout_seconds=1.0)[0] == {"ok": True, "echo": {"action": "echo"}}
+    assert rpc.request(service_socket_path, echo, timeout_seconds=1.0)[0] == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
+    stop_event.set()
+    worker.join(timeout=1.0)
+    assert worker.is_alive() is False
+
+
+def test_local_service_runtime_returns_typed_handler_failure_and_keeps_serving(tmp_path, monkeypatch):
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
+
+    failed = rpc.new_envelope("testd", "raise", {"action": "raise"})
+    echo = rpc.new_envelope("testd", "echo", {"action": "echo"})
+
+    assert rpc.request(service_socket_path, failed, timeout_seconds=1.0)[0] == {
+        "ok": False,
+        "error": "service request failed",
+        "error_code": "handler_failed",
+        "exception_type": "FileNotFoundError",
+    }
+    assert rpc.request(service_socket_path, echo, timeout_seconds=1.0)[0] == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
     stop_event.set()
     worker.join(timeout=1.0)
     assert worker.is_alive() is False
@@ -292,7 +556,7 @@ def test_local_service_runtime_never_opens_a_network_listener(tmp_path, monkeypa
         lock_path=tmp_path / "service.lock",
         service_name="testd",
         stop_event=stop_event,
-        handle=lambda _request: ({"ok": True}, b""),
+        handle=lambda _request, _request_binary: ({"ok": True}, b""),
         on_idle=lambda: False,
         on_client=lambda: None,
     )
@@ -311,7 +575,7 @@ def test_local_service_runtime_loser_does_not_run_stateful_startup(tmp_path):
             lock_path=lock_path,
             service_name="testd",
             stop_event=threading.Event(),
-            handle=lambda _request: ({"ok": True}, b""),
+            handle=lambda _request, _request_binary: ({"ok": True}, b""),
             on_idle=lambda: False,
             on_client=lambda: None,
             on_start=lambda: starts.append("opened-database"),

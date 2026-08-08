@@ -14,6 +14,14 @@ pytestmark = [pytest.mark.browser, pytest.mark.socket, pytest.mark.boot]
 TOUCH_LONG_PRESS_TEST_TIMEOUT_SECONDS = 8
 
 
+def xterm_only_search(session):
+    return "?" + urlencode({
+        "sessions": session,
+        "layout": "slot1",
+        "tabs": f"slot1:{session}",
+    })
+
+
 def saved_layout_state(session):
     return {
         "v": 1,
@@ -68,7 +76,104 @@ def test_full_bundle_boot_smoke_matrix_never_renders_a_blank_page(browser, monke
                 assert "appearance" in metrics["collapsedPreferenceSectionIds"], metrics
                 assert "file_explorer" in metrics["collapsedPreferenceSectionIds"], metrics
     finally:
-        stop_browser_share_server(server, thread)
+        try:
+            stop_browser_share_server(server, thread, browser=browser)
+        finally:
+            stop_isolated_browser_share_app(runtime)
+
+    successor_path = tmp_path / "xterm-successor"
+    successor_path.mkdir()
+    successor_runtime = start_isolated_browser_share_app(monkeypatch, successor_path)
+    successor_session = successor_runtime.sessions[0]
+    successor_server, successor_thread = start_browser_share_server(
+        monkeypatch,
+        successor_path,
+        successor_runtime.app,
+        auth_bypass=True,
+    )
+    try:
+        browser.get(
+            f"http://127.0.0.1:{successor_server.server_address[1]}/"
+            f"{xterm_only_search(successor_session)}"
+        )
+        assert_live_runtime_boot_healthy(browser, "full-bundle-xterm-successor", timeout=12)
+        mounted = WebDriverWait(browser, 12).until(
+            lambda driver: driver.execute_script(
+                """
+                const item = terminals.get(arguments[0]);
+                return Boolean(
+                  document.querySelector(`#term-${arguments[0]} .xterm`)
+                  && item?.socket?.readyState === WebSocket.OPEN
+                );
+                """,
+                successor_session,
+            )
+        )
+        assert mounted is True
+        assert_browser_journey_error_free(browser, observation_seconds=2.0)
+    finally:
+        try:
+            stop_browser_share_server(
+                successor_server,
+                successor_thread,
+                browser=browser,
+            )
+        finally:
+            stop_isolated_browser_share_app(successor_runtime)
+
+
+def test_hard_loaded_yoagent_keeps_activity_summary_disabled_without_requests_or_spinner(browser, monkeypatch, tmp_path):
+    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        runtime.app.yoagent_controller,
+        "run_yoagent_cli_backend",
+        lambda *_args, **_kwargs: ("fixture prewarm", "", {"elapsed_ms": 1}),
+    )
+    session = runtime.sessions[0]
+    server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    search = "?" + urlencode({
+        "sessions": f"{session},yoagent",
+        "layout": "slot1",
+        "tabs": f"slot1:{session},yoagent",
+    })
+    try:
+        browser._yolomux_server_log_boundary = server._fixture_server_log_boundary
+        browser.get(base_url + search)
+        assert_live_runtime_boot_healthy(browser, "activity-summary-disabled", timeout=12)
+        selected = browser.execute_async_script(
+            """
+            const done = arguments[arguments.length - 1];
+            Promise.resolve(selectSession(yoagentItemId, {userInitiated: true}))
+              .then(() => { activateYoagentPanel({scrollBottom: false}); done(true); })
+              .catch(error => done({error: String(error)}));
+            """
+        )
+        assert selected is True, selected
+        state = WebDriverWait(browser, 12).until(
+            lambda driver: driver.execute_script(
+                """
+                const disabled = document.querySelector('[data-activity-summary-disabled="true"]');
+                const refresh = document.querySelector('[data-yoagent-refresh]');
+                if (!disabled || !refresh) return null;
+                return {
+                  text: disabled.textContent.trim(),
+                  refreshDisabled: refresh.disabled,
+                  spinner: Boolean(document.querySelector('.yoagent-refresh-progress')),
+                  activityRequests: performance.getEntriesByType('resource')
+                    .map(entry => new URL(entry.name, location.href).pathname)
+                    .filter(path => path === '/api/activity-summary'),
+                };
+                """
+            )
+        )
+        assert state["text"]
+        assert state["refreshDisabled"] is True
+        assert state["spinner"] is False
+        assert state["activityRequests"] == []
+        assert_browser_journey_error_free(browser)
+    finally:
+        stop_browser_share_server(server, thread, browser=browser)
         stop_isolated_browser_share_app(runtime)
 
 
@@ -83,7 +188,7 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 Version/18.5 Mobile/15E148 Safari/604.1"})
         browser.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
-        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?" + urlencode({"sessions": session}))
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/{xterm_only_search(session)}")
         assert_live_runtime_boot_healthy(browser, "real-xterm-trusted-touch", timeout=12)
         assert WebDriverWait(browser, 12).until(lambda driver: driver.execute_script("return Boolean(document.querySelector(`#term-${arguments[0]} .xterm`) && terminals.get(arguments[0])?.socket?.readyState === WebSocket.OPEN);", session))
         result = run_isolated_tmux(runtime.tmux, "send-keys", "-t", f"{session}:", f"printf '{marker} extension\\n'", "Enter")
@@ -161,7 +266,7 @@ def test_real_xterm_trusted_touch_long_press_selects_extends_and_offers_copy(bro
         browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
         browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
         browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
-        stop_browser_share_server(server, thread)
+        stop_browser_share_server(server, thread, browser=browser)
         stop_isolated_browser_share_app(runtime)
 
 
@@ -172,7 +277,7 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
     server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
     marker = "real-xterm-browser-smoke"
     try:
-        browser.get(f"http://127.0.0.1:{server.server_address[1]}/?" + urlencode({"sessions": session}))
+        browser.get(f"http://127.0.0.1:{server.server_address[1]}/{xterm_only_search(session)}")
         assert_live_runtime_boot_healthy(browser, "real-xterm", timeout=12)
         mounted = WebDriverWait(browser, 12).until(
             lambda driver: driver.execute_script(
@@ -315,5 +420,5 @@ def test_real_xterm_renders_tmux_output_and_survives_pane_resize(browser, monkey
         assert after["connected"] is True and after["viewport"] > glyphs["viewport"], {"before": glyphs, "after": after}
         assert after["screenRect"] and after["screenRect"]["width"] > 0 and after["screenRect"]["height"] > 0, after
     finally:
-        stop_browser_share_server(server, thread)
+        stop_browser_share_server(server, thread, browser=browser)
         stop_isolated_browser_share_app(runtime)

@@ -1,5 +1,10 @@
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+from tests.browser_helpers.browser_console import assert_only_expected_browser_network_error
+from tests.browser_helpers.browser_console import assert_only_expected_browser_warning
+from tests.browser_helpers.browser_console import consume_only_expected_js_debug_api_error
+from selenium.webdriver.common.actions.wheel_input import ScrollOrigin
+from selenium.webdriver.common.by import By
 
 
 def test_preview_frame_shared_chrome_keeps_html_and_pdf_height_policies(browser, tmp_path):
@@ -263,6 +268,11 @@ def test_readme_diff_waits_for_payload_before_building_codemirror(browser, tmp_p
     assert metrics["deletedRows"] > 0, metrics
     assert "from=HEAD" in metrics["request"] and "to=current" in metrics["request"], metrics
     assert metrics["errors"] == [], metrics
+    assert_only_expected_browser_warning(
+        browser,
+        message="CodeMirror diff language parser failed; retrying plain diff editor",
+        correlation="TypeError: Cannot read properties of undefined (reading 'parser')",
+    )
 
 
 def test_editor_diff_button_waits_for_clean_payload_before_showing_refs(browser, tmp_path):
@@ -613,7 +623,6 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
             previewButtonHidden: panel.querySelector('[data-editor-mode="preview"]')?.hidden === true,
             zoomToolbarExists: Boolean(panel.querySelector('.file-editor-image-panel .file-editor-preview-zoom-toolbar')),
             zoomActions: Array.from(panel.querySelectorAll('.file-editor-image-panel [data-preview-zoom-action]')).map(button => button.dataset.previewZoomAction),
-            zoomWheel: panel.querySelector('.file-editor-image-panel')?.dataset.previewZoomWheel || '',
             zoomPan: panel.querySelector('.file-editor-image-panel')?.dataset.previewZoomPan || '',
           };
         };
@@ -677,8 +686,8 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
             after: refreshedPngImage?.getAttribute('src') || '',
             version: png.panel.querySelector('.file-editor-image-panel')?.dataset.imageVersion || '',
           },
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         };
         """
     )
@@ -692,7 +701,6 @@ def test_editor_preview_direct_media_formats_use_shared_dispatch(browser, tmp_pa
         assert metrics[key]["splitButtonHidden"] is True, metrics
         assert metrics[key]["zoomToolbarExists"] is True, metrics
         assert metrics[key]["zoomActions"] == ["out", "fit", "actual", "in"], metrics
-        assert metrics[key]["zoomWheel"] == "1", metrics
         assert metrics[key]["zoomPan"] == "1", metrics
     assert "photo.png" in metrics["png"]["src"], metrics
     assert metrics["pngRefresh"]["before"].endswith("&v=11"), metrics
@@ -789,11 +797,11 @@ def test_editor_opens_mermaid_source_preview_by_default(browser, tmp_path):
               imageSrcPrefix: String(preview?.querySelector('img.mermaid-preview-image')?.getAttribute('src') || '').slice(0, 5),
               calls: mermaidCalls,
               config: window.__directMermaidConfig || {},
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -857,11 +865,11 @@ def test_editor_opens_jsonl_table_preview_by_default_and_keeps_raw_edit(browser,
               editButtonVisible: editButton?.hidden === false,
               finalMode: editorViewModeFor(path, item),
               editorHidden: panel?.querySelector('.file-editor-codemirror-panel')?.hidden === true,
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -962,8 +970,8 @@ def test_direct_mermaid_network_topology_uses_native_svg_labels(browser, tmp_pat
               previewNativeLabelTexts,
               naturalWidth: image?.naturalWidth || 0,
               naturalHeight: image?.naturalHeight || 0,
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
             done({error: String(error), stack: error?.stack || ''});
@@ -1114,7 +1122,6 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
               scrollLeft: viewport.scrollLeft,
               scrollTop: viewport.scrollTop,
             } : null;
-            setFileEditorPreviewZoomStateForPath(path, 'split:mermaid', {mode: 'manual', scale: 2.4});
             setFileEditorViewMode(path, 'split', item);
             renderFileEditorPanel(panel, item);
             const splitPreview = panel.querySelector('.file-editor-preview-pane-panel');
@@ -1156,8 +1163,15 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
             await frame();
             await frame();
             const splitImageRectAfterWheel = rect(splitImage);
+            const splitZoomIn = splitPreview.querySelector('[data-preview-zoom-action="in"]');
+            for (let index = 0; index < 4 && splitZoomIn && !splitZoomIn.disabled; index += 1) {
+              splitZoomIn.click();
+              await frame();
+            }
+            await frame();
+            const splitImageRectAfterManualZoom = rect(splitImage);
             // Start the pan from the top-left corner so the drag (which increases scroll) always
-            // has headroom; the wheel zoom above may have already scrolled the viewport to max.
+            // has headroom after the explicit toolbar zoom.
             splitViewport.scrollLeft = 0;
             splitViewport.scrollTop = 0;
             await frame();
@@ -1257,6 +1271,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
                 wheelPrevented: splitWheelPrevented,
                 zoomValueBeforeWheel: splitZoomValueBeforeWheel,
                 imageRectAfterWheel: splitImageRectAfterWheel,
+                imageRectAfterManualZoom: splitImageRectAfterManualZoom,
                 panStart: splitPanStart,
                 panAfter: {
                   scrollLeft: splitViewport.scrollLeft,
@@ -1274,8 +1289,8 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
               probeNativeLabelTexts,
               previewNativeLabelTexts,
               config: window.mermaid?.mermaidAPI?.getConfig?.() || {},
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             };
             // Bright/Vanilla preview: the diagram's lines and labels must follow the white preview
             // surface (dark on white), not the dark app theme; the app `--text` (light) would paint
@@ -1307,16 +1322,41 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
                   labelFills,
                 };
               }
-            } catch (error) { brightContrast = {error: String(error)}; }
-            result.brightContrast = brightContrast;
+                } catch (error) { brightContrast = {error: String(error)}; }
+                result.brightContrast = brightContrast;
+                const wheelProbe = panel.querySelector('.file-editor-preview-pane-panel .file-editor-preview-zoom-viewport');
+                const wheelProbeImage = wheelProbe?.querySelector('.mermaid-preview-image');
+                const wheelProbeShell = wheelProbe?.closest('.file-editor-preview-zoom-shell');
+                wheelProbeShell?.querySelector('[data-preview-zoom-action="in"]')?.click();
+                wheelProbeShell?.querySelector('[data-preview-zoom-action="in"]')?.click();
+                await frame();
+                await frame();
+                if (wheelProbe && wheelProbeImage) wheelProbe.dataset.previewWheelProbe = 'mermaid';
             done(result);
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """,
         mermaid_uri,
         mermaid_source,
+    )
+    wheel_probe = browser.find_element(By.CSS_SELECTOR, '[data-preview-wheel-probe="mermaid"]')
+    native_wheel_before = browser.execute_script(
+        """const viewport = arguments[0]; const image = viewport.querySelector('.mermaid-preview-image');
+        viewport.scrollTop = 0;
+        const rect = image.getBoundingClientRect();
+        return {scrollTop: viewport.scrollTop, scrollHeight: viewport.scrollHeight, clientHeight: viewport.clientHeight,
+          image: {width: rect.width, height: rect.height}};""",
+        wheel_probe,
+    )
+    ActionChains(browser).scroll_from_origin(ScrollOrigin.from_element(wheel_probe), 0, 220).perform()
+    browser.execute_async_script("requestAnimationFrame(() => requestAnimationFrame(arguments[arguments.length - 1]));")
+    native_wheel_after = browser.execute_script(
+        """const viewport = arguments[0]; const image = viewport.querySelector('.mermaid-preview-image');
+        const rect = image.getBoundingClientRect();
+        return {scrollTop: viewport.scrollTop, image: {width: rect.width, height: rect.height}};""",
+        wheel_probe,
     )
     assert "error" not in metrics, metrics
     assert metrics["imageExists"] is True, metrics
@@ -1324,8 +1364,8 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["naturalWidth"] > 0 and metrics["naturalHeight"] > 0, metrics
     assert metrics["imageRectFit"]["height"] > 340, metrics
     assert metrics["imageRectFit"]["height"] >= metrics["viewport"]["clientHeight"] - 40, metrics
-    assert metrics["wheelPrevented"] is True, metrics
-    assert metrics["imageRectAfterWheel"]["width"] > metrics["imageRectFit"]["width"], metrics
+    assert metrics["wheelPrevented"] is False, metrics
+    assert abs(metrics["imageRectAfterWheel"]["width"] - metrics["imageRectFit"]["width"]) <= 1, metrics
     assert metrics["imageRectActual"]["height"] < metrics["imageRectFit"]["height"], metrics
     assert metrics["imageRectAfterZoom"]["height"] > metrics["imageRectActual"]["height"], metrics
     assert metrics["zoomToolbarExists"] is True, metrics
@@ -1341,7 +1381,7 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     for toolbar_rect in metrics["split"]["toolbarRects"]:
         assert toolbar_rect["width"] > 0 and toolbar_rect["height"] > 0, metrics
     assert metrics["split"]["zoomValueBeforeWheel"].endswith("%"), metrics
-    assert metrics["split"]["wheelPrevented"] is True, metrics
+    assert metrics["split"]["wheelPrevented"] is False, metrics
     assert metrics["split"]["zoomMode"] == "manual", metrics
     # Split preview pane must occupy ~half the editor content (right half), NOT full width.
     # Regression: `.file-editor-preview-zoom-full { width:100% }` overrode `right:0` on the
@@ -1363,7 +1403,21 @@ def test_direct_mermaid_sample_real_bundle_keeps_svg_text_labels(browser, tmp_pa
     assert metrics["split"]["imageRect"]["right"] <= split_content["right"] + 2, {"image": metrics["split"]["imageRect"], "content": split_content}
     assert metrics["split"]["viewportBeforeWheel"]["scrollLeft"] == 0, metrics
     assert metrics["split"]["viewportBeforeWheel"]["scrollTop"] == 0, metrics
-    assert metrics["split"]["imageRectAfterWheel"]["width"] > metrics["split"]["imageRect"]["width"], metrics
+    assert abs(metrics["split"]["imageRectAfterWheel"]["width"] - metrics["split"]["imageRect"]["width"]) <= 1, metrics
+    assert metrics["split"]["imageRectAfterManualZoom"]["width"] > metrics["split"]["imageRect"]["width"], metrics
+    assert native_wheel_before["scrollHeight"] > native_wheel_before["clientHeight"], native_wheel_before
+    assert native_wheel_after["scrollTop"] > native_wheel_before["scrollTop"], {
+        "before": native_wheel_before,
+        "after": native_wheel_after,
+    }
+    assert abs(native_wheel_after["image"]["width"] - native_wheel_before["image"]["width"]) <= 1, {
+        "before": native_wheel_before,
+        "after": native_wheel_after,
+    }
+    assert abs(native_wheel_after["image"]["height"] - native_wheel_before["image"]["height"]) <= 1, {
+        "before": native_wheel_before,
+        "after": native_wheel_after,
+    }
     assert (
         metrics["split"]["panAfter"]["scrollLeft"] > metrics["split"]["panStart"]["scrollLeft"]
         or metrics["split"]["panAfter"]["scrollTop"] > metrics["split"]["panStart"]["scrollTop"]
@@ -1468,11 +1522,11 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
               previewHidden: preview?.hidden === true,
               imageSrc: image?.getAttribute('src') || '',
               mode: editorViewModeFor(path, item),
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -1485,7 +1539,18 @@ def test_editor_open_misleading_binary_uses_sniffed_preview_mime(browser, tmp_pa
     assert metrics["imageSrc"].startswith("/api/fs/raw?path="), metrics
     assert "renamed.bin" in metrics["imageSrc"], metrics
     assert metrics["mode"] == "preview", metrics
-    assert metrics["errors"] == [], metrics
+    expected_api_error = consume_only_expected_js_debug_api_error(
+        browser,
+        path="/api/fs/read",
+        status=415,
+        method="GET",
+        query={"path": "/home/test/repo/renamed.bin"},
+    )
+    assert len(metrics["errors"]) == 1, metrics
+    assert all(expected_api_error.get(key) == value for key, value in metrics["errors"][0].items()), {
+        "initial": metrics["errors"][0],
+        "retired": expected_api_error,
+    }
     assert metrics["rejections"] == [], metrics
 
 
@@ -1655,8 +1720,8 @@ def test_preview_registry_structured_table_and_offline_markdown(browser, tmp_pat
             header: tsv.panel.querySelector('.file-editor-data-preview-header')?.textContent || '',
             cells: Array.from(tsv.panel.querySelectorAll('.file-editor-table-preview th, .file-editor-table-preview td')).map(node => node.textContent),
           },
-          errors: window.__bootErrors,
-          rejections: window.__bootRejections,
+          errors: jsDebugFailureEvents('error'),
+          rejections: jsDebugFailureEvents('rejection'),
         };
         """
     )
@@ -1762,8 +1827,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 resolve(false);
                 return;
               }
-              if (image.complete && image.naturalWidth > 0) {
-                resolve(true);
+              if (image.complete) {
+                resolve(image.naturalWidth > 0);
                 return;
               }
               const finish = () => resolve(image.naturalWidth > 0);
@@ -1817,8 +1882,6 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             document.getElementById('grid').append(panel);
             renderFileEditorPanel(panel, item);
             const preview = panel.querySelector('.file-editor-preview-pane-panel');
-            const fixedImages = Array.from(preview.querySelectorAll('img[alt^="fixed "]'));
-            await Promise.all(fixedImages.map(waitImage));
             const imageSnapshot = label => {
               const img = preview.querySelector(`img[alt="${label}"]`);
               const box = img?.getBoundingClientRect();
@@ -1836,12 +1899,18 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 naturalHeight: img?.naturalHeight || 0,
               };
             };
+            const fixedImages = Array.from(preview.querySelectorAll('img[alt^="fixed "]'));
+            const externalImage = preview.querySelector('img[alt="external"]');
+            const externalInitial = imageSnapshot('external');
+            const externalCompletion = waitImage(externalImage);
+            await Promise.all(fixedImages.map(waitImage));
+            await externalCompletion;
             const initialImages = {
               local: imageSnapshot('local'),
               bare: imageSnapshot('bare'),
               htmlBare: imageSnapshot('html bare'),
               svg: imageSnapshot('svg'),
-              external: imageSnapshot('external'),
+              external: externalInitial,
               unsafe: imageSnapshot('unsafe'),
               missing: imageSnapshot('missing'),
               fixedWide: imageSnapshot('fixed wide'),
@@ -1849,7 +1918,8 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
             };
             const missing = preview.querySelector('img[alt="missing"]');
             if (missing) missing.dispatchEvent(new Event('error'));
-            const brokenText = preview.querySelector('.markdown-image-error')?.textContent || '';
+            const brokenText = Array.from(preview.querySelectorAll('.markdown-image-error'))
+              .find(node => String(node.textContent || '').includes('/home/test/repo/docs/missing.png'))?.textContent || '';
             if (preview._previewAsync) await preview._previewAsync;
             await frame();
             await frame();
@@ -1869,11 +1939,11 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
                 config: window.__mermaidConfig || {},
               },
               previewText: preview.textContent || '',
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -1926,6 +1996,11 @@ def test_markdown_preview_media_and_mermaid_rendering(browser, tmp_path):
     assert metrics["mermaid"]["config"]["flowchart"]["htmlLabels"] is False, metrics
     assert metrics["errors"] == [], metrics
     assert metrics["rejections"] == [], metrics
+    assert_only_expected_browser_network_error(
+        browser,
+        url="https://example.test/image.png",
+        reason="net::ERR_NAME_NOT_RESOLVED",
+    )
 
 
 def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images(browser, tmp_path):
@@ -2078,11 +2153,11 @@ def test_markdown_split_preview_scroll_sync_tracks_source_lines_with_tall_images
                 editorTop: editorScroller.scrollTop,
                 editorCenterLine: editorCenterLine(),
               },
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """,
@@ -2238,11 +2313,11 @@ def test_markdown_preview_visual_rendering_has_mermaid_labels_and_media(browser,
                 preview: {left: 0.77, top: 0.19, right: 0.95, bottom: 0.31},
                 fallback: {left: 0.76, top: 0.65, right: 0.96, bottom: 0.77},
               },
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """,
@@ -2364,11 +2439,11 @@ def test_preview_popout_snapshot_waits_for_media_and_mermaid(browser, tmp_path):
               mermaidSrcPrefix: String(root?.querySelector('img.mermaid-preview-image')?.getAttribute('src') || '').slice(0, 5),
               toolbarText: doc.querySelector('.file-preview-popout-title')?.textContent || '',
               bodyClass: doc.body?.className || '',
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -2470,7 +2545,7 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
             const wheelPrevented = !viewport.dispatchEvent(wheelEvent);
             await frame(win);
             await frame(win);
-            const wheelZoomed = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image)};
+            const wheelUnchanged = {value: value(), mode: root.dataset.previewZoomMode || '', rect: rect(image)};
             await click('in');
             await click('in');
             const zoomed = {
@@ -2534,12 +2609,11 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
               naturalWidth: image?.naturalWidth || 0,
               naturalHeight: image?.naturalHeight || 0,
               toolbarActions: Array.from(root.querySelectorAll('[data-preview-zoom-action]')).map(button => button.dataset.previewZoomAction),
-              zoomWheel: root.dataset.previewZoomWheel || '',
               zoomPan: root.dataset.previewZoomPan || '',
               initial,
               actual,
               wheelPrevented,
-              wheelZoomed,
+              wheelUnchanged,
               zoomed,
             pointerDownPrevented,
             pointerMovePrevented,
@@ -2547,11 +2621,11 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
             panStart,
             panAfter,
               fit,
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """,
@@ -2562,14 +2636,13 @@ def test_preview_popout_zoom_controls_are_hydrated(browser, tmp_path):
     assert metrics["imageExists"] is True, metrics
     assert metrics["naturalWidth"] == 900 and metrics["naturalHeight"] == 520, metrics
     assert metrics["toolbarActions"] == ["out", "fit", "actual", "in"], metrics
-    assert metrics["zoomWheel"] == "1", metrics
     assert metrics["zoomPan"] == "1", metrics
     assert metrics["initial"]["mode"] == "fit", metrics
     assert metrics["actual"]["mode"] == "actual", metrics
     assert metrics["actual"]["value"] == "100%", metrics
-    assert metrics["wheelPrevented"] is True, metrics
-    assert metrics["wheelZoomed"]["mode"] == "manual", metrics
-    assert metrics["wheelZoomed"]["rect"]["width"] > metrics["actual"]["rect"]["width"], metrics
+    assert metrics["wheelPrevented"] is False, metrics
+    assert metrics["wheelUnchanged"]["mode"] == "actual", metrics
+    assert abs(metrics["wheelUnchanged"]["rect"]["width"] - metrics["actual"]["rect"]["width"]) <= 1, metrics
     assert metrics["zoomed"]["mode"] == "manual", metrics
     assert metrics["zoomed"]["rect"]["width"] > metrics["actual"]["rect"]["width"], metrics
     assert metrics["zoomed"]["viewportScrollWidth"] > metrics["zoomed"]["viewportClientWidth"] or metrics["zoomed"]["viewportScrollHeight"] > metrics["zoomed"]["viewportClientHeight"], metrics
@@ -2650,12 +2723,12 @@ def test_markdown_preview_task_checkbox_updates_split_source_and_preview(browser
               previewText: panel.querySelector('.file-editor-preview-pane-panel')?.textContent || '',
               mode: editorViewModeFor(path, item),
               splitVisible: panel.querySelector('.file-editor-content')?.classList.contains('split-preview') === true,
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
             };
             done({before, after});
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -2970,7 +3043,8 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
                 const {frame} = window.__yolomuxTestHelpers;
                 const waitFor = window.__yolomuxTestWaitFor;
                 const waitForScrollSyncReady = (...records) => waitFor(
-                  () => records.every(record => !fileEditorScrollSyncBlocked(record)),
+                  () => records.every(record => !fileEditorScrollSyncBlocked(record)
+                    && (!record?.window || filePreviewPopoutScrollSyncReady(record))),
                   {timeoutMs: 500, description: 'editor scroll-sync readiness'}
                 );
                 const escapeHtml = value => String(value || '').replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
@@ -3185,16 +3259,23 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
             previewPane.scrollTop = maxScrollTop(previewPane);
             previewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
             await frame();
+            const delayedPopupGrowth = popupDoc.createElement('div');
+            delayedPopupGrowth.style.height = '240px';
+            delayedPopupGrowth.dataset.previewDelayedGrowth = 'true';
+            popupDoc.querySelector('[data-preview-root]').append(delayedPopupGrowth);
             await frame();
+            await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const afterEditorBottomScroll = {
               previewTop: previewPane.scrollTop,
               previewMax: maxScrollTop(previewPane),
               popupTop: popupScroller().scrollTop,
               popupMax: maxScrollTop(popupScroller()),
+              completedGeneration: filePreviewPopouts.get(path)?.scrollConvergenceCompletedGeneration || 0,
+              stableSnapshots: filePreviewPopouts.get(path)?.scrollConvergenceStableSnapshots || 0,
             };
-                await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             const popupBefore = popupScroller().scrollTop;
             popupScroller().scrollTop = Math.round(maxScrollTop(popupScroller()) * 0.61);
+            popupDoc.defaultView.dispatchEvent(new WheelEvent('wheel', {deltaY: -1, bubbles: true}));
             popupScroller().dispatchEvent(new Event('scroll', {bubbles: true}));
             popupDoc.defaultView.dispatchEvent(new Event('scroll'));
             await frame();
@@ -3208,6 +3289,7 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               popupCenterRatio: visibleCenterRatio(popupScroller()),
               previewCenterRatio: visibleCenterRatio(previewPane),
               headerTop: snapshotGeometry().headerTop,
+              owner: filePreviewPopouts.get(path)?.scrollSyncOwner?.kind || '',
             };
                 await waitForScrollSyncReady(panel, filePreviewPopouts.get(path));
             popupScroller().scrollTop = 0;
@@ -3362,13 +3444,39 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
                 await waitForScrollSyncReady(splitPanel);
             splitPreviewPane.scrollTop = maxScrollTop(splitPreviewPane);
             splitPreviewPane.dispatchEvent(new Event('scroll', {bubbles: true}));
-            await frame();
-            await frame();
+            const finalSplitOwnerBeforeWait = {
+              pending: Boolean(splitPanel._splitScrollFrame),
+              previewTop: splitPreviewPane.scrollTop,
+              previewMax: maxScrollTop(splitPreviewPane),
+              editorTop: splitEditorScroller.scrollTop,
+              editorMax: maxScrollTop(splitEditorScroller),
+            };
+            await waitFor(
+              () => !splitPanel._splitScrollFrame
+                && !fileEditorScrollSyncBlocked(splitPanel)
+                && splitPanel._splitScrollBottomConvergence == null,
+              {timeoutMs: 500, description: 'final measured split-preview scroll-sync owner'},
+            );
+            const splitBottomSnapshots = [];
+            for (let snapshot = 0; snapshot < 2; snapshot += 1) {
+              await frame();
+              splitBottomSnapshots.push({
+                previewTop: splitPreviewPane.scrollTop,
+                previewMax: maxScrollTop(splitPreviewPane),
+                editorTop: splitEditorScroller.scrollTop,
+                editorMax: maxScrollTop(splitEditorScroller),
+              });
+            }
+            if (splitBottomSnapshots.some(snapshot => snapshot.previewTop !== snapshot.previewMax || snapshot.editorTop !== snapshot.editorMax)
+                || JSON.stringify(splitBottomSnapshots[0]) !== JSON.stringify(splitBottomSnapshots[1])) {
+              throw new Error(`split preview bottom did not remain exact across measured frames: ${JSON.stringify(splitBottomSnapshots)}`);
+            }
             const afterSplitPreviewBottomScroll = {
               previewTop: splitPreviewPane.scrollTop,
               previewMax: maxScrollTop(splitPreviewPane),
               editorTop: splitEditorScroller.scrollTop,
               editorMax: maxScrollTop(splitEditorScroller),
+              stableSnapshots: splitBottomSnapshots.length,
             };
             let splitCloseCount = 0;
             const splitWindow = {closed: false, close() { splitCloseCount += 1; this.closed = true; }};
@@ -3391,8 +3499,8 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               hasRecord: filePreviewPopouts.has(path),
             };
             done({
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
               initialGeometry,
               afterPopoutButtonClick,
               initial,
@@ -3414,12 +3522,13 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
               afterSplitEditorBottomScroll,
               afterSplitPreviewScroll,
               afterSplitPreviewTopScroll,
+              finalSplitOwnerBeforeWait,
               afterSplitPreviewBottomScroll,
               afterSplitModeClose,
               afterPreviewModeClose,
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -3472,10 +3581,13 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     # settles 1-2px short of scrollTopMax (recurring flake, 4 observed). Direction/sync checks stay exact.
     assert abs(metrics["afterEditorBottomScroll"]["previewTop"] - metrics["afterEditorBottomScroll"]["previewMax"]) <= 3, metrics
     assert abs(metrics["afterEditorBottomScroll"]["popupTop"] - metrics["afterEditorBottomScroll"]["popupMax"]) <= 3, metrics
+    assert metrics["afterEditorBottomScroll"]["completedGeneration"] > 0, metrics
+    assert metrics["afterEditorBottomScroll"]["stableSnapshots"] >= 2, metrics
     assert metrics["afterPopupScroll"]["popupTop"] < metrics["afterPopupScroll"]["popupBefore"], metrics
     assert metrics["afterPopupScroll"]["previewTop"] < metrics["afterEditorBottomScroll"]["previewTop"], metrics
     assert abs(metrics["afterPopupScroll"]["popupCenterRatio"] - metrics["afterPopupScroll"]["previewCenterRatio"]) <= 0.05, metrics
     assert abs(metrics["afterPopupScroll"]["headerTop"]) <= 1, metrics
+    assert metrics["afterPopupScroll"]["owner"] == "popout", metrics
     assert metrics["afterPopupTopScroll"]["popupTop"] == 0, metrics
     assert metrics["afterPopupTopScroll"]["previewTop"] == 0, metrics
     assert abs(metrics["afterPopupBottomScroll"]["popupTop"] - metrics["afterPopupBottomScroll"]["popupMax"]) <= 3, metrics
@@ -3495,8 +3607,11 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert abs(metrics["afterSplitPreviewScroll"]["previewCenterRatio"] - metrics["afterSplitPreviewScroll"]["editorCenterRatio"]) <= 0.05, metrics
     assert metrics["afterSplitPreviewTopScroll"]["previewTop"] == 0, metrics
     assert metrics["afterSplitPreviewTopScroll"]["editorTop"] == 0, metrics
+    assert metrics["finalSplitOwnerBeforeWait"]["pending"] is True, metrics
+    assert metrics["finalSplitOwnerBeforeWait"]["editorTop"] < metrics["finalSplitOwnerBeforeWait"]["editorMax"], metrics
     assert abs(metrics["afterSplitPreviewBottomScroll"]["previewTop"] - metrics["afterSplitPreviewBottomScroll"]["previewMax"]) <= 1, metrics
     assert abs(metrics["afterSplitPreviewBottomScroll"]["editorTop"] - metrics["afterSplitPreviewBottomScroll"]["editorMax"]) <= 1, metrics
+    assert metrics["afterSplitPreviewBottomScroll"]["stableSnapshots"] >= 2, metrics
     assert "editor-preview-vanilla" in metrics["afterPopupTheme"]["popupBodyClass"], metrics
     assert "editor-preview-vanilla" in metrics["afterPopupTheme"]["bodyClass"], metrics
     assert "theme-vanilla" in metrics["afterPopupTheme"]["editorThemeClass"], metrics
@@ -3511,6 +3626,104 @@ def test_preview_popout_toolbar_and_state_sync(browser, tmp_path):
     assert metrics["afterPopupThemeDark"]["popupThemeText"] == "Dark", metrics
     assert metrics["afterSplitModeClose"] == {"mode": "split", "closed": True, "closeCount": 1, "hasRecord": False}, metrics
     assert metrics["afterPreviewModeClose"] == {"mode": "preview", "closed": True, "closeCount": 1, "hasRecord": False}, metrics
+
+
+def test_preview_popout_delayed_navigation_write_is_generation_bound(browser, tmp_path):
+    load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1", sessions=["1"])
+    metrics = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        (async () => {
+          const path = '/home/test/repo/DELAYED.md';
+          const writes = [];
+          const loadCallbacks = [];
+          const timeoutCallbacks = [];
+          const asyncControls = new Map();
+          const originalRendered = renderedPreviewSnapshot;
+          const originalRenderedAsync = renderedPreviewSnapshotAsync;
+          const originalWrite = writeFilePreviewPopoutDocument;
+          try {
+            renderedPreviewSnapshot = (_path, text) => ({className: '', dataAttributes: {}, html: `sync:${text}`});
+            renderedPreviewSnapshotAsync = (_path, text) => new Promise((resolve, reject) => asyncControls.set(text, {resolve, reject}));
+            writeFilePreviewPopoutDocument = (_path, _previewWindow, snapshot) => {
+              writes.push(snapshot.html);
+              return true;
+            };
+            const previewWindow = {
+              closed: false,
+              location: {pathname: '/pending-preview'},
+              document: {readyState: 'loading'},
+              addEventListener(type, callback) {
+                if (type === 'load') loadCallbacks.push(callback);
+              },
+              setTimeout(callback) {
+                timeoutCallbacks.push(callback);
+                return timeoutCallbacks.length;
+              },
+              focus() {},
+            };
+            filePreviewPopouts.set(path, {window: previewWindow});
+            writeFilePreviewPopoutWhenReady(path, previewWindow, 'old');
+            writeFilePreviewPopoutWhenReady(path, previewWindow, 'new');
+
+            loadCallbacks[0]();
+            const staleWritesAfterOldLoad = [...writes];
+            asyncControls.get('old').resolve({className: '', dataAttributes: {}, html: 'async:old'});
+            await Promise.resolve();
+            await Promise.resolve();
+            const callbacksAfterOldAsync = loadCallbacks.length;
+
+            asyncControls.get('new').resolve({className: '', dataAttributes: {}, html: 'async:new'});
+            await Promise.resolve();
+            await Promise.resolve();
+            const record = filePreviewPopouts.get(path);
+            const readyBeforeWinningLoad = filePreviewPopoutScrollSyncReady(record);
+            const winningCompletion = record.previewAsync.promise;
+            const winningLoadIndex = loadCallbacks.length - 1;
+            loadCallbacks[winningLoadIndex]();
+            await winningCompletion;
+            await Promise.resolve();
+            const writesAfterWinningLoad = [...writes];
+            const readyAfterWinningLoad = filePreviewPopoutScrollSyncReady(record);
+
+            writeFilePreviewPopoutWhenReady(path, previewWindow, 'reject');
+            const rejectedCompletion = record.previewAsync.promise;
+            asyncControls.get('reject').reject(new Error('expected async render rejection'));
+            await rejectedCompletion;
+            await Promise.resolve();
+            const readyAfterRejectBeforeInitialLoad = filePreviewPopoutScrollSyncReady(record);
+            loadCallbacks[loadCallbacks.length - 1]();
+            await Promise.resolve();
+            done({
+              staleWritesAfterOldLoad,
+              callbacksAfterOldAsync,
+              readyBeforeWinningLoad,
+              writesAfterWinningLoad,
+              readyAfterWinningLoad,
+              readyAfterRejectBeforeInitialLoad,
+              writesAfterRejectedInitialLoad: [...writes],
+              readyAfterRejectedInitialLoad: filePreviewPopoutScrollSyncReady(record),
+            });
+          } catch (error) {
+            done({error: String(error), stack: error?.stack || '', writes: [...writes]});
+          } finally {
+            renderedPreviewSnapshot = originalRendered;
+            renderedPreviewSnapshotAsync = originalRenderedAsync;
+            writeFilePreviewPopoutDocument = originalWrite;
+            filePreviewPopouts.delete(path);
+          }
+        })();
+        """
+    )
+    assert "error" not in metrics, metrics
+    assert metrics["staleWritesAfterOldLoad"] == [], metrics
+    assert metrics["callbacksAfterOldAsync"] == 2, metrics
+    assert metrics["readyBeforeWinningLoad"] is False, metrics
+    assert metrics["writesAfterWinningLoad"] == ["async:new"], metrics
+    assert metrics["readyAfterWinningLoad"] is True, metrics
+    assert metrics["readyAfterRejectBeforeInitialLoad"] is False, metrics
+    assert metrics["writesAfterRejectedInitialLoad"] == ["async:new", "sync:reject"], metrics
+    assert metrics["readyAfterRejectedInitialLoad"] is True, metrics
 
 
 def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_path):
@@ -3633,8 +3846,8 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
               return node ? {text: node.textContent, color: getComputedStyle(node).color} : {text: '', color: ''};
             };
             done({
-              errors: window.__bootErrors,
-              rejections: window.__bootRejections,
+              errors: jsDebugFailureEvents('error'),
+              rejections: jsDebugFailureEvents('rejection'),
               editor: {
                 keyword: editorByClassText('code-keyword', 'class'),
                 type: editorByClassText('code-type', 'ToolParser'),
@@ -3686,7 +3899,7 @@ def test_light_editor_and_preview_share_python_fence_token_colors(browser, tmp_p
               previewHtml: panel.querySelector('code.language-python')?.innerHTML || '',
             });
           } catch (error) {
-            done({error: String(error), stack: error?.stack || '', errors: window.__bootErrors, rejections: window.__bootRejections});
+            done({error: String(error), stack: error?.stack || '', errors: jsDebugFailureEvents('error'), rejections: jsDebugFailureEvents('rejection')});
           }
         })();
         """
@@ -3974,6 +4187,14 @@ def test_markdown_edit_mode_keeps_colored_syntax_in_codemirror(browser, tmp_path
     assert metrics["afterHeadingBg"] == "rgba(0, 0, 0, 0)", metrics
     assert metrics["hasBoldAfterTheme"] is True, metrics
     assert metrics["hasLinkAfterTheme"] is True, metrics
+    assert_only_expected_browser_warning(
+        browser,
+        message="CodeMirror language parser failed; retrying plain editable editor",
+        correlation=(
+            "Error: Unrecognized extension value in extension set ([object Object]). "
+            "This sometimes happens because multiple instances of @codemirror/state are loaded, breaking instanceof checks."
+        ),
+    )
 
 
 def test_editor_search_button_toggles_pressed_state_with_codemirror_panel(browser, tmp_path):

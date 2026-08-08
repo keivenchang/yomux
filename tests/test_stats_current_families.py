@@ -19,8 +19,8 @@ def test_manifest_owns_every_current_family_cadence_and_fold():
         "gpu": ("gpu", 10, 60, families.FoldKind.GAUGE, True),
         "service_load": ("service_load", 10, 60, families.FoldKind.AVERAGE, True),
         "system_memory": ("system_memory", 60, 60, families.FoldKind.GAUGE, True),
-        "agent_tokens": ("agent_tokens", 10, 60, families.FoldKind.RATE, True),
-        "cost": ("agent_tokens", 10, 60, families.FoldKind.USAGE, True),
+        "agent_tokens": ("agent_tokens", 10, 60, families.FoldKind.RATE, False),
+        "cost": ("agent_tokens", 10, 60, families.FoldKind.USAGE, False),
         "browser": ("browser", None, None, families.FoldKind.RATE, True),
     }
     assert {

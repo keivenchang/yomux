@@ -533,6 +533,84 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(Number.isFinite(api.performanceNow()), true);
   });
 
+  test('split preview keeps source ownership across reflected scroll events and converges after CodeMirror measures', () => {
+    const popoutSource = fs.readFileSync('static_src/js/yolomux/91_preview_popout.js', 'utf8');
+    assert.match(popoutSource, /function scheduleFilePreviewPopoutEdgeConvergence[\s\S]*scrollSyncOwner\?\.generation !== state\.generation[\s\S]*stableSnapshots >= 2[\s\S]*if \(record\.previewAsync\) return;[\s\S]*scrollConvergence = null/, 'popout edge convergence is generation-bound and retires only after async work plus stable measured bottoms');
+    assert.match(popoutSource, /function filePreviewPopoutScrollSyncReady[\s\S]*scrollSyncFrame[\s\S]*scrollConvergenceFrame[\s\S]*scrollConvergence[\s\S]*previewAsync[\s\S]*navigationWrite/, 'popout readiness includes queued frames, convergence, asynchronous rendering, and deferred navigation writes');
+    assert.match(popoutSource, /function syncFilePreviewPopoutScroll[\s\S]*filePreviewPopoutReflectedScrollMatches[\s\S]*beginFilePreviewPopoutScrollOwner\(record, \{kind: 'popout'/, 'reflected writes cannot steal ownership while a genuine popup scroll can');
+    assert.match(popoutSource, /function writeFilePreviewPopoutAfterNavigation\(path, previewWindow, snapshot, previewGeneration\)[\s\S]*record\.navigationWrite !== job[\s\S]*filePreviewPopoutGenerationMatches\(path, previewWindow, previewGeneration\)[\s\S]*settleFilePreviewPopoutNavigationWrite/, 'deferred navigation writes validate the current record, window, and generation at the actual write boundary');
+    assert.match(popoutSource, /function applyFilePreviewPopoutAsync[\s\S]*return apply\(snapshot\)[\s\S]*completion\.then\(finish, finish\)/, 'async readiness follows the apply result through a deferred navigation write instead of retiring when it is merely scheduled');
+    const frames = [];
+    const measures = [];
+    let now = 0;
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      performance: {now: () => now},
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+      setTimeout(callback, delay) {
+        if (Number(delay) === 0) callback();
+        return 0;
+      },
+    });
+    const path = '/repo/split-scroll.md';
+    const item = api.fileEditorItemFor(path);
+    api.setFileEditorViewMode(path, 'split', item);
+
+    const panel = new TestElement('split-scroll-panel');
+    panel.dataset.filePath = path;
+    panel.dataset.layoutItem = item;
+    const content = new TestElement('split-scroll-content');
+    content.classList.add('file-editor-content', 'split-preview');
+    const preview = new TestElement('split-scroll-preview');
+    preview.classList.add('file-editor-preview-pane-panel');
+    preview.clientHeight = 100;
+    preview.scrollHeight = 1000;
+    preview.scrollTop = 400;
+    const editor = new TestElement('split-scroll-editor');
+    editor.clientHeight = 100;
+    editor.scrollHeight = 900;
+    editor.scrollTop = 0;
+    panel.append(content, preview);
+    panel._cmView = {
+      scrollDOM: editor,
+      requestMeasure(request) { measures.push(request); },
+    };
+
+    const runFrame = () => {
+      assert.ok(frames.length > 0, 'a requested animation frame is pending');
+      frames.shift()();
+    };
+    const runMeasure = () => {
+      assert.ok(measures.length > 0, 'a CodeMirror measure is pending');
+      const request = measures.shift();
+      request.write(request.read(panel._cmView), panel._cmView);
+    };
+
+    api.scheduleFileEditorSplitScrollSyncForTest(panel, 'preview');
+    runFrame();
+    assert.ok(editor.scrollTop > 0, 'the first preview-owned sync writes the editor target');
+
+    now = 1000;
+    runFrame();
+    assert.equal(api.fileEditorScrollSyncBlockedForTest(panel), false, 'the time guard has expired before the reflected event arrives');
+    preview.scrollTop = preview.scrollHeight - preview.clientHeight;
+    api.scheduleFileEditorSplitScrollSyncForTest(panel, 'preview');
+    api.scheduleFileEditorSplitScrollSyncForTest(panel, 'editor');
+    assert.equal(panel._splitScrollPendingSource, 'preview', `a stale reflected editor event cannot replace the queued preview owner: ${JSON.stringify({generation: panel._splitScrollGeneration, reflections: panel._splitScrollReflections})}`);
+    runFrame();
+    assert.equal(editor.scrollTop, editor.scrollHeight - editor.clientHeight, 'preview bottom initially writes the current editor bottom');
+
+    editor.scrollHeight = 1200;
+    runMeasure();
+    assert.equal(editor.scrollTop, editor.scrollHeight - editor.clientHeight, 'a later CodeMirror geometry measure converges to the new bottom');
+    while (measures.length) runMeasure();
+    assert.equal(panel._splitScrollBottomConvergence, null, 'bottom convergence retires only after stable measured snapshots');
+    api.scheduleFileEditorPreviewLayoutSyncForTest(panel);
+    assert.equal(panel._splitScrollPendingSource, 'editor', 'an explicit preview-layout refresh can still elect the editor source');
+  });
+
   test('coarse-pointer tablets retain menus while phones compact the topbar', () => {
     const tablet = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
@@ -1859,6 +1937,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(pixelWheel > 2.5 && pixelWheel < 3.5, 'mouse-like pixel wheel remains about three lines');
     const touchpadTick = api.terminalWheelSignedLines({deltaY: 4, deltaMode: 0}, 40);
     assert.ok(touchpadTick > 0 && touchpadTick < 0.2, 'small touchpad pixel deltas accumulate as fractions');
+    assert.equal(api.terminalWheelEventIsDiscrete({deltaY: 100, deltaMode: 0, wheelDeltaY: -120}), true, 'a one-notch pixel wheel has 120-unit legacy granularity');
+    assert.equal(api.terminalWheelEventIsDiscrete({deltaY: 300, deltaMode: 0, wheelDeltaY: -360}), true, 'a multi-notch pixel wheel retains 120-unit legacy granularity');
+    assert.equal(api.terminalWheelEventIsDiscrete({deltaY: 4, deltaMode: 0, wheelDeltaY: -4.8}), false, 'a small arbitrary legacy delta stays a continuous gesture');
+    assert.equal(api.terminalWheelEventIsDiscrete({deltaY: 37, deltaMode: 0, wheelDeltaY: -44.4}), false, 'a larger arbitrary legacy delta stays a continuous gesture');
+    assert.equal(api.terminalWheelEventIsDiscrete({deltaY: 1, deltaMode: 1}), true, 'line-mode wheel input is discrete');
     assert.equal(api.terminalWheelSignedLines({deltaY: -3, deltaMode: 1}, 40), -3);
     assert.equal(api.terminalWheelSignedLines({deltaY: 1, deltaMode: 2}, 40), 12);
     assert.equal(api.terminalWheelSignedLines({deltaY: 999, deltaMode: 0}, 40), 12);
@@ -1895,7 +1978,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.terminalTouchAlternateCommand(0), null);
     const source = fs.readFileSync('static_src/js/yolomux/70_layout_actions.js', 'utf8');
     assert.ok(/addEventListener\('touchmove',[\s\S]*\{capture: true, passive: false\}/.test(source), 'claimed touch movement can suppress native focus and page scrolling');
-    assert.ok(/routeTerminalScrollLines\(session, term, container, signedLines, \{source: 'wheel'\}\)/.test(source), 'wheel and touch share one pane-mode router');
+    assert.ok(/routeTerminalScrollLines\(session, term, container, signedLines, \{[\s\S]*source: 'wheel'[\s\S]*discreteWheel: terminalWheelEventIsDiscrete\(event\)/.test(source), 'wheel and touch share one pane-mode router while wheel routing preserves discrete-device metadata');
     assert.ok(/handleTerminalData\(session, data, \{bypassMobileAccessoryModifiers: true\}\)/.test(source), 'alternate-screen touch bytes bypass the accessory modifier latch');
     assert.equal(/page-up|page-down|terminalTouchIsFastFlick/.test(source), false, 'touch panning never replaces line movement with a page jump');
   });
@@ -1919,13 +2002,23 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, -3, {source: 'touch'}), true, 'a touch pan on Claude stays on the wheel route');
     assert.deepStrictEqual(wheelEvents.map(event => [event.type, event.deltaY, event.deltaMode]), [['wheel', -1, 1], ['wheel', -1, 1], ['wheel', -1, 1]], 'Claude touch pan emits one line-accurate wheel report per line');
 
+    const notchEvent = {deltaY: 100, deltaMode: 0, wheelDeltaY: -120};
+    const gestureEvent = {deltaY: 4, deltaMode: 0, wheelDeltaY: -4.8};
+    wheelEvents.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(notchEvent)}), true, 'a discrete high-resolution wheel notch stays on the alternate-screen wheel route');
+    assert.deepStrictEqual(wheelEvents.map(event => [event.type, event.deltaY, event.deltaMode]), [['wheel', 1, 1]], 'a discrete sub-line notch reaches an alternate-screen app immediately instead of waiting for fractional accumulation');
+
+    wheelEvents.length = 0;
+    assert.equal(api.routeTerminalScrollLinesForTest('1', claudeTerm, container, 4 / 35, {source: 'wheel', discreteWheel: api.terminalWheelEventIsDiscrete(gestureEvent)}), true, 'a continuous touchpad delta stays on the alternate-screen wheel route');
+    assert.deepStrictEqual(wheelEvents, [], 'a continuous sub-line touchpad delta remains fractional instead of becoming a staircase');
+
     let pagePrevented = 0;
     assert.equal(api.handleTerminalTmuxHistoryNavigationKeydownForTest('1', claudeTerm, {
       type: 'keydown', key: 'PageUp', code: 'PageUp', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false,
       preventDefault() { pagePrevented += 1; },
     }), true, 'plain Page Up on mouse-owning Claude uses its viewport wheel route');
     assert.equal(pagePrevented, 1, 'Claude Page Up prevents the dead native terminal key');
-    assert.equal(wheelEvents.length, 15, 'Claude Page Up emits its 34-line page through the bounded 12-line wheel reporter');
+    assert.equal(wheelEvents.length, 12, 'Claude Page Up emits its 34-line page through the bounded 12-line wheel reporter');
 
     const frames = [];
     const vimTerm = {rows: 40, modes: {mouseTrackingMode: 'none'}};
@@ -2332,7 +2425,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(acknowledgingRecord.acknowledgedStoppedAt, 4000, 'the same record owns the matching stopped acknowledgement generation');
     assert.equal(acknowledgingRecord.acknowledgementVisual.durationMs, 1550, 'the same record owns the gray acknowledgement lifetime');
     assert.equal(api.agentWindowAcknowledgementVisualActiveForTest('1:7::codex', Date.now() + 1000), true, 'the gray acknowledgement interval remains active before the configured 1550ms pulse period ends');
+    const visualAcknowledgementKey = acknowledgingRecord.acknowledgementVisual.acknowledgementKey;
+    api.clearSessionAttentionAcknowledgementRecordsForTest('1');
+    api.setAttentionAcknowledgementPendingForTest(visualAcknowledgementKey);
     assert.equal(api.agentWindowAcknowledgementVisualActiveForTest('1:7::codex', Date.now() + 1600), false, 'the gray acknowledgement interval expires after the configured status-ball pulse period');
+    assert.ok(Number.isFinite(api.attentionAcknowledgementRecordForTest(visualAcknowledgementKey)?.recordedAt), 'synchronous visual expiry durably records the same pending acknowledgement generation');
     const retiredAcknowledgementRecord = canonical(api.agentWindowActivityRecordForTest('1:7::codex'));
     assert.equal(retiredAcknowledgementRecord.acknowledgementVisual, null, 'retiring the gray visual clears only its field on the shared record');
     assert.equal(retiredAcknowledgementRecord.activity.stoppedAt, 4000, 'retiring the gray visual does not erase the matching activity generation');
@@ -2537,6 +2634,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.equal(/status-indicator--attention/.test(repeatedAskOptimisticParentAck), false, 'the optimistic acknowledgement clears the parent red state');
     const slowAckKey = '8001:2:slow-ack';
     api.setAttentionAcknowledgementPendingForTest(slowAckKey);
+    assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest(slowAckKey, {attention_acknowledged: false}), true, 'an in-flight acknowledgement keeps stale pre-click state from repainting red before the response');
     api.applyAttentionAcknowledgementResponseForTest({acknowledged: [slowAckKey]});
     assert.equal(api.attentionAcknowledgementRecordForTest(slowAckKey).pending, true, 'an in-flight acknowledgement keeps one pending lifecycle flag');
     assert.equal(api.attentionAcknowledgementKeyIsRecordedForTest(slowAckKey, {attention_acknowledged: false}), true, 'the stale pre-click snapshot cannot flash red again after the gray fade while acknowledgement is pending');
@@ -2884,7 +2982,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function handleTerminalData\(session, data, options = \{\}\)[\s\S]*observeTerminalTmuxPrefixWindowSwitches\(session, filtered\);[\s\S]*socket\.send\(JSON\.stringify\(\{type: 'input', data: filtered\}\)\)/.test(source), 'tmux prefix observation happens before sending the unchanged terminal bytes');
     assert.ok(/const sequence = setTmuxWindowActiveIndexOverride\(session, directIndex\)[\s\S]*apiFetchJson\(`\/api\/tmux-window\?session=\$\{encodeURIComponent\(session\)\}&window=\$\{encodeURIComponent\(String\(directIndex\)\)\}`[\s\S]*tmuxWindowSwitchSequenceMatches\(session, sequence\)[\s\S]*scheduleTmuxWindowReadback\(session, \{delayMs: 0, clearActiveIndexOverride: true, expectedIndex: directIndex, sequence\}\)/.test(source), 'direct window buttons highlight before POST and keep the optimistic target until authoritative confirmation');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*applyTmuxWindowActiveIndexToTranscriptInfo\(String\(session\), indexKey, \{render: true\}\)/.test(source), 'known direct tmux targets overlay transcript metadata immediately so stale polls do not flash the old window');
-    assert.ok(/async function applySessionMetadataPayload\(payload, options = \{\}\)[\s\S]*setTranscriptMetadataPayload\(transcriptPayloadWithTmuxWindowOverrides\(payload\)/.test(source), 'incoming session metadata payloads preserve pending direct-window overrides');
+    assert.ok(/async function applySessionMetadataPayload\(payload, options = \{\}\)[\s\S]*const nextPayload = transcriptPayloadWithTmuxWindowOverrides\([\s\S]*setTranscriptMetadataPayload\(nextPayload/.test(source), 'incoming session metadata payloads preserve pending direct-window overrides');
     assert.ok(/function transcriptPayloadWithPriorSessionMetadata\(payload, previousPayload = transcriptMetadataState.payload\)[\s\S]*mergeSessionMetadataDuringLightweightRefresh/.test(source), 'incoming lightweight transcript payloads preserve prior repo metadata so YO!info does not flash empty');
     assert.ok(/async function refreshTmuxWindowActiveFromSignals\(session, options = \{\}\)[\s\S]*apiFetchJson\(tmuxWindowSignalReadbackUrl\(session\)/.test(source), 'tmux sub-window readback uses the session-scoped lightweight tmux-signals endpoint');
     assert.ok(/function setTmuxWindowActiveIndexOverride\(session, windowIndex, options = \{\}\)[\s\S]*refreshTabberPanelsForTmuxWindowChange\(\)/.test(source), 'Tabber repaints immediately when a known tmux sub-window target is selected');
@@ -3078,9 +3176,14 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     api.applyTmuxSignalsPayloadForTest({
       patch: true,
-      ok: true,
-      removed_window_keys: ['meta-preview:0'],
-      windows: [],
+      collection: 'windows',
+      changes: {},
+      removed_keys: ['meta-preview:0'],
+      fields: {
+        ok: true,
+        removed_window_keys: ['meta-preview:0'],
+      },
+      removed_fields: [],
     });
 
     const indexes = [...api.tmuxWindowBarHtml('meta-preview', staleInfo).matchAll(/data-window-index="([^"]+)"/g)].map(match => match[1]);
@@ -3159,7 +3262,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   });
 
   await testAsync('direct tmux sub-window readback only confirms from raw tmux active state', async () => {
-    const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+    const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [80]});
     const staleInfo = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
@@ -3206,7 +3309,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
   });
 
   await testAsync('confirmed direct tmux sub-window target ignores delayed stale signal snapshots', async () => {
-    const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+    const api = loadYolomux('', ['meta-preview'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [4000]});
     const staleInfo = {
       agents: [{kind: 'codex', pane_target: 'meta-preview:0.0'}, {kind: 'claude', pane_target: 'meta-preview:1.0'}],
       selected_pane: {target: 'meta-preview:0.0', window: '0', pane: '0', current_path: '/repo/codex'},
@@ -5319,9 +5422,11 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/data-yoagent-backend[\s\S]*<option value="claude" selected/.test(claudeOnlyHtml), 'Composer selects the only installed logged-in backend');
     assert.equal(/data-yoagent-backend[\s\S]*<option value="codex"/.test(claudeOnlyHtml), false, 'Composer hides unavailable backends');
     api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
-    assert.ok(api.globalActivitySummaryHtml().includes('YO!agent'), 'global activity summary uses the YO agent label');
-    assert.ok(api.globalActivitySummaryHtml().includes('Resume the highest-priority editor fix next.'), 'YO!agent global summary renders explicit global detail_lines');
-    assert.equal(api.globalActivitySummaryHtml().includes('tmux session alpha: raw per-session detail'), false, 'YO!agent global summary omits explicit session_lines without classifying localized prose');
+    const disabledSummaryHtml = api.globalActivitySummaryHtml();
+    assert.equal(api.activitySummaryEnabledForTest(), false, 'activity summary remains fail-closed in the broad YO!agent UI case');
+    assert.ok(disabledSummaryHtml.includes('data-activity-summary-disabled="true"'), 'the global summary surface renders its terminal disabled state');
+    assert.equal(disabledSummaryHtml.includes('Resume the highest-priority editor fix next.'), false, 'the disabled surface does not render test-injected summary details');
+    assert.equal(disabledSummaryHtml.includes('tmux session alpha: raw per-session detail'), false, 'the disabled surface does not render test-injected session details');
     api.setClientSettingsPatchForTest({yoagent: {backend: 'claude'}});
     assert.equal(api.yoagentChatHtml().includes('Your most recent work is about editor fixes'), false, 'Claude-backed YO!agent does not auto-inject Recent agents until the startup one-shot is enabled');
     assert.equal(api.showYoagentStartupInfoOnceForTest(), true, 'YO!agent startup info can be shown once when the tab first opens');
@@ -5338,26 +5443,27 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">running'), 'YO!agent recent agents show running agents as running');
     assert.ok(enabledChatHtml.includes('yoagent-recent-agent-activity">3 min ago'), 'YO!agent recent agents show compact last-used time for idle agents');
     assert.ok(enabledChatHtml.indexOf('yoagent-recent-agent-session">session 5') < enabledChatHtml.indexOf('yoagent-recent-agent-session">session 6'), 'YO!agent recent agents preserve backend recency order');
-    api.applyActivitySummaryPayloadFromPushForTest({
+    assert.equal(api.applyActivitySummaryPayloadFromPushForTest({
       generated_at: '2026-05-31T12:05:00+00:00',
       global: {headline: 'Pushed summary should stay out of the printed startup block'},
       sessions: {},
       agents: [{session: '7', window_label: '0:claude', agent_kind: 'claude', label: "session '7' 0:claude", running: true}],
-    });
+    }), false, 'disabled activity-summary rejects unsolicited pushes');
     const pushUpdatedChatHtml = api.yoagentChatHtml();
     assert.ok(pushUpdatedChatHtml.includes('Your most recent work is about editor fixes'), 'activity-summary pushes do not repaint the one-shot startup summary');
     assert.equal(pushUpdatedChatHtml.includes('Pushed summary should stay out of the printed startup block'), false, 'activity-summary pushes are cache-only for the printed startup block');
     assert.equal(pushUpdatedChatHtml.includes('yoagent-recent-agent-session">session 7'), false, 'activity-summary pushes do not repaint printed Recent Agents');
-    api.applyActivitySummaryPayloadFromPushForTest({
+    assert.equal(api.applyActivitySummaryPayloadFromPushForTest({
       generated_at: '2026-05-31T12:10:00+00:00',
       global: {headline: 'Manual refresh replaces the printed startup block'},
       sessions: {},
       agents: [{session: '8', window_label: '0:codex', agent_kind: 'codex', label: "session '8' 0:codex", running: true}],
-    }, {refreshStartupSnapshot: true});
+    }, {refreshStartupSnapshot: true}), false, 'disabled activity-summary rejects manual push application');
     const manuallyRefreshedChatHtml = api.yoagentChatHtml();
-    assert.ok(manuallyRefreshedChatHtml.includes('Manual refresh replaces the printed startup block'), 'explicit activity-summary refresh replaces the startup summary snapshot');
-    assert.ok(manuallyRefreshedChatHtml.includes('yoagent-recent-agent-session">session 8'), 'explicit activity-summary refresh replaces the Recent Agents snapshot');
-    assert.equal(manuallyRefreshedChatHtml.includes('Your most recent work is about editor fixes'), false, 'explicit refresh removes the stale startup summary snapshot');
+    assert.equal(manuallyRefreshedChatHtml.includes('Manual refresh replaces the printed startup block'), false, 'rejected activity-summary pushes cannot replace the startup snapshot');
+    assert.equal(manuallyRefreshedChatHtml.includes('yoagent-recent-agent-session">session 8'), false, 'rejected activity-summary pushes cannot replace Recent Agents');
+    assert.ok(manuallyRefreshedChatHtml.includes('Your most recent work is about editor fixes'), 'rejected activity-summary pushes preserve the existing startup snapshot');
+    assert.equal(api.yoagentStartupStateForTest().prewarmStarted, false, 'rejected summary pushes schedule no startup prewarm');
     api.setActivitySummaryPayloadForTest(baseActivitySummaryPayload);
     api.showYoagentStartupInfoForLatestActivityForTest();
     api.setYoagentMessagesForTest([{role: 'user', content: 'what changed?'}, {role: 'assistant', content: 'Checking the activity context.'}]);
@@ -5605,11 +5711,13 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const descriptorStateHtmlB = api.yoagentChatHtml();
     assert.ok(descriptorStateHtmlB.includes('Error B: offline') && descriptorStateHtmlB.includes('Fallback B: login') && descriptorStateHtmlB.includes('No answer B'), 'the same YO!agent descriptor state relocalizes in the second locale');
     assert.equal(/raw English (?:error|fallback)/.test(descriptorStateHtmlB), false, 'YO!agent descriptor state does not expose raw English fallbacks when the active catalog resolves them');
-    assert.ok(api.globalActivitySummaryHtml().includes('3 files changed (+9/-2)'), 'global activity summary renders file totals');
-    assert.ok(api.globalActivitySummaryHtml().includes('data-yoagent-global-markdown'), 'global activity summary preserves markdown as escaped fallback until the render pass');
-    assert.ok(api.globalActivitySummaryHtml().includes('Your most recent work is about editor fixes'), 'global activity summary renders a human sentence');
-    assert.ok(api.globalActivitySummaryHtml().includes('Resume the highest-priority editor fix next.'), 'global activity summary renders only explicit global detail lines');
-    assert.equal(api.globalActivitySummaryHtml().includes('tmux session alpha: raw per-session detail'), false, 'global activity summary does not render explicit per-session lines');
+    const relocalizedDisabledSummaryHtml = api.globalActivitySummaryHtml();
+    assert.ok(relocalizedDisabledSummaryHtml.includes('data-activity-summary-disabled="true"'), 'the global summary remains disabled after locale changes');
+    assert.equal(relocalizedDisabledSummaryHtml.includes('3 files changed (+9/-2)'), false, 'the disabled surface never revives injected file totals');
+    assert.equal(relocalizedDisabledSummaryHtml.includes('data-yoagent-global-markdown'), false, 'the disabled surface does not create a summary markdown render pass');
+    assert.equal(relocalizedDisabledSummaryHtml.includes('Your most recent work is about editor fixes'), false, 'the disabled surface does not revive an injected headline');
+    assert.equal(relocalizedDisabledSummaryHtml.includes('Resume the highest-priority editor fix next.'), false, 'the disabled surface does not revive injected detail lines');
+    assert.equal(relocalizedDisabledSummaryHtml.includes('tmux session alpha: raw per-session detail'), false, 'the disabled surface does not revive injected session lines');
     assert.equal(api.sessionActivitySummary('alpha').local, "Codex session alpha is active in yolomux.dev. It has been working on editor fixes. It currently has 2 files changed (+8/-1).");
   });
 
@@ -5642,7 +5750,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
       },
     });
 
-    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['alpha / no AI', 'beta / no AI']);
+    assert.deepStrictEqual(canonical(api.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI']);
     api.setInfoGroupingForTest(['pr', 'tab', 'path', 'branch']);
     api.setInfoSortForTest({key: 'name', dir: 'desc'});
     api.setInfoSearchForTest('alpha pr', {publish: false});
@@ -5653,7 +5761,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(shareInfoSnapshot.sort), {dir: 'desc', key: 'name'}, 'YO!share snapshots the host YO!info sort mode');
     assert.equal(shareInfoSnapshot.search, 'alpha pr', 'YO!share snapshots the host YO!info search query');
     assert.deepStrictEqual(canonical(shareInfoSnapshot.collapsedGroupKeys), ['group:host-collapsed'], 'YO!share snapshots host-owned YO!info collapse state');
-    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'YO!share snapshots host-owned YO!info rows');
+    assert.deepStrictEqual(canonical(shareInfoSnapshot.branchRows.map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'YO!share snapshots host-owned YO!info rows');
     assert.equal('columnWidths' in shareInfoSnapshot, false, 'YO!share no longer snapshots deleted YO!info table column widths');
     const shareApi = loadYolomux('?shareReplay=0', ['1'], 'https:', 'Linux x86_64', 'readonly', {
       share: {view: true, id: 'share-info', mode: 'ro', session: '1', sessions: ['1']},
@@ -5681,7 +5789,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(shareApi.currentInfoSortForTest()), {dir: 'desc', key: 'name'}, 'share viewers apply host YO!info sort state');
     assert.equal(shareApi.currentInfoSearchForTest(), 'alpha pr', 'share viewers apply host YO!info search state');
     assert.deepStrictEqual(canonical(shareApi.infoCollapsedGroupKeysForTest()), ['group:host-collapsed'], 'share viewers preserve host YO!info collapse state');
-    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['alpha / no AI', 'beta / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
+    assert.deepStrictEqual(canonical(shareApi.infoBranchRows().map(row => row.session)), ['beta / no AI', 'alpha / no AI'], 'share viewers render host-owned YO!info rows instead of local transcript metadata');
     assert.equal('columnWidths' in shareApi.shareUiStateSnapshotForTest().info, false, 'share viewers ignore legacy YO!info table column widths');
     shareApi.applyShareScrollStateForTest({target: 'info', kind: 'info', top: 88, left: 144});
     assert.equal(shareInfoScroller.scrollTop, 88, 'share viewers apply YO!info vertical host scroll');
@@ -5763,7 +5871,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.deepStrictEqual(canonical(api.yoagentChatQueueForTest()), [], 'sent ask is removed from the queue');
   });
 
-  await testAsync('a forced locale-change activity refresh is not blocked by silent mode', async () => {
+  await testAsync('disabled activity summary blocks silent and locale-forced refresh work', async () => {
     const requests = [];
     const api = loadYolomux('', ['1']);
     api.setFetchForTest(url => {
@@ -5777,16 +5885,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     });
     api.setActiveLocaleForTest('locale-b');
 
-    await api.refreshActivitySummaryForTest({force: true, silent: true});
-    assert.equal(requests.length, 0, 'ordinary silent refresh remains a watch-root-only no-op');
-
-    await api.refreshActivitySummaryForTest({force: true, silent: true, localeChange: true});
-    assert.equal(requests.length, 1, 'locale change performs exactly one forced refresh even when status UI is silent');
-    const request = new URL(requests[0], 'http://localhost');
-    assert.equal(request.pathname, '/api/activity-summary');
-    assert.equal(request.searchParams.get('force'), '1');
-    assert.equal(request.searchParams.get('locale'), 'locale-b');
-    assert.equal(request.searchParams.get('scope'), 'all');
+    assert.equal(await api.refreshActivitySummaryForTest({force: true, silent: true}), false);
+    assert.equal(await api.refreshActivitySummaryForTest({force: true, silent: true, localeChange: true}), false);
+    assert.deepStrictEqual(requests, [], 'ordinary and locale-forced refreshes issue no request while disabled');
+    assert.equal(api.clientServerWatchStateForTest().activity_summary.visible, false, 'locale changes do not create activity-channel demand while disabled');
+    assert.equal(api.activitySummaryStateForTest().refreshing, false, 'locale changes leave the disabled state terminal');
+    assert.equal(api.yoagentStartupStateForTest().prewarmStarted, false, 'locale changes schedule no startup prewarm while disabled');
   });
 
   test('terminal selection dedent preserves intentional indentation', () => {
@@ -6830,7 +6934,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/function installReconnectResyncHandlers\(\)[\s\S]*document\.addEventListener\('visibilitychange'[\s\S]*document\.visibilityState === 'visible'[\s\S]*scheduleReconnectResync\('visible'\)[\s\S]*window\.addEventListener\('online'[\s\S]*scheduleReconnectResync\('online'\)/.test(source), 'page wake and network restore schedule a shared refreshAll resync');
     assert.ok(/function scheduleReconnectResync\(reason = ''\)[\s\S]*setTimeout\(\(\) => \{[\s\S]*refreshAll\(\)/.test(source), 'wake/network reconnect resync is debounced before refreshAll');
     const runtimeSrc = fs.readFileSync('static_src/js/yolomux/50_editor_settings_runtime.js', 'utf8');
-    assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (document.visibilityState === 'hidden') return null;\n    if (clientEventTransportState.connected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll runs only on visible pages while client-events is disconnected');
+    assert.ok(runtimeSrc.includes("resetRuntimeInterval('auto-approve', () => {\n    if (!clientCanUseUnscopedHostRequests()) return null;\n    if (document.visibilityState === 'hidden') return null;\n    if (clientEventTransportState.connected === true) return null;\n    return refreshAutoStatuses();\n  }, autoApproveDisconnectedPollMs);"), 'auto-approve fallback poll runs only for host-capable visible pages while client-events is disconnected');
     assert.ok(/if \(type === 'settings_changed'\)[\s\S]{0,220}applySettingsPayload\(payload\.data, \{force: true\}\)/.test(source), 'settings_changed applies direct payloads without polling settings again');
     assert.ok(/if \(type === 'auto_approve_changed'\)[\s\S]{0,120}applyAutoApprovePayload\(payload\.data\)/.test(source), 'auto_approve_changed applies direct payloads');
     assert.ok(/if \(type === 'background_owner_changed'\)[\s\S]{0,280}applyBackgroundOwnerStatusPayload\(payload\)[\s\S]{0,240}else if \(typeof refreshAllIndexedDirsStatus === 'function'\)[\s\S]{0,360}refreshAllIndexedDirsStatus\(\)/.test(source), 'background_owner_changed applies direct owner status and revalidates only demanded index roots');
@@ -6842,6 +6946,12 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok(/if \(type === 'watched_prs_changed'\)[\s\S]{0,120}applyWatchedPrsPayload\(payload\.data\)/.test(source), 'watched_prs_changed applies direct payloads');
     assert.ok(/if \(type === 'transcripts_changed'\)[\s\S]{0,220}applyTranscriptsPayload\(payload\.data, \{refreshAuto: false, refreshContext: false, refreshActivity: false\}\)/.test(source), 'transcripts_changed applies direct metadata payloads');
     assert.ok(/if \(type === 'context_items_ready'\)[\s\S]{0,160}applyContextItemsPayloadFromPush\(payload\.data/.test(source), 'context_items_ready applies direct context payloads');
+    const contextPreviewRefresh = source.slice(source.indexOf('async function refreshTranscriptPreview'), source.indexOf('function applyContextItemsPayloadFromPush'));
+    assert.ok(contextPreviewRefresh.includes('if (isApiPendingResponse(error))') && contextPreviewRefresh.includes('apiOperationState.terminal.has(error.operationId)'), 'context-items accepts a durable operation receipt without overwriting a raced terminal result');
+    assert.equal(contextPreviewRefresh.includes('setTimeout'), false, 'context-items completion comes from operation SSE without a browser retry timer');
+    assert.ok(/function handleApiOperationTerminalResult\(record, result = \{\}\)[\s\S]{0,700}record\?\.kind === 'context_items'[\s\S]{0,220}applyContextProductOperationResult\(record, result\)/.test(source), 'operation terminal dispatch routes context product completions through the shared handler');
+    const contextTailRequest = source.slice(source.indexOf('async function showContext'), source.indexOf('function relocalizeModalChrome'));
+    assert.ok(contextTailRequest.includes('renderContextTailPayload(session, payload)') && contextTailRequest.includes('if (isApiPendingResponse(error)) return'), 'context tail keeps its modal loading until the accepted operation completes');
     assert.ok(/if \(type === 'activity_summary_ready'\)[\s\S]{0,120}applyActivitySummaryPayloadFromPush\(payload\.data\)/.test(source), 'activity_summary_ready applies direct summary payloads');
     assert.ok(/if \(type === 'yoagent_skills_changed'\)[\s\S]{0,160}refreshActivitySummary\(\{force: true/.test(source), 'yoagent_skills_changed refreshes YO!agent context');
     assert.ok(/if \(type === 'yoagent_jobs_changed'\)[\s\S]*loadYoagentJobs\(\{force: true, silent: true, render: yoagentPanelIsActive\(\)[\s\S]*maybeNotifyYoagentJob\(payload\.notification/.test(source), 'yoagent_jobs_changed refreshes jobs and can notify from server-fired jobs');
@@ -8346,6 +8456,9 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     assert.ok([...selfTones].filter(([author]) => author !== 'keivenc').every(([, tone]) => tone !== 2), 'other visible people rotate through distinct theme tones without taking the self tone');
     assert.equal(api.chatYoagentQueryForTest('/yo summarize current tasks'), 'summarize current tasks');
     assert.equal(api.chatYoagentQueryForTest('plain message'), '');
+    assert.equal(api.chatMessageRequestsYoagentForTest({body: '/yo summarize current tasks', is_question: false}), true, 'slash commands request YO!agent independent of question classification');
+    assert.equal(api.chatMessageRequestsYoagentForTest({body: 'are you there?', is_question: true}), true, 'ordinary questions consume the server-authoritative classification');
+    assert.equal(api.chatMessageRequestsYoagentForTest({body: 'status update', is_question: false}), false, 'ordinary statements remain chat messages without invoking YO!agent');
     const intro = api.chatIntroductionHtmlForTest();
     assert.ok(intro.includes('YO!agent') && !intro.includes('YOLOmux') && intro.includes('`/yo &lt;query&gt;`') && intro.includes('ask me') && intro.includes('data-yoagent-markdown'), 'empty chat introduction speaks in YO!agent first person and marks the command as inline Markdown code');
     assert.equal(new Set(Array.from({length: 40}, (_, index) => api.chatIntroductionGreetingKeyForTest(`browser-${index}`))).size, 3, 'stable browser identities distribute the introduction across all localized greetings');
@@ -8508,7 +8621,7 @@ async function runEditorPreviewSuite({shardIndex = 0, shardCount = 1} = {}) {
     const touchApi = loadYolomux('', ['1'], 'http:', 'iPad', 'admin', {
       coarsePointer: true,
       hoverCapable: false,
-      fireAllTimeouts: true,
+      fireTimeoutDelays: [0],
     });
     touchApi.setAutoFocusEnabledForTest(true);
     assert.equal(touchApi.browserHasCursorHoverForTest(), false, 'a touch-only iPad has no cursor-hover capability');
