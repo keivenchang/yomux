@@ -11,6 +11,8 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TypeAlias
 
+from . import browser_family
+
 
 class FamilyValidationError(ValueError):
     """An observation does not match its current family contract."""
@@ -34,9 +36,6 @@ BOOLEAN: ValueKind = "boolean"
 AGENT_STATES: ValueKind = "agent_states"
 
 AGENT_STATE_VALUES = frozenset({"ask", "run", "transition", "idle"})
-BROWSER_EVENT_KINDS = frozenset({"api", "sse", "heartbeat", "disconnect"})
-
-
 @dataclass(frozen=True, slots=True)
 class PayloadField:
     """One bounded top-level fact in a collector payload."""
@@ -89,7 +88,10 @@ class FamilySpec:
         for name, value in payload.items():
             _validate_value(value, fields[name].kind, f"{self.name}.{name}")
         if self.name == "browser":
-            _validate_browser_payload(payload)
+            try:
+                browser_family.validate_payload(payload)
+            except browser_family.BrowserPayloadError as error:
+                raise FamilyValidationError(str(error)) from error
         return MappingProxyType(dict(payload))
 
 
@@ -126,23 +128,6 @@ def _validate_value(value: object, kind: ValueKind, path: str) -> None:
                 )
         return
     raise RuntimeError(f"unknown payload value kind {kind!r}")
-
-
-def _validate_browser_payload(payload: Mapping[str, object]) -> None:
-    kind = payload["kind"]
-    if kind not in BROWSER_EVENT_KINDS:
-        raise FamilyValidationError(
-            f"browser.kind must be one of: {', '.join(sorted(BROWSER_EVENT_KINDS))}"
-        )
-    present = set(payload) - {"kind"}
-    if kind == "disconnect":
-        if present != {"duration_ms"}:
-            raise FamilyValidationError("browser disconnect requires only duration_ms")
-        return
-    if "duration_ms" in present:
-        raise FamilyValidationError(f"browser {kind} does not accept duration_ms")
-    if not present <= {"latency_ms", "bytes"}:
-        raise FamilyValidationError(f"browser {kind} accepts only latency_ms and bytes")
 
 
 CURRENT_FAMILIES = (
@@ -192,25 +177,56 @@ CURRENT_FAMILIES = (
             "mac_compressed_memory_bytes", "mac_pressure_percent", "mac_pressure_level",
         ), True,
     ),
+    # Usage atoms are event-derived. The transcript scan cadence controls when
+    # additional atoms are discovered; it is not evidence that an atom-free
+    # sub-cadence bucket is a telemetry outage.
     FamilySpec(
         "agent_tokens", "agent_tokens", 10, 60, FoldKind.RATE,
         None,
-        ("agent_tokens_per_minute", "model_tokens_per_minute"), True,
+        ("agent_tokens_per_minute", "model_tokens_per_minute"), False,
     ),
     FamilySpec(
         "cost", "agent_tokens", 10, 60, FoldKind.USAGE,
         None,
-        ("cost_micro_usd", "api_list_cost_micro_usd", "usage_tokens"), True,
+        ("cost_micro_usd", "api_list_cost_micro_usd", "usage_tokens"), False,
     ),
     FamilySpec(
         "browser", "browser", None, None, FoldKind.RATE,
         (
             _field("kind", STRING), _field("latency_ms", NUMBER, required=False),
             _field("bytes", NUMBER, required=False), _field("duration_ms", NUMBER, required=False),
+            _field("endpoint", STRING, required=False), _field("method", STRING, required=False),
+            _field("request_id", STRING, required=False), _field("status", NUMBER, required=False),
+            _field("journey_id", STRING, required=False),
+            _field("code_revision", STRING, required=False),
+            _field("browser_family", STRING, required=False),
+            _field("connection_protocol", STRING, required=False),
+            _field("max_concurrency", NUMBER, required=False),
+            _field("entry_count", NUMBER, required=False),
+            _field("input_delay_ms", NUMBER, required=False),
+            _field("processing_ms", NUMBER, required=False),
+            _field("presentation_delay_ms", NUMBER, required=False),
+            _field("interaction_type", STRING, required=False),
+            _field("operation_kind", STRING, required=False),
+            _field("outcome", STRING, required=False),
+            *(_field(name, STRING, required=False) for name in ("signature", "message", "stack", "source", "provenance")),
+            *(_field(name, STRING, required=False) for name in ("route", "event_type", "wall_time", "delivery_outcome")),
+            _field("line", NUMBER, required=False),
+            _field("column", NUMBER, required=False),
+            *(_field(name, NUMBER, required=False) for name in sorted(browser_family.UPLOAD_HEALTH_FIELDS)),
+            *(_field(name, NUMBER, required=False) for name in sorted(browser_family.API_PHASE_FIELDS)),
+            *(_field(name, NUMBER, required=False) for name in sorted(browser_family.PAGE_PHASE_FIELDS)),
+            _field("fanout_count", NUMBER, required=False),
         ),
         (
             "browser_api_per_second", "browser_sse_per_second", "browser_latency_ms",
-            "browser_bandwidth_bytes_per_second", "browser_disconnected_ms",
+            "browser_bandwidth_bytes_per_second", "browser_disconnected_ms", "browser_queue_ms",
+            "browser_first_paint_ms", "browser_first_contentful_paint_ms",
+            "browser_app_ready_ms", "browser_page_max_concurrency",
+            "browser_finder_usable_ms", "browser_input_latency_ms",
+            "browser_operation_wait_ms", "browser_long_task_ms",
+            "browser_upload_queue_depth", "browser_upload_drops", "browser_upload_retries",
+            "browser_instrumentation_cost_ms",
         ),
         True,
     ),

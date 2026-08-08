@@ -22,8 +22,18 @@ Collector = Callable[[scheduler.CollectorAttempt], collectors.CollectorFacts]
 DEFAULT_RETRY_INITIAL_SECONDS = 5.0
 DEFAULT_RETRY_MAX_SECONDS = 60.0
 DEFAULT_OWNER_CHECK_SECONDS = 1.0
+# A scan that spends its whole byte/record budget asks for an immediate
+# follow-up cycle.  Honouring that with no delay made the agent_tokens worker
+# free-run: 41 cycles in 30s against a 10s cadence, 87% of a core on the live
+# 7771 web process.  Flooring the follow-up bounds a family to
+# 1/cadence + 1/BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS attempts per second at any
+# backlog size, so its CPU cannot exceed body_cpu times that rate.  At the
+# measured 0.62s body and the 10s watched token cadence that ceiling is 22% of a
+# core, inside SERVER_CPU_BUDGET_PERCENT even if the body never gets faster.
+BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS = 4.0
 SUPERVISOR_JOIN_SECONDS = 5.0
 EXPECTED_SUPERVISOR_ERRORS = (OSError, RuntimeError, ValueError)
+WEB_COLLECTED_FAMILIES = scheduler.COLLECTED_FAMILIES - frozenset({"cpu", "gpu"})
 
 
 def _positive_seconds(value: float, name: str) -> float:
@@ -50,6 +60,7 @@ class StatsCurrentRuntime:
         *,
         owner_generation: Callable[[], int | None],
         token_cadence_seconds: Callable[[], float],
+        collector_context: Callable[[], Mapping[str, object]] | None = None,
         family_cadence_seconds: Callable[[str], float] | None = None,
         retry_initial_seconds: float = DEFAULT_RETRY_INITIAL_SECONDS,
         retry_max_seconds: float = DEFAULT_RETRY_MAX_SECONDS,
@@ -57,14 +68,15 @@ class StatsCurrentRuntime:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         supplied = set(collectors_by_family)
-        if supplied != scheduler.COLLECTED_FAMILIES:
-            missing = sorted(scheduler.COLLECTED_FAMILIES - supplied)
-            extra = sorted(supplied - scheduler.COLLECTED_FAMILIES)
+        if supplied != WEB_COLLECTED_FAMILIES:
+            missing = sorted(WEB_COLLECTED_FAMILIES - supplied)
+            extra = sorted(supplied - WEB_COLLECTED_FAMILIES)
             raise CurrentRuntimeError(
                 f"current collector set mismatch; missing={missing}, extra={extra}"
             )
         self.client = client
         self._owner_generation = owner_generation
+        self._collector_context = collector_context
         self._collectors = MappingProxyType(dict(collectors_by_family))
         self._family_cadence_seconds = family_cadence_seconds
         self._retry_initial_seconds = _positive_seconds(
@@ -93,6 +105,9 @@ class StatsCurrentRuntime:
         self._last_failure_kind = ""
         self._retry_delay_seconds = 0.0
         self._next_retry_at = 0.0
+        self._family_sources: dict[str, set[str]] = {
+            family: set() for family in WEB_COLLECTED_FAMILIES
+        }
         jobs = tuple(
             scheduler.CollectorJob(
                 family,
@@ -100,8 +115,9 @@ class StatsCurrentRuntime:
                 (lambda family=family: self._family_cadence_seconds(family))
                 if self._family_cadence_seconds is not None
                 else (token_cadence_seconds if family == "agent_tokens" else None),
+                self._missed_deadline_callback(family),
             )
-            for family in sorted(scheduler.COLLECTED_FAMILIES)
+            for family in sorted(WEB_COLLECTED_FAMILIES)
         )
         self.scheduler = scheduler.FamilyScheduler(
             jobs,
@@ -129,6 +145,36 @@ class StatsCurrentRuntime:
             attempt.assert_current()
 
         return collect
+
+    def _missed_deadline_callback(
+        self,
+        family: str,
+    ) -> Callable[[scheduler.CollectorMiss], None]:
+        def record(missed: scheduler.CollectorMiss) -> None:
+            if missed.family != family:
+                raise CurrentRuntimeError("scheduler reported a miss for the wrong family")
+            with self._lock:
+                sources = tuple(sorted(self._family_sources[family]))
+            if not sources:
+                return
+            self._append_batch(
+                family,
+                unavailable_spans=tuple(
+                    storage.UnavailableSpan(
+                        family,
+                        source_id,
+                        missed.epoch_id,
+                        missed.started_at,
+                        missed.ended_at,
+                        missed.cadence_seconds,
+                        "scheduler_deadline_missed",
+                        missed.owner_generation,
+                    )
+                    for source_id in sources
+                ),
+            )
+
+        return record
 
     def _append_facts(
         self,
@@ -161,7 +207,14 @@ class StatsCurrentRuntime:
                 facts.receipt.rollback()
             raise
         if facts.budget_exhausted_follow_up:
-            self.scheduler.wake(family)
+            self.scheduler.wake(
+                family,
+                min_interval_seconds=BUDGET_FOLLOW_UP_MIN_INTERVAL_SECONDS,
+            )
+        with self._lock:
+            self._family_sources[family].update(
+                epoch.source_id for epoch in facts.coverage_epochs if epoch.family == family
+            )
 
     def _append_batch(
         self,
@@ -258,6 +311,32 @@ class StatsCurrentRuntime:
         if response.get("ok") is not True:
             self._record_failure("LeaseReleaseFailed")
 
+    def _register_collector_context(self, generation: int) -> bool:
+        if self._collector_context is None:
+            return True
+        context = self._collector_context()
+        try:
+            pid = int(context["pid"])
+            port = int(context["port"])
+            owner_generation = int(context["owner_generation"])
+        except (KeyError, TypeError, ValueError):
+            self._record_failure("InvalidCollectorContext")
+            return False
+        if owner_generation != generation:
+            self._record_failure("StaleCollectorContext")
+            return False
+        try:
+            response = self.client.register_collector_context(
+                pid=pid, port=port, owner_generation=owner_generation,
+            )
+        except EXPECTED_SUPERVISOR_ERRORS as error:
+            self._record_failure(type(error).__name__)
+            return False
+        if response.get("ok") is not True:
+            self._record_failure("CollectorContextUnavailable")
+            return False
+        return True
+
     def _stop_scheduler_and_release(self) -> None:
         with self._lock:
             lease_id = self._lease_id
@@ -305,6 +384,12 @@ class StatsCurrentRuntime:
                     continue
                 if self._stop_event.is_set() or self._owner_generation() != generation:
                     self._release(lease_id)
+                    continue
+                if not self._register_collector_context(generation):
+                    self._release(lease_id)
+                    if self._wait_for_retry(retry_delay):
+                        break
+                    retry_delay = min(self._retry_max_seconds, retry_delay * 2)
                     continue
                 with self._lock:
                     self._lease_id = lease_id

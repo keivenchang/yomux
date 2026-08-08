@@ -395,7 +395,6 @@ class StatsCurrentTranscriptUsageScanner:
                     else self._max_records_per_scan
                 ),
             }
-            self._prune_records()
             self._inflight = _ScanReceipt(
                 receipt_id, checkpoints, proposed_next_source, counters.appended_bytes,
                 legacy_repair_complete, repair_root_ids, repair_status,
@@ -451,6 +450,7 @@ class StatsCurrentTranscriptUsageScanner:
                 self._legacy_repair_roots_cache = None
             self._legacy_repair_status = dict(receipt.legacy_repair_status)
             self._inflight = None
+            self._prune_records()
 
     def status(self) -> dict[str, object]:
         """Return bounded evidence of transcript growth that was durably committed."""
@@ -466,6 +466,48 @@ class StatsCurrentTranscriptUsageScanner:
                 ),
                 "legacy_fork_repair": dict(self._legacy_repair_status),
             }
+
+    def usage_atom_backfill_status(self) -> dict[str, object] | None:
+        """Return only cursor progress that has already been durably committed."""
+
+        with self._lock:
+            if self._scan_number == 0 or self._inflight is not None:
+                return None
+            records = tuple(self._files.values())
+            missing = sum(record.offset < record.observed_size for record in records)
+            return {"state": "complete" if missing == 0 else "pending", "sources": len(records), "missing": missing}
+
+    @staticmethod
+    def usage_atom_backfill_status_for_scan(
+        scan: TranscriptUsageScanResult,
+        *,
+        atoms_accepted: int,
+        rejection_reasons: Mapping[str, int],
+    ) -> dict[str, object]:
+        """Project one scanner result without creating a second completion state."""
+
+        reasons = {
+            str(reason): int(count)
+            for reason, count in sorted(rejection_reasons.items())
+            if isinstance(reason, str) and reason and isinstance(count, int) and count > 0
+        }
+        emitted = len(scan.items)
+        rejected = sum(reasons.values())
+        if atoms_accepted < 0 or atoms_accepted + rejected != emitted:
+            raise ValueError("usage atom adapter counts must partition emitted atoms")
+        return {
+            "state": "complete" if scan.backlog_files == 0 else "pending",
+            "sources": scan.files_considered,
+            "missing": scan.backlog_files,
+            "scan": {
+                "files_read": scan.files_read,
+                "records_parsed": scan.records_parsed,
+                "atoms_emitted": emitted,
+                "atoms_accepted": atoms_accepted,
+                "atoms_rejected": rejected,
+                "rejection_reasons": reasons,
+            },
+        }
 
     def rollback(self, receipt_id: int) -> None:
         """Discard unacknowledged progress so the whole receipt is replayed."""
@@ -492,6 +534,7 @@ class StatsCurrentTranscriptUsageScanner:
                 record.durable_record.state = copy.deepcopy(checkpoint.state)
                 record.mtime_ns = checkpoint.mtime_ns
         self._inflight = None
+        self._prune_records()
 
     def _ordered_sources(
         self,

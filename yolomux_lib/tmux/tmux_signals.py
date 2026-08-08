@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from ..common import AGENT_COMMANDS
+from .tmux_utils import TmuxSocketTargetError
 from .tmux_utils import cmd_error
 from .tmux_utils import tmux_command
 from .tmux_utils import session_sort_key
@@ -298,6 +299,61 @@ class TmuxSignalEventWatcher:
         self.lock = threading.RLock()
         self.thread: threading.Thread | None = None
         self.process: subprocess.Popen[str] | None = None
+        self.status_state = "never-started"
+        self.status_sessions: list[str] = []
+        self.status_error = ""
+
+    @staticmethod
+    def status_details(state: str, error: str = "") -> tuple[bool | None, str, str]:
+        """Return the watcher-owned typed state without inferring health from a caller."""
+
+        details = {
+            "never-started": (False, "not_started", "Tmux signal watcher has not been started"),
+            "attaching": (None, "attaching", "Tmux control client is attaching"),
+            "no-sessions": (True, "no_sessions", "No tmux sessions are configured to watch"),
+            "attached": (True, "", ""),
+            "exited": (False, "control_client_exited", "Tmux control client exited"),
+        }
+        healthy, reason_code, reason = details.get(state, details["exited"])
+        return healthy, reason_code, error or reason
+
+    @classmethod
+    def never_started_status(cls) -> dict[str, Any]:
+        healthy, reason_code, reason = cls.status_details("never-started")
+        return {
+            "state": "never-started",
+            "healthy": healthy,
+            "reason_code": reason_code,
+            "reason": reason,
+            "sessions": [],
+            "thread_alive": False,
+            "process_pid": 0,
+        }
+
+    def status_payload(self) -> dict[str, Any]:
+        with self.lock:
+            state = self.status_state
+            sessions = list(self.status_sessions)
+            error = self.status_error
+            thread = self.thread
+            process = self.process
+        healthy, reason_code, reason = self.status_details(state, error)
+        return {
+            "state": state,
+            "healthy": healthy,
+            "reason_code": reason_code,
+            "reason": reason,
+            "sessions": sessions,
+            "thread_alive": thread is not None and thread.is_alive(),
+            "process_pid": int(process.pid) if process is not None and process.poll() is None else 0,
+        }
+
+    def _set_status(self, state: str, *, sessions: Sequence[str] | None = None, error: str = "") -> None:
+        with self.lock:
+            self.status_state = state
+            if sessions is not None:
+                self.status_sessions = [str(session) for session in sessions]
+            self.status_error = error
 
     def start(self) -> bool:
         with self.lock:
@@ -305,6 +361,7 @@ class TmuxSignalEventWatcher:
                 return False
             reap_macos_orphaned_tmux_control_clients()
             self.stop_event.clear()
+            self._set_status("attaching")
             self.thread = threading.Thread(target=self.run, name="tmux-signal-events", daemon=True)
             self.thread.start()
             return True
@@ -328,15 +385,26 @@ class TmuxSignalEventWatcher:
         while not self.stop_event.is_set():
             sessions = [str(item or "").strip() for item in self.sessions() if str(item or "").strip()]
             if not sessions:
+                self._set_status("no-sessions", sessions=[])
                 self.stop_event.wait(self.retry_seconds)
                 continue
+            self._set_status("attaching", sessions=sessions)
             for error in install_tmux_signal_monitoring(sessions):
                 self.emit_error(error)
             self.run_control_client(sessions[0])
             self.stop_event.wait(self.retry_seconds)
 
     def run_control_client(self, session: str) -> None:
-        command = tmux_control_attach_command(session)
+        # The control client has not existed at either exception boundary below.
+        # Preserve that distinction for operators: ``exited`` is only for a
+        # client that was spawned and then stopped.
+        try:
+            command = tmux_control_attach_command(session)
+        except TmuxSocketTargetError as exc:
+            error = f"tmux control-mode attach refused: {exc}"
+            self._set_status("never-started", error=error)
+            self.emit_error(error)
+            return
         try:
             process = subprocess.Popen(
                 command,
@@ -349,10 +417,13 @@ class TmuxSignalEventWatcher:
                 preexec_fn=set_control_client_parent_death_signal,
             )
         except OSError as exc:
-            self.emit_error(f"tmux control-mode start failed: {exc}")
+            error = f"tmux control-mode start failed: {exc}"
+            self._set_status("never-started", error=error)
+            self.emit_error(error)
             return
         with self.lock:
             self.process = process
+        self._set_status("attached")
         install_tmux_signal_control_subscriptions(process)
         try:
             assert process.stdout is not None
@@ -370,6 +441,8 @@ class TmuxSignalEventWatcher:
             with self.lock:
                 if self.process is process:
                     self.process = None
+            if not self.stop_event.is_set():
+                self._set_status("exited")
             if process.poll() is None:
                 process.terminate()
                 try:

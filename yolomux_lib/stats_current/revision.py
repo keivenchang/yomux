@@ -8,7 +8,9 @@ import hashlib
 from pathlib import Path
 
 _CURRENT_MODULES = (
+    "browser_family.py",
     "families.py",
+    "host_collectors.py",
     "identity.py",
     "materializer.py",
     "migration.py",

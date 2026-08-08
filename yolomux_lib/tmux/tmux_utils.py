@@ -9,11 +9,76 @@ import re
 import secrets
 import subprocess
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from ..cache import TtlCache
 
 YOLOMUX_TMUX_SOCKET_ENV = "YOLOMUX_TMUX_SOCKET"
+YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV = "YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER"
+TMUX_CONTROL_MODE_FLAG = "-C"
+TMUX_CLIENT_ATTACH_VERB = "attach-session"
+
+
+class TmuxSocketTargetError(RuntimeError):
+    """A tmux command would otherwise target an implicit server."""
+
+    def __init__(self, verb: str, argv: Sequence[str]) -> None:
+        self.verb = str(verb)
+        self.argv = [str(item) for item in argv]
+        super().__init__(
+            f"refusing tmux {self.verb}: no tmux server was explicitly chosen; "
+            f"refused argv: {self.argv}"
+        )
+
+
+def tmux_explicit_socket_argument(args: Sequence[str]) -> str:
+    """Return an inline ``-S`` or ``-L`` target, if the caller chose one."""
+
+    values = [str(item) for item in args]
+    for index, value in enumerate(values[:-1]):
+        if value in {"-S", "-L"}:
+            return values[index + 1].strip()
+    return ""
+
+
+def tmux_readonly_control_attach(args: Sequence[str]) -> bool:
+    """Whether a control-mode attach is restricted to observation by tmux itself."""
+
+    values = [str(item) for item in args]
+    if TMUX_CONTROL_MODE_FLAG not in values or TMUX_CLIENT_ATTACH_VERB not in values:
+        return False
+    return any(
+        value == "-f" and "read-only" in values[index + 1].split(",")
+        for index, value in enumerate(values[:-1])
+    )
+
+
+def tmux_guarded_verb(args: Sequence[str]) -> str:
+    """Return a default-server command that policy must refuse.
+
+    A server kill has no default-server opt-in. A session kill is allowed only
+    when the deployment deliberately sets the exact D6 opt-in value; every
+    missing, malformed, or false-ish value stays denied.
+
+    A read-only control-mode attach is observational, so it remains available
+    on the shared default server for the normal watcher configuration. A
+    writable control-mode attach can mutate through tmux commands and remains
+    guarded.
+    """
+
+    values = [str(item) for item in args]
+    if "kill-server" in values:
+        return "kill-server"
+    if "kill-session" in values and os.environ.get(YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV) != "1":
+        return "kill-session"
+    if (
+        TMUX_CONTROL_MODE_FLAG in values
+        and TMUX_CLIENT_ATTACH_VERB in values
+        and not tmux_readonly_control_attach(values)
+    ):
+        return f"{TMUX_CONTROL_MODE_FLAG} {TMUX_CLIENT_ATTACH_VERB}"
+    return ""
 
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -24,11 +89,16 @@ def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProces
 
 
 def tmux_command(args: list[str] | tuple[str, ...]) -> list[str]:
+    values = [str(arg) for arg in args]
     socket_path = os.environ.get(YOLOMUX_TMUX_SOCKET_ENV, "").strip()
+    if not socket_path and not tmux_explicit_socket_argument(values):
+        verb = tmux_guarded_verb(values)
+        if verb:
+            raise TmuxSocketTargetError(verb, values)
     command = ["tmux"]
     if socket_path:
         command.extend(["-S", socket_path])
-    command.extend(str(arg) for arg in args)
+    command.extend(values)
     return command
 
 

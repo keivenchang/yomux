@@ -7,12 +7,17 @@ from .storage import AppendResult
 from .storage import DATABASE_FILENAME
 from .storage import MIN_WRITER_BUILD
 from .storage import MIN_WRITER_PROTOCOL
+from .storage import MAX_RING_BUCKET_BYTES
 from .storage import RETENTION_SECONDS
 from .storage import SCHEMA_VERSION
 from .storage import CoverageEpoch
 from .storage import MigrationReconciliation
 from .storage import Observation
 from .storage import PruneResult
+from .storage import RingBucketRow
+from .storage import RingBucketWrite
+from .storage import RingPublication
+from .storage import RingWindow
 from .storage import SchemaMetadata
 from .storage import SchemaMismatchError
 from .storage import SchemaTooNewError
@@ -31,12 +36,17 @@ __all__ = (
     "DATABASE_FILENAME",
     "MIN_WRITER_BUILD",
     "MIN_WRITER_PROTOCOL",
+    "MAX_RING_BUCKET_BYTES",
     "RETENTION_SECONDS",
     "SCHEMA_VERSION",
     "CoverageEpoch",
     "MigrationReconciliation",
     "Observation",
     "PruneResult",
+    "RingBucketRow",
+    "RingBucketWrite",
+    "RingPublication",
+    "RingWindow",
     "SchemaMetadata",
     "SchemaMismatchError",
     "SchemaTooNewError",

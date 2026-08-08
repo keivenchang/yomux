@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shlex
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -25,9 +26,21 @@ from .tmux_utils import tmux
 from ..server_logs import emit_server_log
 
 
+# (st_dev, st_ino, st_mtime_ns, st_size) — see transcript_file_identity for why all four.
+TranscriptFileIdentity = tuple[int, int, int, int]
+
 TRANSCRIPT_LOOKUP_CACHE_TTL_SECONDS = 2.0
+# A codex-cwd MISS is the expensive branch: it reads and json.loads-es the tail of every
+# candidate rollout, twice (filename order, then mtime order). Measured at 1.17-1.23s for one
+# unresolvable cwd, against a 2.0s positive TTL and a 10s stats agent-token cadence, so the
+# collector re-paid the full miss on every sample and could never improve. Negative results get
+# their own, longer TTL. 30s is 3x the busiest collector cadence (so it actually suppresses
+# retries) and still bounds how long a brand-new rollout for a previously-unresolvable cwd stays
+# undiscovered; the per-file memos below make the retry after it expires cheap anyway.
+TRANSCRIPT_LOOKUP_NEGATIVE_CACHE_TTL_SECONDS = 30.0
 # Newest-by-name rollout files to consider per cwd lookup (bounds work on a large tree).
 CODEX_TRANSCRIPT_SCAN_LIMIT = 80
+CODEX_TRANSCRIPT_TAIL_LINES = 300
 CLAUDE_TRANSCRIPT_SCAN_LIMIT = CODEX_TRANSCRIPT_SCAN_LIMIT
 CLAUDE_TRANSCRIPT_CWD_TAIL_LINES = 500
 CODEX_LSOF_TIMEOUT_SECONDS = 1.0
@@ -350,18 +363,26 @@ def claude_transcript_record_cwd(line: str) -> str | None:
     return None
 
 
-def claude_transcript_latest_cwd(path: Path | None) -> str | None:
-    if path is None:
-        return None
-    try:
-        tail = tail_file_lines(path, CLAUDE_TRANSCRIPT_CWD_TAIL_LINES)
-    except OSError:
-        return None
-    for line in reversed(tail.splitlines()):
+def _claude_transcript_latest_cwd(path: Path) -> str | None:
+    for line in reversed(tail_file_lines(path, CLAUDE_TRANSCRIPT_CWD_TAIL_LINES).splitlines()):
         cwd = claude_transcript_record_cwd(line)
         if cwd:
             return cwd
     return None
+
+
+def claude_transcript_latest_cwd(path: Path | None) -> str | None:
+    """The cwd this Claude transcript's tail last claimed, memoized on the file's identity.
+
+    The watchd revision bridge resolves this for every pane of every session on each revision,
+    and a Claude transcript is multi-hundred-MB JSONL: re-tailing 500 lines of every transcript
+    every pass was 82% of the whole web process in a live sampling profile. Memoizing on the
+    file's identity makes an unchanged transcript a single stat.
+    """
+
+    if path is None:
+        return None
+    return memoized_transcript_tail_value(_CLAUDE_LATEST_CWD_MEMO, path, _claude_transcript_latest_cwd, None)
 
 
 def claude_transcript_family_paths(path: Path) -> list[Path]:
@@ -613,6 +634,95 @@ def codex_transcript_header_cwd(path: Path) -> str | None:
 # Codex rollout tree and the Claude projects tree (keyed by prefix).
 _TRANSCRIPT_DIR_CATALOG: dict[tuple[str, str], tuple[int, tuple[str, ...], tuple[str, ...]]] = {}
 _TRANSCRIPT_DIR_CATALOG_MAX = 4096  # deleted directories orphan entries; bound like the other identity caches
+
+
+def store_bounded_memo(memo: dict, key: Any, value: Any, max_entries: int) -> None:
+    """Insert into an insertion-ordered memo, dropping its oldest half once it reaches max_entries.
+
+    Every memo here is keyed on a filesystem identity that can be deleted out from under us, so
+    none of them can rely on invalidation alone. One shared eviction, rather than a copy per memo.
+    """
+
+    if key not in memo and len(memo) >= max_entries:
+        for stale_key in list(memo)[: max_entries // 2]:
+            del memo[stale_key]
+    memo[key] = value
+
+
+# Per-rollout-file cwd memos. find_codex_transcript_in_candidates re-opened and re-parsed every
+# candidate on every uncached lookup: a miss ran a header pass and a 300-line tail pass over ~80
+# files, then repeated both in mtime order — 160 of the 173 tail_file_lines calls in one
+# discover_sessions(enrich_paths=True), and ~75% of its CPU.
+#
+# The header record (session_meta, first line) is written when the rollout is created and never
+# rewritten, so it is memoized on the path alone. Keying it on the path needs no stat(), which
+# keeps the filename-ordered pass free of the per-rollout stat storm it was written to avoid.
+#
+# A transcript tail is NOT immutable: the live session appends to it. Anything derived from a
+# tail is therefore memoized on the file's identity, so an appended file is re-read and a resumed
+# session that adopts an old filename is still found. Codex rollout cwds and the Claude pane cwd
+# are the same problem and share one parent, memoized_transcript_tail_value, rather than each
+# hand-rolling a stat-versioned dict.
+_CODEX_HEADER_CWD_MEMO: dict[str, str | None] = {}
+_CODEX_TAIL_CWDS_MEMO: dict[str, tuple[TranscriptFileIdentity, frozenset[str]]] = {}
+_CLAUDE_LATEST_CWD_MEMO: dict[str, tuple[TranscriptFileIdentity, str | None]] = {}
+_TRANSCRIPT_MEMO_MAX = 4096  # deleted transcripts orphan entries; bound like the directory catalog
+
+
+def clear_transcript_cwd_memos() -> None:
+    _CODEX_HEADER_CWD_MEMO.clear()
+    _CODEX_TAIL_CWDS_MEMO.clear()
+    _CLAUDE_LATEST_CWD_MEMO.clear()
+
+
+def transcript_file_identity(path: Path) -> TranscriptFileIdentity | None:
+    """The stat fields that decide whether a memoized tail-derived value is still valid.
+
+    `st_size` carries the invalidation on its own for an append-only JSONL transcript, which
+    matters because `st_mtime_ns` granularity is not uniform: ext4 stores nanoseconds, but NFS
+    and some tmpfs/HFS+ configurations round to a coarser tick, so two appends inside one tick
+    share an mtime. They cannot share a size. `st_dev`/`st_ino` catch the opposite case — a
+    transcript replaced at the same path (rotation, restore, a resumed session adopting an old
+    filename) that happens to land on the same size and mtime.
+    """
+
+    try:
+        stat_result = path.stat()
+    except OSError:
+        return None
+    return (stat_result.st_dev, stat_result.st_ino, stat_result.st_mtime_ns, stat_result.st_size)
+
+
+def memoized_transcript_tail_value(
+    memo: dict[str, tuple[TranscriptFileIdentity, Any]],
+    path: Path,
+    compute: Callable[[Path], Any],
+    absent: Any,
+) -> Any:
+    """Return `compute(path)`, reused while the transcript file's identity is unchanged.
+
+    One entry per path, so a replaced file supersedes its predecessor instead of orphaning a
+    second entry, and a vanished file drops its own. Eviction is store_bounded_memo's.
+    """
+
+    key = str(path)
+    identity = transcript_file_identity(path)
+    if identity is None:
+        memo.pop(key, None)
+        return absent
+    cached = memo.get(key)
+    if cached is not None and cached[0] == identity:
+        return cached[1]
+    try:
+        value = compute(path)
+    except OSError:
+        # An unreadable transcript is a transient outcome, not a result worth pinning:
+        # leave the memo untouched so the next pass re-reads it.
+        return absent
+    store_bounded_memo(memo, key, (identity, value), _TRANSCRIPT_MEMO_MAX)
+    return value
+
+
 # Cumulative traversal accounting: calls, directories statted, directories
 # actually re-listed (cache misses). Monotonic; sampled by session-files accounting.
 TRANSCRIPT_CATALOG_COUNTS = {"calls": 0, "dirs_statted": 0, "dirs_listed": 0}
@@ -649,10 +759,12 @@ def _cataloged_jsonl_files(root: Path, prefix: str = "") -> list[Path]:
             except OSError:
                 continue
             cached_files, cached_dirs = tuple(direct_files), tuple(subdirs)
-            if len(_TRANSCRIPT_DIR_CATALOG) >= _TRANSCRIPT_DIR_CATALOG_MAX:
-                for stale_key in list(_TRANSCRIPT_DIR_CATALOG)[: _TRANSCRIPT_DIR_CATALOG_MAX // 2]:
-                    del _TRANSCRIPT_DIR_CATALOG[stale_key]
-            _TRANSCRIPT_DIR_CATALOG[key] = (mtime_ns, cached_files, cached_dirs)
+            store_bounded_memo(
+                _TRANSCRIPT_DIR_CATALOG,
+                key,
+                (mtime_ns, cached_files, cached_dirs),
+                _TRANSCRIPT_DIR_CATALOG_MAX,
+            )
         files.extend(Path(item) for item in cached_files)
         pending.extend(Path(item) for item in cached_dirs)
     return files
@@ -714,7 +826,12 @@ def find_recent_codex_transcript(cwd: str | None, root: Path | None = None) -> P
     found = find_codex_transcript_in_candidates(files_by_mtime, cwd)
     if found is not None:
         return set_cached_transcript_lookup("codex-cwd", root, cwd, found)
-    return set_cached_transcript_lookup("codex-cwd", root, cwd, None)
+    # A cwd with no rollout at all (an agent started outside Codex, a deleted tree) is permanent
+    # until a new rollout is written, and it is the branch that just paid for the full double
+    # scan. Cache the negative answer for longer than the positive one.
+    return set_cached_transcript_lookup(
+        "codex-cwd", root, cwd, None, ttl=TRANSCRIPT_LOOKUP_NEGATIVE_CACHE_TTL_SECONDS
+    )
 
 
 def recent_codex_transcript_candidates(root: Path | None = None, limit: int = CODEX_TRANSCRIPT_SCAN_LIMIT) -> list[Path]:
@@ -751,21 +868,46 @@ def newest_codex_transcript(paths: list[Path]) -> Path | None:
     return max(paths, key=path_mtime)
 
 
+def memoized_codex_transcript_header_cwd(path: Path) -> str | None:
+    """The rollout's session_meta cwd. Immutable once written, so memoized on the path alone."""
+
+    key = str(path)
+    if key in _CODEX_HEADER_CWD_MEMO:
+        return _CODEX_HEADER_CWD_MEMO[key]
+    value = codex_transcript_header_cwd(path)
+    store_bounded_memo(_CODEX_HEADER_CWD_MEMO, key, value, _TRANSCRIPT_MEMO_MAX)
+    return value
+
+
+def _codex_transcript_tail_cwds(path: Path) -> frozenset[str]:
+    cwds: set[str] = set()
+    for line in tail_file_lines(path, CODEX_TRANSCRIPT_TAIL_LINES).splitlines():
+        cwds |= codex_transcript_record_cwds(line)
+    return frozenset(cwds)
+
+
+def memoized_codex_transcript_tail_cwds(path: Path) -> frozenset[str]:
+    """Every cwd this rollout's tail structurally claims, memoized on the file's identity.
+
+    A live rollout is appended to, so the identity — not the path — gates reuse: an appended file
+    has a new size and mtime and is re-read, which is what keeps a resumed session discoverable.
+    """
+
+    return memoized_transcript_tail_value(_CODEX_TAIL_CWDS_MEMO, path, _codex_transcript_tail_cwds, frozenset())
+
+
 def find_codex_transcript_in_candidates(files: list[Path], cwd: str) -> Path | None:
     header_matches: list[Path] = []
+    unmatched: list[Path] = []
     for path in files:
-        if codex_transcript_header_cwd(path) == cwd:
+        if memoized_codex_transcript_header_cwd(path) == cwd:
             header_matches.append(path)
+        else:
+            unmatched.append(path)
     if header_matches:
         return newest_codex_transcript(header_matches)
-    tail_matches: list[Path] = []
-    for path in files:
-        try:
-            tail = tail_file_lines(path, 300)
-        except OSError:
-            continue
-        if codex_transcript_tail_matches_cwd(tail, cwd):
-            tail_matches.append(path)
+    # Only files whose header named a different cwd can still match structurally in the tail.
+    tail_matches = [path for path in unmatched if cwd in memoized_codex_transcript_tail_cwds(path)]
     return newest_codex_transcript(tail_matches)
 
 
@@ -777,26 +919,36 @@ def codex_transcript_tail_matches_cwd(tail: str, cwd: str) -> bool:
 
 
 def codex_transcript_record_matches_cwd(line: str, cwd: str) -> bool:
+    return bool(cwd) and cwd in codex_transcript_record_cwds(line)
+
+
+def codex_transcript_record_cwds(line: str) -> set[str]:
+    """The cwds one rollout record structurally claims — never prose that merely mentions a path.
+
+    The single owner of that rule: the per-line predicate and the memoized per-file set both read
+    it from here, so a matcher and a memo cannot drift into disagreeing about what counts.
+    """
+
     try:
         record = json.loads(line)
     except json.JSONDecodeError:
-        return False
+        return set()
     if not isinstance(record, dict):
-        return False
+        return set()
+    values = [record.get("cwd")]
     payload = record.get("payload")
-    if record.get("cwd") == cwd:
-        return True
-    if isinstance(payload, dict) and payload.get("cwd") == cwd:
-        return True
-    arguments = payload.get("arguments") if isinstance(payload, dict) else None
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except json.JSONDecodeError:
-            arguments = None
-    if isinstance(arguments, dict):
-        return arguments.get("cwd") == cwd or arguments.get("workdir") == cwd
-    return False
+    if isinstance(payload, dict):
+        values.append(payload.get("cwd"))
+        arguments = payload.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = None
+        if isinstance(arguments, dict):
+            values.append(arguments.get("cwd"))
+            values.append(arguments.get("workdir"))
+    return {value for value in values if isinstance(value, str) and value}
 
 
 def codex_transcript_session_id(path: Path | None) -> str | None:

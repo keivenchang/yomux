@@ -37,6 +37,7 @@ from .storage import CoverageEpoch
 from .storage import MigrationReconciliation
 from .storage import Observation
 from .storage import RETENTION_SECONDS
+from .storage import SchemaMismatchError
 from .storage import StatsCurrentError
 from .storage import StoreSnapshot
 from .storage import Store
@@ -50,6 +51,12 @@ from .usage import normalize_usage_atom
 
 
 MIGRATION_ID = "stats-v5-current-only-v1"
+# One name for the recovered-from-corruption outcome, shared by the migration that
+# records it, the service that reports it, and the gate that asserts it.
+UNREADABLE_CURRENT_DATABASE = "unreadable_current_database"
+# Bounded so a directory that somehow cannot yield a free name fails loudly
+# rather than spinning.
+QUARANTINE_NAME_ATTEMPTS = 1_000
 RETIRED_DATABASE_FILENAME = "stats-history.sqlite3"
 RETIRED_JSON_FILENAMES = (
     "stats-client-history-v4.json",
@@ -64,6 +71,11 @@ RETIREMENT_FORMAT = 1
 RETIRED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 V5_DATABASE_FILENAME = "stats-v5.sqlite3"
 V5_SCHEMA_VERSION = 5
+# Schema 5 was released with this writer fence.  A schema-5 database is copied
+# into the current store and then upgraded to the current fence; it must not be
+# rejected merely because the current daemon build has advanced.
+V5_MIN_WRITER_PROTOCOL = 24
+V5_MIN_WRITER_BUILD = 3
 V5_SCHEMA_META_COLUMNS = (
     "singleton", "minimum_writer_protocol", "minimum_writer_build", "source_generation",
 )
@@ -103,6 +115,17 @@ SUPPORTED_LEGACY_TABLES = frozenset({
 
 class MigrationError(RuntimeError):
     """The current database was not activated."""
+
+
+class UnreadableCurrentDatabase(MigrationError):
+    """The current database cannot be opened or read at all.
+
+    Only physical damage lands here -- a torn page, a truncated file, a killed
+    checkpoint. It is recoverable by quarantine and rebuild. A database that
+    opens fine but carries reconciliation metadata that does not add up is a
+    different failure: that stays a plain MigrationError and stays fatal, so
+    tampering is never silently rewritten away.
+    """
 
 
 @dataclass(frozen=True)
@@ -216,18 +239,42 @@ def migrate(
     # This is deliberately before temporary-directory creation or legacy input
     # inspection. A newer runner's state fence is a terminal compatibility
     # result, including when its versioned database is temporarily absent.
-    require_compatible_writer(target)
+    try:
+        require_compatible_writer(target)
+    except SchemaMismatchError:
+        # A file that cannot be identified as a compatible database belongs to
+        # the recovery block below. The distinct newer-writer exception still
+        # propagates before any source inspection or mutation.
+        pass
     recovered_active = _recover_interrupted_retirement(state_dir, target)
     if recovered_active is not None:
         return recovered_active
+    unreadable_current: list[MigrationIssue] = []
     if target.exists():
-        report = _active_report(target)
-        return _retire_sources_beside_existing_current(state_dir, legacy, target, report)
+        try:
+            report = _active_report(target)
+        except UnreadableCurrentDatabase as error:
+            # A current database that cannot be read is an outcome, not a crash.
+            # Killing the writer mid-checkpoint leaves exactly this state, and it
+            # never heals on its own, so exiting here would make every restart die
+            # identically and leave the browser retrying a request that cannot
+            # succeed. Set the damaged file aside for forensics -- never delete it,
+            # it is the operator's history -- and rebuild from the surviving
+            # sources, carrying a typed issue so the UI can say history was reset.
+            quarantined = _quarantine_database(target, "corrupt")
+            unreadable_current.append(MigrationIssue(
+                UNREADABLE_CURRENT_DATABASE, quarantined.name, str(error)[:256],
+            ))
+        else:
+            return _retire_sources_beside_existing_current(state_dir, legacy, target, report)
     v5_source = state_dir / V5_DATABASE_FILENAME
     if v5_source.is_file():
         return _migrate_current_v5_database(state_dir, target, v5_source)
     target.parent.mkdir(parents=True, exist_ok=True)
     recovered = _Recovered()
+    for issue in unreadable_current:
+        recovered.issues.append(issue)
+        recovered.sources.append(issue.source)
     digest = hashlib.sha256()
     with tempfile.TemporaryDirectory(prefix=".stats-v5-migration-", dir=target.parent) as temporary:
         work = Path(temporary)
@@ -236,7 +283,7 @@ def migrate(
             try:
                 _read_database(copied, recovered, digest, work, state_dir)
             except MigrationError as error:
-                quarantined = _quarantine_legacy_database(legacy)
+                quarantined = _quarantine_database(legacy, "unsupported")
                 recovered.sources.append(quarantined.name)
                 recovered.issues.append(MigrationIssue(
                     "unsupported_legacy_database",
@@ -348,7 +395,7 @@ def migrate(
 
 
 def _migrate_current_v5_database(state_dir: Path, target: Path, source: Path) -> MigrationReport:
-    """Atomically copy the frozen schema-5 current store into the schema-6 store.
+    """Atomically copy the frozen schema-5 current store into the schema-7 store.
 
     Schema 5 is a former *current* database, not a retired aggregate format.  Keep this narrow
     copier separate from `_read_database`: all fact tables already have the exact current shape, so
@@ -439,7 +486,12 @@ def _validate_current_v5_database(path: Path) -> None:
             "SELECT minimum_writer_protocol, minimum_writer_build, source_generation "
             "FROM schema_meta WHERE singleton = 1"
         ).fetchone()
-        if row is None or int(row[0]) != MIN_WRITER_PROTOCOL or int(row[1]) != MIN_WRITER_BUILD or int(row[2]) < 0:
+        if (
+            row is None
+            or int(row[0]) != V5_MIN_WRITER_PROTOCOL
+            or int(row[1]) != V5_MIN_WRITER_BUILD
+            or int(row[2]) < 0
+        ):
             raise MigrationError("schema-5 source has incompatible writer metadata")
     except (OSError, sqlite3.Error, ValueError) as error:
         raise MigrationError(f"schema-5 source cannot be read: {error}") from error
@@ -455,7 +507,7 @@ def _active_report(path: Path) -> MigrationReport:
         with Store.open_reader(path) as store:
             snapshot = store.read_snapshot()
     except (OSError, sqlite3.Error, StatsCurrentError, ValueError) as error:
-        raise MigrationError(f"active current database is invalid: {error}") from error
+        raise UnreadableCurrentDatabase(f"active current database is invalid: {error}") from error
     records = [item for item in snapshot.migration_reconciliation if item.migration_id == MIGRATION_ID]
     if len(records) != 1:
         raise MigrationError("active current database has no completed migration reconciliation")
@@ -539,9 +591,32 @@ def _copy_database(source: Path, destination_dir: Path, digest: Any) -> Path:
     return target
 
 
-def _quarantine_legacy_database(source: Path) -> Path:
-    stamp = f"{time.time_ns()}-{os.getpid()}"
-    target = source.with_name(f"{source.name}.unsupported-{stamp}")
+def _free_quarantine_target(source: Path, label: str) -> Path:
+    """Pick a quarantine name that collides with nothing already on disk.
+
+    The stamp is time_ns plus pid, which a backwards clock step can repeat. If a
+    collision were treated as an error it would propagate out of the recovery
+    path and kill the very daemon this recovery exists to keep alive, so the name
+    is made unique instead. An existing quarantine is never reused or overwritten
+    -- it is somebody's history.
+    """
+
+    base = source.with_name(f"{source.name}.{label}-{time.time_ns()}-{os.getpid()}")
+    candidate = base
+    for index in range(1, QUARANTINE_NAME_ATTEMPTS):
+        if not any(
+            Path(f"{candidate}{suffix}").exists() or Path(f"{candidate}{suffix}").is_symlink()
+            for suffix in ("", "-wal", "-shm", "-journal")
+        ):
+            return candidate
+        candidate = Path(f"{base}.{index}")
+    raise MigrationError(f"no free {label} database quarantine name beside {source.name}")
+
+
+def _quarantine_database(source: Path, label: str) -> Path:
+    """Move a database and its sidecars aside under a stamped name, never deleting them."""
+
+    target = _free_quarantine_target(source, label)
     moved = False
     for suffix in ("", "-wal", "-shm", "-journal"):
         candidate = Path(f"{source}{suffix}")
@@ -549,17 +624,12 @@ def _quarantine_legacy_database(source: Path) -> Path:
             continue
         if candidate.is_symlink() or not candidate.is_file():
             raise MigrationError(
-                f"unsupported retired database artifact is not a regular file: {candidate.name}"
+                f"{label} database artifact is not a regular file: {candidate.name}"
             )
-        destination = Path(f"{target}{suffix}")
-        if destination.exists() or destination.is_symlink():
-            raise MigrationError(
-                f"unsupported retired database quarantine already exists: {destination.name}"
-            )
-        os.replace(candidate, destination)
+        os.replace(candidate, Path(f"{target}{suffix}"))
         moved = True
     if not moved:
-        raise MigrationError("unsupported retired database disappeared before quarantine")
+        raise MigrationError(f"{label} database disappeared before quarantine")
     _fsync_directory(source.parent)
     return target
 
@@ -1740,10 +1810,34 @@ def _validate_database(path: Path) -> None:
 
 
 def _activate_database(shadow: Path, target: Path) -> None:
+    # os.replace swaps only the main file. SQLite removes a -wal/-shm pair on the
+    # clean close of the last connection, so a killed writer strands them -- and a
+    # stranded sidecar belongs to the database that just went away, not to the one
+    # being activated. Replaying it into the new file is what produces "database
+    # disk image is malformed" on the next start. Set any orphan aside first.
+    _quarantine_orphaned_sidecars(target)
     try:
         os.replace(shadow, target)
     except OSError as error:
         raise MigrationError(f"current database activation failed: {error}") from error
+
+
+def _quarantine_orphaned_sidecars(target: Path) -> None:
+    """Move aside -wal/-shm/-journal files left beside an absent current database."""
+
+    if target.exists():
+        return
+    quarantine = _free_quarantine_target(target, "orphaned")
+    for suffix in ("-wal", "-shm", "-journal"):
+        candidate = Path(f"{target}{suffix}")
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        if candidate.is_symlink() or not candidate.is_file():
+            raise MigrationError(
+                f"orphaned current database artifact is not a regular file: {candidate.name}"
+            )
+        os.replace(candidate, Path(f"{quarantine}{suffix}"))
+    _fsync_directory(target.parent)
 
 
 def _fsync_directory(path: Path) -> None:

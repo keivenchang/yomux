@@ -10,6 +10,7 @@ Python side so it can run from a normal host checkout.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import logging
 import math
 import os
@@ -18,6 +19,8 @@ import signal
 import shutil
 import socket
 import subprocess
+import stat
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -26,16 +29,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from typing import Callable
+from typing import Mapping
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
-from .. import auth as _auth
 from .cache import MISS as cache_MISS
+from .host_identity import current_host_identity
+from .host_identity import HostIdentity
+from .host_partition import HOST_PARTITION_DIRNAME
+from .host_partition import host_partitioned_state_dir
+from ..local_services.rpc import LOCAL_RPC_SOCKET_PATH_BYTES
+from .root_paths import YOLOMUX_ROOT_ENV
+from .root_paths import YolomuxRootError
+from .root_paths import YolomuxRoots
+from .root_paths import resolve_yolomux_roots as _resolve_root_paths
+from .root_paths import resolved_path
+from .filesystem_preflight import FilesystemClassification
+from .filesystem_preflight import preflight_mutable_roots
 from ..workspace.locales import user_message_payload
 from .runtime_env import healed_runtime_path
 from ..tmux.tmux_utils import list_tmux_session_names
 from ..tmux.tmux_utils import run_cmd
 from ..tmux.tmux_utils import unique_session_names
+from ..tmux.process_group_ownership import signal_recorded_process_group
 
 
 DEFAULT_SESSIONS: tuple[str, ...] = ()
@@ -45,7 +61,11 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.6.10"
+YOLOMUX_VERSION = "0.7.0"
+# Persistent state is versioned independently from the release string.  A
+# rebuilt checkout must be able to run beside v0.6.10 without reopening its
+# append-only event log or its current-schema database.
+PERSISTENT_STATE_GENERATION = 7
 UPDATE_NOTIFY_LEVELS: tuple[str, ...] = ("major", "minor", "patch", "none")
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
@@ -54,27 +74,218 @@ SUMMARY_CODEX_MODEL = os.environ.get("YOLOMUX_SUMMARY_MODEL", "gpt-5.5")
 SUMMARY_CODEX_EFFORT = os.environ.get("YOLOMUX_SUMMARY_EFFORT", "low")
 SUMMARY_CODEX_SERVICE_TIER = os.environ.get("YOLOMUX_SUMMARY_SERVICE_TIER", "fast")
 YOAGENT_CLAUDE_SUMMARY_MODEL = os.environ.get("YOLOMUX_YOAGENT_CLAUDE_SUMMARY_MODEL", "claude-haiku-4-5")
-CONFIG_DIR = Path(os.environ.get("YOLOMUX_CONFIG_DIR", str(Path.home() / ".config" / "yolomux")))
-STATE_DIR = Path(os.environ.get("YOLOMUX_STATE_DIR", str(Path.home() / ".local" / "state" / "yolomux")))
-# Reconstructible provider metadata belongs in the cache root, rather than in
-# STATE_DIR alongside user activity/history.  Keep this as the one owner of
-# the path so tests and future cache consumers do not grow ad-hoc ~/.cache
-# literals.
-_DEFAULT_XDG_CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
-YOLOMUX_CACHE_DIR = Path(os.environ.get("YOLOMUX_CACHE_DIR", str(_DEFAULT_XDG_CACHE_HOME / "yolomux"))).expanduser()
+def resolve_yolomux_roots(
+    environ: Mapping[str, str] | None = None,
+    *,
+    identity: HostIdentity | None = None,
+    temporary_dir: Path | None = None,
+    uid: int | None = None,
+) -> YolomuxRoots:
+    """Resolve all writable product roots from one parent without creating paths.
+
+    A rooted run must never fall back to ambient XDG/Codex configuration: that
+    would make an apparently isolated server mutate a user's live state.
+    """
+    values = os.environ if environ is None else environ
+    paths = _resolve_root_paths(
+        values,
+        default_runtime_dir=runtime_root(environ=values, identity=identity, temporary_dir=temporary_dir, uid=uid),
+    )
+    # CODEX_HOME is ambient process configuration, not a YOLOmux override.
+    # Ignore it under a root so a developer's normal Codex install cannot
+    # redirect an isolated server.
+    if paths.root is not None:
+        validate_rooted_socket_paths(paths, identity=identity)
+    return paths
+
+
+def runtime_socket_candidates(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> tuple[Path, ...]:
+    """Enumerate every product-owned Unix socket before rooted directories exist."""
+    resolved_identity = identity or current_host_identity()
+    services = paths.runtime_dir / "services"
+    database = paths.state_dir / HOST_PARTITION_DIRNAME / resolved_identity.stable_host_id / "stats-v7.sqlite3"
+    digest = hashlib.sha256(str(database).encode("utf-8")).hexdigest()[:16]
+    return (
+        paths.runtime_dir / "control" / "yolomux-4194304-ffffffffffffffff.sock",
+        services / "statusd.sock",
+        services / "jobd.sock",
+        services / "watchd.sock",
+        services / "approvald.sock",
+        services / f"statsd.p24s7.{digest}.sock",
+        services / "indexer.sock",
+    )
+
+
+def validate_rooted_socket_paths(paths: YolomuxRoots, *, identity: HostIdentity | None = None) -> None:
+    """Refuse a root whose real socket names would trigger a /tmp fallback."""
+    longest = max(runtime_socket_candidates(paths, identity=identity), key=lambda path: len(os.fsencode(str(path))))
+    length = len(os.fsencode(str(longest)))
+    if length > LOCAL_RPC_SOCKET_PATH_BYTES:
+        raise YolomuxRootError(
+            f"YOLOMUX_ROOT is too deep for product socket {longest} ({length} bytes; limit {LOCAL_RPC_SOCKET_PATH_BYTES}); choose a shorter YOLOMUX_ROOT"
+        )
+
+
+def runtime_root(
+    *,
+    environ: Mapping[str, str] | None = None,
+    identity: HostIdentity | None = None,
+    temporary_dir: Path | None = None,
+    uid: int | None = None,
+) -> Path:
+    """Return the host- and boot-private root for sockets, leases, and locks.
+
+    XDG runtime storage is normally a local tmpfs cleared on reboot. Headless
+    shells and containers often lack it, so the fallback remains under the
+    machine's temporary directory and is still checked before use.
+    """
+    values = os.environ if environ is None else environ
+    if values.get(YOLOMUX_ROOT_ENV):
+        # A rooted run already has a unique, operator-selected parent. Keeping
+        # host/boot suffixes here would make the advertised <root>/runtime
+        # layout false and wastes the Unix-socket pathname budget.
+        return resolved_path(values[YOLOMUX_ROOT_ENV]) / "runtime"
+    resolved_identity = identity or current_host_identity()
+    base = values.get("YOLOMUX_RUNTIME_DIR") or values.get("XDG_RUNTIME_DIR")
+    if base:
+        runtime_base = Path(base).expanduser() / "yolomux"
+    else:
+        resolved_uid = os.getuid() if uid is None else int(uid)
+        runtime_base = Path(temporary_dir or tempfile.gettempdir()) / f"yolomux-{resolved_uid}"
+    # Keep the socket-bearing root readable while leaving enough sockaddr_un
+    # budget for the longest service filename. These stable prefixes identify
+    # the host and boot in diagnostics without an opaque hash.
+    host_scope = f"h-{resolved_identity.stable_host_id[:12]}"
+    boot_value = resolved_identity.boot_id or f"instance-{resolved_identity.instance_nonce}"
+    boot_scope = f"b-{boot_value[:12]}"
+    return runtime_base / host_scope / boot_scope
+
+
+def ensure_runtime_root(
+    root: Path,
+    *,
+    classifier: Callable[[Path], FilesystemClassification] | None = None,
+) -> Path:
+    """Validate and create a private runtime root without accepting network mounts."""
+    path = Path(root).expanduser()
+    preflight_mutable_roots(
+        unix_sockets=(path / ".yolomux-runtime-probe.sock",),
+        classifier=classifier,
+    )
+    rooted_runtime = _YOLOMUX_ROOTS.root is not None and path == RUNTIME_DIR
+    candidates = (path.parent, path) if rooted_runtime else (path.parent.parent, path.parent, path)
+    for candidate in candidates:
+        _ensure_private_runtime_directory(candidate)
+    if not rooted_runtime:
+        cleanup_previous_boot_runtime_dirs(path)
+    return path
+
+
+def _runtime_directory_error(candidate: Path, metadata: os.stat_result, reason: str, action: str) -> PermissionError:
+    """Describe an unsafe runtime path without hiding the remediation."""
+
+    found_mode = stat.S_IMODE(metadata.st_mode)
+    return PermissionError(
+        f"unsafe runtime directory {candidate}: {reason}; found mode {found_mode:04o}, "
+        f"owner uid {metadata.st_uid}; required a non-symlink directory owned by uid {os.getuid()} "
+        f"with mode 0700; {action}"
+    )
+
+
+def _ensure_private_runtime_directory(candidate: Path) -> None:
+    """Create or upgrade one application-owned runtime path component safely."""
+
+    if not candidate.exists() and not candidate.is_symlink():
+        candidate.mkdir(mode=0o700)
+    metadata = candidate.lstat()
+    if stat.S_ISLNK(metadata.st_mode):
+        raise _runtime_directory_error(
+            candidate, metadata, "path is a symlink",
+            "replace it with a private directory after verifying the target is not needed",
+        )
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise _runtime_directory_error(
+            candidate, metadata, "path is not a directory",
+            "replace it with a private directory",
+        )
+    if metadata.st_uid != os.getuid():
+        raise _runtime_directory_error(
+            candidate, metadata, "path is owned by another uid",
+            "do not reuse it; choose a different YOLOMUX_RUNTIME_DIR or have its owner remove it",
+        )
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        try:
+            candidate.chmod(0o700)
+        except OSError as error:
+            raise _runtime_directory_error(
+                candidate, metadata, f"could not tighten its mode ({type(error).__name__})",
+                f"run chmod 700 {candidate} after verifying it is private",
+            ) from error
+        metadata = candidate.lstat()
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise _runtime_directory_error(
+                candidate, metadata, "path changed while its mode was tightened",
+                "inspect the path and recreate a private runtime directory",
+            )
+
+
+def cleanup_previous_boot_runtime_dirs(root: Path) -> tuple[Path, ...]:
+    """Remove only private previous-boot siblings of the current runtime root."""
+    path = Path(root)
+    host_dir = path.parent
+    removed: list[Path] = []
+    for candidate in host_dir.glob("b-*"):
+        if candidate == path:
+            continue
+        _ensure_private_runtime_directory(candidate)
+        shutil.rmtree(candidate)
+        removed.append(candidate)
+    return tuple(removed)
+
+
+_YOLOMUX_ROOTS = resolve_yolomux_roots()
+RUNTIME_DIR = _YOLOMUX_ROOTS.runtime_dir
+CONFIG_DIR = _YOLOMUX_ROOTS.config_dir
+STATE_DIR = _YOLOMUX_ROOTS.state_dir
+YOLOMUX_CACHE_DIR = _YOLOMUX_ROOTS.cache_dir
 MODEL_PRICING_CACHE_DIR = YOLOMUX_CACHE_DIR / "model-pricing"
 MODEL_PRICING_DATABASE_PATH = MODEL_PRICING_CACHE_DIR / "pricing.sqlite3"
-YOAGENT_CODEX_HOME = Path(os.environ.get("YOLOMUX_CODEX_HOME") or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex"))
+YOAGENT_CODEX_HOME = _YOLOMUX_ROOTS.codex_home
 STATE_PATH = CONFIG_DIR / "state.json"
-EVENT_LOG_PATH = STATE_DIR / "events.jsonl"
-RUN_HISTORY_PATH = STATE_DIR / "run-history.json"
+
+# Auth creates its configuration at import time. Resolve and validate every
+# rooted product path first so an invalid root leaves no partial directory.
+from .. import auth as _auth
+
+
+def event_log_path(state_dir: Path | None = None) -> Path:
+    """Return this host's event journal without adopting legacy shared history."""
+
+    root = STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / f"events-v{PERSISTENT_STATE_GENERATION}.jsonl"
+
+
+def run_history_path(state_dir: Path | None = None) -> Path:
+    """Return this host's run history without adopting legacy shared history."""
+
+    root = STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / "run-history.json"
+
+
+EVENT_LOG_PATH = event_log_path()
+RUN_HISTORY_PATH = run_history_path()
 ACTIVITY_PATH = STATE_DIR / "activity.json"
 TMUX_AI_STATUS_PATH = STATE_DIR / "tmux-AI-status.json"
 LEGACY_ATTENTION_ACKS_PATH = STATE_DIR / "attention-acks.json"
 ACTIVITY_HEARTBEATS_PATH = STATE_DIR / "activity-heartbeats.jsonl"
 WATCH_INDEX_PATH = STATE_DIR / "watch-index.json"
-AUTO_APPROVE_LOCK_DIR = STATE_DIR / "locks"
-CONTROL_SOCKET_DIR = STATE_DIR / "control"
+AUTO_APPROVE_LOCK_DIR = RUNTIME_DIR / "locks"
+CONTROL_SOCKET_DIR = RUNTIME_DIR / "control"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex", "term"}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -112,12 +323,119 @@ def yolomux_dev_bundle_revision() -> str:
 
 
 class ErrorPayload(TypedDict, total=False):
-    error: str
+    state: str
+    request: dict[str, str]
+    error: str | dict[str, Any]
     user_message: dict[str, Any]
     diagnostic: str
     path: str
     session: str
     status: int
+
+
+class ProductMetadata(TypedDict):
+    format: str
+    content_type: str
+    length: int
+    sha256: str
+    disposition: str
+    filename: str
+
+
+PRODUCT_METADATA_FIELDS = frozenset(ProductMetadata.__required_keys__)
+PRODUCT_CONTENT_TYPE_RE = re.compile(
+    r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}(?:; charset=[a-z0-9._-]{1,32})?$",
+)
+PRODUCT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,254}$")
+
+
+def product_filename(raw_name: object, *, fallback: str) -> str:
+    """Return one metadata-safe attachment basename for an untrusted path name."""
+    name = Path(str(raw_name or "")).name
+    safe = "".join(char if 32 <= ord(char) < 127 and char not in {'"', "\\", ";", "/"} else "_" for char in name).strip()
+    if PRODUCT_FILENAME_RE.fullmatch(safe) is None or safe in {".", ".."} or safe[-1:] in {" ", "."}:
+        return fallback
+    return safe
+
+
+def inline_json_product_metadata(data: bytes) -> ProductMetadata:
+    """Describe one pre-encoded JSON object for the shared opaque-product writer."""
+
+    if not isinstance(data, bytes):
+        raise TypeError("JSON product data must be bytes")
+    return {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+
+
+def validated_product_metadata(value: object, *, body_length: int) -> ProductMetadata:
+    """Validate the uniform bounded control block without inspecting product bytes."""
+
+    if not isinstance(value, dict) or set(value) != PRODUCT_METADATA_FIELDS:
+        raise ValueError("product metadata fields do not match the shared contract")
+    product_format = value["format"]
+    content_type = value["content_type"]
+    length = value["length"]
+    sha256 = value["sha256"]
+    disposition = value["disposition"]
+    filename = value["filename"]
+    if product_format not in {"json", "opaque_bytes"}:
+        raise ValueError("product format must be json or opaque_bytes")
+    if not isinstance(content_type, str) or not PRODUCT_CONTENT_TYPE_RE.fullmatch(content_type):
+        raise ValueError("product content_type is invalid")
+    if product_format == "json" and content_type != "application/json; charset=utf-8":
+        raise ValueError("JSON products require the canonical content type")
+    if isinstance(length, bool) or not isinstance(length, int) or length < 0 or length != body_length:
+        raise ValueError("product length does not match its body")
+    if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+        raise ValueError("product sha256 is invalid")
+    if disposition not in {"inline", "attachment"}:
+        raise ValueError("product disposition must be inline or attachment")
+    if not isinstance(filename, str) or (
+        filename
+        and (
+            PRODUCT_FILENAME_RE.fullmatch(filename) is None
+            or filename in {".", ".."}
+            or filename[-1] in {" ", "."}
+        )
+    ):
+        raise ValueError("product filename must be an empty string or validated basename")
+    if disposition == "attachment" and not filename:
+        raise ValueError("attachment product requires a filename")
+    return {
+        "format": product_format,
+        "content_type": content_type,
+        "length": length,
+        "sha256": sha256,
+        "disposition": disposition,
+        "filename": filename,
+    }
+
+
+def ready_response_envelope_bytes(data: bytes, request_id: str) -> bytes:
+    """Frame one opaque JSON object while preserving its established top-level aliases."""
+
+    normalized_request_id = str(request_id or "").strip()
+    if not re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", normalized_request_id):
+        raise ValueError("ready API response requires a validated request.id")
+    if not isinstance(data, bytes) or len(data) < 2 or data[:1] != b"{" or data[-1:] != b"}":
+        raise ValueError("ready API product must be an encoded JSON object")
+    aliases = data[1:-1]
+    framed = (
+        b'{"state":"ready","request":{"id":"'
+        + normalized_request_id.encode("ascii")
+        + b'"},"data":'
+        + data
+        + b',"ok":true,"terminal":true'
+    )
+    if aliases.strip():
+        framed += b"," + aliases
+    return framed + b"}"
 
 
 def error_payload(
@@ -126,6 +444,13 @@ def error_payload(
     message_key: str = "",
     message_params: dict[str, Any] | None = None,
     diagnostic: object = "",
+    canonical: bool = False,
+    code: str = "",
+    origin: str = "",
+    retryable: bool = False,
+    details: dict[str, Any] | None = None,
+    stack: list[dict[str, Any]] | None = None,
+    request_id: str = "",
     **fields: Any,
 ) -> ErrorPayload:
     """Return one structured user-message shape while preserving raw diagnostic context.
@@ -138,6 +463,25 @@ def error_payload(
     params = message_params or {}
     raw_diagnostic = diagnostic
     payload: ErrorPayload = user_message_payload(key, fallback, **dict(params or {}))
+    if canonical:
+        descriptor = payload.get("user_message")
+        error_record: dict[str, Any] = {
+            "code": str(code or "request_failed"),
+            "message": dict(descriptor) if isinstance(descriptor, dict) else {
+                "key": key,
+                "params": dict(params),
+                "fallback": fallback,
+            },
+            "origin": str(origin or "server.http"),
+            "retryable": bool(retryable),
+            "details": dict(details or {}),
+            "stack": [dict(frame) for frame in (stack or [])],
+        }
+        return {
+            "state": "failed",
+            "request": {"id": str(request_id or "")},
+            "error": error_record,
+        }
     if raw_diagnostic:
         payload["diagnostic"] = str(raw_diagnostic)
     for field_name, value in fields.items():
@@ -155,7 +499,7 @@ OTHER_BRANCH_LIMIT = 8
 # the cache-miss sentinel is owned by cache.py (where the single TtlCache lives) and re-exported
 # here for the modules that import it from common. Same object identity, so `is _CACHE_MISS` holds.
 _CACHE_MISS = cache_MISS
-SERVER_HOSTNAME = socket.gethostname()
+SERVER_HOSTNAME = current_host_identity().display_hostname
 SERVER_STARTED_AT = time.time()
 PACIFIC_TIME = ZoneInfo("America/Los_Angeles")
 _YOLOMUX_COMMIT_TIME_PT: str | None = None
@@ -172,6 +516,8 @@ def heal_server_path() -> str:
 
 def codex_home_from_env(env: dict[str, str] | None = None) -> Path:
     values = env or os.environ
+    if values.get(YOLOMUX_ROOT_ENV):
+        return resolve_yolomux_roots(values).codex_home
     configured = str(values.get("YOLOMUX_CODEX_HOME") or values.get("CODEX_HOME") or "").strip()
     return Path(configured).expanduser() if configured else Path.home() / ".codex"
 
@@ -273,8 +619,10 @@ def codex_event_kind(event: dict[str, Any]) -> str:
 
 AuthUser = _auth.AuthUser
 AuthIdentity = _auth.AuthIdentity
+# Compatibility exception: auth.AUTH_CONFIG_PATH, infra.common.AUTH_CONFIG_PATH, filesystem.AUTH_CONFIG_PATH, and filesystem.paths.AUTH_CONFIG_PATH are intentionally independent bindings that may differ simultaneously; _sync_auth_overrides() and filesystem._sync_package_overrides() reconcile their respective compatibility pairs.
+# Assigning this binding leaves auth and both filesystem bindings stale; _sync_auth_overrides() updates auth, while assigning filesystem.AUTH_CONFIG_PATH leaves filesystem.paths stale until _sync_package_overrides().
+# Collapsing these bindings changes synchronization and filesystem secret filtering, so fixtures must patch all four; this is a documented exception to the divergent-copy rule.
 AUTH_CONFIG_PATH = _auth.AUTH_CONFIG_PATH
-AUTH_CONFIG_DISPLAY_PATH = _auth.AUTH_CONFIG_DISPLAY_PATH
 PLACEHOLDER_AUTH_USERNAME = _auth.PLACEHOLDER_AUTH_USERNAME
 PLACEHOLDER_AUTH_PASSWORD = _auth.PLACEHOLDER_AUTH_PASSWORD
 GUEST_AUTH_USERNAME = _auth.GUEST_AUTH_USERNAME
@@ -404,28 +752,6 @@ def yolomux_commit_count() -> int:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, ValueError):
         _YOLOMUX_COMMIT_COUNT = 0
     return _YOLOMUX_COMMIT_COUNT
-
-
-POPULAR_IDE_XTERM_APP_NAMES = [
-    "".join(("Cur", "sor.app")),
-    f"{' '.join(('Visual', 'Studio', 'Code'))}.app",
-    f"{' '.join(('Visual', 'Studio', 'Code'))} - Insiders.app",
-    "Windsurf.app",
-]
-POPULAR_IDE_SERVER_DIRS = (
-    f".{''.join(('cur', 'sor'))}-server",
-    f".{''.join(('vs', 'code'))}-server",
-    f".{''.join(('vs', 'code'))}-server-insiders",
-    ".windsurf-server",
-)
-
-XTERM_ASSET_ROOTS = [
-    *(Path(item).expanduser() for item in os.environ.get("YOLOMUX_XTERM_ROOTS", "").split(os.pathsep) if item),
-    STATIC_DIR / "xterm",
-    Path.cwd() / "node_modules" / "@xterm" / "xterm",
-    Path(__file__).resolve().parents[1] / "node_modules" / "@xterm" / "xterm",
-    *(Path("/Applications") / app_name / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm" for app_name in POPULAR_IDE_XTERM_APP_NAMES),
-]
 
 
 def positive_env_int(name: str, default: int) -> int:
@@ -689,55 +1015,10 @@ def git_bytes(args: list[str], cwd: str, timeout: float = 3.0) -> subprocess.Com
 
 
 def xterm_asset_path(asset: str) -> Path | None:
-    # VDI boxes have no compatible Node/npm. boot.sh downloads these pinned UMD assets into
-    # static/ there, so prefer that self-contained runtime package before node_modules/IDE roots.
-    packaged_path = STATIC_DIR / asset
-    if packaged_path.is_file():
-        return packaged_path
-    relpaths = {
-        "xterm.js": Path("lib") / "xterm.js",
-        "xterm.css": Path("css") / "xterm.css",
-    }
-    addon_relpaths = {
-        "xterm-addon-unicode11.js": ("addon-unicode11", Path("lib") / "addon-unicode11.js"),
-    }
-    relpath = relpaths.get(asset)
-    addon = addon_relpaths.get(asset)
-    if relpath is None and addon is None:
+    if asset not in {"xterm.js", "xterm.css", "xterm-addon-unicode11.js"}:
         return None
-    if relpath is not None:
-        for root in XTERM_ASSET_ROOTS:
-            path = root / relpath
-            if path.exists():
-                return path
-    if addon is not None:
-        package, addon_relpath = addon
-        for root in XTERM_ASSET_ROOTS:
-            for path in (
-                root.parent / package / addon_relpath,
-                root / package / addon_relpath,
-                root / addon_relpath,
-                root / addon_relpath.name,
-            ):
-                if path.exists():
-                    return path
-    for server_dir in POPULAR_IDE_SERVER_DIRS:
-        if relpath is not None:
-            for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
-                if path.exists():
-                    return path
-            for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/xterm/{relpath}"):
-                if path.exists():
-                    return path
-        if addon is not None:
-            package, addon_relpath = addon
-            for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/{package}/{addon_relpath}"):
-                if path.exists():
-                    return path
-            for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/{package}/{addon_relpath}"):
-                if path.exists():
-                    return path
-    return None
+    vendor_path = STATIC_DIR / "vendor" / asset
+    return vendor_path if vendor_path.is_file() else None
 
 
 def split_csv(values: list[str]) -> list[str]:
@@ -758,16 +1039,27 @@ def tail_file_lines(path: Path, lines: int) -> str:
     want = min(max(1, lines), MAX_TRANSCRIPT_TAIL_LINES)
     chunk = 65536
     max_bytes = want * chunk  # generous per-line ceiling; never walk the entire huge file
-    data = b""
+    # Accumulate the blocks and carry running totals. Prepending each block to one
+    # buffer and re-running `data.count(b"\n")` over the whole buffer made the walk
+    # quadratic in the window: transcripts with long JSONL lines need hundreds of
+    # 64 KiB steps to reach `want` newlines, so the counting alone re-scanned
+    # gigabytes per call. The totals are identical to the whole-buffer counts.
+    blocks: list[bytes] = []
+    newlines = 0
+    scanned = 0
     with path.open("rb") as handle:
         handle.seek(0, os.SEEK_END)
         pos = handle.tell()
-        while pos > 0 and data.count(b"\n") <= want and len(data) < max_bytes:
+        while pos > 0 and newlines <= want and scanned < max_bytes:
             step = min(chunk, pos)
             pos -= step
             handle.seek(pos)
-            data = handle.read(step) + data
-    text = data.decode("utf-8", errors="replace")
+            block = handle.read(step)
+            blocks.append(block)
+            newlines += block.count(b"\n")
+            scanned += len(block)
+    blocks.reverse()
+    text = b"".join(blocks).decode("utf-8", errors="replace")
     return "".join(text.splitlines(keepends=True)[-want:])
 
 def parse_bool(value: str) -> bool:
@@ -776,13 +1068,25 @@ def parse_bool(value: str) -> bool:
 def terminate_process_group(process: subprocess.Popen[Any]) -> None:
     if process.poll() is not None:
         return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=2.0)
-    except ProcessLookupError:
+    term_outcome = signal_recorded_process_group(process, signal.SIGTERM)
+    if not term_outcome["signalled"]:
+        logging.getLogger(__name__).warning(
+            "refused SIGTERM for process group %s: %s",
+            process.pid,
+            term_outcome["reason"],
+        )
         return
+    try:
+        process.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
+        kill_outcome = signal_recorded_process_group(process, signal.SIGKILL)
+        if not kill_outcome["signalled"]:
+            logging.getLogger(__name__).warning(
+                "refused SIGKILL for process group %s: %s",
+                process.pid,
+                kill_outcome["reason"],
+            )
+            return
         try:
             process.wait(timeout=2.0)
         except (ProcessLookupError, subprocess.TimeoutExpired):

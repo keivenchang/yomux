@@ -26,8 +26,9 @@ from typing import Callable
 
 from .registry import ProcessTableEntry
 from .registry import bounded_process_table
-from .registry import tracked_local_service_groups
-from .registry import tracked_port_process_group
+from .registry import process_record_diagnostic
+from .registry import resolve_tracked_local_service_groups
+from .registry import resolve_tracked_port_process_group
 
 WATCHDOG_SAMPLE_INTERVAL_SECONDS = 2.0
 WATCHDOG_CPU_PERCENT_LIMIT = 250.0
@@ -61,12 +62,25 @@ class GroupOverloadWatchdog:
 
     def tracked(self, table: dict[int, ProcessTableEntry]) -> dict[str, Any]:
         """Resolve the tracked group strictly from the shared ledger."""
-        web = tracked_port_process_group(self.port, self.state_dir, table)
-        services = tracked_local_service_groups(self.service_dir, table)
+        web, web_diagnostic = resolve_tracked_port_process_group(self.port, self.state_dir, table)
+        services, service_diagnostics = resolve_tracked_local_service_groups(self.service_dir, table)
+        process_diagnostics = list(service_diagnostics)
+        if web_diagnostic is not None and not web_diagnostic.current:
+            process_diagnostics.append({
+                "target": "web",
+                "pid": web_diagnostic.pid,
+                "diagnostic": web_diagnostic.as_dict(),
+            })
         service_members = {pid for group in services for pid in group["member_pids"]}
         web_members = tuple(pid for pid in web.get("member_pids", ()) if pid not in service_members)
         all_members = tuple(sorted(set(web_members) | service_members))
-        return {"web": web, "web_members": web_members, "services": services, "member_pids": all_members}
+        return {
+            "web": web,
+            "web_members": web_members,
+            "services": services,
+            "member_pids": all_members,
+            "process_diagnostics": process_diagnostics,
+        }
 
     def sample_once(self) -> dict[str, Any]:
         table = self.table_reader()
@@ -92,6 +106,7 @@ class GroupOverloadWatchdog:
             "sustained_samples": self.sustained_samples,
             "cpu_percent_limit": self.cpu_percent_limit,
             "fired": self.fired,
+            "process_diagnostics": tracked["process_diagnostics"],
         }
         if self._over_count >= self.sustained_samples and not self.fired and members:
             snapshot.update(self._contain(tracked, table))
@@ -130,29 +145,71 @@ class GroupOverloadWatchdog:
             return "permission-denied"
         return "signalled"
 
+    def _fenced_signal_action(
+        self,
+        *,
+        target: str,
+        pid: int,
+        action: str,
+        signum: int,
+        record: dict[str, Any],
+        table: dict[int, ProcessTableEntry],
+    ) -> dict[str, Any]:
+        diagnostic = process_record_diagnostic(record, table=table)
+        if not diagnostic.current:
+            return {
+                "target": target,
+                "pid": pid,
+                "action": "fence-refused",
+                "result": "refused",
+                "requested_action": action,
+                "diagnostic": diagnostic.as_dict(),
+            }
+        return {"target": target, "pid": pid, "action": action, "result": self._signal(pid, signum)}
+
     def _contain(self, tracked: dict[str, Any], table: dict[int, ProcessTableEntry]) -> dict[str, Any]:
         """Stop the tracked group: graceful leaders first, then targeted SIGKILL."""
         self.fired = True
         actions: list[dict[str, Any]] = []
         shared_veto = self._other_web_ports_active(table)
-        term_targets: list[tuple[str, int]] = []
+        term_targets: list[tuple[str, int, dict[str, Any]]] = []
+        kill_records = {
+            pid: tracked["web"]["member_records"][pid]
+            for pid in tracked["web_members"]
+            if tracked["web"]
+        }
         web_pid = int(tracked["web"].get("pid") or 0)
         if web_pid:
-            term_targets.append(("web", web_pid))
+            term_targets.append(("web", web_pid, tracked["web"]["process_record"]))
         kill_scope = set(tracked["web_members"])
         for group in tracked["services"]:
             if shared_veto:
                 actions.append({"target": group["service"], "pid": group["pid"], "action": "skipped-shared", "reason": "another web port is live"})
                 continue
-            term_targets.append((group["service"], group["pid"]))
+            term_targets.append((group["service"], group["pid"], group["process_record"]))
             kill_scope.update(group["member_pids"])
-        for name, pid in term_targets:
-            actions.append({"target": name, "pid": pid, "action": "sigterm", "result": self._signal(pid, signal.SIGTERM)})
+            kill_records.update(group["member_records"])
+        for name, pid, record in term_targets:
+            actions.append(self._fenced_signal_action(
+                target=name,
+                pid=pid,
+                action="sigterm",
+                signum=signal.SIGTERM,
+                record=record,
+                table=table,
+            ))
         self.sleep(self.grace_seconds)
         survivors_table = self.table_reader()
         for pid in sorted(kill_scope):
             if pid in survivors_table:
-                actions.append({"target": "tracked-member", "pid": pid, "action": "sigkill", "result": self._signal(pid, signal.SIGKILL)})
+                actions.append(self._fenced_signal_action(
+                    target="tracked-member",
+                    pid=pid,
+                    action="sigkill",
+                    signum=signal.SIGKILL,
+                    record=kill_records.get(pid, {}),
+                    table=survivors_table,
+                ))
         evidence_path = self._write_evidence(actions, shared_veto)
         return {"actions": actions, "evidence_path": evidence_path}
 

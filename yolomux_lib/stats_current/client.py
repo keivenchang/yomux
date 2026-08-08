@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import fields
@@ -23,6 +24,7 @@ SERVICE_MODULE = "yolomux_lib.stats_current.service"
 SOCKET_FILENAME = storage.SOCKET_FILENAME
 LEASE_TIMEOUT_SECONDS = 3.0
 STATUS_TIMEOUT_SECONDS = LEASE_TIMEOUT_SECONDS
+BROWSER_PROFILES_TIMEOUT_SECONDS = 0.5
 
 
 def _plain_json_value(value: object) -> object:
@@ -87,6 +89,33 @@ def append_metadata_size(
     )
 
 
+def _encoded_record_size(record: object) -> int:
+    """Exact encoded length one record contributes to the shared metadata frame.
+
+    ``encode_metadata`` serializes the whole envelope with ``sort_keys`` and the
+    compact separators, and a JSON array encodes each element independently.
+    Sizing one record with the same options therefore yields the exact byte count
+    that record adds inside its list, which is what lets a batch be sized by
+    arithmetic instead of by re-encoding the whole candidate batch.
+    """
+
+    return len(
+        json.dumps(
+            _record_payload(record),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+
+
+def _list_size_delta(sizes: Sequence[int]) -> int:
+    """Bytes a populated record list adds over the empty ``[]`` baseline."""
+
+    if not sizes:
+        return 0
+    return sum(sizes) + len(sizes) - 1
+
+
 AppendBatch = tuple[
     tuple[storage.Observation, ...],
     tuple[storage.UsageAtom, ...],
@@ -120,6 +149,16 @@ def iter_append_batches(
         )
     if fixed_count == 0 and not variable:
         return
+    # Size every record exactly once. The previous binary search re-encoded the
+    # whole candidate batch on each probe, so a single append serialized its
+    # payload O(log n) times before sending it; on the live collector that
+    # sizing search was 40% of the thread's wall time.
+    baseline = append_metadata_size()
+    fixed_sizes = tuple(
+        tuple(_encoded_record_size(record) for record in group)
+        for group in fixed_groups
+    )
+    variable_sizes = tuple(_encoded_record_size(item) for _kind, item in variable)
     variable_offset = 0
     first_batch = True
     while first_batch or variable_offset < len(variable):
@@ -129,26 +168,27 @@ def iter_append_batches(
         capacity = protocol.MAX_APPEND_RECORDS - sum(map(len, (
             batch_observations, batch_coverage, batch_unavailable,
         )))
-        low, high = 0, min(len(variable) - variable_offset, capacity)
-        while low < high:
-            candidate = (low + high + 1) // 2
-            candidate_rows = variable[variable_offset:variable_offset + candidate]
-            candidate_atoms = tuple(item for kind, item in candidate_rows if kind == "atom")
-            candidate_tombstones = tuple(
-                item for kind, item in candidate_rows if kind == "tombstone"
+        fixed_delta = sum(
+            _list_size_delta(sizes if first_batch else ())
+            for sizes in fixed_sizes
+        )
+        budget = LOCAL_RPC_MAX_METADATA_BYTES - baseline - fixed_delta
+        # Encoded size grows monotonically with the prefix length, so the longest
+        # prefix that fits is found by accumulation and equals the old bisection.
+        limit = min(len(variable) - variable_offset, capacity)
+        used = {"atom": 0, "tombstone": 0}
+        variable_delta = 0
+        atom_count = 0
+        while atom_count < limit:
+            kind, _item = variable[variable_offset + atom_count]
+            added = variable_sizes[variable_offset + atom_count] + (
+                1 if used[kind] else 0
             )
-            size = append_metadata_size(
-                observations=batch_observations,
-                usage_atoms=candidate_atoms,
-                usage_tombstones=candidate_tombstones,
-                coverage_epochs=batch_coverage,
-                unavailable_spans=batch_unavailable,
-            )
-            if size <= LOCAL_RPC_MAX_METADATA_BYTES:
-                low = candidate
-            else:
-                high = candidate - 1
-        atom_count = low
+            if variable_delta + added > budget:
+                break
+            variable_delta += added
+            used[kind] += 1
+            atom_count += 1
         batch_rows = variable[variable_offset:variable_offset + atom_count]
         batch_atoms = tuple(item for kind, item in batch_rows if kind == "atom")
         batch_tombstones = tuple(
@@ -179,11 +219,11 @@ def iter_append_batches(
 
 
 def default_database_path(state_dir: Path | None = None) -> Path:
-    return Path(state_dir or common.STATE_DIR) / storage.DATABASE_FILENAME
+    return storage.default_database_path(state_dir)
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
-    return Path(state_dir or common.STATE_DIR) / "services" / SOCKET_FILENAME
+    return storage.default_socket_path(state_dir)
 
 
 def _stamp(action: str, payload: Mapping[str, object] | None = None) -> dict[str, Any]:
@@ -201,14 +241,23 @@ def _wire_rpc(
     action: str,
     payload: Mapping[str, object] | None,
     timeout: float,
+    request_binary: bytes = b"",
 ) -> tuple[dict[str, Any], bytes]:
     stamped = _stamp(action, payload)
     envelope = new_envelope(service, action, stamped, timeout_seconds=timeout)
-    response, binary = local_service_request(
-        socket_path,
-        envelope,
-        timeout_seconds=timeout,
-    )
+    if request_binary:
+        response, binary = local_service_request(
+            socket_path,
+            envelope,
+            binary=request_binary,
+            timeout_seconds=timeout,
+        )
+    else:
+        response, binary = local_service_request(
+            socket_path,
+            envelope,
+            timeout_seconds=timeout,
+        )
     if not isinstance(response, dict):
         raise LocalRpcError("invalid local service response")
     return response, binary
@@ -265,6 +314,7 @@ class _CurrentTransport(LocalServiceClient):
         payload: Mapping[str, object] | None = None,
         *,
         timeout: float = 0.5,
+        request_binary: bytes = b"",
     ) -> tuple[dict[str, Any], bytes]:
         try:
             response, binary = _wire_rpc(
@@ -273,13 +323,14 @@ class _CurrentTransport(LocalServiceClient):
                 action,
                 payload,
                 timeout,
+                request_binary,
             )
         except (OSError, LocalRpcError) as error:
             self.registry.note_rpc_failure()
             return {
                 "ok": False,
                 "error": redact_local_service_text(error),
-                "_transport_error": "rpc",
+                "_transport_error": self._transport_error(error),
             }, b""
         self.registry.note_rpc_success()
         return response, binary
@@ -346,6 +397,11 @@ class StatsCurrentClient:
                 "required_build": str(error.minimum_writer_build),
             }
             return False
+        except storage.SchemaMismatchError:
+            # An unreadable current file must reach statsd's migration owner so
+            # it can quarantine the artifact and report a structured recovery.
+            # A newer writer remains fenced by the distinct branch above.
+            pass
         started = self._transport.registry.ensure_started()
         if not started:
             upgrade = self._transport.registry._upgrade_required
@@ -394,11 +450,46 @@ class StatsCurrentClient:
             timeout=LEASE_TIMEOUT_SECONDS,
         )
 
+    def register_collector_context(
+        self,
+        *,
+        pid: int,
+        port: int,
+        owner_generation: int,
+    ) -> dict[str, Any]:
+        """Register only the elected web identity; statsd reads mutable inputs itself."""
+
+        return self._call(
+            "collector_context",
+            {
+                "pid": pid,
+                "port": port,
+                "owner_generation": owner_generation,
+            },
+            timeout=STATUS_TIMEOUT_SECONDS,
+        )
+
     def status(self) -> dict[str, Any]:
         response = self._call("status", timeout=STATUS_TIMEOUT_SECONDS)
         if response.get("_transport_error"):
             return self._transport.registry.failure_response()
         return response
+
+    def browser_diagnostics(self) -> dict[str, Any]:
+        return self._call("browser_profiles", timeout=BROWSER_PROFILES_TIMEOUT_SECONDS)
+
+    def set_usage_atom_backfill_status(self, status: Mapping[str, object]) -> dict[str, Any]:
+        return self._call("usage_atom_backfill", dict(status), timeout=STATUS_TIMEOUT_SECONDS)
+
+    def runtime_status(self, status: Mapping[str, object] | None = None) -> dict[str, Any]:
+        """Project statsd's own status through its existing process sampler."""
+        service = dict(status) if isinstance(status, Mapping) else self.status()
+        pid = int(service.get("pid") or 0)
+        return {
+            **service,
+            "service": "statsd",
+            "resources": self._transport.registry.resources(pid),
+        }
 
     def append(
         self,
@@ -408,6 +499,8 @@ class StatsCurrentClient:
         usage_tombstones: Sequence[storage.UsageAtomTombstone] = (),
         coverage_epochs: Sequence[storage.CoverageEpoch] = (),
         unavailable_spans: Sequence[storage.UnavailableSpan] = (),
+        browser_upload: bytes | None = None,
+        authenticated_username: str = "",
     ) -> dict[str, Any]:
         groups = (
             (observations, storage.Observation),
@@ -417,6 +510,20 @@ class StatsCurrentClient:
             (unavailable_spans, storage.UnavailableSpan),
         )
         total = sum(len(records) for records, _kind in groups)
+        if browser_upload is not None:
+            if total:
+                raise ValueError("browser upload cannot be mixed with typed append records")
+            if not isinstance(browser_upload, bytes) or not 1 <= len(browser_upload) <= 128 * 1024:
+                raise ValueError("browser upload must contain 1..131072 bytes")
+            if not isinstance(authenticated_username, str) or not authenticated_username:
+                raise ValueError("authenticated_username must be non-empty text")
+            response, _binary = self._transport.dispatch(
+                "browser_upload",
+                {"authenticated_username": authenticated_username},
+                timeout=3.0,
+                request_binary=browser_upload,
+            )
+            return self._remember(response)
         if total < 1 or total > protocol.MAX_APPEND_RECORDS:
             raise ValueError(f"append requires 1..{protocol.MAX_APPEND_RECORDS} records")
         for records, kind in groups:
