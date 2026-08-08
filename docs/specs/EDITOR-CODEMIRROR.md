@@ -21,7 +21,7 @@ Build a `CmFileEditor` adapter mounted in the same `#fileEditor` panel, wired to
 
 Loading at prototype time used one hand-written `yolomux.js` and CDN/vendor fallbacks for xterm/marked/highlight.js. The current app now has a no-dependency concat build for `static/yolomux.js` / `static/yolomux.css`, but CodeMirror itself is still a vendored prebuilt bundle. Two prototype sub-options:
 - **A1 — import-map + ESM CDN.** `<script type="importmap">` mapping `codemirror` / `@codemirror/*` to esm.sh (or jsdelivr `+esm`), then `<script type="module">`. Zero local build; matches the current CDN pattern. Downside: runtime depends on the CDN (broken offline) unless cached.
-- **A2 — vendored prebuilt bundle (recommended).** One-time `esbuild` of a tiny entry that re-exports only the CM pieces YOLOmux uses -> commit `static/codemirror.js`, served locally with a CDN fallback. This is EXACTLY how xterm.js is already handled (`web.py:86`, local + `onerror` jsdelivr fallback), keeps YOLOmux self-hostable offline, and is the consistent choice.
+- **A2 — vendored prebuilt bundle (recommended).** One-time `esbuild` of a tiny entry that re-exports only the CM pieces YOLOmux uses -> commit `static/codemirror.js`. CodeMirror and xterm.js are served only from tracked local vendor assets, which keeps YOLOmux self-hostable offline without a runtime CDN dependency.
 
 ### Vendored CodeMirror bundle record
 The rebuild manifest, entry point, and exact lockfile live in `tools/codemirror-bundle/`. Rebuild with `cd tools/codemirror-bundle && npm ci && npm run build`. The committed `static/codemirror.js` currently has SHA256 `96f7c47927e35527d86f1b8a82d9f0e73d2a58ffb51005b436daa5a00b5ba081`.

@@ -19,20 +19,22 @@ Recommended local run: HTTPS, login-gated, all tmux sessions visible, and YOLO-e
 ```bash
 git clone https://github.com/keivenchang/yolomux.git
 cd yolomux
-make setup          # pip install -e ".[yoagent]" + xterm.js assets + build the bundle  (run `make help` for more)
+make setup          # pip install -e ".[yoagent]" + build the bundle  (run `make help` for more)
 tmux new-session -A -s project1     # optional: create one if you do not already have tmux sessions
 python3 yolomux.py --dang   # or: make run
 ```
 
-`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. Not using `make`? `pip install -e ".[yoagent]"` installs the dependencies + the `yolomux` command (pip also enforces Python 3.10+), then `npm install` for local xterm.js assets.
+`make setup` checks for Python 3.10+ before doing any build work, then pip automatically installs every runtime dependency, including the native `watchfiles` filesystem-event backend. On an externally managed system Python (PEP 668), create and activate a virtualenv first (`python3 -m venv .venv && . .venv/bin/activate`), then `make setup`. The source and editable-install runtime serves the tracked xterm files under `static/vendor/`; npm is not needed to start YOLOmux. Contributors can run `make xterm` to install the pinned upstream packages and verify that their bytes still match the tracked files. The Python wheel does not currently package these static assets.
 
-Native filesystem watching is validated on macOS and Linux. Other Unix-like systems are not a support guarantee: if their `watchfiles` backend cannot start, YOLOmux automatically retains its bounded polling fallback.
+Native filesystem watching is validated on macOS and Linux. Native events reduce invalidation latency but do not replace bounded reconciliation: the elected web owner still scans at most 1,000 visible names per watched root and retains at most 512 in each directory signature. If the `watchfiles` backend cannot start or loses events, YOLOmux uses the same bounded polling path as its correctness fallback.
 
 Open `https://localhost:9998/`. The first launch shows a setup page — see [First launch](#first-launch) below. With no `--sessions` filter, YOLOmux discovers every tmux session from `tmux list-sessions`. By default YOLOmux creates and reuses a local HTTPS certificate under `~/.local/state/yolomux/tls/`; your browser will warn because it is not signed by a public CA. `--dang` is the short alias for `--dangerously-yolo`, which makes the UI's `+ Claude` and `+ Codex` buttons launch with their dangerous bypass flags.
 
 ## Runtime architecture
 
-YOLOmux runs one lightweight `yolomux.py` web process per listening port. Shared work moves to a small fixed set of local Unix RPC services under the same `YOLOMUX_STATE_DIR`: one supervised `statsd`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, one lazy `statusd`, and zero or one `approvald` while YO targets are enabled. The current YO!stats architecture makes `statsd` the sole database writer and history-serving owner: it stores original observations, usage atoms, coverage epochs, and unavailable spans in a schema-versioned database, builds immutable resolution layers asynchronously, and serves exact cached snapshots/deltas while web processes only authenticate and forward. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns the current schema/fence/path literals. `statusd` is the sole owner of the shared public session/agent-status snapshot (lightweight tmux discovery, pane classification, encoded auto-approve bytes) and a private session-inventory contract that other daemon-owned products key work on; web processes only forward its bytes. `jobd` is a bounded CPU broker for stateless registered tasks and typed materialized products (`transcript_view`, `session_files_view`, `tabber_activity_view`, `metadata_warm_view`) that serve last-known-good bytes while a newer generation builds. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `indexd`, `statusd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports add only another web process and reuse the same state-directory services.
+YOLOmux runs one lightweight `yolomux.py` web process per listening port. On one host, shared work moves to a small fixed set of local Unix RPC services under the same local `YOLOMUX_STATE_DIR`: one supervised `statsd`, one lazy `indexd`, one lazy `jobd` broker with up to two spawn-based executors, one lazy `statusd`, and zero or one `approvald` while YO targets are enabled. Do not point servers on different hosts at one shared state directory; the current owner, service, tmux-status, watch-root, and activity paths are not fully host-qualified. The current YO!stats architecture makes `statsd` the sole database writer and history-serving owner: it stores original observations, usage atoms, coverage epochs, and unavailable spans in a schema-versioned database, builds immutable resolution layers asynchronously, and serves exact cached snapshots/deltas while web processes only authenticate and forward. [`docs/specs/STATS_API.md`](docs/specs/STATS_API.md) owns the current schema/fence/path literals. `statusd` is the sole owner of the same-host public session/agent-status snapshot (lightweight tmux discovery, pane classification, encoded auto-approve bytes) and a private session-inventory contract that other daemon-owned products key work on; web processes only forward its bytes. `jobd` is a bounded CPU broker for stateless registered tasks and typed materialized products (`transcript_view`, `session_files_view`, `tabber_activity_view`, `metadata_warm_view`) that serve last-known-good bytes while a newer generation builds. A normal stats + Quick Open session has four Python processes (`yolomux.py`, `statsd`, `indexd`, `statusd`); a CPU job burst adds `jobd` plus its executor processes, and active YO auto-approval adds `approvald`. Extra YOLOmux ports on that host add only another web process and reuse the same state-directory services.
+
+“Lightweight” describes this process topology, not a guarantee that every browser-visible handler is asynchronous. The current release line still runs a forced full session-metadata build on the HTTP request thread. The legacy `/api/activity-summary` path is disabled across HTTP, browser demand, watch publication, and statusd, and returns a typed terminal `503 feature_disabled` response without starting summary work. It must not be re-enabled until an asynchronous and more efficient API and backend replacement is implemented and accepted. The `Route.normal_session_local_service` flag is only the inventory marker used by the authenticated route test; runtime dispatch does not read it or use it to offload work.
 
 ```mermaid
 flowchart TB
@@ -56,10 +58,10 @@ flowchart TB
     end
   end
 
-  subgraph services["Shared local services per YOLOMUX_STATE_DIR"]
+  subgraph services["Same-host local services per YOLOMUX_STATE_DIR"]
     direction TB
     statsd["statsd\nversioned state socket\nsole SQLite writer\nasync four-layer materializer\nexact snapshot/delta cache"]
-    indexd["indexd\nSTATE_DIR/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
+    indexd["indexd\nSTATE_DIR/hosts/<host-id>/search_index/indexer.sock\nowns per-root SQLite WAL\n60s idle after leases"]
     jobd["jobd broker\nSTATE_DIR/services/jobd.sock\ninteractive/freshness/maintenance queues\nlast-known-good product store\n60s idle when queue empty"]
     execs["jobd executors\nspawn ProcessPoolExecutor\n1-2 workers by CPU count"]
     statusd["statusd\nSTATE_DIR/services/statusd.sock\nshared session/agent-status snapshot\nprivate session-inventory contract\n60s idle after leases"]
@@ -79,7 +81,7 @@ flowchart TB
   subgraph durable["Durable state"]
     direction TB
     statsdb["versioned stats database\noriginals + usage + coverage\nschema/min-writer fence"]
-    indexdb["STATE_DIR/search_index/<digest>.sqlite3\nindexd is sole writer"]
+    indexdb["STATE_DIR/hosts/<host-id>/search_index/<digest>.sqlite3\nindexd is sole writer"]
     locks["STATE_DIR/background-owner/*\nSTATE_DIR/services/*.service.json\nSTATE_DIR/locks/auto-approve-*.lock"]
     caches_state["STATE_DIR/session-files-cache\nSTATE_DIR/activity-cache\nSTATE_DIR/watch-index.json"]
   end
@@ -165,7 +167,7 @@ flowchart TB
     sock2["control sock\nSTATE_DIR/control/yolomux-<pid>-*.sock"]
   end
 
-  subgraph state["Shared state directory"]
+  subgraph state["One host's local state directory"]
     ownerlock["background-owner/owner.lock"]
     ownerjson["background-owner/owner.json\ngenerations/*.json"]
     records["services/*.service.json\nservices/*.service.lock"]
@@ -173,7 +175,7 @@ flowchart TB
     indexes["search_index/<digest>.sqlite3\none indexd writer"]
     caches["session-files-cache\nactivity-cache\nwatch-index.json"]
   end
-  subgraph svc["Shared service PIDs"]
+  subgraph svc["Same-host service PIDs"]
     statsd2["statsd\nversioned state socket\nsole writer + materializer\nexact cache"]
     indexer["indexd\nsearch_index/indexer.sock\n60s idle"]
     jobd2["jobd\nservices/jobd.sock\n60s empty-queue idle"]
@@ -225,11 +227,11 @@ flowchart TB
 | Server ↔ server election | One owner for expensive cross-process work | `flock` plus atomic JSON generation records under the state directory |
 | Elected server → `statsd` | Independently scheduled YO!stats CPU/status/GPU/memory/token original observations | Current local Unix RPC; statsd appends/deduplicates originals as the sole SQLite writer and rejects stale writer protocols before mutation |
 | Server ↔ `statsd` exact stats | Exact Range/Resolution snapshots, live deltas, and bounded diagnostics | Current binary local Unix RPC; statsd serves pre-encoded immutable cache generations, while the web process never opens or aggregates the stats database |
-| Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
+| Server ↔ `indexd` | Quick Open enqueue/search/unindex and index diagnostics | Local Unix RPC; `indexd` writes `STATE_DIR/hosts/<stable-host-id>/search_index/<digest>.sqlite3` row deltas, servers read committed snapshots |
 | Server ↔ `jobd` | Stateless bounded CPU tasks such as `transcript_view` and indexed-repository discovery | Local Unix RPC to the broker; broker supervises 1-2 spawned executors and bounded queues. The web process consumes the last completed repository snapshot and never recursively walks configured index roots. |
 | Server ↔ `approvald` | YO auto-approval start/status/stop/pending-prompt checks | Local Unix RPC; `approvald` owns target locks and target-keyed `AutoApproveWorker` threads |
 | Server ↔ durable caches | Activity, session-file, watch-root, chat, and ownership state | Atomic JSON/files, SQLite stores, and `flock` locks under the state directory |
-| Native watcher ↔ OS | Filesystem changes for watched client roots | `watchfiles` backend; macOS/Linux validated, bounded polling fallback otherwise |
+| Native watcher ↔ OS | Filesystem changes for watched client roots | `watchfiles` backend plus bounded directory-signature reconciliation; macOS/Linux native events validated, polling remains active and is also the failure fallback |
 
 ### Concrete transports
 
@@ -272,6 +274,74 @@ To add a read-only guest account, uncomment (or add) a `readonly` entry:
     role: "readonly"
 ```
 
+## Two machines sharing a home
+
+YOLOmux is not a shared-state cluster. The safe current shape is one independent YOLOmux deployment per machine, with each machine using local configuration, state, cache, tmux, sockets, databases, and writable worktrees. A mounted home may supply read-only source or transcript files, but two hosts must not use one shared `YOLOMUX_STATE_DIR`, one writable worktree, or concurrently writable configuration files.
+
+### Safe launch shape
+
+Set these before starting YOLOmux on each machine. Replace the example roots with paths on that machine's local filesystem, not paths from the shared home or an NFS/CIFS/FUSE/9p mount.
+
+```bash
+export YOLOMUX_CONFIG_DIR=/local/path/yolomux-config
+export YOLOMUX_STATE_DIR=/local/path/yolomux-state
+export YOLOMUX_CACHE_DIR=/local/path/yolomux-cache
+python3 yolomux.py --dang
+```
+
+| Variable | Current behavior | Multi-host rule |
+| --- | --- | --- |
+| `YOLOMUX_HOST_ID` | Optional stable host-ID override; otherwise YOLOmux reads `/etc/machine-id`. The value is fixed on first use and a late change fails closed. | Set a unique stable value before startup for containers or cloned machine images. Hostname is display-only and is not a durable key. |
+| `YOLOMUX_CONFIG_DIR` | Owns `auth.yaml`, `settings.yaml`, `state.json`, YOLO rules, and user skill/context files. | Use a local directory today. A shared read-only directory or one designated writer is possible, but concurrent cross-host writes are not supported. |
+| `YOLOMUX_STATE_DIR` | Owns same-host services, sockets, locks, activity/status files, histories, and host-partitioned database paths. | Must resolve to a local filesystem and must be distinct per host. Partition subdirectories do not make the remaining unqualified runtime files safe to share. |
+| `YOLOMUX_CACHE_DIR` | Owns reconstructible caches such as model pricing. | Must resolve to a local filesystem and must be distinct per host. |
+| `YOLOMUX_ALLOW_NETWORK_FILESYSTEM_MUTABLE_ROOTS=1` | Changes a WAL/socket preflight refusal into a warning. | Emergency escape hatch only. It does not make SQLite WAL or Unix sockets safe on a network filesystem and is not the supported shared-home setup. |
+
+### Current support matrix
+
+| Family | Current status | What is safe on two machines |
+| --- | --- | --- |
+| Stable host/process identity | Implemented: stable host ID, display hostname, boot ID, PID start identity/ticks, and process nonce are available, and a late `YOLOMUX_HOST_ID` change is rejected. | Give cloned/containerized hosts different overrides before startup. Do not use hostname, PID, port, or an absolute path alone as identity. |
+| Local services, leases, owners, sockets | Partial: records carry host/process identity and several destructive paths fail closed, but the principal two-host owner/lease/service-root gate is still a strict expected failure. | Use a different local `YOLOMUX_STATE_DIR` on each host. Sharing one state directory across hosts is not supported. |
+| Login throttle, YO!stats, Quick Open, model-pricing databases | Their default helpers select a `hosts/<stable-host-id>/` partition, and each WAL opener rejects network or undetermined filesystems before creating the database unless the escape hatch is set. | Keep the containing state/cache roots local. A host-ID subdirectory on NFS prevents filename collision but does not make WAL-on-NFS supported. |
+| YO!chat | Not multi-host safe in this build: the partitioned helper exists, but the production web app still opens the legacy unpartitioned `YOLOMUX_STATE_DIR/yochat.sqlite3`. The product decision on whether conversations should roam remains open. | Run chat only inside one host's local state root. Do not share its database or journal between hosts and do not infer global-chat support. |
+| Shared preferences and authentication | Production settings and state mutations now use the POSIX record-lock parent; auth and YO rules use its complete-document writer and can reject stale revisions. Same-host tests cover exclusion, crash release, key-level merge, concurrent settings updates, and stale auth/rules refusal, but the exporter-local versus NFS-client acceptance run has not happened. | Use local configuration on each host, mount shared configuration read-only, or designate exactly one writer. Do not claim cross-host lock safety from the same-host tests. |
+| Transcript reads | Incremental scans tolerate partial final JSONL records and inode replacement. Cached read failures preserve the last-known-good result with typed reasons; an initial ENOENT remains a deletion. The shared-root reader polls active remote files every five seconds for appended bytes while local roots wait for native invalidation, and logical identity is `(shared_root_id, relative_path)`. | The reader contracts are implemented and fixture-tested, but shared-root discovery/path mapping is not wired into operator configuration. Treat mounted transcript trees as read-only and do not assume multi-host transcript federation is available. |
+| Tmux identities, attention acknowledgements, `tmux-AI-status`, watch-root interest, activity rows | Alerts, errors, and notifications are host-local. The contract requires every record and acknowledgement to use the stable host ID: acknowledging an alert on `lin1` must not clear an identically named pane on `lin2`. When multiple hosts are visible, the UI displays the source hostname without using it as the durable key. The implementation remains strict expected failure: these isolation and attribution contracts are not built. | Keep each host's state and UI separate. Cross-host tmux display and acknowledgement isolation are not supported yet. |
+| Cross-host database views and snapshots | Not implemented. The current immutable YO!stats caches are same-host service outputs, not a cross-host snapshot publication protocol. | Never open another host's live database. Use each host's UI independently; there is no supported aggregate view yet. |
+| Shared physical Git worktree | No cross-host writer fence is implemented. | Use separate worktrees or declare one host the only writer. Do not run edits, Git mutations, builds, tests, uploads, or generated-asset writes from two hosts against one physical worktree. |
+
+### Why the local roots are required
+
+SQLite's own WAL documentation states that all processes using a WAL database must be on the same host and that WAL does not work over a network filesystem: <https://www.sqlite.org/wal.html#overview>. SQLite's network-filesystem guidance also warns that network locking and sync behavior vary and can corrupt data: <https://www.sqlite.org/useovernet.html>. YOLOmux refuses live WAL databases and Unix sockets on `nfs`, `nfs4`, `cifs`, `smb`, `smbfs`, `9p`, and `fuse*` mounts, and it also fails closed when the filesystem cannot be determined.
+
+The `hosts/<stable-host-id>/` database partition prevents two hosts from choosing the same filename. It does not change the filesystem underneath that file, so a partition located on NFS is still an unsupported live WAL database.
+
+### Legacy database migration
+
+Upgrading does not move or delete legacy unpartitioned databases. For the database families that are wired to host partitions, new data starts in the current host's partition and old history stays at the legacy path. Automatic adoption would have to guess which machine produced a shared legacy file; on a shared home, that guess can silently assign one host's history to another.
+
+Use this procedure only during a deliberate maintenance window:
+
+1. Stop every old and new YOLOmux process or local service that can write the source or target database. Do not copy a live `-wal` or `-shm` file independently.
+2. Resolve the destination host ID with `python3 -c 'from yolomux_lib.infra.host_identity import current_host_identity; print(current_host_identity().stable_host_id)'` in the same environment that will launch YOLOmux.
+3. Record the legacy database path and preserve the original database plus any sidecars. Never delete, rename, or overwrite the legacy copy as part of adoption.
+4. Verify the source before adoption with `sqlite3 -readonly "$legacy_db" 'PRAGMA quick_check;'`. Stop if the result is not exactly `ok`.
+5. Create a consistent SQLite backup and validate it before touching the empty destination: `sqlite3 "$legacy_db" ".backup '$backup_db'"`, then `sqlite3 -readonly "$backup_db" 'PRAGMA integrity_check;'`.
+6. Confirm the intended `hosts/<stable-host-id>/` target does not already contain newer data. Create its parent, then use SQLite's backup command to populate it from the validated backup. Do not overwrite a nonempty target or merge two databases by copying pages/files.
+7. Start only the chosen host, verify the expected history and current writes, and retain the legacy file and validated backup for rollback. To roll back, stop the new build and restart the old build against the untouched legacy path; the partition remains beside it.
+
+Adoption choices differ by store:
+
+| Store | Legacy data guidance |
+| --- | --- |
+| YO!stats | Adopt only the confirmed source host's `stats-v6.sqlite3` into that host's empty partition with the SQLite backup procedure. Do not merge histories from two hosts. |
+| Login throttle | Starting fresh is usually safer. If counters must be retained, adopt the validated database and its matching `login-throttle.key` together before first start. |
+| Quick Open and model pricing | Rebuild these reconstructible caches instead of adopting them. Preserve the old files until the new host is verified. |
+| YO!chat | Do not perform a multi-host partition migration in this build: the production app still opens the legacy path and the roaming semantics remain undecided. Preserve the database and `yochat-history/` journal unchanged. |
+
+Implementation details, exact unresolved gates, and developer-facing path owners are documented in [Multi-host shared-home implementation status](docs/DEVELOPMENT.md#multi-host-shared-home-implementation-status).
+
 ## Concepts
 
 YOLOmux follows terminal-app terminology (iTerm2-style):
@@ -307,7 +377,7 @@ Open YOLOmux after setup. Existing tmux sessions appear as tabs. (The detailed p
 - Quick Open indexes are bounded accelerators. The default keeps at most 100,000 entries per root, starts one lazy local indexer on demand, and excludes common dependency/build directories. Paths displayed by Finder or Differ are batched at two seconds; hidden paths rely on the long safety refresh. The indexer incrementally replaces only changed subtrees and writes row deltas to SQLite. In Finder/File Explorer, right-click any directory and choose **Allow index** to add its root or **Disallow index** to remove it; Preferences -> Finder/File Explorer shows the same indexed-root list. That section also exposes **Quick Open exclusions** for descendants inside those roots. Add one rule per line: a plain absolute or home-relative subtree, `glob:<root-relative glob>` such as `glob:**/.uploads/**`, or `regex:<regular expression>` matched against a root-relative POSIX path such as `regex:(^|/)target(?:/|$)`. Advanced operators can also tune `file_explorer.index_max_files`, `index_refresh_seconds`, `index_persist`, `index_persist_max_files`, `index_persist_max_mb`, and `index_exclude_paths` in `~/.config/yolomux/settings.yaml`.
 - Tabber lists open tabs and tmux sub-windows by recent activity. `Mod+B` hides Finder/Differ/Tabber or restores the default left Side Pane on wide layouts. The top-bar language picker changes the live UI language.
 - YO!agent handles product questions, session watches, notifications, safe sends, wait-then-send jobs, and multi-agent handoffs. It can also watch an explicit roster until every agent is stably calm, then send one exact command to a separately named tmux session; it shows the roster, destination, blockers, and quiet window, and never sends twice across shared servers. Known phrasing is parsed locally; a configured AI backend may propose a flexible roster plan, but the server validates it and requires confirmation before that model-derived send. See [`docs/YOAGENT.md`](docs/YOAGENT.md) for setup, intents, and coordination rules.
-- File -> `YO!chat`, immediately after `YO!stats`, opens one global conversation shared by authenticated admin and readonly users whose servers use the same `YOLOMUX_STATE_DIR`; YO!share guests cannot access it. Human headers preserve the authenticated username's case, show the server-observed IP, use a stable per-person color from the shared theme, and show relative age for the first four hours before switching to an exact local timestamp; the composer border uses the same color as that user's sent messages. A non-persisted YO!agent introduction with one of several localized greetings remains first in the current timeline, named typing presence uses localized list formatting, history search stays absent until Cmd/Ctrl-F and its X hides it again, older messages load in bounded pages as you scroll upward, the composer grows with content only up to half the pane, and the keyboard/touch emoji picker lazy-loads its catalog. New content follows the bottom only while you are already viewing the tail; scrolling into older messages preserves that position and exposes New messages. `/yo <query>` stores the question, shares `YO!agent is typing…` through the normal typing lease without adding a fake history message, delegates to the existing YO!agent task/transcript/recommendation pipeline, renders the stored answer through the shared sanitized Markdown path, and shares it with every client. Searchable state lives in SQLite and exact messages are also journaled under `YOLOMUX_STATE_DIR/yochat-history/YYYY-MM-DD.jsonl` using UTC dates. Both are retained for seven days by default (`Preferences -> YO!chat` supports 1–365 days), the database is capped at 100,000 messages, and first load starts at the current tail.
+- File -> `YO!chat`, immediately after `YO!stats`, opens one conversation shared by authenticated admin and readonly users whose servers use the same local `YOLOMUX_STATE_DIR` on one host; YO!share guests cannot access it. Human headers preserve the authenticated username's case, show the server-observed IP, use a stable per-person color from the shared theme, and show relative age for the first four hours before switching to an exact local timestamp; the composer border uses the same color as that user's sent messages. A non-persisted YO!agent introduction with one of several localized greetings remains first in the current timeline, named typing presence uses localized list formatting, history search stays absent until Cmd/Ctrl-F and its X hides it again, older messages load in bounded pages as you scroll upward, the composer grows with content only up to half the pane, and the keyboard/touch emoji picker lazy-loads its catalog. New content follows the bottom only while you are already viewing the tail; scrolling into older messages preserves that position and exposes New messages. `/yo <query>` stores the question, shares `YO!agent is typing…` through the normal typing lease without adding a fake history message, delegates to the existing YO!agent task/transcript/recommendation pipeline, renders the stored answer through the shared sanitized Markdown path, and shares it with every client. Searchable state lives in SQLite and exact messages are also journaled under `YOLOMUX_STATE_DIR/yochat-history/YYYY-MM-DD.jsonl` using UTC dates. Both are retained for seven days by default (`Preferences -> YO!chat` supports 1–365 days), the database is capped at 100,000 messages, and first load starts at the current tail. Cross-host chat semantics remain undecided and this build does not support sharing these files between hosts.
 - Cross-pane notifications appear in one global toast rail and identify their target tab without changing your current focus. Attention remains until acknowledged; completion, chat, PR, and job notices are coalesced by target. Clicking a notice opens its target and clears it. Uploads and file/editor errors remain in the pane where that direct action occurred. Preferences independently control in-YOLOmux and system notifications.
 - Tab attention badges surface agents waiting for input or approval even when automatic approval is off. YOLOmux tracks one canonical Claude/Codex identity per physical tmux pane, so short-lived searches or tests that mention an agent name cannot create duplicate status rows or finished notifications. Visible spinner/timer history is bounded and resets when it disappears, so a reused tmux pane cannot inherit stale working state.
 - The browser title, favicon badge, and topbar activity count report working Claude/Codex sub-windows, so two active agents inside one tmux session count as two everywhere.
@@ -379,7 +449,7 @@ The client address is the socket peer. YOLOmux deliberately does not trust `X-Fo
 
 Defaults are tuned for a self-hosted server and rarely need changing. To override, create `~/.config/yolomux/login-rate-limit.json` (0600) with any of the policy keys — for example `{"username_initial_allowance": 3, "exact_bucket": {"capacity": 5, "refill_per_minute": 2}}`. Overrides are validated on load; a malformed or incoherent file is ignored and the safe defaults are kept. (Overrides live in their own file rather than `auth.yaml` because the auth-config parser only understands accounts and would drop unknown keys.)
 
-**Recovery.** If a username reaches the hard 100-failure lock, changing that account's password in `auth.yaml` clears it, or delete `YOLOMUX_STATE_DIR/login-throttle.sqlite3` to reset all throttle state (this only clears counters; accounts and cookies are unaffected). If the throttle database is ever unreadable, remote password attempts fail closed with the same generic message while local recovery stays possible; the degraded state is visible in the admin System diagnostics (`login_throttle.healthy`).
+**Recovery.** If a username reaches the hard 100-failure lock, changing that account's password in `auth.yaml` clears it. To reset all throttle state, stop every server on that host, make a validated backup, and move aside that host's `YOLOMUX_STATE_DIR/hosts/<stable-host-id>/login-throttle.sqlite3` plus its matching key instead of deleting them; accounts and cookies are unaffected. Leave another host's partition and the legacy unpartitioned file untouched. If the throttle database is ever unreadable, remote password attempts fail closed with the same generic message while local recovery stays possible; the degraded state is visible in the admin System diagnostics (`login_throttle.healthy`).
 
 **Optional escalation (off by default).** Beyond the generic 429, YOLOmux can serve a harmless "type this phrase" decoy to high-confidence automation and can install expiring firewall DROP rules for volumetric single-address/prefix floods. Both are disabled by default and are defense-in-depth, not the core protection. The firewall integration is opt-in and platform-specific (`pf` on macOS, `nftables` on Linux), builds commands as argument lists (never a shell string), applies a strict per-rule TTL and a rule cap, never blocks a configured trusted address, and only ever reacts to a network/volumetric limit — never to a username lock, so it cannot be tricked into firewalling innocent addresses.
 

@@ -242,7 +242,7 @@ Codex can show a working row above an input-looking composer and model line. The
 gpt-5.5 xhigh   <dev-worktree>
 ```
 
-The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/agent_clients/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
+The exact model/effort text is not the contract. Older Codex captures may show `gpt-5.5 xhigh`; the local `tools/mockers/codex.py` wrapper defaults to `gpt-5.4-mini medium`.
 
 Codex working examples embedded in explanatory text are not live state when a bottom composer follows them as part of an old response.
 

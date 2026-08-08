@@ -30,7 +30,7 @@ flowchart LR
 
 ## Schema and writer fence
 
-- The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 6 contains only metadata, observations, usage atoms, covered epochs, explicit unavailable spans, and migration reconciliation; derived display buckets are absent.
+- The current database records `application_id`, `user_version`, current schema generation, minimum writer protocol, and minimum writer build. Schema 7 contains only metadata, observations, usage atoms, covered epochs, explicit unavailable spans, and migration reconciliation; derived display buckets are absent.
 - Its active filename is schema-versioned (`stats-v<schema>.sqlite3`) and its daemon socket is protocol-and-schema scoped (`statsd.p<protocol>s<schema>.sock`). Mixed-version worktrees therefore use distinct writer locks, RPC sockets, and databases; neither can discover, fence, or replace the other's daemon. The retired `stats-history.sqlite3` path is never aliased.
 - Every binary that can write performs a minimal read-only preflight of those markers before `CREATE TABLE`, migration, WAL-mode changes, quarantine, vacuum, or DML. A database newer than the binary supports raises the typed `SchemaTooNewError` result and closes unchanged.
 - A too-new database is not corrupt. The database, WAL, SHM, inode, bytes, timestamps, schema, and service record must not be renamed, recreated, downgraded, quarantined, or repaired.
@@ -179,7 +179,7 @@ A Range/Resolution selection, reconnect, missed generation, server identity chan
 | Condition | HTTP result | Contract |
 | --- | ---: | --- |
 | Unsupported Range/Resolution or retired parameter | `400` | Structured `unsupported` response with current valid choices; no substitution or fallback. |
-| No complete materialization yet | `503` | Structured `pending` response with bounded `retry_after_seconds`; no synchronous build. |
+| No complete materialization yet | `202` | Structured `pending` response with bounded `retry_after_seconds`; no synchronous build. |
 | Current statsd unavailable | `503` | Structured `unavailable` response; no in-process database reader or older transport retry. |
 | Stale page writer protocol or schema | `426` | Structured `upgrade_required`; the page stops mutation and automatic retry. |
 | Read-side RPC fence | `426` | Structured `upgrade_required` with required protocol/schema/build; when the running daemon is proven by the service ledger to belong to a dead prior web launcher, the owner reclaims that exact daemon and starts the current version, and the browser retries through `/api/stats-retry`. A fence without that sole-owner/dead-launcher proof remains terminal. |

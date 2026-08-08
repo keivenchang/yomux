@@ -27,6 +27,8 @@ Borrow from other tools only when the feature improves the local control loop: k
 
 ## Current Priorities
 
+**0.7.1 scope, set by Keiven 2026-08-03: performance, instrumentation and pinpointing slowness are the #1 goal. Nothing else.** The active queue is [`DOIT.071-performance.md`](../DOIT.071-performance.md). Every item below this paragraph is deferred until Keiven reopens it, including the XL items, and no non-performance work should be started against 0.7.1. The standing invariant is that the `yolomux.py` web process must never perform intensive GIL-bound work; CPU work may go to any daemon except the web server, and a background thread inside the web process does not count because it shares the same GIL.
+
 - [ ] [XL] Reliable structured agent control. Replace as much scrape-and-type approval/send behavior as possible with structured channels: Claude permission hooks for Claude decisions, Codex app-server/SDK/MCP where YOLOmux owns or can safely resume the conversation, and `tmux-legacy` only as the verified visible-pane fallback.
 - [ ] [XL] Layout/render reconciliation. Move the grid, topbar, tab strips, virtual tabs, and pane chrome toward one keyed renderer driven by layout state, with fewer pane-type special cases.
 - [ ] [XL] Edge-pinned virtual tabs. Fold Finder/Differ/Tabber into a generic pinned-edge model with declarative placement, hidden-by-user state, minimum sizes, and adoption rules instead of bespoke Finder placement code.
