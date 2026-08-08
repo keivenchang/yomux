@@ -23,9 +23,9 @@ On externally managed system Python installs (PEP 668), create and activate a vi
 
 ### Version bump policy
 
-`YOLOMUX_VERSION` in `yolomux_lib/infra/common.py` is bumped only when publishing to `origin/main`. LOCAL `cps` / `yolo-cps` lands work on local `main` with no version bump and no push; ORIGIN / REMOTE `cps` rebases onto `origin/main`, increments the patch segment, folds the bump into the work commit, and includes `Version: 0.4.N` in the commit message body. The self-updater compares `YOLOMUX_VERSION` on `origin/main`, so SHA-only published commits do not cue update notifications, but local integration commits must not create fake versions.
+Runtime `YOLOMUX_VERSION` lives in `yolomux_lib/infra/common.py`; the static package-version literal in `yolomux_lib/common.py` must always match it. Both are bumped only when publishing to `origin/main`. LOCAL `cps` / `yolo-cps` lands work on local `main` with no version bump and no push; ORIGIN / REMOTE `cps` rebases onto `origin/main`, increments the patch segment, folds both matching literals into the work commit, and includes `Version: 0.4.N` in the commit message body. The self-updater compares `YOLOMUX_VERSION` on `origin/main`, so SHA-only published commits do not cue update notifications, but local integration commits must not create fake versions. `tests/test_common.py::test_package_and_runtime_versions_match` rejects drift between the two required literals.
 
-To find the latest committed version before ORIGIN publish: `git show origin/main:yolomux_lib/infra/common.py | grep YOLOMUX_VERSION` and add 1 to the patch segment.
+To find the latest committed version before ORIGIN publish: `git show origin/main:yolomux_lib/infra/common.py | grep YOLOMUX_VERSION` and add 1 to the patch segment, then apply that same version to `yolomux_lib/common.py`.
 
 ### Timing constants
 
@@ -322,7 +322,7 @@ ORIGIN-mode sequence from the dev checkout:
 ```bash
 python3 tools/check.py                       # the full gate (see Tests above)
 git fetch origin && git rebase origin/main   # rebase onto the published tip
-# bump YOLOMUX_VERSION in yolomux_lib/infra/common.py, folded into the work commit
+# bump matching YOLOMUX_VERSION literals in yolomux_lib/infra/common.py and yolomux_lib/common.py, folded into the work commit
 git add -- <explicit-files>
 git commit -m "<message including Version: 0.4.N>"
 git -C <production-checkout> merge --ff-only <branch>    # land on local main — its OWN exit-checked command
@@ -333,7 +333,7 @@ LOCAL mode is the same minus the version bump and the final `push` (stop after t
 
 Rules:
 
-- ORIGIN mode MUST bump `YOLOMUX_VERSION` in `yolomux_lib/infra/common.py` in the same commit; the auto-updater checks this value on `origin/main`, not the commit SHA, so SHA-only commits do not cue the update. LOCAL mode does NOT bump.
+- ORIGIN mode MUST bump matching `YOLOMUX_VERSION` literals in `yolomux_lib/infra/common.py` and `yolomux_lib/common.py` in the same commit; the auto-updater checks the runtime value on `origin/main`, not the commit SHA, so SHA-only commits do not cue the update. LOCAL mode does NOT bump.
 - Never use `git add -A`; screenshots and scratch files must not get swept in.
 - The `merge --ff-only` into the production checkout MUST be its own exit-checked command — NOT piped through `tail`/`grep` and NOT `&&`-chained straight into the push. A pipe's exit status is the last stage's, so a DIVERGED ff-merge fails silently and a chained `push origin main` then publishes whatever local `main` already points at, not your commit. Confirm the merge succeeded before pushing.
 - This is a shared multi-worktree: local `main` can advance from another worktree mid-`cps`, so your ff-merge can suddenly refuse (diverged). Recovery: `git fetch origin`, `git rebase origin/main` your dev branch (disjoint files rebase clean), re-run the gate, then ff-merge + push. No force-push, nothing lost — the other commit is usually a sibling off the same base.
@@ -453,7 +453,7 @@ The elected app owns one non-overlapping deadline worker per metric family: CPU 
 
 The current schema stores original per-family observations, usage atoms, coverage/epoch facts, unavailable spans, migration reconciliation, and schema/minimum-writer metadata. Adjacent sampler owner generations remain distinct; prefix, suffix, middle, multiple, and empty coverage shapes are ordinary data; absent samples remain no-data rather than zero. Derived `1s/10s/60s/300s` layers exist only in statsd memory. Counts, tokens, costs, and event rates are never held or repeated.
 
-The web process CPU budget is below 10% when idle and below 25% with YO!stats visible on the standard macOS development host. The existing one-second CPU sampler owns enforcement: more than 30% process CPU sustained for five minutes emits one deduplicated `stats-cpu` warning with the three largest endpoint/background compute owners, and the System tab exposes current/budget/sustained values. This adds no monitoring timer. Metadata refreshes are process-wide single-flight: concurrent readers share one real status/signature check, and unchanged repositories reuse the full Git metadata snapshot instead of repeating branch, remote, worktree, and inventory subprocesses. A dirty worktree or Git HEAD/index/config/ref signature change rebuilds immediately. Concurrent Finder refresh owners may bypass the completed listing TTL with `fresh`, but identical in-flight directory listings still coalesce into one `/api/fs/batch`; explicit user freshness is preserved without multiplying enumeration.
+The web process CPU budget is below 10% when idle and below 25% with YO!stats visible on the standard macOS development host. The existing one-second CPU sampler owns enforcement: more than 30% process CPU sustained for five minutes emits one deduplicated `stats-cpu` warning with the three largest endpoint/background compute owners, and the System tab exposes current/budget/sustained values. This adds no monitoring timer. Metadata refreshes are process-wide single-flight: concurrent readers share one real status/signature check, and unchanged repositories reuse the full Git metadata snapshot instead of repeating branch, remote, worktree, and inventory subprocesses. A dirty worktree or a real ref change (`.git/HEAD`, `refs/`, `packed-refs`, `MERGE_HEAD`) invalidates and rebuilds; a repo's own `.git/index`/`*.lock` churn is NOT treated as an external invalidation, because `git status` itself rewrites `.git/index` on every read, and feeding that write back in made a compute bump the generation that then discarded its own result — a self-perpetuating refresh livelock — while the 15 s cache TTL backstops any staging-only change skipped. On a mid-compute invalidation the owner caches and returns the value it just computed and refreshes on the next call, rather than discarding it and recomputing inline. The single-flight aggregate (session-metadata) refresh worker carries a bounded deadline so a stalled build can be superseded instead of pinning the guard and freezing the header indefinitely. Concurrent Finder refresh owners may bypass the completed listing TTL with `fresh`, but identical in-flight directory listings still coalesce into one `/api/fs/batch`; explicit user freshness is preserved without multiplying enumeration.
 
 Repeated visible-client token demand may shorten a stale 60-second idle deadline, but demand inside the active 10-second cadence is coalesced even after the previous scan has completed; UI polling therefore cannot create a token-scan wake storm.
 

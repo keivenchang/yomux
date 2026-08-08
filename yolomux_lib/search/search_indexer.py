@@ -17,6 +17,7 @@ from typing import Any
 
 from . import file_index
 from ..filesystem import search
+from ..infra.common import RUNTIME_DIR
 from ..local_services.rpc import LocalRpcError
 from ..local_services.rpc import new_envelope
 from ..local_services.rpc import request as local_service_request
@@ -37,12 +38,15 @@ INDEXER_PROTOCOL_VERSION = 1
 INDEXER_CAPABILITIES = frozenset({"search"})
 INDEXER_DEBOUNCE_SECONDS = 2.0
 INDEXER_DEFAULT_IDLE_SECONDS = 60.0
+INDEXER_SEARCH_RPC_TIMEOUT_SECONDS = 0.5
 INDEXER_SOCKET_NAME = "indexer.sock"
 INDEXER_LOCK_NAME = "indexer.lock"
 
 
 def default_socket_path() -> Path:
-    return safe_socket_path(file_index.INDEX_DIR / INDEXER_SOCKET_NAME, prefix="yolomux-indexd")
+    # Index data is durable state, but its RPC endpoint is runtime state. This
+    # keeps a rooted run inside its one configured root instead of /tmp.
+    return safe_socket_path(RUNTIME_DIR / "services" / INDEXER_SOCKET_NAME, prefix="yolomux-indexd")
 
 
 def default_lock_path() -> Path:
@@ -62,7 +66,7 @@ class PersistentSearchIndexer:
         self.idle_seconds = max(1.0, float(idle_seconds))
         self.started_at = time.time()
         self.last_client_at = time.monotonic()
-        self.leases: dict[str, int] = {}
+        self.leases: dict[str, object] = {}
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         clean_root = str(Path(root).expanduser().resolve(strict=False))
@@ -186,7 +190,7 @@ class PersistentSearchIndexer:
         return {"ok": False, "error": f"unknown indexer action: {action}"}
 
     def run(self) -> int:
-        def handle(request: dict[str, object]) -> tuple[dict[str, object], bytes]:
+        def handle(request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
             return self.handle(request), b""
 
         def idle() -> bool:
@@ -229,7 +233,13 @@ class SearchIndexerClient:
             envelope = new_envelope("indexd", str(payload.get("action") or "request"), payload, timeout_seconds=timeout)
             response, _binary = local_service_request(self.socket_path, envelope, timeout_seconds=timeout, fallback_legacy=True)
         except (OSError, LocalRpcError) as exc:
-            return {"ok": False, "error": redact_local_service_text(exc)}
+            reason = redact_local_service_text(exc)
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "error_code": "deadline_expired" if isinstance(exc, TimeoutError) else "service_unavailable",
+                "reason": reason,
+            }
         return response if isinstance(response, dict) else {"ok": False, "error": "invalid indexer response"}
 
     def healthy(self) -> bool:
@@ -322,13 +332,23 @@ class SearchIndexerClient:
     def search(self, root: str, query: str, limit: int) -> dict[str, Any]:
         payload = {"action": "search", "root": root, "query": query, "limit": limit}
         if self.supports("search"):
-            return self.request(payload, timeout=5.0)
+            return self.request(payload, timeout=INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)
         if not self.ensure_started():
-            return {"ok": False, "error": "persistent indexer unavailable"}
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "error_code": "service_unavailable",
+                "reason": "persistent indexer unavailable",
+            }
         if not self.supports("search"):
             if not self._stop_legacy_indexer() or not self._start_until(lambda: self.supports("search")):
-                return {"ok": False, "error": "persistent indexer lacks search capability"}
-        return self.request(payload, timeout=5.0)
+                return {
+                    "ok": False,
+                    "status": "unavailable",
+                    "error_code": "service_unavailable",
+                    "reason": "persistent indexer lacks search capability",
+                }
+        return self.request(payload, timeout=INDEXER_SEARCH_RPC_TIMEOUT_SECONDS)
 
 
 def main(argv: list[str] | None = None) -> int:

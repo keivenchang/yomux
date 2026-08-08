@@ -18,11 +18,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+sys.dont_write_bytecode = True
 
 from yolomux_lib.locales import FALLBACK_LOCALE
 from yolomux_lib.locales import PLURAL_CATEGORIES_BY_LOCALE
 from yolomux_lib.locales import PSEUDO_LOCALE
 from yolomux_lib.locales import SHIPPED_LOCALES
+from yolomux_lib.infra import worktree_writer
 
 # i18n: source catalogs live in static_src/locales/<locale>.json; en.json is the source of truth.
 # The build copies them to static/locales/ (all-static-fetch delivery), validates key parity, and
@@ -743,6 +745,7 @@ ASSETS: dict[str, list[str]] = {
         "static_src/js/yolomux/02_timing.js",
         "static_src/js/yolomux/05_i18n.js",
         "static_src/js/yolomux/10_core_utils.js",
+        "static_src/js/yolomux/15_command_registry.js",
         "static_src/js/yolomux/20_layout_state.js",
         "static_src/js/yolomux/30_app_menus.js",
         "static_src/js/yolomux/35_agent_window_activity.js",
@@ -2608,7 +2611,7 @@ def watch_loop(assets: list[str], interval: float = 0.4) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("assets", nargs="*", choices=sorted(ASSETS), help="assets to build; defaults to all")
     parser.add_argument("--check", action="store_true", help="fail if generated static files are stale")
@@ -2688,6 +2691,15 @@ def main(argv: list[str] | None = None) -> int:
     except BuildError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="static-build"):
+            return _main(argv)
+    except worktree_writer.WorktreeWriterBusy as error:
+        print(f"STATIC BUILD REFUSED: {error}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

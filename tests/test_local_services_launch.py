@@ -1,4 +1,7 @@
 import importlib.util
+import json
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -7,9 +10,12 @@ from threading import Event
 
 import pytest
 
+from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib import approvald
 from yolomux_lib import jobd
 from yolomux_lib.local_services import registry as registry_mod
+from yolomux_lib.local_services.client import LocalServiceClient
+from yolomux_lib.local_services.client import TransportFailure
 from yolomux_lib.local_services import runtime
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
@@ -17,9 +23,202 @@ from yolomux_lib.local_services.registry import parse_ps_cpu_seconds
 from yolomux_lib.stats_current import client as stats_current_client
 from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib.stats_current import storage as stats_current_storage
+from tests.gate_harness import FixtureLocalServiceProcess
+from tests.gate_harness import stop_fixture_local_service_process
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_sealed_local_service_client_rejects_late_demand_without_rpc_or_respawn(tmp_path, monkeypatch):
+    client = LocalServiceClient("fixture", "tests.fixture", tmp_path / "fixture.sock")
+    rpc_calls = []
+    spawn_calls = []
+    logged_errors = []
+    absent_error = FileNotFoundError(2, "socket is absent")
+
+    def absent_rpc(*_args, **_kwargs):
+        rpc_calls.append(True)
+        return {
+            "ok": False,
+            "error": "socket is absent",
+            "_transport_error": "absent",
+        }, b"", TransportFailure(absent_error, "traceback", "late-submit", "r-late", 1.0)
+
+    monkeypatch.setattr(client, "_request_once", absent_rpc)
+    monkeypatch.setattr(client, "_emit_transport_error", logged_errors.append)
+    monkeypatch.setattr(client.registry, "_spawn", lambda: spawn_calls.append(True))
+
+    client.registry.seal_starts()
+    response = client.request({"action": "late-submit"})
+
+    assert response == {
+        "ok": False,
+        "error": "fixture is stopping",
+        "status": "unavailable",
+        "terminal": True,
+        "_transport_error": "stopped",
+    }
+    assert client.ensure_started() is False
+    assert rpc_calls == [True]
+    assert spawn_calls == []
+    assert logged_errors == []
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="zombie lifecycle is POSIX-only")
+def test_process_record_diagnostic_rejects_a_real_unreaped_zombie():
+    child = os.fork()
+    if child == 0:
+        os._exit(0)
+    try:
+        deadline = time.monotonic() + 2
+        while registry_mod.process_state(child) != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert registry_mod.process_state(child) == "Z"
+        identity = current_host_identity()
+        record = identity.process_record_fields(pid=child, start_identity=registry_mod.process_start_identity(child))
+        assert registry_mod.process_record_diagnostic(record, table=registry_mod.bounded_process_table()).current is False
+    finally:
+        os.waitpid(child, 0)
+
+
+def test_process_spawn_generation_reads_exact_named_environment_value(tmp_path):
+    marker = "a" * 32
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "43221"
+    process_root.mkdir(parents=True)
+    (process_root / "environ").write_bytes(
+        b"LONG_PREFIX=" + (b"x" * 4096) + b"\0"
+        + f"{registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV}={marker}".encode("ascii")
+        + b"\0"
+    )
+
+    assert registry_mod.process_spawn_generation(43221, proc_root=proc_root) == marker
+    key = registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV.encode("ascii") + b"="
+    for environ in (
+        key + (b"a" * 31) + b"\xff\0",
+        key + marker.encode("ascii") + b"\0" + key + marker.encode("ascii") + b"\0",
+        key + marker.encode("ascii") + b"\0" + key + (b"c" * 32) + b"\0",
+    ):
+        (process_root / "environ").write_bytes(environ)
+        assert registry_mod.process_spawn_generation(43221, proc_root=proc_root) is None
+
+
+def test_process_spawn_generation_rejects_invalid_duplicates_and_uses_structured_portable_fallback(tmp_path):
+    marker = "b" * 32
+    proc_root = tmp_path / "missing-proc"
+    key = registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV.encode("ascii") + b"="
+
+    assert registry_mod.process_spawn_generation(
+        43222,
+        proc_root=proc_root,
+        darwin_environment_reader=lambda _pid: (key + marker.encode("ascii") + b"-foreign",),
+    ) is None
+    assert registry_mod.process_spawn_generation(
+        43222,
+        proc_root=proc_root,
+        darwin_environment_reader=lambda _pid: (b"OTHER=value", key + marker.encode("ascii")),
+    ) == marker
+    for entries in (
+        (key + (b"a" * 31) + b"\xff",),
+        (key + marker.encode("ascii"), key + marker.encode("ascii")),
+        (key + marker.encode("ascii"), key + (b"c" * 32)),
+    ):
+        assert registry_mod.process_spawn_generation(
+            43222,
+            proc_root=proc_root,
+            darwin_environment_reader=lambda _pid, values=entries: values,
+        ) is None
+
+
+def test_process_spawn_generation_readable_proc_without_marker_never_falls_back(tmp_path):
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "43223"
+    process_root.mkdir(parents=True)
+    (process_root / "environ").write_bytes(b"OTHER=value\0")
+    fallback_calls = []
+
+    assert registry_mod.process_spawn_generation(
+        43223,
+        proc_root=proc_root,
+        darwin_environment_reader=lambda pid: fallback_calls.append(pid) or (
+            f"{registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV}={'d' * 32}".encode("ascii"),
+        ),
+    ) is None
+    assert fallback_calls == []
+
+
+def test_darwin_process_environment_parser_excludes_argv_generation_token(tmp_path):
+    owned_marker = b"d" * 32
+    argv_marker = b"e" * 32
+    key = registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV.encode("ascii") + b"="
+    environment = (
+        b"LONG_PREFIX=" + (b"x" * 4096),
+        key + owned_marker,
+        b"OTHER=value",
+    )
+    argv = (b"python3", b"", key + argv_marker)
+    int_size = registry_mod.ctypes.sizeof(registry_mod.ctypes.c_int)
+    raw = (
+        len(argv).to_bytes(int_size, registry_mod.sys.byteorder, signed=True)
+        + b"/usr/bin/python3\0\0\0"
+        + b"\0".join(argv)
+        + b"\0\0"
+        + b"\0".join(environment)
+        + b"\0"
+    )
+
+    parsed = registry_mod.parse_darwin_process_environment(raw)
+
+    assert parsed == environment
+    assert key + argv_marker not in parsed
+    assert registry_mod.process_spawn_generation(
+        43224,
+        proc_root=tmp_path / "missing-proc",
+        darwin_environment_reader=lambda _pid: parsed,
+    ) == owned_marker.decode("ascii")
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    (
+        ((b"YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION_PREFIX=" + (b"f" * 32),), None),
+        ((b"YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION=" + (b"a" * 32),) * 2, None),
+        ((b"YOLOMUX_LOCAL_SERVICE_SPAWN_GENERATION=" + (b"a" * 32), b"OTHER=" + (b"z" * 8192)), "a" * 32),
+    ),
+)
+def test_darwin_process_environment_generation_rows_fail_closed(tmp_path, environment, expected):
+    int_size = registry_mod.ctypes.sizeof(registry_mod.ctypes.c_int)
+    raw = (
+        (1).to_bytes(int_size, registry_mod.sys.byteorder, signed=True)
+        + b"/usr/bin/python3\0\0"
+        + b"python3\0\0"
+        + b"\0".join(environment)
+        + b"\0"
+    )
+    parsed = registry_mod.parse_darwin_process_environment(raw)
+
+    assert registry_mod.process_spawn_generation(
+        43225,
+        proc_root=tmp_path / "missing-proc",
+        darwin_environment_reader=lambda _pid: parsed,
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b"\x00",
+        (-1).to_bytes(registry_mod.ctypes.sizeof(registry_mod.ctypes.c_int), registry_mod.sys.byteorder, signed=True) + b"raw-secret\0",
+        (2).to_bytes(registry_mod.ctypes.sizeof(registry_mod.ctypes.c_int), registry_mod.sys.byteorder, signed=True) + b"/bin/tool\0\0arg-zero\0raw-secret",
+        (1).to_bytes(registry_mod.ctypes.sizeof(registry_mod.ctypes.c_int), registry_mod.sys.byteorder, signed=True) + b"/bin/tool\0\0arg-zero\0\0RAW_SECRET=value",
+    ),
+)
+def test_darwin_process_environment_malformed_buffers_do_not_leak_contents(raw):
+    with pytest.raises(ValueError) as failure:
+        registry_mod.parse_darwin_process_environment(raw)
+
+    assert "raw-secret" not in str(failure.value).lower()
 
 
 def test_pyproject_package_discovery_includes_local_service_subpackages():
@@ -72,6 +271,7 @@ def test_registry_spawn_uses_current_interpreter_module_and_quoted_args(tmp_path
     args, kwargs = starts[0]
 
     assert args[:3] == [sys.executable, "-m", "yolomux_lib.jobd"]
+    assert kwargs["env"][registry_mod.LOCAL_SERVICE_SPAWN_GENERATION_ENV]
     assert args[args.index("--socket") + 1] == str(registry.socket_path)
     assert args[args.index("--idle-seconds") + 1] == "12.5"
     assert args[-2:] == ["--workers", "1"]
@@ -101,15 +301,408 @@ def test_registry_spawn_honors_isolated_idle_override(tmp_path, monkeypatch):
     assert args[args.index("--idle-seconds") + 1] == "0.5"
 
 
+def test_registry_spawn_captures_durable_session_ownership(tmp_path, monkeypatch):
+    class FakeProcess:
+        pid = 43230
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(registry_mod.uuid, "uuid4", lambda: type("Generation", (), {"hex": "a" * 32})())
+    monkeypatch.setattr(registry_mod, "process_start_identity", lambda pid: "ps:portable-start" if pid == 43230 else None)
+    monkeypatch.setattr(registry_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(registry_mod.os, "getsid", lambda pid: pid)
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+        popen=lambda _args, **_kwargs: FakeProcess(),
+    )
+
+    process = registry._spawn()
+
+    assert process is not None
+    assert registry.spawn_ownership == registry_mod.SpawnProcessOwnership(
+        leader_pid=43230,
+        process_group=43230,
+        session_id=43230,
+        generation_marker="a" * 32,
+        member_identities=((43230, "ps:portable-start"),),
+    )
+
+
+def test_registry_refreshes_spawn_members_only_while_original_leader_matches(tmp_path, monkeypatch):
+    generation_marker = "a" * 32
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+    )
+    registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
+        leader_pid=43231,
+        process_group=43231,
+        session_id=43231,
+        generation_marker=generation_marker,
+        member_identities=((43231, "proc:1235"),),
+    )
+    current = {
+        43231: registry_mod.ProcessTableEntry(1, 43231, 0.0, f"python -X{generation_marker}", 1235, 43231, "proc:1235"),
+        43232: registry_mod.ProcessTableEntry(43231, 43231, 0.0, f"python -X{generation_marker}", 1236, 43231, "proc:1236"),
+    }
+    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: current)
+    monkeypatch.setattr(
+        registry_mod,
+        "process_spawn_generation",
+        lambda pid: generation_marker if pid in current and "foreign" not in current[pid].command else "b" * 32,
+    )
+
+    refreshed = registry.refresh_spawn_ownership()
+    assert refreshed is not None
+    assert refreshed.member_identities == ((43231, "proc:1235"), (43232, "proc:1236"))
+
+    current = {
+        43231: registry_mod.ProcessTableEntry(1, 43231, 0.0, "foreign leader", 9999, 43231, "proc:9999"),
+        43233: registry_mod.ProcessTableEntry(43231, 43231, 0.0, "foreign worker", 9998, 43231, "proc:9998"),
+    }
+    retained = registry.refresh_spawn_ownership()
+    assert retained is refreshed
+    assert retained.member_identities == ((43231, "proc:1235"), (43232, "proc:1236"))
+
+
+def test_registry_first_descendant_discovery_survives_leader_exit(tmp_path, monkeypatch):
+    generation_marker = "a" * 32
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+    )
+    registry.spawn_ownership = registry_mod.SpawnProcessOwnership(
+        leader_pid=43234,
+        process_group=43234,
+        session_id=43234,
+        generation_marker=generation_marker,
+        member_identities=((43234, "proc:1237"),),
+    )
+    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {
+        43235: registry_mod.ProcessTableEntry(1, 43234, 0.0, f"python -X{generation_marker} worker", 1238, 43234, "proc:1238"),
+        43236: registry_mod.ProcessTableEntry(43235, 43234, 0.0, f"python -X{generation_marker} grandchild", 1239, 43234, "proc:1239"),
+        43237: registry_mod.ProcessTableEntry(1, 43234, 0.0, f"python -X{generation_marker} wrong-session", 1240, 99999, "proc:1240"),
+        43238: registry_mod.ProcessTableEntry(1, 99999, 0.0, f"python -X{generation_marker} wrong-group", 1241, 43234, "proc:1241"),
+    })
+    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda pid: generation_marker)
+
+    refreshed = registry.refresh_spawn_ownership()
+
+    assert refreshed is not None
+    assert refreshed.member_identities == ((43235, "proc:1238"), (43236, "proc:1239"))
+
+
+def test_registry_absent_leader_rejects_numeric_group_reuse_by_foreign_generation(tmp_path, monkeypatch):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+    )
+    ownership = registry_mod.SpawnProcessOwnership(
+        leader_pid=43239,
+        process_group=43239,
+        session_id=43239,
+        generation_marker="a" * 32,
+        member_identities=((43239, "proc:1242"),),
+    )
+    registry.spawn_ownership = ownership
+    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {
+        43240: registry_mod.ProcessTableEntry(
+            1,
+            43239,
+            0.0,
+            "python -Xyolomux_local_service_generation=generation-b foreign-worker",
+            1243,
+            43239,
+            "proc:1243",
+        ),
+    })
+    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda _pid: "b" * 32)
+
+    proof = registry.refresh_spawn_ownership_proof()
+    assert proof is not None
+    assert proof.ownership is ownership
+    assert proof.group_exists is True
+    assert proof.owned_member_identities == ()
+    assert registry.refresh_spawn_ownership() is ownership
+    assert registry.spawn_ownership.member_identities == ((43239, "proc:1242"),)
+
+
+def test_registry_rejects_recycled_retained_child_identity(tmp_path, monkeypatch):
+    generation_marker = "a" * 32
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("jobd", "yolomux_lib.jobd", "jobd.sock", jobd.JOBD_PROTOCOL_VERSION),
+    )
+    ownership = registry_mod.SpawnProcessOwnership(
+        leader_pid=43241,
+        process_group=43241,
+        session_id=43241,
+        generation_marker=generation_marker,
+        member_identities=((43242, "proc:1244"),),
+    )
+    registry.spawn_ownership = ownership
+    monkeypatch.setattr(registry_mod, "bounded_process_table", lambda: {
+        43242: registry_mod.ProcessTableEntry(1, 43241, 0.0, f"python -X{generation_marker}", 9999, 43241, "proc:9999"),
+    })
+    monkeypatch.setattr(registry_mod, "process_spawn_generation", lambda _pid: generation_marker)
+
+    assert registry.refresh_spawn_ownership() is ownership
+    assert registry.spawn_ownership.member_identities == ((43242, "proc:1244"),)
+
+
+def test_registry_first_refresh_after_real_leader_exit_adopts_only_inherited_generation(tmp_path):
+    child_pid_file = tmp_path / "retained-child.pid"
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec(
+            "generation-fixture",
+            "tests.fixtures.local_service_generation_descendant",
+            "generation.sock",
+            1,
+            extra_args=("--child-pid-file", str(child_pid_file)),
+        ),
+    )
+    process = None
+    ownership = None
+    try:
+        process = registry._spawn()
+        assert process is not None
+        initial_ownership = registry.spawn_ownership
+        assert initial_ownership is not None
+        assert initial_ownership.member_identities == ((process.pid, registry_mod.process_start_identity(process.pid)),)
+        assert process.wait(timeout=5) == 0
+        child_pid, grandchild_pid = (
+            int(value)
+            for value in child_pid_file.read_text(encoding="utf-8").split(",")
+        )
+        assert child_pid != process.pid
+        assert grandchild_pid not in {process.pid, child_pid}
+
+        ownership = registry.refresh_spawn_ownership()
+
+        assert ownership is not None
+        member_pids = {pid for pid, _start_identity in ownership.member_identities}
+        assert process.pid not in member_pids
+        assert child_pid in member_pids
+        assert grandchild_pid in member_pids
+        assert all(
+            registry_mod.process_spawn_generation(pid) == ownership.generation_marker
+            for pid in member_pids
+        )
+        stop_fixture_local_service_process(
+            FixtureLocalServiceProcess(registry, process, ownership),
+            label="retained inherited-generation descendant",
+        )
+    finally:
+        if registry.spawn_ownership is not None:
+            ownership = registry.refresh_spawn_ownership() or registry.spawn_ownership
+        if ownership is not None:
+            live_members = [
+                pid
+                for pid, start_identity in ownership.member_identities
+                if registry_mod.process_start_identity(pid) == start_identity
+                and registry_mod.process_spawn_generation(pid) == ownership.generation_marker
+            ]
+            if live_members:
+                os.killpg(ownership.process_group, signal.SIGKILL)
+
+
+def test_registry_forced_failure_before_first_refresh_cleans_inherited_generation(tmp_path):
+    child_pid_file = tmp_path / "forced-failure-child.pid"
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec(
+            "generation-fixture",
+            "tests.fixtures.local_service_generation_descendant",
+            "generation.sock",
+            1,
+            extra_args=("--child-pid-file", str(child_pid_file)),
+        ),
+    )
+    process = registry._spawn()
+    assert process is not None
+    initial_ownership = registry.spawn_ownership
+    assert initial_ownership is not None
+    marker = initial_ownership.generation_marker
+    process_group = initial_ownership.process_group
+    assert process.wait(timeout=5) == 0
+
+    with pytest.raises(RuntimeError, match="forced before refresh"):
+        try:
+            raise RuntimeError("forced before refresh")
+        finally:
+            cleanup_ownership = registry.refresh_spawn_ownership() or registry.spawn_ownership
+            assert cleanup_ownership is not None
+            stop_fixture_local_service_process(
+                FixtureLocalServiceProcess(registry, process, cleanup_ownership),
+                label="forced pre-refresh inherited-generation cleanup",
+            )
+
+    survivors = [
+        pid
+        for pid, entry in registry_mod.bounded_process_table().items()
+        if entry.pgid == process_group
+        and registry_mod.process_spawn_generation(pid) == marker
+    ]
+    assert survivors == []
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="post-TERM descendant fixture is POSIX-only")
+def test_fixture_teardown_refreshes_generation_authority_after_term(tmp_path):
+    child_pid_file = tmp_path / "post-term-child.pid"
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec(
+            "generation-fixture",
+            "tests.fixtures.local_service_generation_descendant",
+            "generation.sock",
+            1,
+            extra_args=("--child-pid-file", str(child_pid_file), "--spawn-on-term"),
+        ),
+    )
+    process = registry._spawn()
+    assert process is not None
+    ownership = registry.spawn_ownership
+    assert ownership is not None
+    assert ownership.member_identities == ((process.pid, registry_mod.process_start_identity(process.pid)),)
+    deadline = time.monotonic() + 2.0
+    while (
+        not child_pid_file.is_file()
+        or child_pid_file.read_text(encoding="utf-8") != "ready"
+    ) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert child_pid_file.read_text(encoding="utf-8") == "ready"
+
+    stop_fixture_local_service_process(
+        FixtureLocalServiceProcess(registry, process, ownership),
+        label="post-TERM inherited-generation descendant",
+    )
+
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    assert not registry_mod.process_start_identity(child_pid)
+
+
+def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypatch):
+    monkeypatch.setattr(registry_mod, "_TRANSPORT_TEARDOWNS_TOTAL", 0)
+    monkeypatch.setattr(registry_mod, "_TRANSPORT_TEARDOWNS_BY_EXCEPTION", {})
+
+    registry_mod.record_transport_teardown("TimeoutError")
+    registry_mod.record_transport_teardown("FileNotFoundError")
+    registry_mod.record_transport_teardown("TimeoutError")
+
+    assert registry_mod.transport_diagnostics() == {
+        "teardowns_total": 3,
+        "teardowns_by_exception": {"FileNotFoundError": 1, "TimeoutError": 2},
+    }
+
+
+def test_registry_real_ensure_started_preserves_generation_proof_through_cleanup(tmp_path):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec(
+            "jobd",
+            "yolomux_lib.jobd",
+            "jobd.sock",
+            jobd.JOBD_PROTOCOL_VERSION,
+            idle_seconds=30,
+            extra_args=("--workers", "1"),
+        ),
+    )
+
+    process = None
+    ownership = None
+    cleanup_complete = False
+    try:
+        assert registry.ensure_started() is True
+        process = registry.process
+        ownership = registry.refresh_spawn_ownership()
+        assert process is not None
+        assert ownership is not None
+        assert len(ownership.generation_marker) == 32
+        assert ownership.member_identities
+        process_entry = registry_mod.bounded_process_table().get(process.pid)
+        assert process_entry is not None
+        assert registry_mod.process_spawn_generation(process.pid) == ownership.generation_marker
+
+        stop_fixture_local_service_process(
+            FixtureLocalServiceProcess(registry, process, ownership),
+            label="real local-service generation lifecycle",
+        )
+        cleanup_complete = True
+        assert process.poll() is not None
+    finally:
+        if not cleanup_complete and registry.spawn_ownership is not None:
+            ownership = registry.refresh_spawn_ownership() or registry.spawn_ownership
+        if not cleanup_complete and process is not None and ownership is not None:
+            stop_fixture_local_service_process(
+                FixtureLocalServiceProcess(registry, process, ownership),
+                label="real local-service generation lifecycle fallback",
+            )
+
+
 def test_long_default_socket_fallback_keeps_registry_lock_out_of_tmp(tmp_path, monkeypatch):
     state_dir = tmp_path / ("long-state-segment-" * 8)
-    monkeypatch.setattr(approvald.common, "STATE_DIR", state_dir)
+    monkeypatch.setattr(approvald.common, "RUNTIME_DIR", state_dir)
 
     client = approvald.ApprovalClient()
 
     assert client.socket_path.parent == Path("/tmp")
-    assert client.registry.service_dir == state_dir / "services"
-    assert client.registry.lock_path.parent == state_dir / "services"
+    expected_service_dir = state_dir / "services"
+    assert client.registry.service_dir == expected_service_dir
+    assert client.registry.lock_path.parent == expected_service_dir
+
+
+def test_registry_names_the_guard_that_blocked_a_start_instead_of_failing_silently(tmp_path):
+    """A start refused by the record guards must still report why.
+
+    Live signature this covers: watchd absent with a 0-byte ``watchd.stderr.log``
+    and no ``watchd.service.json``. The record named a process the registry may
+    not retire, so ``ensure_started`` returned False before ``_spawn`` and left
+    no reason anywhere a caller could read.
+    """
+    spawns = []
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("fixture", "tests.missing", "fixture.sock", 1),
+        popen=lambda *args, **kwargs: spawns.append(args),
+    )
+    identity = current_host_identity()
+    live_pid = os.getpid()
+    record = identity.process_record_fields(
+        pid=live_pid,
+        start_identity=registry_mod.process_start_identity(live_pid),
+    )
+    record.update({
+        "service": "fixture",
+        "module": "tests.missing",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+        "pid": live_pid,
+    })
+    registry.record_path.parent.mkdir(parents=True, exist_ok=True)
+    registry.record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    # The recorded process is alive and current, so the stale-record guard
+    # refuses removal and no child may be spawned.
+    assert registry.healthy() is False
+    assert registry._remove_stale_record() is False
+    assert registry.ensure_started() is False
+    assert spawns == []
+    assert registry.stderr_path.exists() is False
+
+    status = registry.status()
+    assert status["failure_reason"] == (
+        f"fixture start blocked by remove_stale_record "
+        f"(record_pid={live_pid}, reason=current_local_process)"
+    )
+    assert registry.failure_response()["reason"] == status["failure_reason"]
+    # A blocked start ran no child, so the spawn-exit latch stays untouched.
+    assert status["terminal_failure"] is False
+    assert status["start_exit_count"] == 0
+    assert status["last_exit_code"] is None
 
 
 def test_registry_captures_bounded_stderr_and_latches_repeated_start_exits(tmp_path):
@@ -327,7 +920,8 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
     )
     stale_pid, dead_launcher = 4242, 1111
     registry._write_record({
-        "service": "statsd", "pid": stale_pid, "pgid": stale_pid,
+        **_process_record(stale_pid),
+        "service": "statsd", "pgid": stale_pid,
         "socket": str(registry.socket_path), "launcher_pid": dead_launcher,
     })
     alive = {stale_pid: True, dead_launcher: False}
@@ -344,6 +938,11 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
 
     monkeypatch.setattr(registry, "_request", fake_request)
     monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(
+        registry_mod,
+        "process_start_identity",
+        lambda pid: f"proc:{pid + 1000}" if alive.get(pid, False) else None,
+    )
     monkeypatch.setattr(
         registry_mod,
         "tracked_local_service_groups",
@@ -365,9 +964,20 @@ def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_pat
         LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
     )
     actions = []
+    alive = {4242: True}
+    registry._write_record({
+        **_process_record(4242),
+        "service": "statsd",
+        "socket": str(registry.socket_path),
+        "protocol_version": 22,
+    })
+    registry.socket_path.touch()
 
     def fake_request(method, payload=None, timeout=0.2):
         actions.append(method)
+        if method == "shutdown":
+            alive[4242] = False
+            return {"ok": True}
         return {
             "ok": False,
             "error_code": "upgrade_required",
@@ -377,12 +987,131 @@ def test_registry_retires_an_older_service_that_rejects_the_new_protocol(tmp_pat
         }
 
     monkeypatch.setattr(registry, "_request", fake_request)
-    monkeypatch.setattr("yolomux_lib.local_services.registry.pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(
+        registry_mod,
+        "process_start_identity",
+        lambda pid: f"proc:{pid + 1000}" if alive.get(pid, False) else None,
+    )
 
-    registry._retire_incompatible_service()
+    assert registry._retire_incompatible_service() is True
 
     assert actions == ["ping", "shutdown"]
     assert registry._upgrade_required is None
+    assert registry.record_path.exists() is False
+    assert registry.socket_path.exists() is False
+
+
+def test_registry_retires_ledger_proven_older_service_with_its_recorded_protocol(tmp_path, monkeypatch):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statusd", "yolomux_lib.statusd", "statusd.sock", 2),
+    )
+    old_pid = 4242
+    registry._write_record({
+        **_process_record(old_pid),
+        "service": "statusd",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+    })
+    registry.socket_path.touch()
+    alive = {old_pid: True}
+    actions = []
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        version = registry.spec.protocol_version if protocol_version is None else protocol_version
+        actions.append((method, version))
+        if method == "ping":
+            return {"ok": False, "error": "upgrade_required", "required_protocol_version": 1}
+        if method == "status":
+            return {"ok": True, "pid": old_pid, "version": 1}
+        if method == "shutdown":
+            alive[old_pid] = False
+            return {"ok": True}
+        return {}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(
+        registry_mod,
+        "process_start_identity",
+        lambda pid: f"proc:{pid + 1000}" if alive.get(pid, False) else None,
+    )
+
+    assert registry._retire_incompatible_service() is True
+
+    assert actions == [("ping", 2), ("status", 1), ("shutdown", 1)]
+    assert registry.record_path.exists() is False
+    assert registry.socket_path.exists() is False
+
+
+def test_registry_reclaims_dead_legacy_record_for_inert_socket_without_signalling(tmp_path, monkeypatch):
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", "indexer.sock", 1),
+    )
+    registry._write_record({"pid": 999_999_999, "service": "indexd"})
+    registry.socket_path.write_text("stale", encoding="utf-8")
+    signals = []
+
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda _pid: False)
+    monkeypatch.setattr(registry_mod.os, "kill", lambda pid, signum: signals.append((pid, signum)))
+
+    assert registry._remove_stale_record() is True
+    assert registry.record_path.exists() is False
+    assert registry.socket_path.read_text(encoding="utf-8") == "stale"
+    assert registry.status()["process_diagnostic"]["reason"] == "missing_host_identity"
+    assert signals == []
+
+
+@pytest.mark.parametrize(
+    ("record_case", "reason"),
+    (
+        ("foreign", "foreign_host"),
+        ("previous-boot", "previous_boot"),
+        ("missing-host", "missing_host_identity"),
+        ("recycled", "process_identity_reused"),
+    ),
+)
+def test_registry_reclaim_fence_refuses_typed_noncurrent_records(tmp_path, monkeypatch, record_case, reason):
+    service_pid = 4242
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 23),
+    )
+    record = {
+        **_process_record(service_pid),
+        "service": "statsd",
+        "socket": str(registry.socket_path),
+        "protocol_version": 22,
+    }
+    if record_case == "foreign":
+        record["stable_host_id"] = "fixture-foreign-host"
+    elif record_case == "previous-boot":
+        record["boot_id"] = "fixture-previous-boot"
+    elif record_case == "missing-host":
+        del record["stable_host_id"]
+    registry._write_record(record)
+    registry.socket_path.touch()
+    actions = []
+    signals = []
+
+    def fake_request(method, payload=None, timeout=0.2):
+        actions.append(method)
+        return {"ok": True, "version": 22, "pid": service_pid}
+
+    observed_start = "proc:9999" if record_case == "recycled" else f"proc:{service_pid + 1000}"
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda _pid: True)
+    monkeypatch.setattr(registry_mod, "process_start_identity", lambda _pid: observed_start)
+    monkeypatch.setattr(registry_mod.os, "kill", lambda pid, signum: signals.append((pid, signum)))
+
+    assert registry._retire_incompatible_service() is False
+    assert actions == ["ping"]
+    assert registry.record_path.exists() is True
+    assert registry.socket_path.exists() is True
+    assert registry.status()["process_diagnostic"]["reason"] == reason
+    assert signals == []
 
 
 def test_registry_does_not_retire_newer_same_protocol_build(tmp_path, monkeypatch):
@@ -507,22 +1236,27 @@ def test_service_priority_is_best_effort(monkeypatch):
 
 def _table(rows):
     return {
-        pid: registry_mod.ProcessTableEntry(ppid, pgid, cpu_seconds, command)
-        for pid, ppid, pgid, cpu_seconds, command in rows
+        pid: registry_mod.ProcessTableEntry(ppid, pgid, cpu_seconds, command, start_time)
+        for pid, ppid, pgid, cpu_seconds, command, *start in rows
+        for start_time in [start[0] if start else pid + 1000]
     }
+
+
+def _process_record(pid):
+    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{pid + 1000}")
 
 
 def _write_service_record(service_dir, name, pid, socket_path):
     service_dir.mkdir(parents=True, exist_ok=True)
     (service_dir / f"{name}.service.json").write_text(
-        registry_mod.json.dumps({"service": name, "pid": pid, "socket": str(socket_path)}),
+        registry_mod.json.dumps({**_process_record(pid), "service": name, "socket": str(socket_path)}),
         encoding="utf-8",
     )
 
 
 def test_ledger_record_identity_requires_the_exact_socket_marker(tmp_path):
     socket_path = tmp_path / "services" / "jobd.sock"
-    record = {"service": "jobd", "pid": 100, "socket": str(socket_path)}
+    record = {**_process_record(100), "service": "jobd", "socket": str(socket_path)}
     with_marker = _table([(100, 1, 100, 5.0, f"python3 -m yolomux_lib.jobd --serve --socket {socket_path} --idle-seconds 60")])
     unrelated_python = _table([(100, 1, 100, 5.0, "python3 some_other_tool.py --socket /tmp/elsewhere.sock")])
     defender_shaped = _table([(100, 1, 100, 5.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon unprivileged")])
@@ -564,7 +1298,10 @@ def test_tracked_local_service_groups_membership_is_exact_process_group(tmp_path
 def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
     lease_dir = tmp_path / "server-leases"
     lease_dir.mkdir(parents=True)
-    (lease_dir / "8881.lock").write_text(registry_mod.json.dumps({"pid": 400, "port": 8881}), encoding="utf-8")
+    (lease_dir / "8881.lock").write_text(
+        registry_mod.json.dumps({**_process_record(400), "port": 8881}),
+        encoding="utf-8",
+    )
     good = _table(
         [
             (400, 1, 400, 50.0, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev"),
@@ -575,7 +1312,17 @@ def test_tracked_port_process_group_requires_lease_and_port_identity(tmp_path):
     recycled = _table([(400, 1, 400, 50.0, "python3 unrelated.py")])
 
     group = registry_mod.tracked_port_process_group(8881, tmp_path, good)
-    assert group == {"port": 8881, "pid": 400, "pgid": 400, "member_pids": (400, 401)}
+    assert {key: group[key] for key in ("port", "pid", "pgid", "member_pids")} == {
+        "port": 8881,
+        "pid": 400,
+        "pgid": 400,
+        "member_pids": (400, 401),
+    }
+    assert group["process_record"] == {
+        key: _process_record(400)[key]
+        for key in ("stable_host_id", "boot_id", "pid", "process_start_identity", "process_start_ticks")
+    }
+    assert set(group["member_records"]) == {400, 401}
     # Another YOLOmux port (or a --port prefix collision) never enters this ledger.
     assert registry_mod.tracked_port_process_group(8881, tmp_path, prefix_collision) == {}
     # A recycled lease PID fails the command identity check.

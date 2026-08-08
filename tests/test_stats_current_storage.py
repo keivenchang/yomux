@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 """Focused contract tests for the current-only YO!stats store."""
 
+import inspect
 import json
 import sqlite3
+import time
 from dataclasses import replace
 
 import pytest
@@ -136,6 +138,40 @@ def test_vacuum_persists_its_completion_marker_only_after_success(tmp_path):
         assert reader.last_vacuumed_at() == 123.0
         with pytest.raises(StatsCurrentError, match="cannot vacuum"):
             reader.vacuum(124.0)
+
+
+def test_vacuum_reclaims_pruned_raw_table_pages(tmp_path):
+    """A successful marker alone is insufficient: VACUUM must shrink raw-table churn."""
+
+    path = tmp_path / DATABASE_FILENAME
+    observations = tuple(
+        Observation(
+            f"fragment-{index}", "cpu", "fragmented", float(index), "epoch-1", 1,
+            {"ordinal": index, "payload": "x" * 16_384},
+        )
+        for index in range(128)
+    )
+    with Store.open(path) as store:
+        assert store.append_batch(observations=observations).observations_accepted == len(observations)
+    with Store.open(path) as store:
+        assert store.prune(now=RETENTION_SECONDS + len(observations) + 1).observations_deleted == len(observations)
+
+    before_bytes = path.stat().st_size
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        assert connection.execute("PRAGMA freelist_count").fetchone()[0] > 0
+    finally:
+        connection.close()
+
+    with Store.open(path) as store:
+        assert store.vacuum(123.0) == 123.0
+        assert store.last_vacuumed_at() == 123.0
+    assert path.stat().st_size < before_bytes
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    try:
+        assert connection.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    finally:
+        connection.close()
 
 
 def test_current_database_uses_a_versioned_path_and_publishes_the_fence_first(tmp_path):
@@ -421,6 +457,7 @@ def test_replayed_usage_safely_repairs_legacy_unknown_model_once(tmp_path):
     assert first.source_generation == 1
     assert repaired.source_generation == 2
     assert repaired.usage_atoms_accepted == 1
+    assert repaired.accepted_original_timestamps == (10.0,)
     assert repaired.usage_attribution_conflicts == 1
     assert duplicate.usage_atoms_duplicate == 1
     assert duplicate.usage_attribution_conflicts == 1
@@ -479,6 +516,7 @@ def test_fork_history_tombstone_deletes_the_exact_model_attributed_atom(tmp_path
     assert first.source_generation == 1
     assert removed.source_generation == 2
     assert removed.usage_tombstones_accepted == 1
+    assert removed.accepted_original_timestamps == (99.5,)
     assert duplicate.source_generation == 2
     assert duplicate.usage_tombstones_duplicate == 1
     assert snapshot.usage_atoms == ()
@@ -568,8 +606,10 @@ def test_atomic_batch_advances_one_source_generation_only_for_new_facts(tmp_path
 
     assert first.source_generation == 1
     assert (first.observations_accepted, first.coverage_changed, first.usage_atoms_accepted) == (1, 1, 1)
+    assert first.accepted_original_timestamps == (10.0, 10.0)
     assert duplicate.source_generation == 1
     assert (duplicate.observations_duplicate, duplicate.coverage_unchanged, duplicate.usage_atoms_duplicate) == (1, 1, 1)
+    assert duplicate.accepted_original_timestamps == ()
     assert snapshot.schema.source_generation == 1
 
 
@@ -655,7 +695,7 @@ def test_build2_repairs_early_schema5_unavailable_rows_once_and_fences_build1(tm
     with Store.open(path) as store:
         second = store.read_snapshot()
 
-    assert first.schema.minimum_writer_build == MIN_WRITER_BUILD == 3
+    assert first.schema.minimum_writer_build == MIN_WRITER_BUILD == 4
     assert first.schema.source_generation == 8
     assert first.unavailable_spans == (
         UnavailableSpan(
@@ -718,6 +758,32 @@ def test_open_coverage_epoch_closes_once_without_rewriting_immutable_facts(tmp_p
 
     assert snapshot.coverage_epochs == (closed_epoch,)
     assert snapshot.schema.source_generation == 2
+
+
+def test_latest_coverage_epoch_uses_exact_source_owner_and_cadence_identity(tmp_path):
+    first = CoverageEpoch("gpu", "gpu:0", "inline:42:gpu:first", 100.0, 110.0, 10.0, 42)
+    latest = CoverageEpoch("gpu", "gpu:0", "inline:42:gpu:latest", 120.0, 130.0, 10.0, 42)
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        store.append_batch(coverage_epochs=(first, latest))
+
+        assert store.latest_coverage_epoch("gpu", "gpu:0", 42, 10.0) == latest
+        assert store.latest_coverage_epoch("gpu", "gpu:1", 42, 10.0) is None
+        assert store.latest_coverage_epoch("gpu", "gpu:0", 43, 10.0) is None
+
+
+def test_inline_coverage_source_ids_selects_exact_canonical_owner_roster(tmp_path):
+    rows = (
+        CoverageEpoch("gpu", "gpu:0", "inline:42:gpu:first", 100.0, 110.0, 10.0, 42),
+        CoverageEpoch("gpu", "gpu:1", "inline:42:gpu:second", 100.0, 110.0, 10.0, 42),
+        CoverageEpoch("gpu", "gpu:other-owner", "inline:43:gpu:third", 100.0, 110.0, 10.0, 43),
+        CoverageEpoch("gpu", "gpu:scheduled", "scheduled:42:gpu:fourth", 100.0, 110.0, 10.0, 42),
+        CoverageEpoch("cpu", "port:7443", "inline:42:cpu:fifth", 100.0, 101.0, 1.0, 42),
+    )
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        store.append_batch(coverage_epochs=rows)
+        sources = store.inline_coverage_source_ids("gpu", 42)
+
+    assert sources == ("gpu:0", "gpu:1")
 
 
 def test_migration_reconciliation_is_identity_deduplicated_and_visible_in_snapshot(tmp_path):
@@ -796,7 +862,7 @@ def test_empty_dirty_snapshot_reads_no_originals_but_all_coverage_facts(tmp_path
     assert snapshot.unavailable_spans == (unavailable,)
 
 
-def test_dirty_snapshot_includes_full_history_for_bounded_recent_private_sources(tmp_path):
+def test_dirty_snapshot_excludes_browser_history_outside_the_dirty_interval(tmp_path):
     private = tuple(
         Observation(
             f"browser-{source}-{timestamp}",
@@ -815,27 +881,300 @@ def test_dirty_snapshot_includes_full_history_for_bounded_recent_private_sources
         store.append_batch(observations=(cpu, *private))
         snapshot = store.read_snapshot(
             dirty_intervals=((99, 101),),
-            private_observation_sources=4,
         )
 
-    assert cpu in snapshot.observations
-    private_rows = tuple(
-        item for item in snapshot.observations if item.family == "browser"
-    )
-    assert {item.source_id for item in private_rows} == {
-        "browser:1", "browser:2", "browser:3", "browser:4",
+    assert snapshot.observations == (cpu,)
+
+
+def test_browser_observation_status_aggregates_an_error_storm_without_decoding_every_row(
+    tmp_path, monkeypatch,
+):
+    observations = []
+    provenances = (None, "controlled_probe", "confirmed_real")
+    for signature_index in range(140):
+        kind = "error" if signature_index % 2 == 0 else "unhandledrejection"
+        provenance = provenances[signature_index % len(provenances)]
+        signature = "jsf-tied" if signature_index >= 138 else f"jsf-{signature_index:08x}"
+        observed_at = 13_900 if signature_index >= 138 else signature_index * 100
+        for occurrence in range(10):
+            payload = {
+                "kind": kind,
+                "signature": signature,
+                "message": f"failure {signature_index}",
+                "source": "/static/yolomux.js",
+            }
+            if signature_index != 138:
+                payload["code_revision"] = f"rev-{occurrence % 3}"
+            if provenance is not None:
+                payload["provenance"] = provenance
+            observations.append(Observation(
+                f"failure-{signature_index:03d}-{occurrence:02d}",
+                "browser",
+                "browser:test",
+                float(observed_at + occurrence),
+                "page-1",
+                1,
+                payload,
+            ))
+
+    decoded_payloads = 0
+    decode_json_object = storage_module._decode_json_object
+
+    def count_decoded_payloads(encoded, name):
+        nonlocal decoded_payloads
+        decoded_payloads += 1
+        return decode_json_object(encoded, name)
+
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        assert store.append_batch(observations=tuple(observations)).observations_accepted == 1_400
+        monkeypatch.setattr(storage_module, "_decode_json_object", count_decoded_payloads)
+        status = store.browser_observation_status(14_000.0)
+
+    assert decoded_payloads <= 128
+    assert status["retained_observations"] == 1_400
+    assert status["retained_failures"] == 1_400
+    assert status["retained_errors"] == status["retained_unhandled_rejections"] == 700
+    assert status["unknown_failures"] == status["probe_failures"] == 470
+    assert status["confirmed_real_failures"] == 460
+    assert status["last_retained_observed_at"] == 13_909.0
+    assert status["last_retained_observed_age_seconds"] == 91.0
+    assert len(status["fingerprints"]) == 128
+    assert status["classification_counts"] == {"open": 128, "fixed": 0, "live_verified": 0}
+    assert [item["signature"] for item in status["fingerprints"]] == [
+        "jsf-tied", "jsf-tied",
+        *(f"jsf-{signature_index:08x}" for signature_index in range(137, 11, -1)),
+    ]
+    assert status["fingerprints"][0] == {
+        "signature": "jsf-tied",
+        "kind": "unhandledrejection",
+        "provenance": "controlled_probe",
+        "count": 10,
+        "first_observed_at": 13_900.0,
+        "last_observed_at": 13_909.0,
+        "code_revisions": ("rev-0", "rev-1", "rev-2"),
+        "state": "open",
+        "state_reason": "no durable closure or path-execution evidence",
     }
-    assert len(private_rows) == 8
+    assert status["fingerprints"][1]["code_revisions"] == ()
 
 
-def test_dirty_snapshot_falls_back_to_full_for_a_widely_scattered_batch(tmp_path):
+def test_browser_observation_status_retains_typed_warning_fingerprints(tmp_path):
+    warning = Observation(
+        "stats-warning-1", "browser", "browser:test", 10.0, "page-1", 1,
+        {
+            "kind": "warning", "signature": "jsf-warning", "message": "stats capabilities fields are not exact",
+            "source": "/api/stats-stream", "code_revision": "test-revision",
+        },
+    )
+    with Store.open(tmp_path / DATABASE_FILENAME) as store:
+        assert store.append_batch(observations=(warning,)).observations_accepted == 1
+        status = store.browser_observation_status(10.0)
+
+    assert status["retained_failures"] == 1
+    assert status["retained_errors"] == status["retained_unhandled_rejections"] == 0
+    assert status["fingerprints"] == ({
+        "signature": "jsf-warning", "kind": "warning", "provenance": "unknown", "count": 1,
+        "first_observed_at": 10.0, "last_observed_at": 10.0,
+        "code_revisions": ("test-revision",), "state": "open",
+        "state_reason": "no durable closure or path-execution evidence",
+    },)
+def test_browser_observation_status_survives_an_unrelated_malformed_heartbeat(tmp_path):
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        store.append_batch(observations=(
+            Observation(
+                "failure", "browser", "browser:test", 10.0, "page-1", 1,
+                {"kind": "error", "signature": "jsf-real", "message": "boom", "source": "/"},
+            ),
+            Observation(
+                "heartbeat", "browser", "browser:test", 11.0, "page-1", 1,
+                {"kind": "heartbeat"},
+            ),
+        ))
+        store._connection().execute(
+            "UPDATE observations SET payload_json = ? WHERE event_id = ?",
+            ('{"kind":"heartbeat"', "heartbeat"),
+        )
+
+    with Store.open(path) as store:
+        status = store.browser_observation_status(12.0)
+
+    assert status["retained_observations"] == 2
+    assert status["retained_failures"] == 1
+    assert status["fingerprints"][0]["signature"] == "jsf-real"
+
+
+def test_browser_observation_status_has_a_constant_request_work_bound_under_high_volume(
+    tmp_path,
+):
+    count = 20_000
+    observations = tuple(
+        Observation(
+            f"failure-{index:05d}", "browser", "browser:test", float(index), "page-1", 1,
+            ({
+                "kind": "error",
+                "signature": f"jsf-{index:08x}",
+                "message": "boom",
+                "source": "/",
+                "code_revision": f"rev-{index % 3}",
+            } if index % 2 == 0 else {
+                "kind": "api", "endpoint": "/api/ping", "method": "GET",
+            }),
+        )
+        for index in range(count)
+    )
+    path = tmp_path / DATABASE_FILENAME
+    with Store.open(path) as store:
+        assert store.append_batch(observations=observations).observations_accepted == count
+
+    with Store.open(path) as store:
+        progress_calls = 0
+
+        def count_progress():
+            nonlocal progress_calls
+            progress_calls += 1
+            return 0
+
+        connection = store._connection()
+        assert connection.execute("PRAGMA temp_store").fetchone()[0] == 1
+        connection.set_progress_handler(count_progress, 1_000)
+        status_started = time.monotonic()
+        try:
+            status = store.browser_observation_status(float(count))
+        finally:
+            status_elapsed = time.monotonic() - status_started
+            connection.set_progress_handler(None, 0)
+        status_progress_calls = progress_calls
+        progress_calls = 0
+        connection.set_progress_handler(count_progress, 1_000)
+        profiles_started = time.monotonic()
+        try:
+            profiles = store.recent_browser_profiles()
+        finally:
+            profiles_elapsed = time.monotonic() - profiles_started
+            connection.set_progress_handler(None, 0)
+
+    assert status["retained_failures"] == count // 2
+    assert len(status["fingerprints"]) == 128
+    assert len(profiles) == 128
+    assert status_progress_calls <= 250
+    assert progress_calls <= 250
+    assert status_elapsed < 0.5
+    assert profiles_elapsed < 0.5
+
+
+def test_browser_diagnostics_queries_need_no_optional_sqlite_json_or_window_features():
+    source = inspect.getsource(storage_module)
+    for unsupported in ("json_extract(", "json_type(", "json_group_array(", "ROW_NUMBER()", "FILTER (WHERE"):
+        assert unsupported not in source
+
+
+def test_browser_diagnostics_indexes_follow_duplicates_reopen_and_prune(tmp_path):
+    now = 100_000.0
+    cutoff = now - RETENTION_SECONDS
+    path = tmp_path / DATABASE_FILENAME
+    old_failure = Observation(
+        "old-a", "browser", "browser:test", cutoff - 1, "page-1", 1,
+        {
+            "kind": "error", "signature": "jsf-a", "message": "old", "source": "/",
+            "code_revision": "rev-old", "provenance": "controlled_probe",
+        },
+    )
+    with Store.open(path) as store:
+        store.append_batch(observations=(
+            old_failure,
+            Observation(
+                "kept-a", "browser", "browser:test", cutoff, "page-1", 1,
+                {
+                    "kind": "error", "signature": "jsf-a", "message": "kept", "source": "/",
+                    "code_revision": "rev-kept", "provenance": "controlled_probe",
+                },
+            ),
+            Observation(
+                "old-b", "browser", "browser:test", cutoff - 2, "page-1", 1,
+                {
+                    "kind": "unhandledrejection", "signature": "jsf-b", "message": "old",
+                    "source": "/", "provenance": "confirmed_real",
+                },
+            ),
+            Observation(
+                "old-profile", "browser", "browser:test", cutoff - 3, "page-1", 1,
+                {"kind": "api", "endpoint": "/api/old", "method": "GET"},
+            ),
+            Observation(
+                "kept-profile", "browser", "browser:test", cutoff + 1, "page-1", 1,
+                {"kind": "api", "endpoint": "/api/kept", "method": "GET"},
+            ),
+        ))
+        assert store.append_observation(old_failure) is False
+
+    with Store.open(path) as store:
+        before = store.browser_observation_status(now)
+        assert before["retained_observations"] == 5
+        assert before["retained_failures"] == 3
+        store.prune(now=now)
+        after = store.browser_observation_status(now)
+        profiles = store.recent_browser_profiles()
+
+    assert after["retained_observations"] == 2
+    assert after["retained_failures"] == after["retained_errors"] == 1
+    assert after["retained_unhandled_rejections"] == 0
+    assert after["probe_failures"] == 1
+    assert after["confirmed_real_failures"] == after["unknown_failures"] == 0
+    assert after["fingerprints"][0]["first_observed_at"] == cutoff
+    assert after["fingerprints"][0]["code_revisions"] == ("rev-kept",)
+    assert [item["endpoint"] for item in profiles] == ["/api/kept"]
+
+
+def test_dirty_snapshot_chunks_widely_scattered_intervals_without_a_full_scan(tmp_path):
+    selected = tuple(10 + (index * 300) for index in range(1_030))
+    outside = 155
     with Store.open(tmp_path / DATABASE_FILENAME) as store:
         store.append_batch(
-            observations=(_observation("cpu", "host", 10), _observation("cpu", "host", 5_000)),
+            observations=tuple(
+                _observation("cpu", "host", observed_at)
+                for observed_at in (*selected, outside)
+            ),
+            usage_atoms=tuple(
+                _usage(f"usage-{observed_at}", observed_at)
+                for observed_at in (*selected, outside)
+            ),
         )
-        snapshot = store.read_snapshot(dirty_intervals=((9, 11), (4_999, 5_001)))
+        statements = []
+        store._connection().set_trace_callback(statements.append)
+        for count, expected_queries in ((32, 1), (33, 2), (1_030, 1)):
+            statements.clear()
+            snapshot = store.read_snapshot(
+                dirty_intervals=tuple(
+                    (observed_at, observed_at + 1)
+                    for observed_at in selected[:count]
+                ),
+            )
 
-    assert [item.observed_at for item in snapshot.observations] == [10, 5_000]
+            assert [item.observed_at for item in snapshot.observations] == list(selected[:count])
+            assert [item.observed_at for item in snapshot.usage_atoms] == list(selected[:count])
+            observation_reads = [
+                statement for statement in statements
+                if " FROM observations" in statement
+            ]
+            usage_reads = [
+                statement for statement in statements
+                if " FROM usage_atoms" in statement
+            ]
+            assert len(observation_reads) == len(usage_reads) == expected_queries
+            assert all(
+                " WHERE " in statement
+                for statement in (*observation_reads, *usage_reads)
+            )
+            expected_predicates = count if count <= 64 else 1
+            assert sum(
+                statement.count("observed_at >=")
+                for statement in observation_reads
+            ) == expected_predicates
+            assert sum(
+                statement.count("observed_at >=")
+                for statement in usage_reads
+            ) == expected_predicates
 
 
 def test_dirty_snapshot_rejects_an_invalid_interval(tmp_path):

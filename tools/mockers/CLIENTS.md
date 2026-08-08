@@ -5,11 +5,11 @@
 
 This document owns exhaustive real-capture, fixture-replay, composer-geometry, and fixture-dump details. [`docs/specs/GUI.md`](../../docs/specs/GUI.md) retains the browser-facing fixed-footer and parity contract only.
 
-`tools/agent_clients/codex.py` and `tools/agent_clients/claude.py` are text-first prototype clients for driving Codex and Claude without scraping their terminal UIs. They share the terminal/readline/prompt/output/metrics layer in `tools/agent_clients/text_client_common.py`, but they talk to different upstream backends.
+`tools/mockers/codex.py` and `tools/mockers/claude.py` are text-first prototype clients for driving Codex and Claude without scraping their terminal UIs. They share the terminal/readline/prompt/output/metrics layer in `tools/mockers/text_client_common.py`, but they talk to different upstream backends.
 
 ## Shared Parent
 
-Both clients inherit from `TextClientBase` in `tools/agent_clients/text_client_common.py`.
+Both clients inherit from `TextClientBase` in `tools/mockers/text_client_common.py`.
 
 Shared behavior:
 
@@ -18,7 +18,7 @@ Shared behavior:
 - Prefixed gray output: codex.py reasoning (aka thinking), claude.py thinking (aka reasoning), tool events, thread/session hints, and metrics use the shared color helpers.
 - Shared metrics: TTFT, submit-to-first-token, first reasoning (aka thinking) or thinking (aka reasoning) event, first tool, total turn time, ISL, OSL, token/sec, answer chars/sec, tool counts, tool duration, approval counts, and event counts.
 - Shared config helpers: bool parsing, TOML-ish `key=value` parsing, config display, shell-safe resume command formatting.
-- Shared same-intent metadata: `OutputTerminology`, `ClientConfigKeys`, `ClientPermissionDefaults`, and `CLIENT_INTENT_ROWS` in `tools/agent_clients/text_client_common.py` own the terminology map, config-key map, prefix labels, and permissive defaults used by both clients.
+- Shared same-intent metadata: `OutputTerminology`, `ClientConfigKeys`, `ClientPermissionDefaults`, and `CLIENT_INTENT_ROWS` in `tools/mockers/text_client_common.py` own the terminology map, config-key map, prefix labels, and permissive defaults used by both clients.
 - Shared terminal color selection: aux text and prompt colors are selected once in the base class.
 
 ## Background Color Handling
@@ -28,8 +28,8 @@ The clients auto-detect light vs dark terminal backgrounds and adjust prompt/aux
 OSC 11 is only attempted when stdin and stdout are real TTYs. The query runs against `/dev/tty`, restores terminal settings immediately, and has a short timeout so non-responsive terminals fall back cleanly. To force the palette, run one of:
 
 ```bash
-TEXT_CLIENT_BACKGROUND=light python3 tools/agent_clients/codex.py -C .
-TEXT_CLIENT_BACKGROUND=dark python3 tools/agent_clients/claude.py -C .
+TEXT_CLIENT_BACKGROUND=light python3 tools/mockers/codex.py -C .
+TEXT_CLIENT_BACKGROUND=dark python3 tools/mockers/claude.py -C .
 ```
 
 ## Backend Differences
@@ -43,7 +43,7 @@ TEXT_CLIENT_BACKGROUND=dark python3 tools/agent_clients/claude.py -C .
 
 ## Mock Agent Fixture Replay
 
-`tools/agent_clients/claude.py --mock` and `tools/agent_clients/codex.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mock implementations live in the real client entry points plus shared code in `tools/agent_clients/mock_agent_common.py`; the old top-level `mock/` package is intentionally gone. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
+`tools/mockers/claude.py --mock` and `tools/mockers/codex.py --mock` run the TUI mocks for detector, auto-approve, and browser tests. The mock implementations live in the real client entry points plus shared code in `tools/mockers/common.py`; the old top-level `mock/` package is intentionally gone. The mocks replay the real and synthetic prompt corpus from `tests/fixtures/prompt_corpus/` so tests exercise current Claude Code and Codex CLI chrome without launching the real clients for every case.
 
 - `mock list all`: print replayable prompt-corpus cases for the current agent, plus shared and idle fixtures.
 - `fixture <case>`: clear the pane, render that fixture, bottom-align short captures in the current tmux pane, and freeze the process so `tmux capture-pane` sees the prompt exactly as a live client would.

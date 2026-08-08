@@ -28,7 +28,9 @@ from .protocol import MAX_COST_DETAIL_MODELS
 from .protocol import validate_cost_report
 from . import resolution as stats_resolution
 from .storage import Observation
+from .storage import CoverageEpoch
 from .storage import StoreSnapshot
+from .storage import UnavailableSpan
 from .storage import UsageAtom
 from .storage import normalize_unavailable_spans
 from .usage import UsageValidationError
@@ -593,11 +595,19 @@ def _fold_bucket(
 ) -> Bucket:
     observation_values = tuple(observations)
     usage_values = tuple(usage_atoms)
-    samples = [sample for observation in observation_values for sample in _observation_samples(observation)]
+    samples = []
+    projected_timestamps = []
+    for observation in observation_values:
+        observation_samples = _observation_samples(observation)
+        samples.extend(observation_samples)
+        if observation_samples:
+            projected_timestamps.append(observation.observed_at)
     cost_atoms = []
     for atom in usage_values:
         atom_samples, cost_atom = _usage_projection(atom, price_resolver)
         samples.extend(atom_samples)
+        if atom_samples:
+            projected_timestamps.append(atom.observed_at)
         cost_atoms.append(cost_atom)
     grouped: dict[str, list[_Sample]] = {}
     for sample in samples:
@@ -643,7 +653,7 @@ def _fold_bucket(
             min(value.observed_at for value in values),
             max(value.observed_at for value in values),
         ))
-    timestamps = tuple(item.observed_at for item in (*observation_values, *usage_values))
+    timestamps = tuple(projected_timestamps)
     return Bucket(
         start,
         duration,
@@ -704,6 +714,40 @@ def _observation_samples(observation: Observation) -> tuple[_Sample, ...]:
             samples.append(_Sample("browser_bandwidth_bytes_per_second", "rate_average_sources", _number(payload, "bytes"), at, source))
         if kind == "disconnect" and "duration_ms" in payload:
             samples.append(_Sample("browser_disconnected_ms", "sum_average_sources", _number(payload, "duration_ms"), at, source))
+        if kind == "api" and "queue_ms" in payload:
+            samples.append(_Sample("browser_queue_ms", "average_sources", _number(payload, "queue_ms"), at, source))
+        if kind == "page_load":
+            page_series = {
+                "first_paint_ms": "browser_first_paint_ms",
+                "first_contentful_paint_ms": "browser_first_contentful_paint_ms",
+                "app_ready_ms": "browser_app_ready_ms",
+                "max_concurrency": "browser_page_max_concurrency",
+            }
+            samples.extend(
+                _Sample(series, "average_sources", _number(payload, field), at, source)
+                for field, series in page_series.items()
+                if field in payload
+            )
+        perceptual_series = {
+            "finder_usable": "browser_finder_usable_ms",
+            "interaction": "browser_input_latency_ms",
+            "operation_wait": "browser_operation_wait_ms",
+            "long_task": "browser_long_task_ms",
+        }
+        if kind in perceptual_series and "latency_ms" in payload:
+            samples.append(_Sample(perceptual_series[kind], "average_sources", _number(payload, "latency_ms"), at, source))
+        if kind == "heartbeat":
+            health_series = {
+                "upload_queue_depth": "browser_upload_queue_depth",
+                "upload_drops": "browser_upload_drops",
+                "upload_retries": "browser_upload_retries",
+                "instrumentation_cost_ms": "browser_instrumentation_cost_ms",
+            }
+            samples.extend(
+                _Sample(series, "average_sources", _number(payload, field), at, source)
+                for field, series in health_series.items()
+                if field in payload
+            )
         return tuple(samples)
     fields: Mapping[str, str] | None = {
         "gpu": {
@@ -1425,14 +1469,104 @@ def _model_token_dimension(atom: UsageAtom) -> str:
     return "input"
 
 
+def _is_legacy_inline_epoch(item: CoverageEpoch) -> bool:
+    if item.family not in {"cpu", "gpu"}:
+        return False
+    parts = item.epoch_id.split(":")
+    if len(parts) != 3 or parts[0] != str(item.owner_generation) or parts[1] != item.family:
+        return False
+    suffix = parts[2]
+    if not suffix.isascii() or not suffix.isdigit():
+        return False
+    try:
+        return suffix == str(int(item.started_at))
+    except (OverflowError, ValueError):
+        return False
+
+
+def _coalesce_coverage_epochs(
+    coverage_epochs: Iterable[CoverageEpoch],
+    unavailable_spans: Iterable[UnavailableSpan],
+) -> tuple[CoverageEpoch, ...]:
+    """Normalize only the retired inline per-sample lifecycle representation."""
+
+    separators = tuple(unavailable_spans)
+    compacted: list[CoverageEpoch] = []
+    active_legacy: dict[tuple[int, str, str, float], int] = {}
+    for item in coverage_epochs:
+        item_is_legacy = _is_legacy_inline_epoch(item)
+        key = (
+            item.owner_generation,
+            item.family,
+            item.source_id,
+            item.native_cadence_seconds,
+        )
+        previous_index = active_legacy.get(key) if item_is_legacy else None
+        if previous_index is None:
+            compacted.append(item)
+            if item_is_legacy:
+                active_legacy[key] = len(compacted) - 1
+            else:
+                active_legacy.pop(key, None)
+            continue
+        previous = compacted[previous_index]
+        previous_end = previous.ended_at
+        separated = (
+            previous_end is not None
+            and any(
+                span.family == item.family
+                and span.source_id == item.source_id
+                and span.started_at < item.started_at
+                and span.ended_at > previous_end
+                for span in separators
+            )
+        )
+        mergeable = (
+            previous_end is not None
+            and item.started_at - previous_end <= previous.native_cadence_seconds
+            and not separated
+        )
+        if not mergeable:
+            compacted.append(item)
+            active_legacy[key] = len(compacted) - 1
+            continue
+        ended_at = (
+            None
+            if previous_end is None or item.ended_at is None
+            else max(previous_end, item.ended_at)
+        )
+        compacted[previous_index] = replace(
+            previous,
+            epoch_id=item.epoch_id,
+            ended_at=ended_at,
+        )
+    return tuple(compacted)
+
+
+def normalize_coverage_model(
+    coverage_epochs: Iterable[CoverageEpoch],
+    unavailable_spans: Iterable[UnavailableSpan],
+) -> tuple[tuple[CoverageEpoch, ...], tuple[UnavailableSpan, ...]]:
+    """Normalize durable coverage history once for reuse by incremental builds."""
+
+    normalized_spans = normalize_unavailable_spans(unavailable_spans)
+    return (
+        _coalesce_coverage_epochs(coverage_epochs, normalized_spans),
+        normalized_spans,
+    )
+
+
 def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float) -> tuple[NoData, ...]:
     gaps: list[NoData] = []
-    unavailable_spans = normalize_unavailable_spans(snapshot.unavailable_spans)
+    coverage_epochs, unavailable_spans = normalize_coverage_model(
+        snapshot.coverage_epochs,
+        snapshot.unavailable_spans,
+    )
     for spec in CURRENT_FAMILIES:
         if not spec.no_data_eligible:
             continue
         family_coverage = tuple(
-            item for item in snapshot.coverage_epochs
+            item for item in coverage_epochs
             if item.family == spec.coverage_family
         )
         latest_family_end = max(
@@ -1459,7 +1593,7 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                 ),
                 key=lambda item: (item.started_at, item.epoch_id),
             )
-            source_gaps = [
+            explicit_gaps = [
                 NoData(
                     spec.name, source_id, item.epoch_id,
                     max(oldest, item.started_at), min(observed_until, item.ended_at),
@@ -1472,9 +1606,10 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                 and item.started_at < observed_until
             ]
             if not intervals:
-                for gap in sorted(source_gaps, key=lambda item: (item.start, item.end, item.epoch_id)):
+                for gap in sorted(explicit_gaps, key=lambda item: (item.start, item.end, item.epoch_id)):
                     _append_gap(gaps, gap)
                 continue
+            computed_gaps: list[NoData] = []
             cursor = max(oldest, intervals[0].started_at)
             previous = intervals[0]
             for interval in intervals:
@@ -1487,7 +1622,7 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                     previous = interval
                     continue
                 if start > cursor:
-                    _append_uncovered_gap(source_gaps, NoData(
+                    _append_uncovered_gap(explicit_gaps, computed_gaps, NoData(
                         spec.name, source_id, previous.epoch_id, cursor, start,
                         previous.native_cadence_seconds,
                     ))
@@ -1501,11 +1636,11 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
                 and previous.ended_at is not None
                 and previous.ended_at >= latest_family_end
             ):
-                _append_uncovered_gap(source_gaps, NoData(
+                _append_uncovered_gap(explicit_gaps, computed_gaps, NoData(
                     spec.name, source_id, previous.epoch_id, cursor, observed_until,
                     previous.native_cadence_seconds,
                 ))
-            for gap in sorted(source_gaps, key=lambda item: (item.start, item.end, item.epoch_id)):
+            for gap in sorted((*explicit_gaps, *computed_gaps), key=lambda item: (item.start, item.end, item.epoch_id)):
                 _append_gap(gaps, gap)
     result = tuple(sorted(
         gaps,
@@ -1525,11 +1660,11 @@ def _coverage_gaps(snapshot: StoreSnapshot, oldest: float, observed_until: float
     return result
 
 
-def _append_uncovered_gap(gaps: list[NoData], candidate: NoData) -> None:
+def _append_uncovered_gap(explicit_gaps: list[NoData], computed_gaps: list[NoData], candidate: NoData) -> None:
     """Add only candidate portions not already owned by an explicit span."""
 
     portions = [(candidate.start, candidate.end)]
-    for existing in gaps:
+    for existing in explicit_gaps:
         next_portions = []
         for start, end in portions:
             if existing.end <= start or existing.start >= end:
@@ -1540,7 +1675,7 @@ def _append_uncovered_gap(gaps: list[NoData], candidate: NoData) -> None:
             if existing.end < end:
                 next_portions.append((existing.end, end))
         portions = next_portions
-    gaps.extend(
+    computed_gaps.extend(
         NoData(
             candidate.family, candidate.source_id, candidate.epoch_id,
             start, end, candidate.native_cadence_seconds, candidate.reason,

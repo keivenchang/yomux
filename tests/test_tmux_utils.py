@@ -1,4 +1,8 @@
+import os
 import subprocess
+from pathlib import Path
+
+import pytest
 
 from tools import auto_approve_tmux
 from yolomux_lib import tmux_utils
@@ -56,6 +60,66 @@ def test_tmux_command_uses_configured_socket(monkeypatch):
     monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/yolomux-test-tmux.sock")
 
     assert tmux_utils.tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/yolomux-test-tmux.sock", "list-sessions"]
+
+
+def test_readonly_control_mode_attach_allows_default_server(monkeypatch):
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    argv = ["-C", "attach-session", "-f", "read-only,ignore-size", "-t", "alpha:"]
+
+    assert tmux_utils.tmux_command(argv) == ["tmux", *argv]
+
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/declared.sock")
+    assert tmux_utils.tmux_command(argv) == ["tmux", "-S", "/tmp/declared.sock", *argv]
+
+
+@pytest.mark.parametrize(
+    ("argv", "verb"),
+    [
+        (["kill-server"], "kill-server"),
+        (["kill-session", "-t", "alpha:"], "kill-session"),
+        (["-C", "attach-session", "-t", "alpha:"], "-C attach-session"),
+    ],
+)
+def test_default_server_refuses_destructive_and_writable_control_commands(monkeypatch, argv, verb):
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, raising=False)
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+
+    with pytest.raises(tmux_utils.TmuxSocketTargetError) as raised:
+        tmux_utils.tmux_command(argv)
+
+    assert raised.value.verb == verb
+
+    monkeypatch.setenv(tmux_utils.YOLOMUX_TMUX_SOCKET_ENV, "/tmp/declared-private.sock")
+    assert tmux_utils.tmux_command(argv) == ["tmux", "-S", "/tmp/declared-private.sock", *argv]
+
+
+def test_launchers_declare_the_default_server_intent_for_control_mode(monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.delenv(tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV, raising=False)
+    optin = subprocess.run(
+        ["bash", "-c", "source tools/startup_common.sh; yolomux_default_server_optin"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert optin == f"{tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV}=1"
+    assert f'export PATH="$launch_path"' in subprocess.run(
+        ["bash", "-c", "source tools/startup_common.sh; yolomux_macos_server_launcher"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert tmux_utils.YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER_ENV in subprocess.run(
+        ["bash", "-c", "source tools/startup_common.sh; yolomux_macos_server_launcher"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert 'extra_env+=("$(yolomux_default_server_optin)")' in (root / "boot.sh").read_text(encoding="utf-8")
 
 
 def test_tmux_move_to_option_walks_highlight_without_crashing(monkeypatch):
@@ -136,10 +200,11 @@ def test_tmux_paste_text_submits_with_enter_key_not_pasted_newline(monkeypatch):
     monkeypatch.setattr(tmux_utils, "tmux_run", fake_tmux_run)
 
     result = tmux_utils.tmux_paste_text("%6", "date", submit=True)
+    private_socket = os.environ[tmux_utils.YOLOMUX_TMUX_SOCKET_ENV]
 
     assert result.returncode == 0
     assert calls == [
-        ("subprocess", ("tmux", "load-buffer", "-b", "yolomux-abc123", "-"), "date"),
+        ("subprocess", ("tmux", "-S", private_socket, "load-buffer", "-b", "yolomux-abc123", "-"), "date"),
         ("tmux_run", ("paste-buffer", "-p", "-t", "%6", "-b", "yolomux-abc123"), None),
         ("tmux_run", ("send-keys", "-t", "%6", "Enter"), None),
         ("tmux_run", ("delete-buffer", "-b", "yolomux-abc123"), None),

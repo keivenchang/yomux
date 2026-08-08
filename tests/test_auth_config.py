@@ -1,6 +1,9 @@
 import json
 import re
+import threading
 from pathlib import Path
+
+import pytest
 
 from yolomux_lib import common
 from yolomux_lib import web
@@ -8,6 +11,9 @@ from yolomux_lib.locales import locale_registry_payload
 from yolomux_lib.locales import normalize_locale
 from yolomux_lib.locales import resolve_locale_preference
 from yolomux_lib.workdir import available_agent_commands
+from yolomux_lib import auth
+from yolomux_lib.infra.shared_config_lock import SharedConfigRevisionConflict
+from yolomux_lib.infra.shared_config_lock import read_shared_document
 
 SOURCE_STATIC_DIR = Path(__file__).resolve().parents[1] / "static_src"
 
@@ -40,6 +46,46 @@ def test_missing_auth_yaml_creates_commented_starter(monkeypatch, tmp_path):
     assert common.auth_setup_required() is True
     assert auth_path.stat().st_mode & 0o777 == 0o600
     assert auth_path.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_auth_reader_never_observes_partial_config_during_atomic_writes(tmp_path):
+    path = tmp_path / "auth.yaml"
+    first = active_auth_yaml()
+    second = first.replace('role: "readonly"', 'role: "admin"')
+    failures = []
+    done = threading.Event()
+
+    def writer():
+        for index in range(40):
+            auth.write_auth_config(path, first if index % 2 else second)
+        done.set()
+
+    def reader():
+        while not done.is_set():
+            try:
+                auth.read_auth_users(path)
+            except Exception as error:
+                failures.append(error)
+
+    writers = threading.Thread(target=writer)
+    readers = threading.Thread(target=reader)
+    readers.start()
+    writers.start()
+    writers.join()
+    readers.join()
+
+    assert failures == []
+    assert len(auth.read_auth_users(path)) == 2
+
+
+def test_auth_stale_document_write_is_refused(tmp_path):
+    path = tmp_path / "auth.yaml"
+    auth.write_auth_config(path, active_auth_yaml())
+    _text, revision = read_shared_document(path)
+    auth.write_auth_config(path, active_auth_yaml().replace('role: "readonly"', 'role: "admin"'))
+
+    with pytest.raises(SharedConfigRevisionConflict):
+        auth.write_auth_config(path, "# stale document\n", expected_revision=revision)
 
 
 def test_test_auth_bypass_disables_setup_requirement(monkeypatch, tmp_path):
@@ -211,6 +257,16 @@ def test_setup_auth_page_recommends_https_only_for_http(monkeypatch):
     assert "--host 0.0.0.0" not in setup_html
     edit_label = web.server_string("en", "common.edit")
     assert setup_html.index(recommendation) < setup_html.index(f"{edit_label} <code>")
+
+
+def test_setup_screen_names_effective_auth_config_path(monkeypatch, tmp_path):
+    auth_path = tmp_path / "private-config" / "auth.yaml"
+    monkeypatch.setattr(web, "AUTH_CONFIG_PATH", auth_path)
+
+    setup_html = web.setup_auth_html()
+
+    assert str(auth_path) in setup_html
+    assert "~/.config/yolomux/auth.yaml" not in setup_html
 
 
 def test_login_and_setup_screens_show_please_login_for_logged_out_agent(monkeypatch):

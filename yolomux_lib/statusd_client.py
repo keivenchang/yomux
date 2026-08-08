@@ -8,26 +8,32 @@ from typing import Any
 
 from .infra import common
 from .local_services.client import LocalServiceClient
-from .local_services.rpc import LOCAL_RPC_VERSION
 from .local_services.rpc import safe_socket_path
+from .statusd_protocol import STATUSD_PROTOCOL_VERSION
 from .statusd_protocol import STATUSD_SERVICE_NAME
 from .statusd_protocol import STATUSD_CODE_REVISION
+from .statusd_protocol import activity_summary_disabled_response
+from .statusd_protocol import activity_summary_enabled
+from .statusd_protocol import encode_activity_work_body
 from .statusd_protocol import stamped_request
 
 
 STATUSD_SOCKET_NAME = "statusd.sock"
 STATUSD_DEFAULT_IDLE_SECONDS = 60.0
+STATUSD_ACTIVITY_SUMMARY_TIMEOUT_SECONDS = 60.0
+STATUSD_WAIT_GENERATION_TRANSPORT_MARGIN_SECONDS = 0.5
+STATUSD_GENERATION_PROBE_TRANSPORT_TIMEOUT_SECONDS = 1.5
 
 
 def default_socket_path() -> Path:
-    return safe_socket_path(common.STATE_DIR / "services" / STATUSD_SOCKET_NAME, prefix="yolomux-statusd")
+    return safe_socket_path(common.RUNTIME_DIR / "services" / STATUSD_SOCKET_NAME, prefix="yolomux-statusd")
 
 
 class StatusClient(LocalServiceClient):
     """Typed byte-forwarding client for the shared status owner."""
 
     def __init__(self, socket_path: Path | None = None):
-        super().__init__(STATUSD_SERVICE_NAME, "yolomux_lib.statusd", socket_path or default_socket_path(), LOCAL_RPC_VERSION, idle_seconds=STATUSD_DEFAULT_IDLE_SECONDS, code_revision=STATUSD_CODE_REVISION, build_revision=1, service_dir=Path(socket_path).parent if socket_path is not None else common.STATE_DIR / "services")
+        super().__init__(STATUSD_SERVICE_NAME, "yolomux_lib.statusd", socket_path or default_socket_path(), STATUSD_PROTOCOL_VERSION, idle_seconds=STATUSD_DEFAULT_IDLE_SECONDS, code_revision=STATUSD_CODE_REVISION, build_revision=1, service_dir=Path(socket_path).parent if socket_path is not None else common.RUNTIME_DIR / "services")
 
     def snapshot(self, sessions: list[str], session: str | None = None, timeout: float = 1.0) -> tuple[dict[str, Any], bytes]:
         if not self.ensure_started():
@@ -46,8 +52,48 @@ class StatusClient(LocalServiceClient):
             fields["sessions"] = list(sessions_hint)
         return self.request_with_binary(stamped_request("inventory", **fields), timeout=timeout)
 
+    def activity_summary(
+        self,
+        sessions: list[str],
+        *,
+        force: bool,
+        locale: str,
+        session_scope: str,
+        hours: float,
+        work_by_session: dict[str, dict[str, Any]],
+        timeout: float = STATUSD_ACTIVITY_SUMMARY_TIMEOUT_SECONDS,
+    ) -> tuple[dict[str, Any], bytes]:
+        if not activity_summary_enabled():
+            return activity_summary_disabled_response()
+        if not self.ensure_started():
+            return {"ok": False, "status": int(HTTPStatus.SERVICE_UNAVAILABLE), "error": "unavailable"}, b""
+        request_binary = encode_activity_work_body(work_by_session, sessions)
+        return self.request_with_binary(
+            stamped_request(
+                "activity_summary",
+                sessions=list(sessions),
+                force=bool(force),
+                locale=locale,
+                session_scope=session_scope,
+                hours=hours,
+                work_by_session_binary=True,
+            ),
+            timeout=timeout,
+            request_binary=request_binary,
+        )
+
     def wait_generation(self, after_generation: int, timeout: float) -> dict[str, Any]:
-        return self.request(stamped_request("wait_generation", after_generation=after_generation, timeout_seconds=timeout), timeout=timeout + 0.1)
+        return self.request(
+            stamped_request("wait_generation", after_generation=after_generation, timeout_seconds=timeout),
+            timeout=timeout + STATUSD_WAIT_GENERATION_TRANSPORT_MARGIN_SECONDS,
+        )
+
+    def probe_generation(self, after_generation: int) -> dict[str, Any]:
+        """Read the current generation without occupying a daemon handler between probes."""
+        return self.request(
+            stamped_request("wait_generation", after_generation=after_generation, timeout_seconds=0.0),
+            timeout=STATUSD_GENERATION_PROBE_TRANSPORT_TIMEOUT_SECONDS,
+        )
 
     def acquire_generation_lease(self) -> dict[str, Any]:
         """Keep statusd's demand-scoped generation refresher alive for one web process."""

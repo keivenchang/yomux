@@ -9,11 +9,27 @@ checks by hand. Use --serial when debugging order or when interleaved process
 load makes a failure hard to read. Focused pytest lanes are available with
 --lane, but the default gate keeps the old full-pytest behavior.
 
+A default run then adds ONE exclusive latency-certification phase. The parallel
+lanes retire every process they own, the host is qualified against a declared
+resource envelope, the certification units run serially and alone, and the host
+is qualified again afterwards. An unqualified host exits 4 with the literal
+NOT CERTIFIABLE and its raw evidence; it is never skipped into a green.
+
 Usage:
   python3 tools/check.py
   python3 tools/check.py --serial
   python3 tools/check.py --lane pytest-boot
+  python3 tools/check.py --certification-only
   python3 tools/check.py --no-tool-guard
+
+Exit codes:
+  0   every lane passed and the certification units certified
+  1   a lane failed, or a certification unit breached its fixed ceiling
+  2   usage error
+  3   another expensive check or worktree writer owns this checkout
+  4   NOT CERTIFIABLE - the host was unqualified, owned processes did not
+      retire, or a certification unit did not actually run
+  130 interrupted
 """
 
 from __future__ import annotations
@@ -31,17 +47,31 @@ import shlex
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+sys.dont_write_bytecode = True
 
+# tests/latency_calibration.py is the sole owner of host qualification, the declared reference
+# envelopes and the fixed-ceiling verdict. The phase runner and the certification units read the
+# same module so a threshold cannot drift between the gate and the test that it admits.
+from tests import latency_calibration
+from tools import docker_image
 from yolomux_lib.background_owner import pid_is_alive
 from yolomux_lib.filesystem.io_ops import read_json_file
+from yolomux_lib.infra import worktree_writer
+from tools.test_catalog import MOCK_TRANSCRIPT_FILES  # noqa: F401 - check-runner compatibility export
+from tools.test_catalog import NODE_LAYOUT_FILES
 from tools.test_catalog import PYTEST_PHASE_FILES  # noqa: F401 - check-runner compatibility export
 from tools.test_catalog import pytest_files
+from tools.tool_guard import TOOL_LOCK_OWNER_ENV
+from tools.tool_guard import tool_lock_owner_marker
+from yolomux_lib.infra.inotify_capacity import InotifyCapacityVerdict
+from yolomux_lib.infra.inotify_capacity import inotify_capacity_verdict
 
 DEFAULT_TOOL_LOCK_PATH = Path(
     os.environ.get("YOLOMUX_TOOL_LOCK_PATH", str(Path.home() / ".cache" / "yolomux" / "expensive-tools.lock"))
@@ -49,6 +79,32 @@ DEFAULT_TOOL_LOCK_PATH = Path(
 TOOL_GUARD_STATE_STALE_SECONDS = 30.0
 TOOL_GUARD_NICE_DELTA = 5
 EXPENSIVE_TOOL_LANES = frozenset({"node-layout", "pytest", "pytest-boot", "pytest-browser", "pytest-e2e"})
+
+EXIT_LANE_FAILED = 1
+EXIT_USAGE = 2
+EXIT_REFUSED = 3
+EXIT_NOT_CERTIFIABLE = 4
+
+# The exclusive phase's units. Each is a user-visible wall-latency claim that a parallel lane
+# cannot measure: an oversubscribed renderer or a contended disk reports the machine. Every unit
+# qualifies its host through the one owner in tests/latency_calibration.py, the same one this
+# runner uses for preflight and postflight, so order no longer has to compensate for a private
+# decaying estimator inside a unit.
+#
+# The last entry is the phase's own negative control: it proves the qualifier still separates a
+# quiet host from a loaded one on this box. It runs last because it deliberately loads the host.
+CERTIFICATION_NODE_IDS = (
+    "tests/test_gate_tmux.py::test_s1_certification_keystroke_wall_latency_holds_the_fixed_user_ceiling",
+    "tests/test_gate_interaction.py::test_i3a_certification_drag_preview_holds_the_fixed_ceiling",
+    "tests/test_gate_interaction.py::test_i3b_certification_dockview_load_layout_holds_the_fixed_ceiling",
+    "tests/test_chat_store.py::test_chat_store_operation_wall_latency_certification",
+    "tests/test_check_runner.py::test_certification_host_qualifier_refuses_a_genuinely_loaded_host",
+)
+CERTIFICATION_JUNIT_NAME = "certification-junit.xml"
+# A join, not a settle wait: the phase blocks until every process this gate started has exited,
+# then measures once. It never waits for the machine to become quiet.
+RETIREMENT_DEADLINE_SECONDS = 30.0
+RETIREMENT_POLL_SECONDS = 0.2
 
 
 class ToolGuardBusy(RuntimeError):
@@ -59,6 +115,9 @@ class ToolGuardBusy(RuntimeError):
 class Step:
     label: str
     args: list[str]
+    # Extra environment for this step only. The certification units are admitted by env flag and
+    # docker/run-tests.sh forwards a fixed allowlist, so the names here must appear in it.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,7 +146,7 @@ class StepResult:
     command: str
     seconds: float
     returncode: int
-    slow_tests: tuple[dict[str, object], ...] = ()
+    test_durations: tuple[dict[str, object], ...] = ()
 
 
 def py_compile_files() -> list[str]:
@@ -160,8 +219,11 @@ def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]
         ),
         Lane(
             "static",
-            "static_build --check",
-            (Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),),
+            "static source checks",
+            (
+                Step("static_build --check", ["python3", "tools/static_build.py", "--check"]),
+                Step("textshape_assertion_guard", ["python3", "tools/textshape_assertion_guard.py"]),
+            ),
             True,
         ),
         Lane(
@@ -176,7 +238,7 @@ def lanes(*, serial: bool = False, cpu_percent: int | None = None) -> list[Lane]
         Lane(
             "node-layout",
             "node layout suite",
-            (Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js"]),),
+            (Step("node tests/layout_url.test.js", ["node", "tests/layout_url.test.js", *NODE_LAYOUT_FILES]),),
             True,
         ),
         Lane(
@@ -332,6 +394,29 @@ def lower_current_process_priority(active_records: list[dict[str, object]], *, n
     return True
 
 
+HEAVY_LANE_NAME_PREFIX = "pytest"
+
+
+def heavy_lane_names(selected: list[Lane]) -> list[str]:
+    """Return the selected lanes that fan out browsers, daemons and xdist workers."""
+
+    return [lane.name for lane in selected if lane.name.startswith(HEAVY_LANE_NAME_PREFIX)]
+
+
+def admit_inotify_capacity(selected: list[Lane]) -> InotifyCapacityVerdict | None:
+    """Admit this host's inotify capacity before any heavy lane is created.
+
+    The check runs here, not after the lanes retire: every watch daemon and
+    browser the gate starts consumes the same uid-wide ceiling, so a refusal is
+    only actionable while the capacity still has to be reserved.  Lanes that
+    create no watchers are not gated on it.
+    """
+
+    if not heavy_lane_names(selected):
+        return None
+    return inotify_capacity_verdict()
+
+
 def selected_needs_tool_guard(selected: list[Lane], explicit_lane_names: list[str] | None) -> bool:
     selected_names = {lane.name for lane in selected}
     if explicit_lane_names is None:
@@ -350,9 +435,15 @@ def expensive_tool_lock(enabled: bool = True, lock_path: Path = DEFAULT_TOOL_LOC
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ToolGuardBusy(f"another expensive YOLOmux check already owns {lock_path}") from exc
+        previous_owner = os.environ.get(TOOL_LOCK_OWNER_ENV)
+        os.environ[TOOL_LOCK_OWNER_ENV] = tool_lock_owner_marker(lock_path)
         try:
             yield True
         finally:
+            if previous_owner is None:
+                os.environ.pop(TOOL_LOCK_OWNER_ENV, None)
+            else:
+                os.environ[TOOL_LOCK_OWNER_ENV] = previous_owner
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -364,8 +455,9 @@ def run_lane(lane: Lane) -> LaneResult:
     for step in lane.steps:
         chunks.append(f"$ {command_text(step.args)}\n")
         step_started = time.monotonic()
-        result = subprocess.run(step.args, cwd=REPO_ROOT, capture_output=True, text=True)
-        step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_slowest_calls(result.stdout)))
+        environment = {**os.environ, **dict(step.env)} if step.env else None
+        result = subprocess.run(step.args, cwd=REPO_ROOT, capture_output=True, text=True, env=environment)
+        step_results.append(StepResult(step.label, command_text(step.args), time.monotonic() - step_started, result.returncode, pytest_duration_phases(result.stdout)))
         if result.stdout:
             chunks.append(result.stdout)
             if not result.stdout.endswith("\n"):
@@ -394,23 +486,23 @@ def child_usage_snapshot() -> dict[str, float | int | str]:
     }
 
 
-_PYTEST_SLOW_CALL_RE = re.compile(r"^\s*([0-9.]+)s\s+(?:call|setup|teardown)\s+(.+)$", re.MULTILINE)
+_PYTEST_DURATION_RE = re.compile(r"^\s*([0-9.]+)s\s+(call|setup|teardown)\s+(.+)$", re.MULTILINE)
 
 
-def pytest_slowest_calls(output: str, *, limit: int = 10) -> tuple[dict[str, object], ...]:
-    """Extract bounded pytest duration rows when a performance run requested them."""
+def pytest_duration_phases(output: str) -> tuple[dict[str, object], ...]:
+    """Extract every pytest duration row for the persistent per-run report."""
 
     return tuple(
-        {"seconds": float(seconds), "nodeid": nodeid.strip()}
-        for seconds, nodeid in _PYTEST_SLOW_CALL_RE.findall(output)[:limit]
+        {"seconds": float(seconds), "phase": phase, "nodeid": nodeid.strip()}
+        for seconds, phase, nodeid in _PYTEST_DURATION_RE.findall(output)
     )
 
 
 def instrument_lane_for_performance(lane: Lane) -> Lane:
-    """Ask pytest for a bounded timing table only in opt-in reporting mode."""
+    """Ask every pytest step for the timing table persisted in the run report."""
 
     steps = tuple(
-        Step(step.label, [*step.args, "--durations=10"] if step.args[:3] == ["python3", "-m", "pytest"] else step.args)
+        Step(step.label, [*step.args, "--durations=0", "--durations-min=0"] if step.args[:3] == ["python3", "-m", "pytest"] else step.args, step.env)
         for step in lane.steps
     )
     return Lane(lane.name, lane.label, steps, lane.default)
@@ -427,12 +519,13 @@ def child_usage_delta(before: dict[str, float | int | str], after: dict[str, flo
     }
 
 
-def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None) -> dict[str, object]:
+def performance_report_payload(*, selected: list[Lane], results: list[LaneResult], serial: bool, elapsed: float, child_usage: dict[str, float | int | str], interrupted: bool = False, cpu_percent: int | None = None, certification: dict[str, object] | None = None) -> dict[str, object]:
     """Create stable opt-in machine output without adding noise to normal checks."""
 
     worker_counts = dict(zip(("nonbrowser", "browser", "e2e"), pytest_worker_counts(serial=serial, cpu_percent=cpu_percent), strict=True))
     return {
-        "schema": 1,
+        "schema": 3,
+        "certification": certification,
         "interrupted": interrupted,
         "mode": "serial" if serial else "parallel",
         "cpu_percent": None if serial else check_cpu_percent(cpu_percent),
@@ -451,7 +544,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
                         "command": step.command,
                         "wall_seconds": round(step.seconds, 6),
                         "returncode": step.returncode,
-                        "slow_tests": step.slow_tests,
+                        "test_durations": step.test_durations,
                     }
                     for step in result.steps
                 ],
@@ -465,7 +558,7 @@ def performance_report_payload(*, selected: list[Lane], results: list[LaneResult
 def performance_report_path(value: str) -> Path:
     """Limit raw machine evidence to /tmp, never the source tree or docs."""
 
-    path = Path(value) if value else Path("/tmp") / f"yolomux-check-{os.getpid()}.json"
+    path = Path(value) if value else Path("/tmp") / "yolomux-check-runs" / f"check-{time.time_ns()}-{os.getpid()}.json"
     resolved = path.resolve()
     tmp_root = Path("/tmp").resolve()
     if not resolved.is_relative_to(tmp_root):
@@ -533,6 +626,268 @@ def run_serial(selected: list[Lane]) -> list[LaneResult]:
     return results
 
 
+def process_table() -> list[tuple[int, int, str]]:
+    """One snapshot of every live process as (pid, ppid, command), portable across Linux and macOS.
+
+    The snapshot is produced by a child process, so an unfiltered table always contains at least one
+    live descendant of the caller and retirement could never complete. Excluding that pid is the
+    difference between measuring the gate and measuring the measurement.
+    """
+
+    with subprocess.Popen(["ps", "-eo", "pid=,ppid=,command="], stdout=subprocess.PIPE, text=True) as probe:
+        stdout, _stderr = probe.communicate()
+        probe_pid = probe.pid
+    rows: list[tuple[int, int, str]] = []
+    for line in stdout.splitlines():
+        fields = line.split(None, 2)
+        if len(fields) < 2 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        if int(fields[0]) == probe_pid:
+            continue
+        rows.append((int(fields[0]), int(fields[1]), fields[2] if len(fields) > 2 else ""))
+    return rows
+
+
+def descendant_processes(pid: int, rows: list[tuple[int, int, str]] | None = None) -> list[dict[str, object]]:
+    """Every live descendant of pid. These are the processes this gate owns and must retire."""
+
+    table = process_table() if rows is None else rows
+    children: dict[int, list[tuple[int, str]]] = {}
+    for child_pid, parent_pid, command in table:
+        children.setdefault(parent_pid, []).append((child_pid, command))
+    found: list[dict[str, object]] = []
+    seen = {pid}
+    frontier = [pid]
+    while frontier:
+        current = frontier.pop()
+        for child_pid, command in children.get(current, ()):
+            if child_pid in seen:
+                continue
+            seen.add(child_pid)
+            frontier.append(child_pid)
+            found.append({"pid": child_pid, "ppid": current, "command": command})
+    return found
+
+
+def running_test_containers() -> dict[str, object]:
+    """Live containers built from this checkout's test image, or why they could not be observed.
+
+    pytest re-executes itself inside that image, so the lanes' real work does NOT run as a
+    descendant of this runner: those processes belong to the container runtime. A retirement check
+    that only walks the process tree therefore reports "retired" while a full browser suite is
+    still winding down. An unobservable docker client is not a failure here - the lanes then ran on
+    the host, or inside the image itself, and the process walk already covers them - but the reason
+    is recorded so an empty result is never mistaken for a proven-clean one.
+    """
+
+    image = docker_image.image_name(REPO_ROOT)
+    try:
+        completed = subprocess.run(
+            ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        # An expected outcome carrying its reason, not a crash. The gate's own tests execute INSIDE
+        # that image, where there is no docker client at all, so this probe must report "cannot
+        # observe" rather than raise through the phase or claim an empty, clean result.
+        return {"available": False, "reason": f"docker client unavailable: {exc}", "image": image, "containers": []}
+    if completed.returncode != 0:
+        return {"available": False, "reason": (completed.stderr or "docker ps failed").strip()[:500], "image": image, "containers": []}
+    return {
+        "available": True,
+        "reason": "",
+        "image": image,
+        "containers": [
+            {"container": fields[0], "status": fields[1] if len(fields) > 1 else ""}
+            for fields in (line.split("\t") for line in completed.stdout.splitlines())
+            if fields and fields[0]
+        ],
+    }
+
+
+def retire_owned_processes(*, pid: int | None = None, deadline_seconds: float = RETIREMENT_DEADLINE_SECONDS) -> dict[str, object]:
+    """Join everything the parallel lanes started before anything is measured.
+
+    A join on measured predicates - zero surviving descendants and zero live test containers - not
+    a settle wait for a quiet machine. `os.sync()` then completes the writeback those lanes caused
+    instead of leaving the qualifier to observe it as ambient disk load; the gate finishes its own
+    I/O rather than waiting for the kernel to get around to it. A deadline breach is a
+    machine-readable refusal carrying the survivors, never a longer wait and never a silent continue.
+    """
+
+    owner = os.getpid() if pid is None else pid
+    started = time.monotonic()
+    survivors = descendant_processes(owner)
+    container_probe = running_test_containers()
+    while (survivors or container_probe["containers"]) and time.monotonic() - started < deadline_seconds:
+        time.sleep(RETIREMENT_POLL_SECONDS)
+        survivors = descendant_processes(owner)
+        container_probe = running_test_containers()
+    joined_seconds = time.monotonic() - started
+    sync_started = time.monotonic()
+    os.sync()
+    return {
+        "owner_pid": owner,
+        "retired": not survivors and not container_probe["containers"],
+        "seconds": round(joined_seconds, 6),
+        "sync_seconds": round(time.monotonic() - sync_started, 6),
+        "deadline_seconds": deadline_seconds,
+        "survivors": survivors,
+        "container_probe": container_probe,
+    }
+
+
+def certification_evidence_dir(explicit: str | None = None) -> Path:
+    """One /tmp directory holding the junit outcomes and every raw latency artifact.
+
+    docker/run-tests.sh bind-mounts YOLOMUX_E2E_EVIDENCE_DIR at the identical absolute path, so
+    evidence written by the containerized run is readable here without a second transport.
+    """
+
+    path = Path(explicit) if explicit else Path("/tmp") / "yolomux-certification" / f"cert-{time.time_ns()}-{os.getpid()}"
+    if not path.resolve().is_relative_to(Path("/tmp").resolve()):
+        raise ValueError("certification evidence dir must be under /tmp")
+    return path
+
+
+def certification_step(evidence_dir: Path) -> Step:
+    """One serial pytest invocation naming every certification node id explicitly."""
+
+    junit_path = evidence_dir / CERTIFICATION_JUNIT_NAME
+    return Step(
+        "certification units",
+        # junit_family=xunit1 is pinned because the default xunit2 omits the `file` attribute, and
+        # without it no reported case can be matched back to a requested node id. That failure is
+        # fail-closed - every unit reads as not-collected and the phase refuses - but it refuses a
+        # run whose units all actually passed, so the family is pinned rather than inferred.
+        ["python3", "-m", "pytest", *CERTIFICATION_NODE_IDS, "-p", "no:xdist", "-o", "junit_family=xunit1", f"--junit-xml={junit_path}", "-rs", "-q"],
+        tuple(
+            [(name, "1") for name in latency_calibration.CERTIFICATION_ENV_NAMES]
+            + [("YOLOMUX_E2E_EVIDENCE_DIR", str(evidence_dir))]
+        ),
+    )
+
+
+def certification_outcomes(junit_path: Path, expected: tuple[str, ...] = CERTIFICATION_NODE_IDS) -> dict[str, dict[str, object]]:
+    """Read what each named node actually did. A node that did not run is never counted green."""
+
+    reported: dict[str, dict[str, object]] = {}
+    if junit_path.exists():
+        for case in ElementTree.parse(junit_path).iter("testcase"):
+            nodeid = f"{case.get('file')}::{case.get('name')}"
+            outcome, detail = "passed", ""
+            for child in case:
+                if child.tag in {"skipped", "failure", "error"}:
+                    outcome = "skipped" if child.tag == "skipped" else child.tag
+                    detail = (child.get("message") or child.text or "").strip()
+                    break
+            reported[nodeid] = {"outcome": outcome, "detail": detail[:2000], "seconds": float(case.get("time") or 0.0)}
+    return {
+        nodeid: reported.get(nodeid, {"outcome": "not-collected", "detail": f"absent from {junit_path}", "seconds": 0.0})
+        for nodeid in expected
+    }
+
+
+def certification_verdict(
+    *,
+    retirement: dict[str, object],
+    preflight: dict[str, object] | None,
+    postflight: dict[str, object] | None,
+    outcomes: dict[str, dict[str, object]] | None,
+    returncode: int | None,
+) -> dict[str, object]:
+    """Resolve one phase outcome with an explicit precedence, and name the machine-readable reason.
+
+    Precedence, strongest refusal first. A void measurement outranks a unit failure: a ceiling
+    breach measured on a host that was not qualified is not evidence about the product, so it is
+    reported as NOT CERTIFIABLE with the unit evidence attached rather than blamed on the code.
+    """
+
+    if not retirement["retired"]:
+        return {
+            "result": "not-certifiable",
+            "reason": "owned_processes_not_retired",
+            "evidence": {"survivors": retirement["survivors"], "container_probe": retirement.get("container_probe")},
+        }
+    if preflight is not None and not preflight["qualified"]:
+        return {"result": "not-certifiable", "reason": "host_unqualified_preflight", "evidence": preflight["reasons"]}
+    if postflight is not None and not postflight["qualified"]:
+        return {"result": "not-certifiable", "reason": "host_unqualified_postflight", "evidence": postflight["reasons"]}
+    did_not_run = {nodeid: outcome for nodeid, outcome in (outcomes or {}).items() if outcome["outcome"] in {"skipped", "not-collected"}}
+    if did_not_run:
+        return {"result": "not-certifiable", "reason": "certification_unit_did_not_run", "evidence": did_not_run}
+    # A unit that refused because its own host qualification failed is not evidence about the
+    # product either, so it outranks a breach for the same reason the preflight does. The units
+    # qualify their host at the moment they run, which the phase's preflight - taken before the
+    # whole serial run - cannot; without this branch that refusal would be reported as a product
+    # failure. NOT_CERTIFIABLE is the literal every refusal carries, in the runner and in a unit.
+    #
+    # The refusal changes the verdict but never hides the other reds: a unit that refused and a
+    # DIFFERENT unit that failed are two facts, and reporting only the first would discard the
+    # second. Both sets are carried, so a reader always sees every non-passing unit.
+    not_passed = {nodeid: outcome for nodeid, outcome in (outcomes or {}).items() if outcome["outcome"] != "passed"}
+    refused = {nodeid: outcome for nodeid, outcome in not_passed.items() if latency_calibration.NOT_CERTIFIABLE in str(outcome["detail"])}
+    if refused:
+        return {
+            "result": "not-certifiable",
+            "reason": "certification_unit_not_certifiable",
+            "evidence": {"refused": refused, "also_failed": {nodeid: outcome for nodeid, outcome in not_passed.items() if nodeid not in refused}},
+        }
+    if not_passed:
+        return {"result": "failed", "reason": "certification_unit_failed", "evidence": not_passed}
+    if returncode not in (None, 0):
+        return {"result": "failed", "reason": "certification_command_failed", "evidence": {"returncode": returncode}}
+    return {"result": "certified", "reason": "all_units_certified_on_a_qualified_host", "evidence": outcomes or {}}
+
+
+def run_certification_phase(*, evidence_dir: Path) -> tuple[dict[str, object], LaneResult | None]:
+    """Retire, qualify, certify serially, qualify again. Exclusive by construction, never by hope."""
+
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    retirement = retire_owned_processes()
+    preflight = latency_calibration.host_qualification(evidence_root=evidence_dir) if retirement["retired"] else None
+    lane_result: LaneResult | None = None
+    postflight: dict[str, object] | None = None
+    outcomes: dict[str, dict[str, object]] | None = None
+    returncode: int | None = None
+    if preflight is not None and preflight["qualified"]:
+        lane_result = run_lane(Lane("certification", "latency certification", (certification_step(evidence_dir),)))
+        returncode = lane_result.steps[-1].returncode if lane_result.steps else None
+        postflight = latency_calibration.host_qualification(evidence_root=evidence_dir)
+        outcomes = certification_outcomes(evidence_dir / CERTIFICATION_JUNIT_NAME)
+    verdict = certification_verdict(retirement=retirement, preflight=preflight, postflight=postflight, outcomes=outcomes, returncode=returncode)
+    payload = {
+        **verdict,
+        "wall_seconds": round(time.monotonic() - started, 6),
+        "evidence_dir": str(evidence_dir),
+        "node_ids": list(CERTIFICATION_NODE_IDS),
+        "retirement": retirement,
+        "preflight": preflight,
+        "postflight": postflight,
+        "outcomes": outcomes,
+        "returncode": returncode,
+    }
+    return payload, lane_result
+
+
+def print_certification(payload: dict[str, object], lane_result: LaneResult | None) -> None:
+    result = payload["result"]
+    if result == "certified":
+        print(f"CERTIFIED: {len(CERTIFICATION_NODE_IDS)} unit(s) on a qualified host ({payload['wall_seconds']:.2f}s)", flush=True)
+    elif result == "not-certifiable":
+        print(f"{latency_calibration.NOT_CERTIFIABLE}: {payload['reason']}", flush=True)
+        print(json.dumps(payload["evidence"], indent=2, sort_keys=True, default=str), flush=True)
+    else:
+        print(f"CERTIFICATION FAILED: {payload['reason']}", flush=True)
+        print(json.dumps(payload["evidence"], indent=2, sort_keys=True, default=str), flush=True)
+    if lane_result is not None and result != "certified":
+        print(lane_result.output, end="" if lane_result.output.endswith("\n") else "\n", flush=True)
+    print(f"Certification evidence: {payload['evidence_dir']}", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     available = lanes()
     lane_names = [lane.name for lane in available]
@@ -542,8 +897,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lane", action="append", choices=lane_names, help="run only this lane; may be repeated")
     parser.add_argument("--list-lanes", action="store_true", help="print lane names and exit")
     parser.add_argument("--no-tool-guard", action="store_true", help="skip the expensive-tool lock and live-server priority lowering")
-    parser.add_argument("--performance-report", nargs="?", const="", metavar="/tmp/REPORT.json", help="write opt-in timing and child-resource JSON under /tmp")
+    parser.add_argument("--performance-report", nargs="?", const="", metavar="/tmp/REPORT.json", help="override the automatic per-run timing report path under /tmp")
+    parser.add_argument("--certification-only", action="store_true", help="run only the exclusive latency-certification phase, skipping every functional lane")
+    parser.add_argument("--certification-evidence-dir", default=None, metavar="/tmp/DIR", help="override the automatic certification evidence directory under /tmp")
     args = parser.parse_args(argv)
+
+    if args.certification_only and args.lane:
+        parser.error("--certification-only runs no lanes; drop --lane")
 
     try:
         check_cpu_percent(args.cpu_percent)
@@ -555,60 +915,95 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.list_lanes:
         for lane in available:
-            print(f"{lane.name}\t{lane.label}")
+            selections = [command_text(step.args) for step in lane.steps]
+            if lane.name == "node-layout":
+                selections.extend(NODE_LAYOUT_FILES)
+            print(f"{lane.name}\t{lane.label}\t{' ; '.join(selections)}")
         return 0
 
-    selected_names = set(args.lane or [lane.name for lane in available if lane.default])
+    selected_names = set() if args.certification_only else set(args.lane or [lane.name for lane in available if lane.default])
     selected = slowest_first([lane for lane in available if lane.name in selected_names])
-    if not selected:
+    if not selected and not args.certification_only:
         print("no lanes selected", file=sys.stderr)
         return 2
 
+    # The exclusive phase belongs to the canonical command. A focused --lane run is deliberately
+    # not a certification, and says so, rather than exiting 0 as if it had certified.
+    certify = args.certification_only or args.lane is None
     try:
-        report_path = performance_report_path(args.performance_report) if args.performance_report is not None else None
+        report_path = performance_report_path(args.performance_report or "")
+        evidence_dir = certification_evidence_dir(args.certification_evidence_dir)
     except ValueError as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 2
-    if report_path is not None:
-        selected = [instrument_lane_for_performance(lane) for lane in selected]
+    selected = [instrument_lane_for_performance(lane) for lane in selected]
 
-    guard_enabled = selected_needs_tool_guard(selected, args.lane) and not args.no_tool_guard
+    inotify_capacity = admit_inotify_capacity(selected)
+    if inotify_capacity is not None and not inotify_capacity.admitted:
+        print(inotify_capacity.refusal_text(), file=sys.stderr, flush=True)
+        return 4
+
+    guard_enabled = (certify or selected_needs_tool_guard(selected, args.lane)) and not args.no_tool_guard
     if guard_enabled:
         print(f"Acquiring YOLOmux expensive-tool lock: {DEFAULT_TOOL_LOCK_PATH}", flush=True)
     started = time.monotonic()
     usage_before = child_usage_snapshot()
     results: list[LaneResult] = []
+    certification: dict[str, object] | None = None
+    certification_lane: LaneResult | None = None
     try:
-        with expensive_tool_lock(enabled=guard_enabled):
-            if guard_enabled:
-                active_records = active_yolomux_server_records()
-                if lower_current_process_priority(active_records):
-                    ports = sorted({str(record.get("port") or "?") for record in active_records})
-                    print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
-            mode = "serial" if args.serial else "parallel"
-            print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
-            results = run_serial(selected) if args.serial else run_parallel(selected)
-            elapsed = time.monotonic() - started
+        with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="test-gate"):
+            with expensive_tool_lock(enabled=guard_enabled):
+                if guard_enabled:
+                    active_records = active_yolomux_server_records()
+                    if lower_current_process_priority(active_records):
+                        ports = sorted({str(record.get("port") or "?") for record in active_records})
+                        print(f"Detected {len(active_records)} active YOLOmux server(s) on port(s) {', '.join(ports)}; lowered check priority by nice +{TOOL_GUARD_NICE_DELTA}", flush=True)
+                mode = "serial" if args.serial else "parallel"
+                if selected:
+                    print(f"Running {len(selected)} check lane(s) in {mode}: {', '.join(lane.name for lane in selected)}", flush=True)
+                    results = run_serial(selected) if args.serial else run_parallel(selected)
+                # Always, even when a lane already failed. A phase that only runs on an otherwise
+                # green gate cannot be trusted on a box where some lane is usually red: its own
+                # regressions would never be observed.
+                if certify:
+                    print(f"Retiring lane processes, then running the exclusive certification phase: {len(CERTIFICATION_NODE_IDS)} unit(s)", flush=True)
+                    certification, certification_lane = run_certification_phase(evidence_dir=evidence_dir)
+                    print_certification(certification, certification_lane)
+                elapsed = time.monotonic() - started
+    except worktree_writer.WorktreeWriterBusy as exc:
+        print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
+        return 3
     except ToolGuardBusy as exc:
         print(f"CHECK REFUSED: {exc}", file=sys.stderr, flush=True)
         return 3
     except KeyboardInterrupt:
         elapsed = time.monotonic() - started
         print("CHECK INTERRUPTED", file=sys.stderr, flush=True)
-        if report_path is not None:
-            write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True, cpu_percent=args.cpu_percent))
-            print(f"Performance report: {report_path}", file=sys.stderr, flush=True)
+        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), interrupted=True, cpu_percent=args.cpu_percent))
+        print(f"Test runtime report: {report_path}", file=sys.stderr, flush=True)
         return 130
 
-    if report_path is not None:
-        write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent))
-        print(f"Performance report: {report_path}", flush=True)
+    write_performance_report(report_path, performance_report_payload(selected=selected, results=results, serial=args.serial, elapsed=elapsed, child_usage=child_usage_delta(usage_before, child_usage_snapshot()), cpu_percent=args.cpu_percent, certification=certification))
+    print(f"Test runtime report: {report_path}", flush=True)
 
     failed = [result.label for result in results if not result.ok]
     print("\n" + ("=" * 40))
     if failed:
-        print(f"CHECK FAILED in {elapsed:.2f}s: " + ", ".join(failed))
-        return 1
+        # A failed lane is a definite product red and outranks "could not be measured"; the
+        # certification verdict was still printed above and is in the run report either way.
+        certification_note = f"; certification: {certification['result']}" if certification else ""
+        print(f"CHECK FAILED in {elapsed:.2f}s: " + ", ".join(failed) + certification_note)
+        return EXIT_LANE_FAILED
+    if not certify:
+        print(f"CHECK PASSED in {elapsed:.2f}s (focused lane selection: NOT CERTIFIED, the exclusive latency phase did not run)")
+        return 0
+    if certification["result"] == "not-certifiable":
+        print(f"CHECK {latency_calibration.NOT_CERTIFIABLE} in {elapsed:.2f}s: {certification['reason']}")
+        return EXIT_NOT_CERTIFIABLE
+    if certification["result"] != "certified":
+        print(f"CHECK FAILED in {elapsed:.2f}s: {certification['reason']}")
+        return EXIT_LANE_FAILED
     print(f"CHECK PASSED in {elapsed:.2f}s")
     return 0
 

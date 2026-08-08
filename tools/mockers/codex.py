@@ -10,9 +10,9 @@ Codex reasoning/thinking summaries and raw events when the server emits them, an
 approval prompts.
 
 Usage:
-  python3 tools/agent_clients/codex.py
-  python3 tools/agent_clients/codex.py -C . "summarize this repo"
-  python3 tools/agent_clients/codex.py -m gpt-5.4-mini --effort medium
+  python3 tools/mockers/codex.py
+  python3 tools/mockers/codex.py -C . "summarize this repo"
+  python3 tools/mockers/codex.py -m gpt-5.4-mini --effort medium
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import mock_agent_common
+import common as mock_agent_common
 
 if "--dump-fixtures" in sys.argv[1:]:
     mock_agent_common.configure_codex_mock(

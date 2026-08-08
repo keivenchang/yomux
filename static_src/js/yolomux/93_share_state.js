@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Share status, creation payloads, mirror sockets, and shared state snapshots.
+// YO!share is quarantined by product decision. Keep this implementation dormant so a future
+// revival can rebuild it behind tests from docs/specs/SHARE_MIRRORING.md.
+const shareFeatureQuarantined = true;
 let shareDefaultTtlSeconds = initialSetting('share.ttl_seconds', 600);
 let shareDefaultMaxViewers = initialSetting('share.max_viewers', 2);
 let shareDefaultReadOnly = initialSetting('share.read_only', true) !== false;

@@ -20,6 +20,7 @@ from .infra.common import MAX_EVENT_TAIL_LINES
 from .infra.common import MAX_TRANSCRIPT_TAIL_LINES
 from .infra.common import auth_setup_required
 from .infra.common import error_payload
+from .infra.common import inline_json_product_metadata
 from .infra.common import parse_bool
 from .chat.chat_service import ChatServiceError
 from .chat.chat_store import ChatStoreValidationError
@@ -28,11 +29,31 @@ from .web import html_page
 from .web import server_string
 from .web import static_content_type
 from .server_logs import server_logs_payload
+from .statusd_protocol import activity_summary_disabled_response
+from .statusd_protocol import activity_summary_enabled
 
 
 RouteRole = str | Callable[[Any, Any], str]
 RouteHandler = Callable[[Any, Any, "Route"], bool | None]
 PUBLIC = "public"
+RESPONSE_JSON = "json"
+RESPONSE_JSON_BATCH = "json-batch"
+RESPONSE_SSE = "sse"
+RESPONSE_BINARY = "binary"
+RESPONSE_HTML = "html"
+RESPONSE_REDIRECT = "redirect"
+RESPONSE_STATIC = "static"
+RESPONSE_WEBSOCKET = "websocket"
+RESPONSE_PROTOCOLS = frozenset({
+    RESPONSE_JSON,
+    RESPONSE_JSON_BATCH,
+    RESPONSE_SSE,
+    RESPONSE_BINARY,
+    RESPONSE_HTML,
+    RESPONSE_REDIRECT,
+    RESPONSE_STATIC,
+    RESPONSE_WEBSOCKET,
+})
 SHARE_ACCESS_NONE = "none"
 SHARE_ACCESS_READONLY = "readonly"
 SHARE_ACCESS_SCOPED_FILE = "scoped-file"
@@ -65,11 +86,15 @@ class Route:
     path: str
     role: RouteRole
     handler: RouteHandler
+    protocol: str
     body_limit: int | None = None
     group: str = "core"
     share_access: str = SHARE_ACCESS_NONE
+    normal_session_local_service: bool = False
 
     def __post_init__(self) -> None:
+        if self.protocol not in RESPONSE_PROTOCOLS:
+            raise ValueError(f"invalid response protocol: {self.protocol}")
         if self.share_access not in SHARE_ACCESS_VALUES:
             raise ValueError(f"invalid share access policy: {self.share_access}")
 
@@ -276,10 +301,14 @@ def dispatch_http_route(request: Any, method: str) -> None:
         _write_not_found_after_default_auth(request, method)
         return
 
+    request.dispatch_route_response(route, lambda: _dispatch_route_handler(request, parsed, route))
+
+
+def _dispatch_route_handler(request: Any, parsed: Any, route: Route) -> None:
     if route.role == PUBLIC:
         handled = route.handler(request, parsed, route)
         if handled is False:
-            _write_not_found_after_default_auth(request, method)
+            _write_not_found_after_default_auth(request, route.method)
         return
 
     required_role = route_required_role(route, request, parsed)
@@ -357,6 +386,8 @@ def get_stats_snapshot(request: Any, parsed: Any, route: Route) -> None:
     )
     if result.payload is not None:
         request.write_json(result.payload, status=result.status)
+    elif result.status == HTTPStatus.OK:
+        request.write_product_bytes(result.body, inline_json_product_metadata(result.body))
     else:
         request.write_json_bytes(result.body, status=result.status)
 
@@ -367,10 +398,12 @@ def get_stats_delta(request: Any, parsed: Any, route: Route) -> None:
         parsed.query,
         authenticated_username=request.auth_identity().username,
     )
-    if result.payload is None:
-        request.write_json_bytes(result.body, status=result.status)
-    else:
+    if result.payload is not None:
         request.write_json(result.payload, status=result.status)
+    elif result.status == HTTPStatus.OK:
+        request.write_product_bytes(result.body, inline_json_product_metadata(result.body))
+    else:
+        request.write_json_bytes(result.body, status=result.status)
 
 
 def get_stats_stream(request: Any, parsed: Any, route: Route) -> None:
@@ -389,7 +422,7 @@ def get_stats_capabilities(request: Any, parsed: Any, route: Route) -> None:
 def post_stats_retry(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
     payload = request.server.app.stats_current_http.retry()
-    request.write_json(payload, status=200 if payload.get("ok") is True else 503)
+    request.write_json(payload, status=HTTPStatus.OK if payload.get("ok") is True else HTTPStatus.FAILED_DEPENDENCY)
 
 
 def get_pricing_catalog(request: Any, parsed: Any, route: Route) -> None:
@@ -408,11 +441,14 @@ def post_pricing_catalog_refresh(request: Any, parsed: Any, route: Route) -> Non
 
 def post_stats_observations(request: Any, parsed: Any, route: Route) -> None:
     del parsed
-    payload = require_json_body(request, route)
-    if payload is None:
+    if route.body_limit is None:
+        raise RuntimeError(f"route {route.method} {route.path} has no body_limit")
+    body, error, status = request.read_request_body(route.body_limit)
+    if error is not None:
+        request.write_json(error, status=status)
         return
     response, status = request.server.app.record_current_browser_observations(
-        payload,
+        body,
         authenticated_username=request.auth_identity().username,
     )
     request.write_json(response, status=status)
@@ -440,10 +476,87 @@ def get_dev_reload(request: Any, parsed: Any, route: Route) -> None:
 def get_client_events(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
+    operation_id = str(query_one(qs, "operation_id", "") or "")
+    replay_operation_ids = tuple(dict.fromkeys(
+        item[:128]
+        for item in str(query_one(qs, "operations", "") or "").split(",")[:64]
+        if item
+    ))
+    shared_sessions = request.share_sessions()
+    if shared_sessions and (
+        not operation_id
+        or not request.server.app.operation_access_allowed(operation_id, shared_sessions)
+    ):
+        request.reject_share_forbidden()
+        return
+    if shared_sessions:
+        replay_operation_ids = ()
     request.stream_client_events(
         channels=str(query_one(qs, "channels", "") or ""),
         client_id=str(query_one(qs, "client_id", "") or ""),
+        operation_id=operation_id,
+        replay_operation_ids=replay_operation_ids,
     )
+
+
+def get_operation(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    operation_id = unquote(parsed.path.removeprefix("/api/operations/")).strip("/")
+    shared_sessions = request.share_sessions()
+    if shared_sessions and not request.server.app.operation_access_allowed(operation_id, shared_sessions):
+        request.reject_share_forbidden()
+        return
+    request.write_app_result(request.server.app.operation_status_payload(operation_id))
+
+
+def post_operation_acknowledgments(request: Any, parsed: Any, route: Route) -> None:
+    del parsed
+    payload = require_json_body(request, route)
+    if payload is None:
+        return
+    raw_acknowledgments = payload.get("acks")
+    if not isinstance(raw_acknowledgments, list) or not 1 <= len(raw_acknowledgments) <= 64:
+        request.write_json(
+            error_payload("operation acknowledgments required", message_key="common.requestFailed", status=HTTPStatus.BAD_REQUEST),
+            status=HTTPStatus.BAD_REQUEST,
+        )
+        return
+    acknowledgments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_acknowledgments:
+        operation_id = str(raw.get("id") or "") if isinstance(raw, dict) else ""
+        cursor = raw.get("cursor") if isinstance(raw, dict) else None
+        epoch = str(cursor.get("epoch") or "") if isinstance(cursor, dict) else ""
+        seq = cursor.get("seq") if isinstance(cursor, dict) else None
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != {"id", "cursor"}
+            or not isinstance(cursor, dict)
+            or set(cursor) != {"epoch", "seq"}
+            or not operation_id
+            or len(operation_id) > 128
+            or not epoch
+            or len(epoch) > 128
+            or not isinstance(seq, int)
+            or isinstance(seq, bool)
+            or seq <= 0
+            or operation_id in seen
+        ):
+            request.write_json(
+                error_payload("invalid operation acknowledgment", message_key="common.requestFailed", status=HTTPStatus.BAD_REQUEST),
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        seen.add(operation_id)
+        acknowledgments.append({"id": operation_id, "cursor": {"epoch": epoch, "seq": seq}})
+    shared_sessions = request.share_sessions()
+    if shared_sessions and any(
+        not request.server.app.operation_access_allowed(item["id"], shared_sessions)
+        for item in acknowledgments
+    ):
+        request.reject_share_forbidden()
+        return
+    request.write_app_result(request.server.app.acknowledge_operation_deliveries(acknowledgments))
 
 
 def get_home(request: Any, parsed: Any, route: Route) -> None:
@@ -483,16 +596,29 @@ def get_pane_popout(request: Any, parsed: Any, route: Route) -> None:
     request.handle_pane_popout_placeholder(parsed)
 
 
-def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
-    del route
+def session_metadata_route_payload(request: Any, parsed: Any) -> dict[str, Any]:
     qs = request_query(request, parsed)
     payload_fn = request.server.app.session_metadata_payload
     scoped_fn = request.share_scoped_session_metadata_payload
-    request.write_json(scoped_fn(payload_fn(force=query_bool(qs, "force"))))
+    return scoped_fn(payload_fn(force=query_bool(qs, "force")))
+
+
+def get_session_metadata(request: Any, parsed: Any, route: Route) -> None:
+    del route
+    payload = session_metadata_route_payload(request, parsed)
+    request.write_json({
+        "state": "ready",
+        "request": {"id": request.api_request_id()},
+        "data": payload,
+    })
 
 
 def get_transcripts(request: Any, parsed: Any, route: Route) -> None:
-    get_session_metadata(request, parsed, route)
+    del route
+    # Keep the old flattened shape on the explicitly documented compatibility alias. The current
+    # browser uses /api/session-metadata and the shared ready-envelope decoder, so duplicating the
+    # multi-megabyte metadata graph there only adds encode, compression, transfer, and parse work.
+    request.write_json(session_metadata_route_payload(request, parsed))
 
 
 def get_tmux_session_exists(request: Any, parsed: Any, route: Route) -> None:
@@ -510,13 +636,18 @@ def get_agent_auth(request: Any, parsed: Any, route: Route) -> None:
 
 def get_activity_summary(request: Any, parsed: Any, route: Route) -> None:
     del route
+    if not activity_summary_enabled():
+        metadata, body = activity_summary_disabled_response()
+        request.write_json_bytes(body, status=HTTPStatus(int(metadata["status"])))
+        return
     qs = request_query(request, parsed)
-    request.write_json(request.server.app.activity_summary_payload(
+    body, status = request.server.app.activity_summary_bytes(
         force=query_bool(qs, "force"),
         locale=str(query_one(qs, "locale", "en") or "en"),
         session_scope=query_one(qs, "scope", "configured"),
         hours=query_one(qs, "hours", "24"),
-    ))
+    )
+    request.write_json_bytes(body, status=status)
 
 
 def get_background_status(request: Any, parsed: Any, route: Route) -> None:
@@ -650,7 +781,34 @@ def get_notify(request: Any, parsed: Any, route: Route) -> None:
 
 def get_settings(request: Any, parsed: Any, route: Route) -> None:
     del parsed, route
-    request.write_json(request.server.app.settings_payload())
+    payload = request.server.app.settings_payload()
+    if _write_settings_load_failure(request, payload):
+        return
+    request.write_json(payload)
+
+
+def _write_settings_load_failure(request: Any, payload: Any | None = None) -> bool:
+    """Surface an unreadable settings file before a route can use default-looking data."""
+
+    settings_payload = payload if isinstance(payload, dict) else request.server.app.settings_payload()
+    error = settings_payload.get("error") if isinstance(settings_payload, dict) else "settings payload unavailable"
+    if not isinstance(error, str) or not error.strip():
+        return False
+    request.write_json(
+        {
+            **error_payload(
+                error,
+                message_key="common.requestFailed",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                reason=error,
+            ),
+            "code": "settings_file_malformed",
+            "settings": None,
+            "terminal": True,
+        },
+        status=HTTPStatus.SERVICE_UNAVAILABLE,
+    )
+    return True
 
 
 def get_share_status(request: Any, parsed: Any, route: Route) -> None:
@@ -749,7 +907,7 @@ def get_session_files(request: Any, parsed: Any, route: Route) -> None:
         if blocked is not None:
             return blocked
         scoped_session = scoped_sessions[0] if scoped_sessions else None
-        return request.server.app.session_files_payload(scoped_session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
+        return request.server.app.session_files_http_payload(scoped_session, hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs, force=force)
 
     request.write_validated_float_result(
         qs,
@@ -770,6 +928,8 @@ def get_summary(request: Any, parsed: Any, route: Route) -> None:
 def _chat_write_result(request: Any, operation: Callable[[], dict[str, Any]], *, created: bool = False) -> None:
     if request.share_token_text():
         request.reject_forbidden(request.auth_identity(), "authenticated user")
+        return
+    if _write_settings_load_failure(request):
         return
     try:
         payload = operation()
@@ -960,10 +1120,12 @@ def get_fs_diff(request: Any, parsed: Any, route: Route) -> None:
 def get_fs_watch_diff(request: Any, parsed: Any, route: Route) -> None:
     del route
     qs = request_query(request, parsed)
-    request.write_json(request.server.app.filesystem_watch_diff_payload(
+    payload, status = request.server.app.filesystem_watch_diff_http_payload(
         since_token=str(query_one(qs, "since", "") or ""),
         force_full=query_bool(qs, "full"),
-    ))
+        request_id=request.api_request_id(),
+    )
+    request.write_json(payload, status=status)
 
 
 def get_blame(request: Any, parsed: Any, route: Route) -> None:
@@ -1037,7 +1199,17 @@ def post_create_session(request: Any, parsed: Any, route: Route) -> None:
     agent = str(query_one(qs, "agent", "claude") or "claude")
     dangerously_yolo = query_bool(qs, "dangerously_yolo", request.server.app.dangerously_yolo)
     terminal = str(query_one(qs, "terminal", "") or "")
-    request.write_app_result(request.server.app.create_next_session(agent, dangerously_yolo, terminal))
+    session = str(query_one(qs, "session", "") or "")
+    generation, error = parse_query_int(qs, "generation", 0, min_value=0)
+    if error:
+        request.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+        return
+    request.write_app_result(request.server.app.create_next_session(agent, dangerously_yolo, terminal, session, generation))
+
+
+def get_create_session_plan(request: Any, parsed: Any, route: Route) -> None:
+    del parsed, route
+    request.write_app_result(request.server.app.create_next_session_plan())
 
 
 def post_rename_session(request: Any, parsed: Any, route: Route) -> None:
@@ -1367,145 +1539,148 @@ def post_fs_mkdir(request: Any, parsed: Any, route: Route) -> None:
 
 
 CORE_ROUTES = (
-    Route("GET", "/static/*", PUBLIC, get_static_asset, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, group="core"),
-    Route("GET", "/login", PUBLIC, get_login, group="core"),
-    Route("GET", "/logout", PUBLIC, get_logout, group="core"),
-    Route("GET", "/api/ping", "readonly", get_ping, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, group="core"),
-    Route("GET", "/api/stats-delta", "readonly", get_stats_delta, group="core"),
-    Route("GET", "/api/stats-snapshot", "readonly", get_stats_snapshot, group="core"),
-    Route("GET", "/api/stats-stream", "readonly", get_stats_stream, group="core"),
-    Route("POST", "/api/stats-retry", "readonly", post_stats_retry, group="core"),
-    Route("GET", "/api/pricing-catalog", "readonly", get_pricing_catalog, group="core"),
-    Route("GET", "/api/update-status", "admin", get_update_status, group="core"),
-    Route("GET", "/api/dev-reload", "readonly", get_dev_reload, group="core"),
-    Route("GET", "/api/client-events", "readonly", get_client_events, group="core"),
-    Route("GET", "/", "readonly", get_home, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/preview-popout", "readonly", get_preview_popout, group="core"),
-    Route("GET", "/pane-popout", "readonly", get_pane_popout, group="core"),
-    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/transcripts", "readonly", get_transcripts, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/agent-auth", "readonly", get_agent_auth, group="core"),
-    Route("GET", "/api/activity-summary", "readonly", get_activity_summary, group="core"),
-    Route("GET", "/api/background/status", "readonly", get_background_status, group="core"),
-    Route("GET", "/api/system-status", "readonly", get_system_status, group="core"),
-    Route("GET", "/api/logs", "readonly", get_server_logs, group="core"),
-    Route("GET", "/api/diagnostics/performance", "admin", get_performance_diagnostics, group="core"),
-    Route("GET", "/api/auto-approve", "readonly", get_auto_approve, group="core"),
-    Route("GET", "/api/notify", "readonly", get_notify, group="core"),
-    Route("GET", "/api/settings", "readonly", get_settings, group="core"),
-    Route("GET", "/api/watched-prs", "readonly", get_watched_prs, group="core"),
-    Route("GET", "/api/yolo-rules", "readonly", get_yolo_rules, group="core"),
-    Route("GET", "/api/events", "readonly", get_events, group="core"),
-    Route("GET", "/api/search", "readonly", get_search, group="core"),
-    Route("GET", "/api/run-history", "readonly", get_run_history, group="core"),
-    Route("GET", "/api/activity", "readonly", get_activity, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/session-files", "readonly", get_session_files, group="core", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/summary", "readonly", get_summary, group="core"),
-    Route("GET", "/api/tmux-session-exists", "readonly", get_tmux_session_exists, group="core"),
-    Route("POST", "/login", PUBLIC, post_login, group="core"),
-    Route("POST", "/api/self-update", "admin", post_self_update, group="core"),
-    Route("POST", "/api/stats-observations", "readonly", post_stats_observations, body_limit=128 * 1024, group="core"),
-    Route("POST", "/api/pricing-catalog/refresh", "admin", post_pricing_catalog_refresh, group="core"),
-    Route("POST", "/api/background/claim", "admin", post_background_claim, group="core"),
-    Route("POST", "/api/ensure-session", "admin", post_ensure_session, group="core"),
-    Route("POST", "/api/create-session", "admin", post_create_session, group="core"),
-    Route("POST", "/api/rename-session", "admin", post_rename_session, group="core"),
-    Route("POST", "/api/kill-session", "admin", post_kill_session, group="core"),
-    Route("POST", "/api/upload", "admin", post_upload, group="core"),
-    Route("POST", "/api/auto-approve", "admin", post_auto_approve, group="core"),
-    Route("POST", "/api/attention-ack", "admin", post_attention_ack, body_limit=16 * 1024, group="core"),
-    Route("POST", "/api/notify", "admin", post_notify, group="core"),
-    Route("POST", "/api/settings", "admin", post_settings, body_limit=64 * 1024, group="core"),
-    Route("POST", "/api/watch/roots", "admin", post_watch_roots, body_limit=64 * 1024, group="core"),
-    Route("POST", "/api/drop-action/run", "admin", post_drop_action, body_limit=64 * 1024, group="core"),
-    Route("POST", "/api/yolo-rules/reload", "admin", post_yolo_rules_reload, group="core"),
-    Route("POST", "/api/yolo-rules/open", "admin", post_yolo_rules_open, group="core"),
-    Route("POST", "/api/event", "readonly", post_event, group="core"),
+    Route("GET", "/static/*", PUBLIC, get_static_asset, protocol=RESPONSE_STATIC, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/auth-setup", PUBLIC, get_auth_setup, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/login", PUBLIC, get_login, protocol=RESPONSE_HTML, group="core"),
+    Route("GET", "/logout", PUBLIC, get_logout, protocol=RESPONSE_REDIRECT, group="core"),
+    Route("GET", "/api/ping", "readonly", get_ping, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/stats-capabilities", "readonly", get_stats_capabilities, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/stats-delta", "readonly", get_stats_delta, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/stats-snapshot", "readonly", get_stats_snapshot, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/stats-stream", "readonly", get_stats_stream, protocol=RESPONSE_SSE, group="core"),
+    Route("POST", "/api/stats-retry", "readonly", post_stats_retry, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/pricing-catalog", "readonly", get_pricing_catalog, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/update-status", "admin", get_update_status, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/dev-reload", "readonly", get_dev_reload, protocol=RESPONSE_SSE, group="core"),
+    Route("GET", "/api/client-events", "readonly", get_client_events, protocol=RESPONSE_SSE, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/operations/*", "readonly", get_operation, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("POST", "/api/operations/ack", "readonly", post_operation_acknowledgments, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/", "readonly", get_home, protocol=RESPONSE_HTML, group="core", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/preview-popout", "readonly", get_preview_popout, protocol=RESPONSE_HTML, group="core"),
+    Route("GET", "/pane-popout", "readonly", get_pane_popout, protocol=RESPONSE_HTML, group="core"),
+    Route("GET", "/api/session-metadata", "readonly", get_session_metadata, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY, normal_session_local_service=True),
+    Route("GET", "/api/transcripts", "readonly", get_transcripts, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY, normal_session_local_service=True),
+    Route("GET", "/api/agent-auth", "readonly", get_agent_auth, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/activity-summary", "readonly", get_activity_summary, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/background/status", "readonly", get_background_status, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/system-status", "readonly", get_system_status, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/logs", "readonly", get_server_logs, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/diagnostics/performance", "admin", get_performance_diagnostics, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/auto-approve", "readonly", get_auto_approve, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/notify", "readonly", get_notify, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/settings", "readonly", get_settings, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/watched-prs", "readonly", get_watched_prs, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/yolo-rules", "readonly", get_yolo_rules, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/events", "readonly", get_events, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/search", "readonly", get_search, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/run-history", "readonly", get_run_history, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/activity", "readonly", get_activity, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY, normal_session_local_service=True),
+    Route("GET", "/api/session-files-batch", "readonly", get_session_files_batch, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY, normal_session_local_service=True),
+    Route("GET", "/api/session-files", "readonly", get_session_files, protocol=RESPONSE_JSON, group="core", share_access=SHARE_ACCESS_READONLY, normal_session_local_service=True),
+    Route("GET", "/api/summary", "readonly", get_summary, protocol=RESPONSE_JSON, group="core", normal_session_local_service=True),
+    Route("GET", "/api/tmux-session-exists", "readonly", get_tmux_session_exists, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/login", PUBLIC, post_login, protocol=RESPONSE_REDIRECT, group="core"),
+    Route("POST", "/api/self-update", "admin", post_self_update, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/stats-observations", "readonly", post_stats_observations, protocol=RESPONSE_JSON, body_limit=128 * 1024, group="core"),
+    Route("POST", "/api/pricing-catalog/refresh", "admin", post_pricing_catalog_refresh, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/background/claim", "admin", post_background_claim, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/ensure-session", "admin", post_ensure_session, protocol=RESPONSE_JSON, group="core"),
+    Route("GET", "/api/create-session-plan", "admin", get_create_session_plan, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/create-session", "admin", post_create_session, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/rename-session", "admin", post_rename_session, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/kill-session", "admin", post_kill_session, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/upload", "admin", post_upload, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/auto-approve", "admin", post_auto_approve, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/attention-ack", "admin", post_attention_ack, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="core"),
+    Route("POST", "/api/notify", "admin", post_notify, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/settings", "admin", post_settings, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="core"),
+    Route("POST", "/api/watch/roots", "admin", post_watch_roots, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="core"),
+    Route("POST", "/api/drop-action/run", "admin", post_drop_action, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="core"),
+    Route("POST", "/api/yolo-rules/reload", "admin", post_yolo_rules_reload, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/yolo-rules/open", "admin", post_yolo_rules_open, protocol=RESPONSE_JSON, group="core"),
+    Route("POST", "/api/event", "readonly", post_event, protocol=RESPONSE_JSON, group="core"),
 )
 
 SHARE_ROUTES = (
-    Route("GET", "/share/*", PUBLIC, get_share_shell, group="share", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/share", share_token_readonly_role, get_share_status, group="share", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/ws/share-host", "admin", get_share_host_websocket, group="share"),
-    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, group="share", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, group="share", share_access=SHARE_ACCESS_READONLY),
-    Route("POST", "/api/share", "admin", post_share_create, body_limit=16 * 1024, group="share"),
-    Route("POST", "/api/share/stop", "admin", post_share_stop, body_limit=4096, group="share"),
-    Route("POST", "/api/share/extend", "admin", post_share_extend, body_limit=4096, group="share"),
-    Route("POST", "/api/share/debug-profile", share_token_readonly_role, post_share_debug_profile, body_limit=64 * 1024, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/share/*", PUBLIC, get_share_shell, protocol=RESPONSE_HTML, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/share", share_token_readonly_role, get_share_status, protocol=RESPONSE_JSON, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/ws/share-host", "admin", get_share_host_websocket, protocol=RESPONSE_WEBSOCKET, group="share"),
+    Route("GET", "/ws/share-ui", "readonly", get_share_ui_websocket, protocol=RESPONSE_WEBSOCKET, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/ws/share-view", "readonly", get_share_view_websocket, protocol=RESPONSE_WEBSOCKET, group="share", share_access=SHARE_ACCESS_READONLY),
+    Route("POST", "/api/share", "admin", post_share_create, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="share"),
+    Route("POST", "/api/share/stop", "admin", post_share_stop, protocol=RESPONSE_JSON, body_limit=4096, group="share"),
+    Route("POST", "/api/share/extend", "admin", post_share_extend, protocol=RESPONSE_JSON, body_limit=4096, group="share"),
+    Route("POST", "/api/share/debug-profile", share_token_readonly_role, post_share_debug_profile, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="share", share_access=SHARE_ACCESS_READONLY),
 )
 
 YOAGENT_ROUTES = (
-    Route("GET", "/api/yoagent/skills", "admin", get_yoagent_skills, group="yoagent"),
-    Route("GET", "/api/yoagent/skill-files", "admin", get_yoagent_skill_files, group="yoagent"),
-    Route("GET", "/api/yoagent/conversation", "admin", get_yoagent_conversation, group="yoagent"),
-    Route("GET", "/api/yoagent/jobs", "admin", get_yoagent_jobs, group="yoagent"),
-    Route("POST", "/api/yoagent/chat", yoagent_chat_post_role, post_yoagent_chat, body_limit=64 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/chat/*/cancel", "admin", post_yoagent_chat_cancel, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/actions/preview-send", "admin", post_yoagent_preview_send, body_limit=64 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/actions/execute-send", "admin", post_yoagent_execute_send, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/intent", "admin", post_yoagent_intent, body_limit=64 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/jobs", "admin", post_yoagent_jobs, body_limit=64 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/jobs/cancel-session", "admin", post_yoagent_jobs_cancel_session, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/jobs/*/confirm", "admin", post_yoagent_job_confirm, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/jobs/*/cancel", "admin", post_yoagent_job_cancel, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/waits/*/clear", "admin", post_yoagent_wait_clear, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/skill-files/upsert", "admin", post_yoagent_skill_file_upsert, body_limit=64 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/skill-files/delete", "admin", post_yoagent_skill_file_delete, body_limit=16 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/prewarm", "admin", post_yoagent_prewarm, body_limit=64 * 1024, group="yoagent"),
-    Route("POST", "/api/yoagent/reset", "admin", post_yoagent_reset, group="yoagent"),
+    Route("GET", "/api/yoagent/skills", "admin", get_yoagent_skills, protocol=RESPONSE_JSON, group="yoagent"),
+    Route("GET", "/api/yoagent/skill-files", "admin", get_yoagent_skill_files, protocol=RESPONSE_JSON, group="yoagent"),
+    Route("GET", "/api/yoagent/conversation", "admin", get_yoagent_conversation, protocol=RESPONSE_JSON, group="yoagent"),
+    Route("GET", "/api/yoagent/jobs", "admin", get_yoagent_jobs, protocol=RESPONSE_JSON, group="yoagent"),
+    Route("POST", "/api/yoagent/chat", yoagent_chat_post_role, post_yoagent_chat, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/chat/*/cancel", "admin", post_yoagent_chat_cancel, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/actions/preview-send", "admin", post_yoagent_preview_send, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/actions/execute-send", "admin", post_yoagent_execute_send, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/intent", "admin", post_yoagent_intent, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs", "admin", post_yoagent_jobs, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs/cancel-session", "admin", post_yoagent_jobs_cancel_session, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs/*/confirm", "admin", post_yoagent_job_confirm, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/jobs/*/cancel", "admin", post_yoagent_job_cancel, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/waits/*/clear", "admin", post_yoagent_wait_clear, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/skill-files/upsert", "admin", post_yoagent_skill_file_upsert, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/skill-files/delete", "admin", post_yoagent_skill_file_delete, protocol=RESPONSE_JSON, body_limit=16 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/prewarm", "admin", post_yoagent_prewarm, protocol=RESPONSE_JSON, body_limit=64 * 1024, group="yoagent"),
+    Route("POST", "/api/yoagent/reset", "admin", post_yoagent_reset, protocol=RESPONSE_JSON, group="yoagent"),
 )
 
 CHAT_ROUTES = (
-    Route("GET", "/api/chat/bootstrap", "readonly", get_chat_bootstrap, group="chat"),
-    Route("GET", "/api/chat/page", "readonly", get_chat_page, group="chat"),
-    Route("GET", "/api/chat/delta", "readonly", get_chat_delta, group="chat"),
-    Route("GET", "/api/chat/context", "readonly", get_chat_context, group="chat"),
-    Route("GET", "/api/chat/search", "readonly", get_chat_search, group="chat"),
-    Route("POST", "/api/chat/send", "readonly", post_chat_send, body_limit=12 * 1024, group="chat"),
-    Route("POST", "/api/chat/yoagent", "readonly", post_chat_yoagent, body_limit=4096, group="chat"),
-    Route("POST", "/api/chat/typing", "readonly", post_chat_typing, body_limit=4096, group="chat"),
-    Route("POST", "/api/chat/read", "readonly", post_chat_read, body_limit=4096, group="chat"),
+    Route("GET", "/api/chat/bootstrap", "readonly", get_chat_bootstrap, protocol=RESPONSE_JSON, group="chat"),
+    Route("GET", "/api/chat/page", "readonly", get_chat_page, protocol=RESPONSE_JSON, group="chat"),
+    Route("GET", "/api/chat/delta", "readonly", get_chat_delta, protocol=RESPONSE_JSON, group="chat"),
+    Route("GET", "/api/chat/context", "readonly", get_chat_context, protocol=RESPONSE_JSON, group="chat"),
+    Route("GET", "/api/chat/search", "readonly", get_chat_search, protocol=RESPONSE_JSON, group="chat"),
+    Route("POST", "/api/chat/send", "readonly", post_chat_send, protocol=RESPONSE_JSON, body_limit=12 * 1024, group="chat"),
+    Route("POST", "/api/chat/yoagent", "readonly", post_chat_yoagent, protocol=RESPONSE_JSON, body_limit=4096, group="chat"),
+    Route("POST", "/api/chat/typing", "readonly", post_chat_typing, protocol=RESPONSE_JSON, body_limit=4096, group="chat"),
+    Route("POST", "/api/chat/read", "readonly", post_chat_read, protocol=RESPONSE_JSON, body_limit=4096, group="chat"),
 )
 
 FILESYSTEM_ROUTES = (
-    Route("GET", "/api/fs/list", "readonly", get_fs_list, group="filesystem", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/fs/search", "readonly", get_fs_search, group="filesystem"),
-    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, group="filesystem", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/fs/read", "readonly", get_fs_read, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
-    Route("GET", "/api/fs/info", "readonly", get_fs_info, group="filesystem", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
-    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, group="filesystem", share_access=SHARE_ACCESS_READONLY),
-    Route("GET", "/api/blame", "readonly", get_blame, group="filesystem"),
-    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
-    Route("GET", "/api/fs/zip", "readonly", get_fs_zip, group="filesystem"),
-    Route("GET", "/api/fs/count", "readonly", get_fs_count, group="filesystem"),
-    Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, group="filesystem"),
-    Route("POST", "/api/fs/batch", share_token_readonly_role, post_fs_batch, body_limit=64 * 1024, group="filesystem", share_access=SHARE_ACCESS_READONLY),
-    Route("POST", "/api/fs/write", "admin", post_fs_write, group="filesystem"),
-    Route("POST", "/api/fs/delete", "admin", post_fs_delete, body_limit=4096, group="filesystem"),
-    Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, body_limit=4096, group="filesystem"),
-    Route("POST", "/api/fs/rename", "admin", post_fs_rename, body_limit=4096, group="filesystem"),
-    Route("POST", "/api/fs/mkdir", "admin", post_fs_mkdir, body_limit=4096, group="filesystem"),
+    Route("GET", "/api/fs/list", "readonly", get_fs_list, protocol=RESPONSE_JSON, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/search", "readonly", get_fs_search, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/index-status", "readonly", get_fs_index_status, protocol=RESPONSE_JSON, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/read", "readonly", get_fs_read, protocol=RESPONSE_JSON, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/info", "readonly", get_fs_info, protocol=RESPONSE_JSON, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/fs/diff", "readonly", get_fs_diff, protocol=RESPONSE_JSON, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/watch-diff", "readonly", get_fs_watch_diff, protocol=RESPONSE_JSON, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("GET", "/api/blame", "readonly", get_blame, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/raw", "readonly", get_fs_raw, protocol=RESPONSE_BINARY, group="filesystem", share_access=SHARE_ACCESS_SCOPED_FILE),
+    Route("GET", "/api/fs/zip", "readonly", get_fs_zip, protocol=RESPONSE_BINARY, group="filesystem"),
+    Route("GET", "/api/fs/count", "readonly", get_fs_count, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("GET", "/api/fs/html-preview", "readonly", get_fs_html_preview, protocol=RESPONSE_BINARY, group="filesystem"),
+    Route("POST", "/api/fs/batch", share_token_readonly_role, post_fs_batch, protocol=RESPONSE_JSON_BATCH, body_limit=64 * 1024, group="filesystem", share_access=SHARE_ACCESS_READONLY),
+    Route("POST", "/api/fs/write", "admin", post_fs_write, protocol=RESPONSE_JSON, group="filesystem"),
+    Route("POST", "/api/fs/delete", "admin", post_fs_delete, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
+    Route("POST", "/api/fs/unindex", "admin", post_fs_unindex, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
+    Route("POST", "/api/fs/rename", "admin", post_fs_rename, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
+    Route("POST", "/api/fs/mkdir", "admin", post_fs_mkdir, protocol=RESPONSE_JSON, body_limit=4096, group="filesystem"),
 )
 
 TMUX_ROUTES = (
-    Route("GET", "/api/tmux", "readonly", get_tmux, group="tmux"),
-    Route("GET", "/api/tmux-signals", "readonly", get_tmux_signals, group="tmux"),
-    Route("GET", "/api/tmux-status", "readonly", get_tmux_status, group="tmux"),
-    Route("GET", "/api/transcript", "readonly", get_transcript, group="tmux"),
-    Route("GET", "/api/context", "readonly", get_context, group="tmux"),
-    Route("GET", "/api/context-items", "readonly", get_context_items, group="tmux"),
-    Route("GET", "/api/context-stream", "readonly", get_context_stream, group="tmux"),
-    Route("GET", "/api/summary-stream", "admin", get_summary_stream, group="tmux"),
-    Route("GET", "/ws", "readonly", get_websocket, group="tmux", share_access=SHARE_ACCESS_READONLY),
-    Route("POST", "/api/tmux-next", "admin", post_tmux_next, group="tmux"),
-    Route("POST", "/api/tmux-status", "admin", post_tmux_status, group="tmux"),
-    Route("POST", "/api/tmux-window", "admin", post_tmux_window, group="tmux"),
-    Route("POST", "/api/tmux-copy-selection", "admin", post_tmux_copy_selection, group="tmux"),
+    Route("GET", "/api/tmux", "readonly", get_tmux, protocol=RESPONSE_JSON, group="tmux"),
+    Route("GET", "/api/tmux-signals", "readonly", get_tmux_signals, protocol=RESPONSE_JSON, group="tmux"),
+    Route("GET", "/api/tmux-status", "readonly", get_tmux_status, protocol=RESPONSE_JSON, group="tmux"),
+    Route("GET", "/api/transcript", "readonly", get_transcript, protocol=RESPONSE_JSON, group="tmux"),
+    Route("GET", "/api/context", "readonly", get_context, protocol=RESPONSE_JSON, group="tmux", normal_session_local_service=True),
+    Route("GET", "/api/context-items", "readonly", get_context_items, protocol=RESPONSE_JSON, group="tmux", normal_session_local_service=True),
+    Route("GET", "/api/context-stream", "readonly", get_context_stream, protocol=RESPONSE_SSE, group="tmux"),
+    Route("GET", "/api/summary-stream", "admin", get_summary_stream, protocol=RESPONSE_SSE, group="tmux"),
+    Route("GET", "/ws", "readonly", get_websocket, protocol=RESPONSE_WEBSOCKET, group="tmux", share_access=SHARE_ACCESS_READONLY),
+    Route("POST", "/api/tmux-next", "admin", post_tmux_next, protocol=RESPONSE_JSON, group="tmux"),
+    Route("POST", "/api/tmux-status", "admin", post_tmux_status, protocol=RESPONSE_JSON, group="tmux"),
+    Route("POST", "/api/tmux-window", "admin", post_tmux_window, protocol=RESPONSE_JSON, group="tmux"),
+    Route("POST", "/api/tmux-copy-selection", "admin", post_tmux_copy_selection, protocol=RESPONSE_JSON, group="tmux"),
 )
 
 ROUTE_GROUPS = {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -10,6 +11,7 @@ import re
 from fnmatch import fnmatchcase
 import stat
 import time
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +19,10 @@ from ..search import file_index
 from ..common import is_generated_upload_name
 from ..settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from ..settings import settings_payload
+from . import exclusions
+from . import git_ops
 from . import paths
 from .errors import FilesystemError
-from .errors import raise_os_error
-from .git_ops import git_root_for_path
 from .listing import _directory_is_repo
 
 SEARCH_SKIP_DIRS = set(DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
@@ -101,12 +103,27 @@ def _index_path_is_excluded(
     skip_dirs: set[str],
     exclude_path: Any,
 ) -> bool:
-    """Apply one index root's complete exclusion policy to an event path."""
+    """Apply one index root's complete exclusion policy to an event path.
+
+    The rule itself lives in the shared exclusion owner so the index and the
+    watch daemon cannot drift apart again; only the index's root scoping is
+    applied here.
+    """
     try:
-        relative = path.expanduser().resolve(strict=False).relative_to(root)
+        resolved = path.expanduser().resolve(strict=False)
+    except OSError:
+        return True
+    try:
+        resolved.relative_to(root)
     except ValueError:
         return True
-    return any(part in skip_dirs for part in relative.parts) or bool(exclude_path(path))
+    return exclusions.path_exclusion_verdict(
+        path,
+        skip_dirs=skip_dirs,
+        resolved=resolved,
+        exclude_path=exclude_path,
+        relative_to=root,
+    ).excluded
 
 
 def _search_index_policy(root: Path) -> dict[str, Any]:
@@ -149,19 +166,27 @@ def _search_index_policy(root: Path) -> dict[str, Any]:
     }
 
 
-def _ensure_search_index(root: Path) -> tuple[file_index.RootIndex, dict[str, Any]]:
+def _ensure_search_index(
+    root: Path,
+    *,
+    operation: str = "",
+) -> tuple[file_index.RootIndex, dict[str, Any]]:
     policy = _search_index_policy(root)
-    index = file_index.ensure_index(
-        root,
-        policy["skip_dirs"],
-        exclude_path=policy["exclude_path"],
-        exclude_signature=policy["exclude_signature"],
-        max_files=policy["max_files"],
-        refresh_seconds=policy["refresh_seconds"],
-        persist_enabled=policy["persist_enabled"],
-        persist_max_files=policy["persist_max_files"],
-        persist_max_bytes=policy["persist_max_bytes"],
-    )
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(str(root), flags=directory_flags, operation=operation) as handle:
+        index = file_index.ensure_index(
+            handle.resolved,
+            policy["skip_dirs"],
+            exclude_path=policy["exclude_path"],
+            exclude_signature=policy["exclude_signature"],
+            max_files=policy["max_files"],
+            refresh_seconds=policy["refresh_seconds"],
+            persist_enabled=policy["persist_enabled"],
+            persist_max_files=policy["persist_max_files"],
+            persist_max_bytes=policy["persist_max_bytes"],
+            root_fd=handle.descriptor,
+            operation=operation,
+        )
     return index, policy
 
 
@@ -268,30 +293,41 @@ def _search_limit(raw_limit: int | str | None) -> int:
     return max(1, min(limit, MAX_SEARCH_LIMIT))
 
 
-def _search_file_entry(root: Path, path: Path, tokens: list[str]) -> dict[str, Any] | None:
-    try:
-        st = path.lstat()
-    except OSError:
-        return None
+def _search_file_entry(
+    root: Path,
+    path: Path,
+    tokens: list[str],
+    *,
+    display_path: Path | None = None,
+    stat_result: os.stat_result | None = None,
+) -> dict[str, Any] | None:
+    if stat_result is None:
+        try:
+            st = path.lstat()
+        except OSError:
+            return None
+    else:
+        st = stat_result
     if not stat.S_ISREG(st.st_mode):
         return None
+    result_path = display_path or path
     try:
-        rel = path.relative_to(root).as_posix()
+        rel = result_path.relative_to(root).as_posix()
     except ValueError:
-        rel = path.name
-    sort_key = _search_entry_sort_key(path, rel, tokens)
+        rel = result_path.name
+    sort_key = _search_entry_sort_key(result_path, rel, tokens)
     if sort_key is None:
         return None
     return {
-        "name": path.name,
-        "path": str(path),
+        "name": result_path.name,
+        "path": str(result_path),
         "relative_path": rel,
         "kind": "file",
         "size": int(st.st_size),
         "mtime": int(st.st_mtime),
-        "uploaded": is_generated_upload_name(path),
+        "uploaded": is_generated_upload_name(result_path),
         "_sort_key": sort_key,
-        **paths._physical_file_identity(path),
+        **paths._physical_file_identity(result_path, resolved=result_path, stat_result=st),
     }
 
 
@@ -300,13 +336,24 @@ def _annotate_search_dedupe_fields(entry: dict[str, Any]) -> None:
     path_str = entry.get("path")
     if not isinstance(path_str, str):
         return
-    entry.setdefault("realpath", os.path.realpath(path_str))
-    if "size" not in entry:
-        try:
-            entry["size"] = int(os.stat(path_str).st_size)
-        except OSError:
-            entry["size"] = None
-    entry.update({key: value for key, value in paths._physical_file_identity(Path(path_str)).items() if key not in entry})
+    try:
+        with paths.safe_path(
+            path_str,
+            flags=getattr(os, "O_PATH", os.O_RDONLY),
+            operation="search.annotate",
+        ) as handle:
+            entry["realpath"] = str(handle.resolved)
+            entry["size"] = int(handle.stat_result.st_size)
+            identity = paths._physical_file_identity(
+                handle.requested,
+                resolved=handle.resolved,
+                stat_result=handle.stat_result,
+            )
+    except paths.FilesystemError:
+        for key in ("realpath", "size", "file_id", "file_identity"):
+            entry.pop(key, None)
+        return
+    entry.update(identity)
 
 
 def _search_full_tree(
@@ -315,56 +362,89 @@ def _search_full_tree(
     tokens: list[str],
     results: list[dict[str, Any]],
     skip_dirs: set[str] | None = None,
+    *,
+    display_search_root: Path | None = None,
+    search_descriptor: int | None = None,
 ) -> tuple[int, int, bool]:
     effective_skip_dirs = SEARCH_SKIP_DIRS if skip_dirs is None else skip_dirs
     visited_dirs = 0
     visited_files = 0
     truncated = False
-    walker = os.walk(search_root, topdown=True, onerror=raise_os_error, followlinks=False)
-    for current, dirs, files in walker:
-        visited_dirs += 1
-        if visited_dirs > MAX_SEARCH_DIRS:
-            truncated = True
-            dirs[:] = []
-            break
-        dirs[:] = sorted(
-            [name for name in dirs if name not in effective_skip_dirs and not paths._path_is_secret(Path(current) / name)],
-            key=str.lower,
+    result_search_root = display_search_root or root
+    owned_descriptor = None
+    if search_descriptor is None:
+        owned_descriptor = os.open(search_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        search_descriptor = owned_descriptor
+
+    def include_directory(relative: Path) -> bool:
+        return relative.name not in effective_skip_dirs and not paths._path_is_secret(result_search_root / relative)
+
+    try:
+        walker = paths.walk_directory(
+            search_descriptor,
+            include_directory=include_directory,
+            operation="search_files",
+            requested_root=result_search_root,
         )
-        for name in sorted(files, key=str.lower):
-            visited_files += 1
-            if visited_files > MAX_SEARCH_FILES:
-                truncated = True
-                dirs[:] = []
-                break
-            path = Path(current) / name
-            if paths._path_is_secret(path):
-                continue
-            entry = _search_file_entry(root, path, tokens)
-            if entry is not None:
-                results.append(entry)
-        if visited_files > MAX_SEARCH_FILES:
-            break
+        with contextlib.closing(walker):
+            for relative_directory, _directory_fd, _dirnames, file_rows in walker:
+                visited_dirs += 1
+                if visited_dirs > MAX_SEARCH_DIRS:
+                    truncated = True
+                    break
+                for name, file_stat in file_rows:
+                    visited_files += 1
+                    if visited_files > MAX_SEARCH_FILES:
+                        truncated = True
+                        break
+                    relative = relative_directory / name
+                    display_path = result_search_root / relative
+                    if paths._path_is_secret(display_path):
+                        continue
+                    entry = _search_file_entry(
+                        root,
+                        relative,
+                        tokens,
+                        display_path=display_path,
+                        stat_result=file_stat,
+                    )
+                    if entry is not None:
+                        results.append(entry)
+                if visited_files > MAX_SEARCH_FILES:
+                    break
+    finally:
+        if owned_descriptor is not None:
+            os.close(owned_descriptor)
     return visited_dirs, visited_files, truncated
 
 
-def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
-    root = paths._canonical_root(paths._validated_path(raw_root))
-    if not root.exists():
+def _search_files_from_safe_root(
+    raw_root: str,
+    query: str = "",
+    limit: int | str | None = 400,
+    recursive: bool = False,
+    *,
+    access_root: Path | None = None,
+    access_descriptor: int | None = None,
+    inside_repo: bool = False,
+) -> dict[str, Any]:
+    root = Path(raw_root)
+    scan_root = access_root or root
+    if not scan_root.exists():
         raise paths.FilesystemError.path_not_found(root)
-    if not root.is_dir():
+    if not scan_root.is_dir():
         raise paths.FilesystemError.not_directory(root)
     max_results = _search_limit(limit)
     tokens = [token for token in str(query or "").split() if token]
     index_policy = _search_index_policy(root)
     skip_dirs = index_policy["skip_dirs"]
-    full_tree = bool(recursive) or bool(git_root_for_path(root))
+    full_tree = bool(recursive) or inside_repo
     if full_tree:
         # Accelerate full-tree quick-open with the persistent index: it covers the
         # whole tree (no 20k/50k walk cap) and needs no per-query walk. Warm/refresh
         # it in the background; until it is ready we fall back to the live walk below
         # (stale-while-revalidate), so search never blocks on indexing.
-        index, index_policy = _ensure_search_index(root)
+        index, index_policy = _ensure_search_index(root, operation="search_files")
         skip_dirs = index_policy["skip_dirs"]
         can_build_index = file_index.background_owner_can_build()
         if tokens:
@@ -453,6 +533,13 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
                 persistent_payload = persistent_response.get("payload")
                 if persistent_response.get("ok") and isinstance(persistent_payload, dict):
                     return persistent_payload
+                if persistent_response.get("status") == "unavailable":
+                    raise FilesystemError(
+                        "search index service unavailable",
+                        status=HTTPStatus.FAILED_DEPENDENCY,
+                        message_key="common.requestFailed",
+                        diagnostic=persistent_response.get("reason"),
+                    )
                 refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
                 if not refresh_result.get("fallback"):
                     return {
@@ -577,16 +664,54 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
     visited_files = 0
     truncated = False
     if full_tree:
-        visited_dirs, visited_files, truncated = _search_full_tree(root, root, tokens, results, skip_dirs)
+        visited_dirs, visited_files, truncated = _search_full_tree(
+            root,
+            scan_root,
+            tokens,
+            results,
+            skip_dirs,
+            display_search_root=root,
+            search_descriptor=access_descriptor,
+        )
     else:
         visited_dirs = 1
-        direct_names = sorted(os.listdir(root), key=str.lower)
+        direct_names = sorted(os.listdir(scan_root), key=str.lower)
         for name in direct_names:
-            path = root / name
-            if name in skip_dirs or paths._path_is_secret(path):
+            path = scan_root / name
+            display_path = root / name
+            if name in skip_dirs or paths._path_is_secret(display_path):
                 continue
-            if path.is_dir() and _directory_is_repo(path):
-                child_dirs, child_files, child_truncated = _search_full_tree(root, path, tokens, results, skip_dirs)
+            try:
+                entry_fd = os.open(path, os.O_RDONLY | paths.nofollow_flag())
+            except OSError:
+                continue
+            try:
+                entry_stat = os.fstat(entry_fd)
+            finally:
+                os.close(entry_fd)
+            if stat.S_ISDIR(entry_stat.st_mode):
+                try:
+                    child_fd = os.open(
+                        path,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | paths.nofollow_flag(),
+                    )
+                except OSError:
+                    continue
+                try:
+                    child_path = paths.SafePathHandle(display_path, display_path, child_fd).descriptor_path()
+                    if not _directory_is_repo(child_path):
+                        continue
+                    child_dirs, child_files, child_truncated = _search_full_tree(
+                        root,
+                        child_path,
+                        tokens,
+                        results,
+                        skip_dirs,
+                        display_search_root=display_path,
+                        search_descriptor=child_fd,
+                    )
+                finally:
+                    os.close(child_fd)
                 visited_dirs += child_dirs
                 visited_files += child_files
                 truncated = truncated or child_truncated
@@ -598,7 +723,13 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             if visited_files > MAX_SEARCH_FILES:
                 truncated = True
                 break
-            entry = _search_file_entry(root, path, tokens)
+            entry = _search_file_entry(
+                root,
+                path,
+                tokens,
+                display_path=display_path,
+                stat_result=entry_stat,
+            )
             if entry is None:
                 continue
             results.append(entry)
@@ -633,12 +764,27 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
     }
 
 
-def index_status(raw_root: str) -> dict[str, Any]:
+def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(raw_root, flags=directory_flags, operation="search_files") as handle:
+        inside_repo = git_ops._pinned_repo_root(handle, operation="search_files") is not None
+        return _search_files_from_safe_root(
+            str(handle.resolved),
+            query,
+            limit,
+            recursive,
+            access_root=handle.descriptor_path(),
+            access_descriptor=handle.descriptor,
+            inside_repo=inside_repo,
+        )
+
+
+def _index_status_from_safe_root(raw_root: str) -> dict[str, Any]:
     """Warm the persistent quick-open index for a root and report its build state."""
-    root = paths._canonical_root(paths._validated_path(raw_root))
+    root = Path(raw_root)
     if not root.is_dir():
         raise paths.FilesystemError.not_directory(root)
-    index, policy = _ensure_search_index(root)
+    index, policy = _ensure_search_index(root, operation="index_status")
     # HTTP servers are read-only consumers. Asking for index status is still an
     # explicit Quick Open demand, so queue the persistent indexer when no
     # committed snapshot exists yet.
@@ -705,9 +851,15 @@ def index_status(raw_root: str) -> dict[str, Any]:
     }
 
 
-def unindex_root(raw_root: str) -> dict[str, Any]:
+def index_status(raw_root: str) -> dict[str, Any]:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(raw_root, flags=directory_flags, operation="index_status") as handle:
+        return _index_status_from_safe_root(str(handle.resolved))
+
+
+def _unindex_safe_root(raw_root: str) -> dict[str, Any]:
     """Drop the persistent quick-open index for a root (cancel any build, free memory + on-disk)."""
-    root = paths._canonical_root(paths._validated_path(raw_root))
+    root = Path(raw_root)
     if file_index.background_owner_can_build():
         file_index.unindex(root)
         return {"root": str(root), "ok": True}
@@ -723,6 +875,12 @@ def unindex_root(raw_root: str) -> dict[str, Any]:
     }
 
 
+def unindex_root(raw_root: str) -> dict[str, Any]:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(raw_root, flags=directory_flags) as handle:
+        return _unindex_safe_root(str(handle.resolved))
+
+
 def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> list[str]:
     return reindex_roots_for_paths([raw_path], reason=reason)
 
@@ -732,7 +890,8 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
     normalized_paths: list[Path] = []
     for raw_path in raw_paths:
         try:
-            normalized_paths.append(paths._normalized_scope_path(paths._validated_path(raw_path)))
+            with paths.safe_parent(raw_path) as handle:
+                normalized_paths.append(handle.resolved_target)
         except FilesystemError as error:
             if error.message_key != "fs.error.credentialBlocked":
                 raise
@@ -740,23 +899,24 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
             if blocked not in _LOGGED_BLOCKED_REINDEX_PATHS:
                 _LOGGED_BLOCKED_REINDEX_PATHS.add(blocked)
                 LOGGER.warning("Skipping blocked filesystem watch path: %s", blocked)
-    roots_by_path: dict[Path, set[Path]] = {}
     policies: dict[Path, dict[str, Any]] = {}
 
     def include_root(root: Path, path: Path) -> bool:
         policy = policies.setdefault(root, _search_index_policy(root))
         return not _index_path_is_excluded(root, path, policy["skip_dirs"], policy["exclude_path"])
 
-    for path in normalized_paths:
-        for root in file_index.mark_path_dirty(path, include_root=include_root):
-            roots_by_path.setdefault(root, set()).add(path)
-    if file_index.background_owner_can_build():
-        for root, changed_paths in roots_by_path.items():
-            if not root.is_dir():
-                continue
-            _ensure_search_index(root)
-            for path in changed_paths:
-                file_index.mark_path_dirty(path, include_root=include_root)
+    owner_can_build = file_index.background_owner_can_build()
+
+    def prepare_root(root: Path) -> None:
+        if root.is_dir():
+            _ensure_search_index(root, operation="reindex")
+
+    roots_by_path = file_index.mark_paths_dirty(
+        normalized_paths,
+        include_root=include_root,
+        prepare_root=prepare_root if owner_can_build else None,
+    )
+    if owner_can_build:
         file_index.schedule_refreshes()
     else:
         for root, changed_paths in roots_by_path.items():

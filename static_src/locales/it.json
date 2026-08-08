@@ -219,6 +219,7 @@
   "debug.cost.backfillPartial": "Recupero storico incompleto",
   "debug.cost.backfillPending": "Recupero storico in attesa",
   "debug.cost.backfillRunning": "Recupero storico in corso",
+  "debug.cost.backfillUnknown": "Stato del recupero storico sconosciuto",
   "debug.cost.byModel": "Per modello",
   "debug.cost.bySource": "Attribuzione agente e fonte",
   "debug.cost.byTmux": "Costo per finestra tmux",

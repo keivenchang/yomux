@@ -8,10 +8,12 @@ writers use the bounded length-prefixed form.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import socket
+import sys
 import uuid
 from time import monotonic as monotonic_clock
 from dataclasses import dataclass
@@ -23,14 +25,28 @@ LOCAL_RPC_VERSION = 1
 LOCAL_RPC_MAX_METADATA_BYTES = 256 * 1024
 LOCAL_RPC_MAX_BINARY_BYTES = 4 * 1024 * 1024
 LOCAL_RPC_HEADER_BYTES = 4
-# macOS uses a much smaller Unix-domain pathname budget than Linux. Leave
-# enough room for the platform's private /var expansion of /tmp as well as
-# the socket filename, instead of accepting a path that only fails at bind.
-LOCAL_RPC_SOCKET_PATH_BYTES = 72
+# Linux exposes 108 bytes in sockaddr_un.sun_path, including its trailing NUL,
+# while Darwin exposes 104. On Darwin `/tmp` is expanded to `/private/tmp` by
+# the kernel, so reserve that seven-byte prefix rather than rejecting ordinary
+# absolute project paths everywhere. This is the actual bind budget shared by
+# fallback routing and rooted-run preflight, not an arbitrary safety margin.
+LOCAL_RPC_SOCKET_PATH_BYTES = 96 if sys.platform == "darwin" else 107
 
 
 class LocalRpcError(ValueError):
     """A peer sent a malformed, incompatible, or oversized local RPC frame."""
+
+
+# The single owner of "the peer could not answer inside the caller's deadline".  Which of these
+# a caller sees is decided by milliseconds of jitter -- whether the peer's response landed just
+# inside the per-recv timer or just outside the total budget -- so they must classify
+# identically.  `response exceeded deadline` is the pre-rename spelling kept here, not copied
+# elsewhere, so no consumer grows its own list.
+LOCAL_RPC_DEADLINE_REASONS = frozenset({
+    "peer_handler_slow",
+    "unattributed_latency",
+    "response exceeded deadline",
+})
 
 
 @dataclass(frozen=True)
@@ -46,10 +62,19 @@ class LocalRpcEnvelope:
     owner_generation: int
     config_generation: int
     payload: dict[str, Any]
+    accept_to_read_ms: float = 0.0
+    read_complete_ms: float = 0.0
+    service_duration_ms: float = 0.0
+    queue_wait_ms: float = 0.0
+    queue_depth: int = 0
+    capacity_limit: int = 0
+    capacity_saturated: bool = False
+    capacity_rejected: bool = False
+    capacity_rejections: int = 0
     version: int = LOCAL_RPC_VERSION
 
     def to_dict(self, binary_length: int = 0) -> dict[str, Any]:
-        return {
+        result = {
             "version": self.version,
             "service": self.service,
             "method": self.method,
@@ -59,9 +84,22 @@ class LocalRpcEnvelope:
             "priority": self.priority,
             "owner_generation": self.owner_generation,
             "config_generation": self.config_generation,
+            "accept_to_read_ms": round(max(0.0, float(self.accept_to_read_ms)), 3),
+            "read_complete_ms": round(max(0.0, float(self.read_complete_ms)), 3),
+            "service_duration_ms": round(max(0.0, float(self.service_duration_ms)), 3),
             "binary_length": binary_length,
             "payload": self.payload,
         }
+        if self.capacity_limit:
+            result.update({
+                "queue_wait_ms": round(max(0.0, float(self.queue_wait_ms)), 3),
+                "queue_depth": max(0, int(self.queue_depth)),
+                "capacity_limit": max(0, int(self.capacity_limit)),
+                "capacity_saturated": bool(self.capacity_saturated),
+                "capacity_rejected": bool(self.capacity_rejected),
+                "capacity_rejections": max(0, int(self.capacity_rejections)),
+            })
+        return result
 
 
 def safe_socket_path(path: Path, prefix: str = "yolomux", fallback_name: str | None = None) -> Path:
@@ -148,6 +186,26 @@ def _decode_envelope(value: dict[str, Any]) -> tuple[LocalRpcEnvelope, int]:
     owner_generation = _validate_length(value.get("owner_generation"), 2**63 - 1, "owner_generation")
     config_generation = _validate_length(value.get("config_generation"), 2**63 - 1, "config_generation")
     binary_length = _validate_length(value.get("binary_length", 0), LOCAL_RPC_MAX_BINARY_BYTES, "binary_length")
+    durations: dict[str, float] = {}
+    for field in ("accept_to_read_ms", "read_complete_ms", "service_duration_ms"):
+        duration = value.get(field, 0.0)
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration < 0 or duration > 60_000:
+            raise LocalRpcError(f"invalid {field}")
+        durations[field] = float(duration)
+    queue_wait_ms = 0.0
+    queue_depth = capacity_limit = capacity_rejections = 0
+    capacity_saturated = capacity_rejected = False
+    if "capacity_limit" in value:
+        queue_wait_ms = value.get("queue_wait_ms", 0.0)
+        if isinstance(queue_wait_ms, bool) or not isinstance(queue_wait_ms, (int, float)) or queue_wait_ms < 0 or queue_wait_ms > 60_000:
+            raise LocalRpcError("invalid queue_wait_ms")
+        queue_depth = _validate_length(value.get("queue_depth", 0), 2**31 - 1, "queue_depth")
+        capacity_limit = _validate_length(value["capacity_limit"], 2**31 - 1, "capacity_limit")
+        capacity_rejections = _validate_length(value.get("capacity_rejections", 0), 2**63 - 1, "capacity_rejections")
+        capacity_saturated = value.get("capacity_saturated", False)
+        capacity_rejected = value.get("capacity_rejected", False)
+        if not isinstance(capacity_saturated, bool) or not isinstance(capacity_rejected, bool):
+            raise LocalRpcError("invalid capacity state")
     return (
         LocalRpcEnvelope(
             service=value["service"],
@@ -159,6 +217,15 @@ def _decode_envelope(value: dict[str, Any]) -> tuple[LocalRpcEnvelope, int]:
             owner_generation=owner_generation,
             config_generation=config_generation,
             payload=payload,
+            accept_to_read_ms=durations["accept_to_read_ms"],
+            read_complete_ms=durations["read_complete_ms"],
+            service_duration_ms=durations["service_duration_ms"],
+            queue_wait_ms=float(queue_wait_ms),
+            queue_depth=queue_depth,
+            capacity_limit=capacity_limit,
+            capacity_saturated=capacity_saturated,
+            capacity_rejected=capacity_rejected,
+            capacity_rejections=capacity_rejections,
             version=version,
         ),
         binary_length,
@@ -250,15 +317,15 @@ def encode_metadata(
     ).encode("utf-8")
 
 
-def request(
+def request_with_envelope(
     socket_path: str | Path,
     envelope: LocalRpcEnvelope,
     *,
     binary: bytes = b"",
     timeout_seconds: float = 2.0,
     fallback_legacy: bool = False,
-) -> tuple[dict[str, Any], bytes]:
-    """Send one current-format request and return the peer's metadata and bytes."""
+) -> tuple[LocalRpcEnvelope | None, dict[str, Any], bytes]:
+    """Send one request and retain the peer phase envelope with its payload and bytes."""
     started = monotonic_clock()
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
@@ -272,16 +339,45 @@ def request(
         # overload; legacy fallback is only for an immediate protocol/connect
         # incompatibility during a rolling restart.
         raise
-    except (OSError, LocalRpcError):
+    except OSError as exc:
+        # A missing or refused socket proves there is no peer to negotiate with.
+        # Let the lifecycle-owning client start or replace it; replaying via the
+        # legacy protocol only creates a second identical connection failure.
+        if exc.errno in {errno.ENOENT, errno.ECONNREFUSED} or not fallback_legacy or binary:
+            raise
+        return None, legacy_request(socket_path, envelope.payload, timeout_seconds=timeout_seconds), b""
+    except LocalRpcError:
         if not fallback_legacy or binary:
             raise
-        return legacy_request(socket_path, envelope.payload, timeout_seconds=timeout_seconds), b""
+        return None, legacy_request(socket_path, envelope.payload, timeout_seconds=timeout_seconds), b""
     if legacy or response_envelope is None:
-        return payload, response_binary
+        return None, payload, response_binary
     if response_envelope.request_id != envelope.request_id:
         raise LocalRpcError("response request_id mismatch")
-    if (monotonic_clock() - started) * 1000 > envelope.deadline_ms:
-        raise LocalRpcError("response exceeded deadline")
+    elapsed_ms = (monotonic_clock() - started) * 1000
+    if elapsed_ms > envelope.deadline_ms:
+        if response_envelope.service_duration_ms > envelope.deadline_ms:
+            raise LocalRpcError("peer_handler_slow")
+        raise LocalRpcError("unattributed_latency")
+    return response_envelope, payload, response_binary
+
+
+def request(
+    socket_path: str | Path,
+    envelope: LocalRpcEnvelope,
+    *,
+    binary: bytes = b"",
+    timeout_seconds: float = 2.0,
+    fallback_legacy: bool = False,
+) -> tuple[dict[str, Any], bytes]:
+    """Send one request while preserving the established payload/binary API."""
+    _response_envelope, payload, response_binary = request_with_envelope(
+        socket_path,
+        envelope,
+        binary=binary,
+        timeout_seconds=timeout_seconds,
+        fallback_legacy=fallback_legacy,
+    )
     return payload, response_binary
 
 

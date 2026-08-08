@@ -1,39 +1,133 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Canonical pytest file catalogs for the local check lanes.
+"""Derived pytest file catalogs for the local check lanes.
 
-Pytest only needs to import files which can contribute to a lane.  Passing the
-whole ``tests`` directory to every marker-filtered invocation made even the
-two-case boot smoke collect the entire suite.  Keep the ownership here, and
-validate it against real pytest collection in ``test_check_runner.py``.
+Pytest only imports files which can contribute to a lane. The catalog is
+derived from test definitions and their static pytest markers so adding a test
+file cannot silently leave it outside the default gate.
 """
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import Final
 
 
-NONBROWSER_FILES: Final[tuple[str, ...]] = (
-    "tests/test_activity.py", "tests/test_activity_summary.py", "tests/test_agent_tui.py", "tests/test_app.py", "tests/test_approvald.py", "tests/test_atomic_file.py", "tests/test_attention_ack_sync.py", "tests/test_auth_config.py", "tests/test_auto_approve_detector.py", "tests/test_auto_approve_lock.py", "tests/test_auto_approve_worker.py", "tests/test_background_owner.py", "tests/test_cache.py", "tests/test_chat_service.py", "tests/test_chat_store.py", "tests/test_check_runner.py", "tests/test_claude_permission_hook.py", "tests/test_client_events.py", "tests/test_common.py", "tests/test_control.py", "tests/test_dev_restart_script.py", "tests/test_drop_actions.py", "tests/test_events_state.py", "tests/test_file_index.py", "tests/test_finder_fs_repro.py", "tests/test_filesystem.py", "tests/test_install_metadata.py", "tests/test_jobd.py", "tests/test_local_services_launch.py", "tests/test_local_services_rpc.py", "tests/test_local_services_watchdog.py", "tests/test_login_auth.py", "tests/test_login_escalation.py", "tests/test_login_rate_limit.py", "tests/test_login_throttle_integration.py", "tests/test_metadata.py", "tests/test_metadata_badge_pulses.py", "tests/test_mock_agents.py", "tests/test_observability.py", "tests/test_pricing_catalog.py", "tests/test_search_indexer.py", "tests/test_server_lease.py", "tests/test_server_logs.py", "tests/test_server_query.py", "tests/test_server_static.py", "tests/test_source_inventory.py", "tests/test_service_failure_matrix.py", "tests/test_session_actions.py", "tests/test_session_files.py", "tests/test_sessions.py", "tests/test_settings.py", "tests/test_static_build.py", "tests/test_stats_current_app.py", "tests/test_stats_current_client.py", "tests/test_stats_current_collectors.py", "tests/test_stats_current_families.py", "tests/test_stats_current_http.py", "tests/test_stats_current_materializer.py", "tests/test_stats_current_migration.py", "tests/test_stats_current_observations.py", "tests/test_stats_current_pricing.py", "tests/test_stats_current_protocol.py", "tests/test_stats_current_revision.py", "tests/test_stats_current_runtime.py", "tests/test_stats_current_scheduler.py", "tests/test_stats_current_service.py", "tests/test_stats_current_storage.py", "tests/test_stats_current_transcripts.py", "tests/test_stats_current_usage.py", "tests/test_stats_resolution.py", "tests/test_statusd.py", "tests/test_statusd_protocol.py", "tests/test_test_isolation.py", "tests/test_text_client_common_metadata.py", "tests/test_tls_config.py", "tests/test_tmux_signals.py", "tests/test_tmux_runtime.py", "tests/test_tmux_theme.py", "tests/test_tmux_utils.py", "tests/test_tmux_wall.py", "tests/test_transcripts.py", "tests/test_ui_pins.py", "tests/test_uploads.py", "tests/test_web.py", "tests/test_websocket.py", "tests/test_workdir.py", "tests/test_yoagent_actions.py", "tests/test_yoagent_backend.py", "tests/test_yoagent_frontend.py", "tests/test_yoagent_model_intents.py", "tests/test_yoagent_orchestration.py", "tests/test_yoagent_preferences.py", "tests/test_yoagent_skills.py", "tests/test_yoagent_stream_events.py", "tests/test_yoagent_stream_state.py", "tests/test_yoagent_transports.py", "tests/test_yolo_rules.py", "tests/test_yostats_active_browser_window.py",
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TEST_ROOT = REPO_ROOT / "tests"
+PHASE_MARKER_PRECEDENCE: Final[tuple[tuple[str, str], ...]] = (
+    ("node_bridge", "node_bridge"),
+    ("e2e", "e2e"),
+    ("visual_golden", "golden"),
+    ("boot", "boot"),
+    ("browser", "browser"),
 )
 
-BOOT_FILES: Final[tuple[str, ...]] = ("tests/test_browser_boot.py",)
-BROWSER_FILES: Final[tuple[str, ...]] = ("tests/test_browser_dockview.py", "tests/test_browser_editor.py", "tests/test_browser_finder.py", "tests/test_browser_finder_fs_repro.py", "tests/test_browser_layout.py", "tests/test_browser_share.py", "tests/test_browser_stats_coverage.py", "tests/test_browser_stats_widen.py")
-GOLDEN_FILES: Final[tuple[str, ...]] = ("tests/test_browser_golden.py",)
-E2E_FILES: Final[tuple[str, ...]] = ("tests/test_browser_layout.py", "tests/test_e2e_auto_approve.py", "tests/test_mock_agents.py")
-NODE_BRIDGE_FILES: Final[tuple[str, ...]] = ("tests/test_node_suite.py",)
 
-PYTEST_PHASE_FILES: Final[dict[str, tuple[str, ...]]] = {
-    "nonbrowser": NONBROWSER_FILES,
-    "boot": BOOT_FILES,
-    "browser": BROWSER_FILES,
-    "golden": GOLDEN_FILES,
-    "e2e": E2E_FILES,
-    "node_bridge": NODE_BRIDGE_FILES,
-}
+def _pytest_markers(node: ast.AST) -> set[str]:
+    markers: set[str] = set()
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Attribute):
+            continue
+        value = child.value
+        if (
+            isinstance(value, ast.Attribute)
+            and value.attr == "mark"
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "pytest"
+        ):
+            markers.add(child.attr)
+    return markers
+
+
+def _assigned_pytest_markers(body: list[ast.stmt]) -> set[str]:
+    markers: set[str] = set()
+    for statement in body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        if not any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
+            continue
+        markers.update(_pytest_markers(statement.value))
+    return markers
+
+
+def _decorator_markers(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> set[str]:
+    markers: set[str] = set()
+    for decorator in node.decorator_list:
+        markers.update(_pytest_markers(decorator))
+    return markers
+
+
+def _phase_for_markers(markers: set[str]) -> str:
+    return next((phase for marker, phase in PHASE_MARKER_PRECEDENCE if marker in markers), "nonbrowser")
+
+
+def file_phases(path: Path) -> set[str]:
+    """Return every check lane phase containing a statically defined test in path."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    automatic = {"browser", "socket"} if path.name.startswith("test_browser_") else set()
+    module_markers = _assigned_pytest_markers(tree.body)
+    phases: set[str] = set()
+
+    def visit(body: list[ast.stmt], inherited: set[str]) -> None:
+        for statement in body:
+            if isinstance(statement, ast.ClassDef):
+                class_markers = inherited | _decorator_markers(statement) | _assigned_pytest_markers(statement.body)
+                visit(statement.body, class_markers)
+            elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)) and statement.name.startswith("test_"):
+                phases.add(_phase_for_markers(automatic | inherited | _decorator_markers(statement)))
+
+    visit(tree.body, module_markers)
+    return phases
+
+
+def discover_pytest_phase_files(
+    test_root: Path = TEST_ROOT,
+    *,
+    repo_root: Path = REPO_ROOT,
+) -> dict[str, tuple[str, ...]]:
+    """Derive phase file ownership from every Python test under test_root."""
+
+    phase_files = {phase: [] for phase in ("nonbrowser", "boot", "browser", "golden", "e2e", "node_bridge")}
+    for path in sorted(test_root.rglob("test_*.py")):
+        relative = path.relative_to(repo_root).as_posix()
+        for phase in file_phases(path):
+            phase_files[phase].append(relative)
+    return {phase: tuple(paths) for phase, paths in phase_files.items()}
+
+
+PYTEST_PHASE_FILES: Final[dict[str, tuple[str, ...]]] = discover_pytest_phase_files()
+NONBROWSER_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["nonbrowser"]
+BOOT_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["boot"]
+BROWSER_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["browser"]
+GOLDEN_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["golden"]
+E2E_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["e2e"]
+NODE_BRIDGE_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["node_bridge"]
+MOCK_TRANSCRIPT_FILES: Final[tuple[str, ...]] = ("tests/test_mock_transcripts.py",)
+NODE_LAYOUT_FILES: Final[tuple[str, ...]] = (
+    "tests/i18n_structured_message.test.js",
+    "tests/i18n_locale_registry.test.js",
+    "tests/tmux_wall.test.js",
+    "tests/layout_restore.test.js",
+    "tests/drop_action_result.test.js",
+    "tests/file_surface_menu.test.js",
+    "tests/side_panes.test.js",
+    "tests/editor_preview_core.test.js",
+    "tests/editor_preview_tmux.test.js",
+    "tests/editor_preview_settings.test.js",
+    "tests/stats_current_ui.test.js",
+    "tests/stats_current_panel.test.js",
+    "tests/tabber.test.js",
+    "tests/layout_async.test.js",
+    # gate_panels remains an unimplemented placeholder until its browser harness exists.
+)
 
 
 def pytest_files(phase: str) -> list[str]:
-    """Return the explicit pytest targets for one canonical phase."""
+    """Return the derived pytest targets for one canonical phase."""
+
     return list(PYTEST_PHASE_FILES[phase])

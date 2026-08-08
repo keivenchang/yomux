@@ -43,12 +43,15 @@ function i18nNormalizeLocale(value, options = {}) {
 
 let i18nActiveLocale = i18nNormalizeLocale(typeof bootstrap === 'object' && bootstrap ? bootstrap.locale : '');
 const i18nCatalogs = new Map();  // locale -> {dottedKey: string}
+const i18nMissingKeys = new Set();
 let i18nApplyLocaleRequestId = 0;
 // seed from the INLINED bootstrap catalogs (active locale + en fallback) so t() resolves
 // SYNCHRONOUSLY on the very first render — the menu bar/tabs/wordmark paint at boot before any fetch.
 if (typeof bootstrap === 'object' && bootstrap && bootstrap.strings && typeof bootstrap.strings === 'object') {
   for (const [loc, catalog] of Object.entries(bootstrap.strings)) {
-    if (catalog && typeof catalog === 'object') i18nCatalogs.set(loc, catalog);
+    // An empty bootstrap object is not a catalog.  Treating it as one suppresses the
+    // per-page static fetch below and leaves every translated surface showing fallback text.
+    if (catalog && typeof catalog === 'object' && Object.keys(catalog).length) i18nCatalogs.set(loc, catalog);
   }
 }
 
@@ -64,6 +67,19 @@ function i18nResolve(key) {
     ?? (i18nActiveLocale === i18nFallbackLocale ? null : i18nCatalogValue(i18nFallbackLocale, key));
 }
 
+function i18nMissingKey(key) {
+  const normalized = String(key);
+  i18nMissingKeys.add(normalized);
+  if (typeof document !== 'undefined' && document.documentElement) {
+    document.documentElement.dataset.i18nMissingKeys = [...i18nMissingKeys].sort().join(',');
+  }
+  return normalized;
+}
+
+function i18nMissingKeyList() {
+  return [...i18nMissingKeys].sort();
+}
+
 function i18nInterpolate(text, params) {
   if (!params) return text;
   return String(text).replace(/\{(\w+)\}/g, (match, name) =>
@@ -73,7 +89,7 @@ function i18nInterpolate(text, params) {
 // Translate KEY, interpolating {params}. Falls back active -> en -> the key itself (never blank).
 function t(key, params) {
   const value = i18nResolve(key);
-  return i18nInterpolate(value == null ? String(key) : value, params);
+  return i18nInterpolate(value == null ? i18nMissingKey(key) : value, params);
 }
 
 // Plural form via Intl.PluralRules. Catalog keys are `${key}.${category}` (e.g. files.changed.one /
@@ -86,7 +102,7 @@ function tPlural(key, count, params) {
     ?? i18nCatalogValue(i18nActiveLocale, `${key}.other`)
     ?? i18nCatalogValue(i18nFallbackLocale, `${key}.${category}`)
     ?? i18nCatalogValue(i18nFallbackLocale, `${key}.other`);
-  return i18nInterpolate(value == null ? String(key) : value, {...(params || {}), count: number});
+  return i18nInterpolate(value == null ? i18nMissingKey(key) : value, {...(params || {}), count: number});
 }
 
 function i18nActiveLocaleId() {

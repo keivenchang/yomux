@@ -15,6 +15,7 @@ from typing import Protocol
 from urllib.parse import parse_qs
 
 from yolomux_lib.stats_current import protocol, resolution as stats_resolution
+from yolomux_lib.local_services.client import local_service_failure_is_transient
 
 MAX_QUERY_BYTES = 2_048
 CLIENT_ID_HMAC_DOMAIN = b"yolomux-stats-client-v1\x00"
@@ -73,6 +74,20 @@ def _unsupported(reason: str) -> protocol.UnsupportedWire:
     return protocol.unsupported_response(reason)
 
 
+def _transient_not_ready(metadata: Mapping[str, object]) -> bool:
+    """Recognize bounded daemon-busy replies without hiding terminal failures."""
+    return local_service_failure_is_transient(metadata)
+
+
+def _delta_pending(reason: str = "statsd is refreshing") -> dict[str, object]:
+    return {
+        "status": "pending",
+        "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+        "retry_after_seconds": 1,
+        "reason": reason,
+    }
+
+
 def parse_http_snapshot_query(raw_query: str) -> protocol.SnapshotRequest:
     """Parse one bounded query without accepting aliases, blanks, or duplicates."""
     if not isinstance(raw_query, str):
@@ -125,15 +140,33 @@ class StatsHttpForwarder:
         self.client_binding_secret = client_binding_secret
         self._logged_unavailable_reason = ""
 
-    @staticmethod
-    def capabilities() -> Mapping[str, object]:
-        return stats_resolution.wire_capabilities()
+    def capabilities(self) -> Mapping[str, object]:
+        """Expose the resolution matrix plus the one browser-safe recovery outcome."""
+        payload = dict(stats_resolution.wire_capabilities())
+        migration = self.client.status().get("migration")
+        if not isinstance(migration, Mapping):
+            return payload
+        state = str(migration.get("state") or "")
+        result = str(migration.get("result") or "")
+        if state != "ready" or result not in {"existing", "activated", "recovered"}:
+            return payload
+        issue_kinds = migration.get("issue_kinds")
+        if not isinstance(issue_kinds, (list, tuple)):
+            issue_kinds = ()
+        payload["migration"] = {
+            "state": state,
+            "result": result,
+            "issue_kinds": [str(kind)[:80] for kind in issue_kinds[:16] if isinstance(kind, str)],
+        }
+        return payload
 
     def _startup_failure(self) -> Mapping[str, object] | None:
         if self.client.ensure_started():
             self._logged_unavailable_reason = ""
             return None
         status = self.client.status()
+        if _transient_not_ready(status):
+            return status
         if status.get("status") == "upgrade_required" or status.get("error_code") == "upgrade_required":
             return status
         unavailable = _unavailable(
@@ -159,11 +192,20 @@ class StatsHttpForwarder:
             return SnapshotHttpResult(HTTPStatus.BAD_REQUEST, payload=error.response)
         startup_failure = self._startup_failure()
         if startup_failure is not None:
+            if _transient_not_ready(startup_failure):
+                return SnapshotHttpResult(
+                    HTTPStatus.ACCEPTED,
+                    payload=protocol.pending_response(
+                        requested,
+                        1,
+                        "statsd is refreshing",
+                    ),
+                )
             status = (
                 HTTPStatus.UPGRADE_REQUIRED
                 if startup_failure.get("status") == "upgrade_required"
                 or startup_failure.get("error_code") == "upgrade_required"
-                else HTTPStatus.SERVICE_UNAVAILABLE
+                else HTTPStatus.FAILED_DEPENDENCY
             )
             return SnapshotHttpResult(status, payload=startup_failure)
 
@@ -181,17 +223,26 @@ class StatsHttpForwarder:
         metadata, body = self.client.snapshot(request)
         state = metadata.get("status")
 
+        if _transient_not_ready(metadata) and not body:
+            return SnapshotHttpResult(
+                HTTPStatus.ACCEPTED,
+                payload=protocol.pending_response(
+                    request,
+                    1,
+                    "statsd is refreshing",
+                ),
+            )
         if metadata.get("ok") is True and metadata.get("not_modified") is True and not body:
             return SnapshotHttpResult(HTTPStatus.NOT_MODIFIED)
         if metadata.get("ok") is True and body and metadata.get("content_type") == "application/json":
             return SnapshotHttpResult(HTTPStatus.OK, body=body)
         if state == "pending" and not body:
-            return SnapshotHttpResult(HTTPStatus.SERVICE_UNAVAILABLE, payload=metadata)
+            return SnapshotHttpResult(HTTPStatus.ACCEPTED, payload=metadata)
         if state == "unsupported" and not body:
             return SnapshotHttpResult(HTTPStatus.BAD_REQUEST, payload=metadata)
         if (state == "upgrade_required" or metadata.get("error_code") == "upgrade_required") and not body:
             return SnapshotHttpResult(HTTPStatus.UPGRADE_REQUIRED, payload=metadata)
-        return SnapshotHttpResult(HTTPStatus.SERVICE_UNAVAILABLE, payload=_unavailable())
+        return SnapshotHttpResult(HTTPStatus.FAILED_DEPENDENCY, payload=_unavailable())
 
     def delta(self, raw_query: str, *, authenticated_username: str) -> SnapshotHttpResult:
         result = self.delta_stream(
@@ -214,11 +265,16 @@ class StatsHttpForwarder:
             return DeltaStreamResult(HTTPStatus.BAD_REQUEST, error.response)
         startup_failure = self._startup_failure()
         if startup_failure is not None:
+            if _transient_not_ready(startup_failure):
+                return DeltaStreamResult(
+                    HTTPStatus.ACCEPTED,
+                    _delta_pending(),
+                )
             status = (
                 HTTPStatus.UPGRADE_REQUIRED
                 if startup_failure.get("status") == "upgrade_required"
                 or startup_failure.get("error_code") == "upgrade_required"
-                else HTTPStatus.SERVICE_UNAVAILABLE
+                else HTTPStatus.FAILED_DEPENDENCY
             )
             return DeltaStreamResult(status, startup_failure)
         request = protocol.DeltaRequest(
@@ -234,16 +290,22 @@ class StatsHttpForwarder:
         )
         metadata, body = self.client.delta(request)
         state = metadata.get("status")
+        if _transient_not_ready(metadata) and not body:
+            return DeltaStreamResult(HTTPStatus.ACCEPTED, _delta_pending())
         if metadata.get("ok") is True and metadata.get("not_modified") is True and not body:
             return DeltaStreamResult(HTTPStatus.NOT_MODIFIED, metadata)
         if metadata.get("ok") is True and body and metadata.get("content_type") == "application/json":
             return DeltaStreamResult(HTTPStatus.OK, metadata, body)
         if state == "repair_required" and not body:
             return DeltaStreamResult(HTTPStatus.CONFLICT, metadata)
+        if state == "queued" and metadata.get("ok") is True and not body:
+            return DeltaStreamResult(HTTPStatus.ACCEPTED, metadata)
         if state == "pending" and not body:
-            return DeltaStreamResult(HTTPStatus.SERVICE_UNAVAILABLE, metadata)
+            return DeltaStreamResult(HTTPStatus.ACCEPTED, metadata)
         if state == "unsupported" and not body:
             return DeltaStreamResult(HTTPStatus.BAD_REQUEST, metadata)
         if (state == "upgrade_required" or metadata.get("error_code") == "upgrade_required") and not body:
             return DeltaStreamResult(HTTPStatus.UPGRADE_REQUIRED, metadata)
-        return DeltaStreamResult(HTTPStatus.SERVICE_UNAVAILABLE, _unavailable())
+        if state == "unavailable" and not body:
+            return DeltaStreamResult(HTTPStatus.FAILED_DEPENDENCY, metadata)
+        return DeltaStreamResult(HTTPStatus.FAILED_DEPENDENCY, _unavailable())

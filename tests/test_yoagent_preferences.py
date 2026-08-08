@@ -584,11 +584,13 @@ def test_app_yoagent_product_state_question_skips_cli_backend(monkeypatch, tmp_p
     payload = settings_payload_for_path(path)
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
-    monkeypatch.setattr(webapp, "activity_summary_payload", lambda *args, **kwargs: {
-        "generated_at": "now",
-        "sessions": {"6": {"session": "6", "last_activity_ts": 1, "repos": ["/repo"], "work": "tests", "file_lines": ["M app.py"]}},
-        "global": {"headline": "No work."},
-    })
+    monkeypatch.setattr(
+        webapp,
+        "activity_summary_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("product-state fallback must not call the disabled activity summary")
+        ),
+    )
     monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model backend should not run")))
     try:
         response, status = webapp.yoagent_controller.yoagent_chat({"message": "what changed?"}, access_role="readonly")
@@ -597,7 +599,7 @@ def test_app_yoagent_product_state_question_skips_cli_backend(monkeypatch, tmp_p
 
     assert status == HTTPStatus.OK
     assert response["backend_used"] == "yolomux"
-    assert "M app.py" in response["answer"]
+    assert response["answer"] == "I do not see changed-file details in the current activity cache."
 
 
 def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
@@ -605,12 +607,7 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
     save_settings({"yoagent": {"backend": "claude"}}, path)
     payload = settings_payload(path)
     webapp = app_module.TmuxWebtermApp([])
-    activity_force_calls = []
     backend_calls = []
-
-    def fake_activity_payload(*_args, **kwargs):
-        activity_force_calls.append(kwargs.get("force"))
-        return {"generated_at": "now", "sessions": {}, "global": {"headline": "No work."}}
 
     def fake_cli_backend(*args, **kwargs):
         backend_calls.append({"args": args, "kwargs": kwargs})
@@ -618,7 +615,13 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(app_module, "settings_payload", lambda: payload)
     monkeypatch.setattr(app_module, "resolve_yoagent_backend", lambda backend: "claude")
-    monkeypatch.setattr(webapp.yoagent_controller, "activity_summary_payload", fake_activity_payload)
+    monkeypatch.setattr(
+        webapp.yoagent_controller,
+        "activity_summary_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("model answers must not call the disabled activity summary")
+        ),
+    )
     monkeypatch.setattr(webapp.yoagent_controller, "run_yoagent_cli_backend", fake_cli_backend)
     try:
         response, status = webapp.yoagent_controller.yoagent_chat({"message": "summarize this project"}, access_role="admin")
@@ -642,7 +645,8 @@ def test_app_yoagent_model_answer_includes_timing(monkeypatch, tmp_path):
         **detail_rows["yoagent.details.responseTime"]["params"],
     ).startswith("响应时间")
     assert response["details"] == ""
-    assert activity_force_calls == [True]
+    assert backend_calls[0]["args"][2]["status"] == "feature_disabled"
+    assert backend_calls[0]["args"][2]["reason"] == "async_replacement_required"
     assert backend_calls[0]["kwargs"]["include_activity_context"] is True
 
 

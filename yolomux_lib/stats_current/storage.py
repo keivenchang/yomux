@@ -19,19 +19,59 @@ from urllib.parse import quote
 
 from yolomux_lib.atomic_file import atomic_write_text
 from yolomux_lib.filesystem.io_ops import read_json_file
+from yolomux_lib.infra import common
+from yolomux_lib.infra.filesystem_preflight import preflight_mutable_roots
+from yolomux_lib.infra.host_partition import host_partitioned_state_dir
 
 from . import identity
+from . import resolution as stats_resolution
 
 
 # Keep the existing YOST identity and advance beyond legacy schema 4. That
 # combination makes the legacy writer's read-only header fence stop before it
 # can reinterpret or mutate this intentionally incompatible schema.
 APPLICATION_ID = 0x594F5354
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 MIN_WRITER_PROTOCOL = 24
-MIN_WRITER_BUILD = 3
+# Build 4 moves recurring CPU/GPU host sampling into statsd.  An older daemon
+# must be retired rather than silently accepting context it cannot collect.
+MIN_WRITER_BUILD = 4
 RETENTION_SECONDS = 24 * 60 * 60
 DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
+
+
+def default_socket_path(state_dir: Path | None = None) -> Path:
+    """The one place the statsd socket path is decided.
+
+    A Unix socket cannot live on a network filesystem, and the state root may be
+    an NFS-exported home, so the socket belongs on the host-local, boot-scoped
+    runtime root.
+
+    The legacy probe is the coexistence half of THE SECOND RULE: a server from
+    the previous build is serving right now on the old path, and a client that
+    looked only at the new location would report a live service as missing. Once
+    nothing is listening there, new runs move on by themselves.
+    """
+
+    root = Path(state_dir or common.STATE_DIR)
+    legacy = root / "services" / SOCKET_FILENAME
+    if legacy.exists():
+        return legacy
+    database_path = default_database_path(root).resolve(strict=False)
+    database_digest = hashlib.sha256(str(database_path).encode("utf-8")).hexdigest()[:16]
+    return common.RUNTIME_DIR / "services" / f"{SOCKET_FILENAME.removesuffix('.sock')}.{database_digest}.sock"
+
+
+def default_database_path(state_dir: Path | None = None) -> Path:
+    """The one place the current database path is decided.
+
+    `client` and `service` each had their own copy of this expression. Partitioning
+    one and not the other would split the writer from its readers, so both now call
+    here. A legacy unpartitioned database beside it is never moved or removed -- it
+    is the operator's history and a previous build may still be running on it.
+    """
+
+    return host_partitioned_state_dir(state_dir or common.STATE_DIR) / DATABASE_FILENAME
 
 
 def socket_filename(protocol_version: int, schema_generation: int) -> str:
@@ -52,8 +92,17 @@ def socket_filename(protocol_version: int, schema_generation: int) -> str:
 SOCKET_FILENAME = socket_filename(MIN_WRITER_PROTOCOL, SCHEMA_VERSION)
 WRITER_FENCE_FILENAME = "stats-writer-compat.json"
 MAX_DIRTY_INTERVALS = 32
-MAX_DIRTY_INTERVAL_SPAN_SECONDS = 60 * 60
-MAX_PRIVATE_OBSERVATION_SOURCES = 64
+MAX_BROWSER_FAILURE_FINGERPRINTS = 128
+MAX_RING_BUCKET_BYTES = 256 * 1024
+
+_BROWSER_PROFILE_KINDS = frozenset(
+    {"api", "page_load", "finder_usable", "interaction", "operation_wait", "long_task"}
+)
+_BROWSER_DIAGNOSTICS_SUMMARY = "browser_observation_diagnostics"
+_BROWSER_FAILURE_EVENTS = "browser_failure_diagnostic_events"
+_BROWSER_FAILURE_GROUPS = "browser_failure_diagnostic_groups"
+_BROWSER_FAILURE_REVISIONS = "browser_failure_diagnostic_revisions"
+_BROWSER_PROFILE_EVENTS = "browser_profile_diagnostic_events"
 
 _TABLES = frozenset(
     {
@@ -89,6 +138,26 @@ _COLUMNS = {
         "event_id", "direction", "modality", "cache_role", "unit", "observed_at", "payload_json",
     ),
 }
+_RING_TABLES = frozenset(
+    {"aggregate_publication", "aggregate_rings", "aggregate_ring_slots"}
+)
+_RING_COLUMNS = {
+    "aggregate_publication": (
+        "singleton", "ring_generation", "source_generation", "published_at",
+    ),
+    "aggregate_rings": (
+        "resolution_seconds", "slot_count", "newest_bucket_start",
+    ),
+    "aggregate_ring_slots": (
+        "resolution_seconds", "slot_index", "bucket_start", "bucket_json", "complete",
+        "source_generation", "ring_generation", "published_at",
+    ),
+}
+_RING_TRIGGER_NAMES = frozenset(
+    f"{table}_reject_{operation}"
+    for table in _RING_TABLES
+    for operation in ("insert", "delete")
+)
 
 
 class StatsCurrentError(RuntimeError):
@@ -307,6 +376,48 @@ class AppendResult:
     usage_attribution_conflicts: int = 0
     usage_tombstones_accepted: int = 0
     usage_tombstones_duplicate: int = 0
+    accepted_observation_ids: tuple[str, ...] = ()
+    accepted_original_timestamps: tuple[float, ...] = ()
+
+
+@dataclass(frozen=True)
+class RingBucketWrite:
+    resolution_seconds: int
+    bucket_start: int
+    bucket_json: str
+    complete: bool
+
+
+@dataclass(frozen=True)
+class RingBucketRow:
+    resolution_seconds: int
+    bucket_start: int
+    bucket_json: str
+    complete: bool
+    source_generation: int
+    ring_generation: int
+    published_at: float
+
+
+@dataclass(frozen=True)
+class RingWindow:
+    range_seconds: int
+    resolution_seconds: int
+    window_start: int
+    window_end: int
+    rows: tuple[RingBucketRow, ...]
+    missing_bucket_starts: tuple[int, ...]
+    source_generation: int
+    ring_generation: int
+    published_at: float
+
+
+@dataclass(frozen=True)
+class RingPublication:
+    ring_generation: int
+    source_generation: int
+    published_at: float
+    buckets_updated: int
 
 
 @dataclass(frozen=True)
@@ -343,6 +454,38 @@ def _validate_nonnegative_integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise StorageValidationError(f"{name} must be a non-negative integer")
     return value
+
+
+def _ring_bucket_values(bucket: RingBucketWrite) -> tuple[int, int, int, str, int]:
+    if not isinstance(bucket, RingBucketWrite):
+        raise StorageValidationError("ring bucket must be a RingBucketWrite")
+    resolution_seconds = _validate_nonnegative_integer(
+        bucket.resolution_seconds, "resolution_seconds",
+    )
+    slot_count = stats_resolution.RING_CAPACITIES.get(resolution_seconds)
+    if slot_count is None:
+        raise StorageValidationError(
+            f"resolution_seconds must be one of {tuple(stats_resolution.RING_CAPACITIES)}"
+        )
+    bucket_start = _validate_nonnegative_integer(bucket.bucket_start, "bucket_start")
+    if bucket_start % resolution_seconds:
+        raise StorageValidationError("bucket_start must align to resolution_seconds")
+    if not isinstance(bucket.bucket_json, str):
+        raise StorageValidationError("bucket_json must be a JSON object")
+    if len(bucket.bucket_json.encode("utf-8")) > MAX_RING_BUCKET_BYTES:
+        raise StorageValidationError(
+            f"bucket_json exceeds {MAX_RING_BUCKET_BYTES} bytes"
+        )
+    try:
+        payload = json.loads(bucket.bucket_json)
+    except json.JSONDecodeError as error:
+        raise StorageValidationError("bucket_json must be a JSON object") from error
+    if not isinstance(payload, dict):
+        raise StorageValidationError("bucket_json must be a JSON object")
+    if not isinstance(bucket.complete, bool):
+        raise StorageValidationError("complete must be a boolean")
+    slot_index = (bucket_start // resolution_seconds) % slot_count
+    return resolution_seconds, slot_index, bucket_start, bucket.bucket_json, int(bucket.complete)
 
 
 def _encode_json_object(value: Mapping[str, object], name: str) -> str:
@@ -434,6 +577,384 @@ def _decode_json_object(encoded: object, name: str) -> dict[str, object]:
     return value
 
 
+def _browser_diagnostic_payload(encoded: object) -> dict[str, object] | None:
+    """Decode one derived browser index input without making corruption contagious."""
+
+    try:
+        value = json.loads(str(encoded))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _browser_failure_dimensions(
+    payload: Mapping[str, object],
+) -> tuple[str, str, str, str | None] | None:
+    kind = str(payload.get("kind") or "")
+    if kind not in {"warning", "error", "unhandledrejection"}:
+        return None
+    provenance_value = payload.get("provenance")
+    provenance = (
+        str(provenance_value)
+        if provenance_value in {"controlled_probe", "confirmed_real"}
+        else "unknown"
+    )
+    revision_value = payload.get("code_revision")
+    revision = revision_value if isinstance(revision_value, str) and revision_value else None
+    return kind, str(payload.get("signature") or ""), provenance, revision
+
+
+def _create_browser_diagnostics_tables(connection: sqlite3.Connection) -> None:
+    """Create process-local derived indexes; original observations remain authoritative."""
+
+    # Some SQLite builds default TEMP tables to process memory. These indexes scale with the
+    # retained originals, so force spillable host-local TEMP storage and keep request memory flat.
+    connection.execute("PRAGMA temp_store = FILE")
+    connection.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_BROWSER_DIAGNOSTICS_SUMMARY} ("
+        "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+        "retained_observations INTEGER NOT NULL CHECK (retained_observations >= 0), "
+        "retained_failures INTEGER NOT NULL CHECK (retained_failures >= 0), "
+        "retained_errors INTEGER NOT NULL CHECK (retained_errors >= 0), "
+        "retained_rejections INTEGER NOT NULL CHECK (retained_rejections >= 0), "
+        "confirmed_real INTEGER NOT NULL CHECK (confirmed_real >= 0), "
+        "controlled_probe INTEGER NOT NULL CHECK (controlled_probe >= 0), "
+        "unknown INTEGER NOT NULL CHECK (unknown >= 0), last_observed_at REAL)"
+    )
+    connection.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_BROWSER_FAILURE_EVENTS} ("
+        "source_id TEXT NOT NULL, event_id TEXT NOT NULL, observed_at REAL NOT NULL, "
+        "kind TEXT NOT NULL, signature TEXT NOT NULL, provenance TEXT NOT NULL, "
+        "code_revision TEXT, PRIMARY KEY(source_id, event_id)) WITHOUT ROWID"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS browser_failure_diagnostic_events_group "
+        f"ON {_BROWSER_FAILURE_EVENTS}("
+        "kind, signature, provenance, observed_at DESC, event_id DESC)"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS browser_failure_diagnostic_events_time "
+        f"ON {_BROWSER_FAILURE_EVENTS}(observed_at)"
+    )
+    connection.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_BROWSER_FAILURE_GROUPS} ("
+        "kind TEXT NOT NULL, signature TEXT NOT NULL, provenance TEXT NOT NULL, "
+        "failure_count INTEGER NOT NULL CHECK (failure_count > 0), "
+        "first_observed_at REAL NOT NULL, last_observed_at REAL NOT NULL, "
+        "latest_event_id TEXT NOT NULL, PRIMARY KEY(kind, signature, provenance)) WITHOUT ROWID"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS browser_failure_diagnostic_groups_recent "
+        f"ON {_BROWSER_FAILURE_GROUPS}("
+        "last_observed_at DESC, signature, latest_event_id DESC, kind, provenance)"
+    )
+    connection.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_BROWSER_FAILURE_REVISIONS} ("
+        "kind TEXT NOT NULL, signature TEXT NOT NULL, provenance TEXT NOT NULL, "
+        "code_revision TEXT NOT NULL, occurrence_count INTEGER NOT NULL "
+        "CHECK (occurrence_count > 0), "
+        "PRIMARY KEY(kind, signature, provenance, code_revision)) WITHOUT ROWID"
+    )
+    connection.execute(
+        f"CREATE TEMP TABLE IF NOT EXISTS {_BROWSER_PROFILE_EVENTS} ("
+        "source_id TEXT NOT NULL, event_id TEXT NOT NULL, observed_at REAL NOT NULL, "
+        "payload_json TEXT NOT NULL, PRIMARY KEY(source_id, event_id)) WITHOUT ROWID"
+    )
+    connection.execute(
+        f"CREATE INDEX IF NOT EXISTS browser_profile_diagnostic_events_recent "
+        f"ON {_BROWSER_PROFILE_EVENTS}(observed_at DESC, event_id DESC)"
+    )
+
+
+def _rebuild_browser_failure_groups(connection: sqlite3.Connection) -> None:
+    connection.execute(f"DELETE FROM {_BROWSER_FAILURE_GROUPS}")
+    connection.execute(f"DELETE FROM {_BROWSER_FAILURE_REVISIONS}")
+    connection.execute(
+        f"INSERT INTO {_BROWSER_FAILURE_GROUPS}("
+        "kind, signature, provenance, failure_count, first_observed_at, "
+        "last_observed_at, latest_event_id) "
+        f"SELECT kind, signature, provenance, COUNT(*), MIN(observed_at), MAX(observed_at), '' "
+        f"FROM {_BROWSER_FAILURE_EVENTS} GROUP BY kind, signature, provenance"
+    )
+    connection.execute(
+        f"UPDATE {_BROWSER_FAILURE_GROUPS} AS groups SET latest_event_id = ("
+        f"SELECT events.event_id FROM {_BROWSER_FAILURE_EVENTS} AS events "
+        "WHERE events.kind = groups.kind AND events.signature = groups.signature "
+        "AND events.provenance = groups.provenance "
+        "ORDER BY events.observed_at DESC, events.event_id DESC LIMIT 1)"
+    )
+    connection.execute(
+        f"INSERT INTO {_BROWSER_FAILURE_REVISIONS}("
+        "kind, signature, provenance, code_revision, occurrence_count) "
+        f"SELECT kind, signature, provenance, code_revision, COUNT(*) "
+        f"FROM {_BROWSER_FAILURE_EVENTS} WHERE code_revision IS NOT NULL "
+        "GROUP BY kind, signature, provenance, code_revision"
+    )
+
+
+def _initialize_browser_diagnostics(connection: sqlite3.Connection) -> None:
+    """Rebuild bounded request-time indexes from authoritative retained originals."""
+
+    _create_browser_diagnostics_tables(connection)
+    with _transaction(connection):
+        for table in (
+            _BROWSER_DIAGNOSTICS_SUMMARY,
+            _BROWSER_FAILURE_EVENTS,
+            _BROWSER_FAILURE_GROUPS,
+            _BROWSER_FAILURE_REVISIONS,
+            _BROWSER_PROFILE_EVENTS,
+        ):
+            connection.execute(f"DELETE FROM {table}")
+        retained = failures = errors = rejections = confirmed = probes = unknown = 0
+        latest: float | None = None
+        failure_rows: list[tuple[object, ...]] = []
+        profile_rows: list[tuple[object, ...]] = []
+
+        def flush_rows() -> None:
+            connection.executemany(
+                f"INSERT INTO {_BROWSER_FAILURE_EVENTS} VALUES(?, ?, ?, ?, ?, ?, ?)",
+                failure_rows,
+            )
+            connection.executemany(
+                f"INSERT INTO {_BROWSER_PROFILE_EVENTS} VALUES(?, ?, ?, ?)",
+                profile_rows,
+            )
+            failure_rows.clear()
+            profile_rows.clear()
+
+        rows = connection.execute(
+            "SELECT source_id, event_id, observed_at, payload_json FROM observations "
+            "WHERE family = 'browser'"
+        )
+        for source_id, event_id, observed_at, payload_json in rows:
+            retained += 1
+            observed = float(observed_at)
+            latest = observed if latest is None else max(latest, observed)
+            payload = _browser_diagnostic_payload(payload_json)
+            if payload is None:
+                continue
+            kind = str(payload.get("kind") or "")
+            if kind in _BROWSER_PROFILE_KINDS:
+                profile_rows.append((source_id, event_id, observed, payload_json))
+            failure = _browser_failure_dimensions(payload)
+            if failure is None:
+                if len(failure_rows) + len(profile_rows) >= 1_024:
+                    flush_rows()
+                continue
+            failure_kind, signature, provenance, revision = failure
+            failure_rows.append(
+                (source_id, event_id, observed, failure_kind, signature, provenance, revision)
+            )
+            failures += 1
+            errors += int(failure_kind == "error")
+            rejections += int(failure_kind == "unhandledrejection")
+            confirmed += int(provenance == "confirmed_real")
+            probes += int(provenance == "controlled_probe")
+            unknown += int(provenance == "unknown")
+            if len(failure_rows) + len(profile_rows) >= 1_024:
+                flush_rows()
+        flush_rows()
+        connection.execute(
+            f"INSERT INTO {_BROWSER_DIAGNOSTICS_SUMMARY} VALUES(1, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (retained, failures, errors, rejections, confirmed, probes, unknown, latest),
+        )
+        _rebuild_browser_failure_groups(connection)
+
+
+def _append_browser_diagnostics(
+    connection: sqlite3.Connection,
+    accepted: tuple[tuple[object, ...], ...],
+) -> None:
+    browser = tuple(values for values in accepted if values[1] == "browser")
+    if not browser:
+        return
+    failure_rows: list[tuple[object, ...]] = []
+    profile_rows: list[tuple[object, ...]] = []
+    groups: dict[tuple[str, str, str], list[object]] = {}
+    revisions: dict[tuple[str, str, str, str], int] = {}
+    errors = rejections = confirmed = probes = unknown = 0
+    latest = max(float(values[3]) for values in browser)
+    for values in browser:
+        payload = _browser_diagnostic_payload(values[6])
+        if payload is None:
+            continue
+        kind = str(payload.get("kind") or "")
+        if kind in _BROWSER_PROFILE_KINDS:
+            profile_rows.append((values[2], values[0], values[3], values[6]))
+        failure = _browser_failure_dimensions(payload)
+        if failure is None:
+            continue
+        failure_kind, signature, provenance, revision = failure
+        event_id, observed = str(values[0]), float(values[3])
+        failure_rows.append(
+            (values[2], event_id, observed, failure_kind, signature, provenance, revision)
+        )
+        errors += int(failure_kind == "error")
+        rejections += int(failure_kind == "unhandledrejection")
+        confirmed += int(provenance == "confirmed_real")
+        probes += int(provenance == "controlled_probe")
+        unknown += int(provenance == "unknown")
+        key = (failure_kind, signature, provenance)
+        item = groups.setdefault(key, [0, observed, observed, event_id])
+        item[0] = int(item[0]) + 1
+        item[1] = min(float(item[1]), observed)
+        if observed > float(item[2]) or (observed == float(item[2]) and event_id > str(item[3])):
+            item[2], item[3] = observed, event_id
+        if revision is not None:
+            revision_key = (*key, revision)
+            revisions[revision_key] = revisions.get(revision_key, 0) + 1
+    connection.execute(
+        f"UPDATE {_BROWSER_DIAGNOSTICS_SUMMARY} SET "
+        "retained_observations = retained_observations + ?, "
+        "retained_failures = retained_failures + ?, retained_errors = retained_errors + ?, "
+        "retained_rejections = retained_rejections + ?, confirmed_real = confirmed_real + ?, "
+        "controlled_probe = controlled_probe + ?, unknown = unknown + ?, "
+        "last_observed_at = CASE WHEN last_observed_at IS NULL OR last_observed_at < ? "
+        "THEN ? ELSE last_observed_at END WHERE singleton = 1",
+        (
+            len(browser), len(failure_rows), errors, rejections, confirmed, probes, unknown,
+            latest, latest,
+        ),
+    )
+    connection.executemany(
+        f"INSERT INTO {_BROWSER_FAILURE_EVENTS} VALUES(?, ?, ?, ?, ?, ?, ?)",
+        failure_rows,
+    )
+    connection.executemany(
+        f"INSERT INTO {_BROWSER_PROFILE_EVENTS} VALUES(?, ?, ?, ?)",
+        profile_rows,
+    )
+    connection.executemany(
+        f"INSERT INTO {_BROWSER_FAILURE_GROUPS}("
+        "kind, signature, provenance, failure_count, first_observed_at, "
+        "last_observed_at, latest_event_id) VALUES(?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(kind, signature, provenance) DO UPDATE SET "
+        "failure_count = failure_count + excluded.failure_count, "
+        "first_observed_at = MIN(first_observed_at, excluded.first_observed_at), "
+        "latest_event_id = CASE WHEN excluded.last_observed_at > last_observed_at "
+        "OR (excluded.last_observed_at = last_observed_at "
+        "AND excluded.latest_event_id > latest_event_id) THEN excluded.latest_event_id "
+        "ELSE latest_event_id END, "
+        "last_observed_at = MAX(last_observed_at, excluded.last_observed_at)",
+        ((*key, *item) for key, item in groups.items()),
+    )
+    connection.executemany(
+        f"INSERT INTO {_BROWSER_FAILURE_REVISIONS}("
+        "kind, signature, provenance, code_revision, occurrence_count) "
+        "VALUES(?, ?, ?, ?, ?) "
+        "ON CONFLICT(kind, signature, provenance, code_revision) DO UPDATE SET "
+        "occurrence_count = occurrence_count + excluded.occurrence_count",
+        ((*key, count) for key, count in revisions.items()),
+    )
+
+
+def _prune_browser_diagnostics(connection: sqlite3.Connection, cutoff: float) -> None:
+    removed_observations = int(connection.execute(
+        "SELECT COUNT(*) FROM observations WHERE family = 'browser' AND observed_at < ?",
+        (cutoff,),
+    ).fetchone()[0])
+    if not removed_observations:
+        return
+    removed_rows = connection.execute(
+        f"SELECT kind, signature, provenance, code_revision, COUNT(*) "
+        f"FROM {_BROWSER_FAILURE_EVENTS} WHERE observed_at < ? "
+        "GROUP BY kind, signature, provenance, code_revision",
+        (cutoff,),
+    ).fetchall()
+    removed_groups: dict[tuple[str, str, str], int] = {}
+    failures = errors = rejections = confirmed = probes = unknown = 0
+    for kind, signature, provenance, _revision, count_value in removed_rows:
+        count = int(count_value)
+        key = (str(kind), str(signature), str(provenance))
+        removed_groups[key] = removed_groups.get(key, 0) + count
+        failures += count
+        errors += count * int(kind == "error")
+        rejections += count * int(kind == "unhandledrejection")
+        confirmed += count * int(provenance == "confirmed_real")
+        probes += count * int(provenance == "controlled_probe")
+        unknown += count * int(provenance == "unknown")
+    connection.execute(
+        f"DELETE FROM {_BROWSER_FAILURE_EVENTS} WHERE observed_at < ?", (cutoff,),
+    )
+    connection.execute(
+        f"DELETE FROM {_BROWSER_PROFILE_EVENTS} WHERE observed_at < ?", (cutoff,),
+    )
+    for key, count in removed_groups.items():
+        current = connection.execute(
+            f"SELECT failure_count FROM {_BROWSER_FAILURE_GROUPS} "
+            "WHERE kind = ? AND signature = ? AND provenance = ?",
+            key,
+        ).fetchone()
+        if current is None or int(current[0]) < count:
+            raise SchemaMismatchError("browser failure diagnostic group count is inconsistent")
+        if int(current[0]) == count:
+            connection.execute(
+                f"DELETE FROM {_BROWSER_FAILURE_GROUPS} "
+                "WHERE kind = ? AND signature = ? AND provenance = ?",
+                key,
+            )
+            connection.execute(
+                f"DELETE FROM {_BROWSER_FAILURE_REVISIONS} "
+                "WHERE kind = ? AND signature = ? AND provenance = ?",
+                key,
+            )
+            continue
+        first = connection.execute(
+            f"SELECT MIN(observed_at) FROM {_BROWSER_FAILURE_EVENTS} "
+            "WHERE kind = ? AND signature = ? AND provenance = ?",
+            key,
+        ).fetchone()[0]
+        connection.execute(
+            f"UPDATE {_BROWSER_FAILURE_GROUPS} SET failure_count = failure_count - ?, "
+            "first_observed_at = ? WHERE kind = ? AND signature = ? AND provenance = ?",
+            (count, first, *key),
+        )
+    for kind, signature, provenance, revision, count_value in removed_rows:
+        if revision is None:
+            continue
+        key = (str(kind), str(signature), str(provenance), str(revision))
+        current = connection.execute(
+            f"SELECT occurrence_count FROM {_BROWSER_FAILURE_REVISIONS} "
+            "WHERE kind = ? AND signature = ? AND provenance = ? AND code_revision = ?",
+            key,
+        ).fetchone()
+        if current is None:
+            continue
+        count = int(count_value)
+        if int(current[0]) <= count:
+            connection.execute(
+                f"DELETE FROM {_BROWSER_FAILURE_REVISIONS} "
+                "WHERE kind = ? AND signature = ? AND provenance = ? AND code_revision = ?",
+                key,
+            )
+        else:
+            connection.execute(
+                f"UPDATE {_BROWSER_FAILURE_REVISIONS} "
+                "SET occurrence_count = occurrence_count - ? "
+                "WHERE kind = ? AND signature = ? AND provenance = ? AND code_revision = ?",
+                (count, *key),
+            )
+    remaining = connection.execute(
+        f"SELECT retained_observations - ? FROM {_BROWSER_DIAGNOSTICS_SUMMARY} WHERE singleton = 1",
+        (removed_observations,),
+    ).fetchone()
+    if remaining is None or int(remaining[0]) < 0:
+        raise SchemaMismatchError("browser observation diagnostic count is inconsistent")
+    connection.execute(
+        f"UPDATE {_BROWSER_DIAGNOSTICS_SUMMARY} SET "
+        "retained_observations = retained_observations - ?, "
+        "retained_failures = retained_failures - ?, retained_errors = retained_errors - ?, "
+        "retained_rejections = retained_rejections - ?, confirmed_real = confirmed_real - ?, "
+        "controlled_probe = controlled_probe - ?, unknown = unknown - ?, "
+        "last_observed_at = CASE WHEN retained_observations = ? THEN NULL ELSE last_observed_at END "
+        "WHERE singleton = 1",
+        (
+            removed_observations, failures, errors, rejections,
+            confirmed, probes, unknown, removed_observations,
+        ),
+    )
+
+
 def _coalesced_dirty_intervals(
     values: Iterable[tuple[int | float, int | float]] | None,
 ) -> tuple[tuple[float, float], ...] | None:
@@ -454,24 +975,57 @@ def _coalesced_dirty_intervals(
             merged[-1] = (merged[-1][0], max(merged[-1][1], end))
         else:
             merged.append((start, end))
-    if (
-        len(merged) > MAX_DIRTY_INTERVALS
-        or merged[-1][1] - merged[0][0] > MAX_DIRTY_INTERVAL_SPAN_SECONDS
-    ):
-        return None
     return tuple(merged)
 
 
-def _time_clause(intervals: tuple[tuple[float, float], ...] | None) -> tuple[str, tuple[float, ...]]:
+def _time_clauses(
+    intervals: tuple[tuple[float, float], ...] | None,
+) -> tuple[tuple[str, tuple[float, ...]], ...]:
     if intervals is None:
-        return "", ()
+        return (("", ()),)
     if not intervals:
-        return " WHERE 0", ()
-    clause = " WHERE " + " OR ".join(
-        "(observed_at >= ? AND observed_at < ?)" for _interval in intervals
+        return ((" WHERE 0", ()),)
+    if len(intervals) > MAX_DIRTY_INTERVALS * 2:
+        # Repeating many small indexed reads is slower than one bounded range
+        # read on the host-backed database; the caller sweeps this envelope
+        # against the exact intervals before decoding any JSON payload.
+        return ((
+            " WHERE observed_at >= ? AND observed_at < ?",
+            (intervals[0][0], intervals[-1][1]),
+        ),)
+    return tuple(
+        (
+            " WHERE " + " OR ".join(
+                "(observed_at >= ? AND observed_at < ?)" for _interval in batch
+            ),
+            tuple(value for interval in batch for value in interval),
+        )
+        for offset in range(0, len(intervals), MAX_DIRTY_INTERVALS)
+        for batch in (intervals[offset:offset + MAX_DIRTY_INTERVALS],)
     )
-    parameters = tuple(value for interval in intervals for value in interval)
-    return clause, parameters
+
+
+def _rows_in_dirty_intervals(
+    rows: tuple[tuple[object, ...], ...],
+    intervals: tuple[tuple[float, float], ...] | None,
+    timestamp_index: int,
+) -> tuple[tuple[object, ...], ...]:
+    if intervals is None or len(intervals) <= MAX_DIRTY_INTERVALS * 2:
+        return rows
+    selected = []
+    interval_index = 0
+    for row in rows:
+        observed_at = float(row[timestamp_index])
+        while (
+            interval_index < len(intervals)
+            and intervals[interval_index][1] <= observed_at
+        ):
+            interval_index += 1
+        if interval_index >= len(intervals):
+            break
+        if intervals[interval_index][0] <= observed_at:
+            selected.append(row)
+    return tuple(selected)
 
 
 def _read_header(connection: sqlite3.Connection) -> _Header:
@@ -642,6 +1196,146 @@ def _unavailable_values(span: UnavailableSpan) -> tuple[object, ...]:
     )
 
 
+def _aggregate_tables(connection: sqlite3.Connection) -> frozenset[str]:
+    return frozenset(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'aggregate_%'"
+        )
+    )
+
+
+def _validate_ring_schema(connection: sqlite3.Connection) -> None:
+    tables = _aggregate_tables(connection)
+    if tables != _RING_TABLES:
+        raise SchemaMismatchError(
+            f"expected aggregate tables {sorted(_RING_TABLES)}, found {sorted(tables)}"
+        )
+    columns = {
+        table: tuple(str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})"))
+        for table in tables
+    }
+    if columns != _RING_COLUMNS:
+        raise SchemaMismatchError("aggregate ring columns do not match the exact schema")
+    publication_rows = connection.execute(
+        "SELECT singleton, ring_generation, source_generation, published_at "
+        "FROM aggregate_publication"
+    ).fetchall()
+    if len(publication_rows) != 1 or tuple(publication_rows[0])[:1] != (1,):
+        raise SchemaMismatchError("aggregate publication must contain its one fixed row")
+    ring_rows = connection.execute(
+        "SELECT resolution_seconds, slot_count, newest_bucket_start "
+        "FROM aggregate_rings ORDER BY resolution_seconds"
+    ).fetchall()
+    expected_rings = tuple(
+        (resolution_seconds, slot_count)
+        for resolution_seconds, slot_count in stats_resolution.RING_CAPACITIES.items()
+    )
+    if tuple((int(row[0]), int(row[1])) for row in ring_rows) != expected_rings:
+        raise SchemaMismatchError("aggregate rings do not match the exact capacities")
+    for row in ring_rows:
+        if row[2] is not None and int(row[2]) % int(row[0]):
+            raise SchemaMismatchError("aggregate ring head is not resolution-aligned")
+    slot_counts = tuple(
+        (int(row[0]), int(row[1]))
+        for row in connection.execute(
+            "SELECT resolution_seconds, count(*) FROM aggregate_ring_slots "
+            "GROUP BY resolution_seconds ORDER BY resolution_seconds"
+        )
+    )
+    if slot_counts != expected_rings:
+        raise SchemaMismatchError("aggregate ring slot counts do not match the exact capacities")
+    for resolution_seconds, slot_count in expected_rings:
+        indexes = tuple(
+            int(row[0])
+            for row in connection.execute(
+                "SELECT slot_index FROM aggregate_ring_slots "
+                "WHERE resolution_seconds = ? ORDER BY slot_index",
+                (resolution_seconds,),
+            )
+        )
+        if indexes != tuple(range(slot_count)):
+            raise SchemaMismatchError(
+                f"aggregate ring {resolution_seconds}s slots are not exact and contiguous"
+            )
+    trigger_names = frozenset(
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name LIKE 'aggregate_%'"
+        )
+    )
+    if trigger_names != _RING_TRIGGER_NAMES:
+        raise SchemaMismatchError("aggregate ring fixed-row triggers do not match the exact schema")
+
+
+def _initialize_ring_schema(connection: sqlite3.Connection) -> None:
+    tables = _aggregate_tables(connection)
+    if tables:
+        _validate_ring_schema(connection)
+        return
+    with _transaction(connection):
+        connection.execute(
+            "CREATE TABLE aggregate_publication ("
+            "singleton INTEGER PRIMARY KEY CHECK (singleton = 1), "
+            "ring_generation INTEGER NOT NULL CHECK (ring_generation >= 0), "
+            "source_generation INTEGER NOT NULL CHECK (source_generation >= 0), "
+            "published_at REAL NOT NULL CHECK (published_at >= 0))"
+        )
+        connection.execute(
+            "CREATE TABLE aggregate_rings ("
+            "resolution_seconds INTEGER PRIMARY KEY, "
+            "slot_count INTEGER NOT NULL CHECK (slot_count > 0), "
+            "newest_bucket_start INTEGER, "
+            "CHECK (resolution_seconds > 0), "
+            "CHECK (newest_bucket_start IS NULL OR newest_bucket_start >= 0), "
+            "CHECK (newest_bucket_start IS NULL OR "
+            "newest_bucket_start % resolution_seconds = 0)) WITHOUT ROWID"
+        )
+        connection.execute(
+            "CREATE TABLE aggregate_ring_slots ("
+            "resolution_seconds INTEGER NOT NULL, "
+            "slot_index INTEGER NOT NULL CHECK (slot_index >= 0), "
+            "bucket_start INTEGER, bucket_json TEXT, "
+            "complete INTEGER NOT NULL DEFAULT 0 CHECK (complete IN (0, 1)), "
+            "source_generation INTEGER NOT NULL DEFAULT 0 CHECK (source_generation >= 0), "
+            "ring_generation INTEGER NOT NULL DEFAULT 0 CHECK (ring_generation >= 0), "
+            "published_at REAL NOT NULL DEFAULT 0 CHECK (published_at >= 0), "
+            "PRIMARY KEY (resolution_seconds, slot_index), "
+            "FOREIGN KEY (resolution_seconds) REFERENCES aggregate_rings(resolution_seconds), "
+            "CHECK (bucket_start IS NULL OR bucket_start >= 0), "
+            "CHECK (bucket_start IS NULL OR bucket_start % resolution_seconds = 0), "
+            "CHECK ((bucket_start IS NULL AND bucket_json IS NULL AND complete = 0 "
+            "AND source_generation = 0 AND ring_generation = 0 AND published_at = 0) "
+            "OR (bucket_start IS NOT NULL AND bucket_json IS NOT NULL))) WITHOUT ROWID"
+        )
+        connection.execute(
+            "INSERT INTO aggregate_publication("
+            "singleton, ring_generation, source_generation, published_at) VALUES(1, 0, 0, 0)"
+        )
+        connection.executemany(
+            "INSERT INTO aggregate_rings("
+            "resolution_seconds, slot_count, newest_bucket_start) VALUES(?, ?, NULL)",
+            stats_resolution.RING_CAPACITIES.items(),
+        )
+        connection.executemany(
+            "INSERT INTO aggregate_ring_slots(resolution_seconds, slot_index) VALUES(?, ?)",
+            (
+                (resolution_seconds, slot_index)
+                for resolution_seconds, slot_count in stats_resolution.RING_CAPACITIES.items()
+                for slot_index in range(slot_count)
+            ),
+        )
+        for table in sorted(_RING_TABLES):
+            for operation in ("insert", "delete"):
+                connection.execute(
+                    f"CREATE TRIGGER {table}_reject_{operation} "
+                    f"BEFORE {operation.upper()} ON {table} "
+                    "BEGIN SELECT RAISE(ABORT, 'aggregate ring rows are fixed'); END"
+                )
+    _validate_ring_schema(connection)
+
+
 class Store:
     """One fail-fast owner of the exact current schema and original facts."""
 
@@ -673,6 +1367,9 @@ class Store:
         is_new = not database_path.exists() or database_path.stat().st_size == 0
         if not is_new:
             cls._preflight(database_path, protocol, build)
+        # Before the file is opened or created, not after: WAL is unsupported on a
+        # network filesystem, and a shared home puts two hosts on one inode.
+        preflight_mutable_roots(wal_databases=[database_path])
         cls._publish_fence(database_path)
         connection = sqlite3.connect(database_path, timeout=5.0, isolation_level=None)
         try:
@@ -690,6 +1387,7 @@ class Store:
             connection.execute("PRAGMA synchronous = NORMAL")
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
+            _initialize_browser_diagnostics(connection)
         except (sqlite3.Error, StatsCurrentError):
             connection.close()
             raise
@@ -719,11 +1417,12 @@ class Store:
                 timeout=5.0,
                 isolation_level=None,
             )
-            connection.execute("PRAGMA query_only = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
             header = _read_header(connection)
             _check_writer(header, protocol, build)
             cls._validate_schema_shape(connection)
+            _initialize_browser_diagnostics(connection)
+            connection.execute("PRAGMA query_only = ON")
         except (sqlite3.Error, StatsCurrentError):
             if connection is not None:
                 connection.close()
@@ -878,16 +1577,21 @@ class Store:
                 ("table", "sqlite_%"),
             )
         }
-        if tables != _TABLES:
+        # Landing 2 keeps schema v7 active and makes the ring kernel explicit. Reopening an opted-in
+        # test or migration candidate may accept the whole exact extension, never a partial shape.
+        aggregate_tables = tables & _RING_TABLES
+        if tables - _RING_TABLES != _TABLES or aggregate_tables not in (set(), set(_RING_TABLES)):
             raise SchemaMismatchError(
                 f"expected current tables {sorted(_TABLES)}, found {sorted(tables)}"
             )
         columns = {
             table: tuple(str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})"))
-            for table in tables
+            for table in _TABLES
         }
         if columns != _COLUMNS:
             raise SchemaMismatchError("current stats table columns do not match the exact schema")
+        if aggregate_tables:
+            _validate_ring_schema(connection)
 
     @staticmethod
     def _upgrade_current_contract(connection: sqlite3.Connection) -> None:
@@ -963,6 +1667,157 @@ class Store:
             raise StatsCurrentError("stats store is closed")
         return self._database
 
+    def initialize_ring_storage(self) -> None:
+        """Create the inert fixed-slot kernel without enabling a production caller."""
+
+        if self.read_only:
+            raise StatsCurrentError("stats store reader cannot initialize ring storage")
+        _initialize_ring_schema(self._connection())
+
+    def _require_ring_storage(self) -> sqlite3.Connection:
+        connection = self._connection()
+        tables = _aggregate_tables(connection)
+        if tables != _RING_TABLES:
+            raise StatsCurrentError("aggregate ring storage is not initialized")
+        return connection
+
+    def publish_ring_buckets(
+        self,
+        *,
+        buckets: Iterable[RingBucketWrite],
+        source_generation: int,
+        published_at: float,
+    ) -> RingPublication:
+        """Replace exact addressed slots in one update-only transaction."""
+
+        if self.read_only:
+            raise StatsCurrentError("stats store reader cannot publish ring rows")
+        prepared = tuple(_ring_bucket_values(bucket) for bucket in buckets)
+        if not prepared:
+            raise StorageValidationError("ring publication must contain at least one bucket")
+        source = _validate_nonnegative_integer(source_generation, "source_generation")
+        published = _validate_timestamp(published_at, "published_at")
+        connection = self._require_ring_storage()
+        with _transaction(connection):
+            previous = connection.execute(
+                "SELECT ring_generation, source_generation, published_at "
+                "FROM aggregate_publication WHERE singleton = 1"
+            ).fetchone()
+            if previous is None:
+                raise SchemaMismatchError("aggregate publication row is missing")
+            if source < int(previous[1]):
+                raise StorageValidationError("source_generation cannot move backward")
+            if published < float(previous[2]):
+                raise StorageValidationError("published_at cannot move backward")
+            ring_generation = int(previous[0]) + 1
+            newest_by_resolution: dict[int, int] = {}
+            for resolution_seconds, slot_index, bucket_start, bucket_json, complete in prepared:
+                changed = connection.execute(
+                    "UPDATE aggregate_ring_slots SET bucket_start = ?, bucket_json = ?, "
+                    "complete = ?, source_generation = ?, ring_generation = ?, published_at = ? "
+                    "WHERE resolution_seconds = ? AND slot_index = ?",
+                    (
+                        bucket_start, bucket_json, complete, source, ring_generation, published,
+                        resolution_seconds, slot_index,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise SchemaMismatchError("aggregate ring slot address is missing")
+                newest_by_resolution[resolution_seconds] = max(
+                    bucket_start,
+                    newest_by_resolution.get(resolution_seconds, bucket_start),
+                )
+            for resolution_seconds, newest_bucket_start in newest_by_resolution.items():
+                changed = connection.execute(
+                    "UPDATE aggregate_rings SET newest_bucket_start = CASE "
+                    "WHEN newest_bucket_start IS NULL OR newest_bucket_start < ? THEN ? "
+                    "ELSE newest_bucket_start END WHERE resolution_seconds = ?",
+                    (newest_bucket_start, newest_bucket_start, resolution_seconds),
+                ).rowcount
+                if changed != 1:
+                    raise SchemaMismatchError("aggregate ring metadata row is missing")
+            changed = connection.execute(
+                "UPDATE aggregate_publication SET ring_generation = ?, source_generation = ?, "
+                "published_at = ? WHERE singleton = 1",
+                (ring_generation, source, published),
+            ).rowcount
+            if changed != 1:
+                raise SchemaMismatchError("aggregate publication row is missing")
+        return RingPublication(ring_generation, source, published, len(prepared))
+
+    def read_ring_window(
+        self,
+        *,
+        range_seconds: int,
+        resolution_seconds: int,
+        window_end: int,
+    ) -> RingWindow:
+        """Read exact timestamps from one resolution ring in one SQLite snapshot."""
+
+        range_value = _validate_nonnegative_integer(range_seconds, "range_seconds")
+        resolution_value = _validate_nonnegative_integer(
+            resolution_seconds, "resolution_seconds",
+        )
+        end = _validate_nonnegative_integer(window_end, "window_end")
+        if not stats_resolution.is_supported(range_value, resolution_value):
+            raise StorageValidationError(
+                f"unsupported ring window {range_value}s/{resolution_value}s"
+            )
+        if end < range_value or end % resolution_value:
+            raise StorageValidationError(
+                "window_end must be resolution-aligned and cover the requested range"
+            )
+        connection = self._require_ring_storage()
+        window_start = end - range_value
+        expected_starts = tuple(range(window_start, end, resolution_value))
+        slot_count = stats_resolution.RING_CAPACITIES[resolution_value]
+        with _transaction(connection):
+            publication = connection.execute(
+                "SELECT ring_generation, source_generation, published_at "
+                "FROM aggregate_publication WHERE singleton = 1"
+            ).fetchone()
+            if publication is None:
+                raise SchemaMismatchError("aggregate publication row is missing")
+            slot_rows = {
+                int(row[0]): row
+                for row in connection.execute(
+                    "SELECT slot_index, bucket_start, bucket_json, complete, "
+                    "source_generation, ring_generation, published_at "
+                    "FROM aggregate_ring_slots WHERE resolution_seconds = ?",
+                    (resolution_value,),
+                )
+            }
+            rows: list[RingBucketRow] = []
+            missing: list[int] = []
+            for bucket_start in expected_starts:
+                slot_index = (bucket_start // resolution_value) % slot_count
+                candidate = slot_rows.get(slot_index)
+                if candidate is None or candidate[1] is None or int(candidate[1]) != bucket_start:
+                    missing.append(bucket_start)
+                    continue
+                rows.append(
+                    RingBucketRow(
+                        resolution_value,
+                        bucket_start,
+                        str(candidate[2]),
+                        bool(candidate[3]),
+                        int(candidate[4]),
+                        int(candidate[5]),
+                        float(candidate[6]),
+                    )
+                )
+        return RingWindow(
+            range_value,
+            resolution_value,
+            window_start,
+            end,
+            tuple(rows),
+            tuple(missing),
+            int(publication[1]),
+            int(publication[0]),
+            float(publication[2]),
+        )
+
     def last_vacuumed_at(self) -> float:
         """Return the persisted completion time for the last successful VACUUM."""
         row = self._connection().execute(
@@ -994,8 +1849,9 @@ class Store:
 
     def _apply_observations(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> int:
+    ) -> tuple[int, tuple[tuple[object, ...], ...]]:
         accepted = 0
+        accepted_values: list[tuple[object, ...]] = []
         for values in prepared:
             previous = connection.execute(
                 "SELECT observed_at, epoch_id, owner_generation, payload_json FROM observations "
@@ -1007,9 +1863,10 @@ class Store:
                     "owner_generation, payload_json) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
                 )
                 accepted += 1
+                accepted_values.append(values)
             elif tuple(previous) != values[3:]:
                 raise StorageValidationError("observation event identity conflicts with stored data")
-        return accepted
+        return accepted, tuple(accepted_values)
 
     def _apply_coverage_epochs(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
@@ -1051,8 +1908,9 @@ class Store:
 
     def _apply_usage_atoms(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, tuple[tuple[object, ...], ...]]:
         accepted = conflicts = 0
+        accepted_values: list[tuple[object, ...]] = []
         for values in prepared:
             previous = connection.execute(
                 "SELECT observed_at, payload_json FROM usage_atoms WHERE event_id = ? "
@@ -1064,6 +1922,7 @@ class Store:
                     "payload_json) VALUES(?, ?, ?, ?, ?, ?, ?)", values,
                 )
                 accepted += 1
+                accepted_values.append(values)
             elif tuple(previous) != values[5:]:
                 repaired = _usage_unknown_model_repair(tuple(previous), values[5:])
                 compatible, agent_changed = _usage_compatible_metadata_change(tuple(previous), values[5:])
@@ -1074,6 +1933,7 @@ class Store:
                         "AND modality = ? AND cache_role = ? AND unit = ?", (payload_json, *values[:5]),
                     )
                     accepted += 1
+                    accepted_values.append(values)
                     conflicts += int(repair_agent_changed)
                 elif compatible:
                     conflicts += int(agent_changed)
@@ -1083,12 +1943,13 @@ class Store:
                         first_payload_hash=_usage_conflict_hash(tuple(previous)),
                         attempted_payload_hash=_usage_conflict_hash(tuple(values[5:])),
                     )
-        return accepted, conflicts
+        return accepted, conflicts, tuple(accepted_values)
 
     def _apply_usage_tombstones(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, tuple[tuple[object, ...], ...]]:
         accepted = duplicate = 0
+        accepted_values: list[tuple[object, ...]] = []
         for values in prepared:
             key = values[:5]
             previous = connection.execute(
@@ -1108,7 +1969,8 @@ class Store:
                 "AND cache_role = ? AND unit = ?", key,
             )
             accepted += 1
-        return accepted, duplicate
+            accepted_values.append(values)
+        return accepted, duplicate, tuple(accepted_values)
 
     def _apply_unavailable_spans(
         self, connection: sqlite3.Connection, prepared: tuple[tuple[object, ...], ...],
@@ -1169,12 +2031,15 @@ class Store:
             generation = int(connection.execute(
                 "SELECT source_generation FROM schema_meta WHERE singleton = 1"
             ).fetchone()[0])
-            observations_accepted = self._apply_observations(connection, prepared_observations)
+            observations_accepted, accepted_observations = self._apply_observations(
+                connection, prepared_observations,
+            )
+            _append_browser_diagnostics(connection, accepted_observations)
             coverage_changed = self._apply_coverage_epochs(connection, prepared_coverage)
-            usage_accepted, usage_attribution_conflicts = self._apply_usage_atoms(
+            usage_accepted, usage_attribution_conflicts, accepted_usage = self._apply_usage_atoms(
                 connection, prepared_usage,
             )
-            tombstones_accepted, tombstones_duplicate = self._apply_usage_tombstones(
+            tombstones_accepted, tombstones_duplicate, accepted_tombstones = self._apply_usage_tombstones(
                 connection, prepared_tombstones,
             )
             unavailable_accepted = self._apply_unavailable_spans(
@@ -1203,6 +2068,16 @@ class Store:
             usage_attribution_conflicts,
             tombstones_accepted,
             tombstones_duplicate,
+            tuple(str(values[0]) for values in accepted_observations),
+            tuple(
+                float(values[index])
+                for accepted, index in (
+                    (accepted_observations, 3),
+                    (accepted_usage, 5),
+                    (accepted_tombstones, 5),
+                )
+                for values in accepted
+            ),
         )
 
     def append_observation(self, observation: Observation) -> bool:
@@ -1210,6 +2085,58 @@ class Store:
 
     def append_coverage_epoch(self, coverage: CoverageEpoch) -> bool:
         return self.append_batch(coverage_epochs=(coverage,)).coverage_changed == 1
+
+    def latest_coverage_epoch(
+        self,
+        family: str,
+        source_id: str,
+        owner_generation: int,
+        native_cadence_seconds: float,
+    ) -> CoverageEpoch | None:
+        """Read the latest exact source lifecycle without scanning retained coverage."""
+
+        family_value = _validate_text(family, "family")
+        source_value = _validate_text(source_id, "source_id")
+        owner_value = _validate_nonnegative_integer(owner_generation, "owner_generation")
+        cadence_value = _validate_timestamp(
+            native_cadence_seconds,
+            "native_cadence_seconds",
+        )
+        row = self._connection().execute(
+            "SELECT epoch_id, started_at, ended_at FROM coverage_epochs "
+            "WHERE family = ? AND source_id = ? AND owner_generation = ? "
+            "AND native_cadence_seconds = ? ORDER BY started_at DESC, epoch_id DESC LIMIT 1",
+            (family_value, source_value, owner_value, cadence_value),
+        ).fetchone()
+        if row is None:
+            return None
+        return CoverageEpoch(
+            family_value,
+            source_value,
+            str(row[0]),
+            float(row[1]),
+            None if row[2] is None else float(row[2]),
+            cadence_value,
+            owner_value,
+        )
+
+    def inline_coverage_source_ids(
+        self,
+        family: str,
+        owner_generation: int,
+    ) -> tuple[str, ...]:
+        """Read the canonical inline source roster for one exact owner."""
+
+        family_value = _validate_text(family, "family")
+        owner_value = _validate_nonnegative_integer(owner_generation, "owner_generation")
+        epoch_prefix = f"inline:{owner_value}:{family_value}:"
+        rows = self._connection().execute(
+            "SELECT DISTINCT source_id FROM coverage_epochs "
+            "WHERE family = ? AND owner_generation = ? AND substr(epoch_id, 1, ?) = ? "
+            "ORDER BY source_id",
+            (family_value, owner_value, len(epoch_prefix), epoch_prefix),
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
 
     def append_usage_atom(self, atom: UsageAtom) -> bool:
         return self.append_batch(usage_atoms=(atom,)).usage_atoms_accepted == 1
@@ -1239,69 +2166,137 @@ class Store:
         self,
         *,
         dirty_intervals: Iterable[tuple[int | float, int | float]] | None = None,
-        private_observation_sources: int = 0,
         include_coverage: bool = True,
     ) -> StoreSnapshot:
         """Read all coverage plus either full or dirty-window original facts."""
 
         with self.pinned_snapshot(
             dirty_intervals=dirty_intervals,
-            private_observation_sources=private_observation_sources,
             include_coverage=include_coverage,
         ) as read:
             return read()
+
+    def recent_browser_profiles(self, limit: int = 128) -> tuple[dict[str, object], ...]:
+        """Read bounded durable request, page, and perceptual profiles newest first."""
+
+        bounded_limit = _validate_nonnegative_integer(limit, "browser profile limit")
+        if not 1 <= bounded_limit <= 128:
+            raise StorageValidationError("browser profile limit must be from 1 through 128")
+        rows = self._connection().execute(
+            f"SELECT observed_at, payload_json FROM {_BROWSER_PROFILE_EVENTS} "
+            "ORDER BY observed_at DESC, event_id DESC LIMIT ?",
+            (bounded_limit,),
+        ).fetchall()
+        return tuple(
+            {"observed_at": float(row[0]), **_decode_json_object(row[1], "browser profile payload")}
+            for row in rows
+        )
+
+    def browser_observation_status(self, now: float) -> dict[str, object]:
+        """Summarize retained browser facts without creating a second receipt ledger."""
+
+        connection = self._connection()
+        summary = connection.execute(
+            f"SELECT retained_observations, retained_failures, retained_errors, "
+            "retained_rejections, confirmed_real, controlled_probe, unknown, last_observed_at "
+            f"FROM {_BROWSER_DIAGNOSTICS_SUMMARY} WHERE singleton = 1"
+        ).fetchone()
+        if summary is None:
+            raise SchemaMismatchError("browser observation diagnostics summary is missing")
+        failure_groups = connection.execute(
+            f"SELECT kind, signature, provenance, failure_count, first_observed_at, "
+            f"last_observed_at FROM {_BROWSER_FAILURE_GROUPS} "
+            "ORDER BY last_observed_at DESC, signature, latest_event_id DESC, kind, provenance LIMIT ?",
+            (MAX_BROWSER_FAILURE_FINGERPRINTS,),
+        ).fetchall()
+        retained, failures, errors, rejections, confirmed_real, controlled_probe, unknown = map(
+            int, summary[:7],
+        )
+        latest = float(summary[7]) if summary[7] is not None else None
+        fingerprints = tuple(
+            {
+                "signature": str(item[1]),
+                "kind": str(item[0]),
+                "provenance": str(item[2]),
+                "count": int(item[3]),
+                "first_observed_at": float(item[4]),
+                "last_observed_at": float(item[5]),
+                "code_revisions": tuple(
+                    str(row[0])
+                    for row in connection.execute(
+                        f"SELECT code_revision FROM {_BROWSER_FAILURE_REVISIONS} "
+                        "WHERE kind = ? AND signature = ? AND provenance = ? "
+                        "ORDER BY code_revision",
+                        item[:3],
+                    )
+                ),
+                "state": "open",
+                "state_reason": "no durable closure or path-execution evidence",
+            }
+            for item in failure_groups
+        )
+        return {
+            "retained_observations": retained,
+            "retained_failures": failures,
+            "confirmed_real_failures": confirmed_real,
+            "probe_failures": controlled_probe,
+            "unknown_failures": unknown,
+            "retained_errors": errors,
+            "retained_unhandled_rejections": rejections,
+            "last_retained_observed_at": latest,
+            "last_retained_observed_age_seconds": round(max(0.0, now - latest), 3) if latest is not None else None,
+            "fingerprints": fingerprints,
+            "classification_counts": {"open": len(fingerprints), "fixed": 0, "live_verified": 0},
+            "unprovable_states": ("fixed", "live_verified"),
+        }
 
     @contextmanager
     def pinned_snapshot(
         self,
         *,
         dirty_intervals: Iterable[tuple[int | float, int | float]] | None = None,
-        private_observation_sources: int = 0,
         include_coverage: bool = True,
     ) -> Iterator[Callable[[], StoreSnapshot]]:
         """Pin one WAL generation before yielding its potentially longer row scan."""
 
         connection = self._connection()
         intervals = _coalesced_dirty_intervals(dirty_intervals)
-        time_clause, time_parameters = _time_clause(intervals)
-        private_limit = _validate_nonnegative_integer(
-            private_observation_sources,
-            "private_observation_sources",
-        )
-        if private_limit > MAX_PRIVATE_OBSERVATION_SOURCES:
-            raise StorageValidationError(
-                f"private_observation_sources must be at most {MAX_PRIVATE_OBSERVATION_SOURCES}"
-            )
-        observation_clause = time_clause
-        observation_parameters = time_parameters
-        if intervals is not None and private_limit:
-            observation_clause += (
-                " OR (family = 'browser' AND source_id IN ("
-                "SELECT source_id FROM observations WHERE family = 'browser' "
-                "GROUP BY source_id ORDER BY MAX(observed_at) DESC, source_id LIMIT ?))"
-            )
-            observation_parameters = (*time_parameters, private_limit)
+        time_clauses = _time_clauses(intervals)
         with _transaction(connection):
             header = _read_header(connection)
 
             def read() -> StoreSnapshot:
-                observation_rows = connection.execute(
-                    "SELECT event_id, family, source_id, observed_at, epoch_id, owner_generation, payload_json "
-                    "FROM observations" + observation_clause
-                    + " ORDER BY observed_at, family, source_id",
-                    observation_parameters,
-                ).fetchall()
+                observation_rows = tuple(
+                    row
+                    for time_clause, time_parameters in time_clauses
+                    for row in connection.execute(
+                        "SELECT event_id, family, source_id, observed_at, epoch_id, "
+                        "owner_generation, payload_json FROM observations" + time_clause
+                        + " ORDER BY observed_at, family, source_id",
+                        time_parameters,
+                    ).fetchall()
+                )
+                observation_rows = _rows_in_dirty_intervals(
+                    observation_rows, intervals, 3,
+                )
                 coverage_rows = () if not include_coverage else connection.execute(
                     "SELECT family, source_id, epoch_id, started_at, ended_at, "
                     "native_cadence_seconds, owner_generation FROM coverage_epochs "
                     "ORDER BY started_at, family, source_id, epoch_id"
                 ).fetchall()
-                usage_rows = connection.execute(
-                    "SELECT event_id, direction, modality, cache_role, unit, observed_at, payload_json "
-                    "FROM usage_atoms" + time_clause
-                    + " ORDER BY observed_at, event_id, direction, modality, cache_role, unit",
-                    time_parameters,
-                ).fetchall()
+                usage_rows = tuple(
+                    row
+                    for time_clause, time_parameters in time_clauses
+                    for row in connection.execute(
+                        "SELECT event_id, direction, modality, cache_role, unit, "
+                        "observed_at, payload_json FROM usage_atoms" + time_clause
+                        + " ORDER BY observed_at, event_id, direction, modality, cache_role, unit",
+                        time_parameters,
+                    ).fetchall()
+                )
+                usage_rows = _rows_in_dirty_intervals(
+                    usage_rows, intervals, 5,
+                )
                 unavailable_rows = () if not include_coverage else connection.execute(
                     "SELECT family, source_id, epoch_id, started_at, ended_at, "
                     "native_cadence_seconds, reason, owner_generation FROM unavailable_spans "
@@ -1366,6 +2361,7 @@ class Store:
         cutoff = _validate_timestamp(now, "now") - RETENTION_SECONDS
         connection = self._connection()
         with _transaction(connection):
+            _prune_browser_diagnostics(connection, cutoff)
             observations = connection.execute(
                 "DELETE FROM observations WHERE observed_at < ?", (cutoff,)
             ).rowcount

@@ -32,3 +32,33 @@ def test_saved_layout_search_keeps_files_panel_bootstrap():
     assert "sessions=files%2C1" in search
     assert "tabs=slot1%3Afiles" in search
     assert "finder=files" in search
+
+
+def test_wait_for_finder_settled_requires_continuous_idle_after_pending_operation(monkeypatch):
+    now = 0.0
+    observed = []
+
+    def clock():
+        return now
+
+    def wait(duration):
+        nonlocal now
+        now += duration
+
+    def finder_is_settled(_driver):
+        state = "idle" if now < 0.1 or now >= 0.25 else "pending"
+        observed.append((round(now, 3), state))
+        return state == "idle"
+
+    monkeypatch.setattr(tool, "finder_is_settled", finder_is_settled)
+
+    tool.wait_for_finder_settled(
+        {"client-a": object()},
+        timeout=1.0,
+        quiet_seconds=0.3,
+        clock=clock,
+        wait=wait,
+    )
+
+    assert any(state == "pending" for _, state in observed)
+    assert now >= 0.55

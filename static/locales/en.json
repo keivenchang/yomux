@@ -230,7 +230,7 @@
   "debug.cost.exclusions": "Unpriced exclusions",
   "debug.cost.formula": "Formula",
   "debug.cost.freshness": "Catalog freshness",
-  "debug.cost.grandTotalApiList": "Grand total at API list prices",
+  "debug.cost.grandTotalApiList": "Grand total",
   "debug.cost.grandTotalDual": "Grand total · marginal / API list prices",
   "debug.cost.input": "Input",
   "debug.cost.input.gloss": "new prompt/context tokens",

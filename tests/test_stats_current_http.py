@@ -3,8 +3,10 @@
 """Focused tests for the current-only YO!stats HTTP forwarding boundary."""
 
 from http import HTTPStatus
+import hashlib
 import io
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,7 @@ import pytest
 from yolomux_lib import http_routes
 from yolomux_lib import server
 from yolomux_lib.stats_current import http, protocol, resolution as stats_resolution
+from tests.terminal_state_guard import assert_terminal_transition
 
 
 class FakeClient:
@@ -160,7 +163,15 @@ def test_delta_forwards_exact_preencoded_bytes_and_binds_the_same_client_identit
     (
         ({"ok": True, "not_modified": True, "cache_generation": 8}, HTTPStatus.NOT_MODIFIED),
         ({"status": "repair_required", "cache_generation": 9}, HTTPStatus.CONFLICT),
-        ({"status": "pending", "retry_after_seconds": 1}, HTTPStatus.SERVICE_UNAVAILABLE),
+        (
+            {"ok": True, "status": "queued", "ticket": "stats-ticket-12", "key": "stats:300:1"},
+            HTTPStatus.ACCEPTED,
+        ),
+        ({"status": "pending", "retry_after_seconds": 1}, HTTPStatus.ACCEPTED),
+        (
+            {"ok": False, "status": "unavailable", "reason": "stats storage is unavailable"},
+            HTTPStatus.FAILED_DEPENDENCY,
+        ),
     ),
 )
 def test_delta_maps_not_modified_repair_and_pending_without_fallback(metadata, expected):
@@ -171,6 +182,42 @@ def test_delta_maps_not_modified_repair_and_pending_without_fallback(metadata, e
     )
     assert result.status == expected
     assert result.payload is metadata
+
+
+def test_delta_queued_acknowledgement_can_reach_terminal_body():
+    queued = {
+        "ok": True,
+        "status": "queued",
+        "ticket": "stats-ticket-12",
+        "key": "stats:300:1",
+    }
+    terminal_metadata = {
+        "ok": True,
+        "content_type": "application/json",
+        "base_cache_generation": 7,
+        "cache_generation": 8,
+        "revision": 4,
+    }
+    adapter, client = forwarder(queued)
+    query = (
+        "range_seconds=300&resolution_seconds=1&client_id=browser-a"
+        "&after_cache_generation=7&after_revision=0"
+    )
+
+    pending = adapter.delta(query, authenticated_username="alice")
+    client.metadata = terminal_metadata
+    client.body = b'{"exact":"delta"}'
+    terminal = adapter.delta(query, authenticated_username="alice")
+
+    assert_terminal_transition(
+        contract_id="stats-delta-queued-producer",
+        pending_observed=(pending.status == HTTPStatus.ACCEPTED and pending.payload is queued),
+        terminal_observed=(
+            terminal.status == HTTPStatus.OK
+            and terminal.body == b'{"exact":"delta"}'
+        ),
+        evidence={"pending": pending, "terminal": terminal},
+    )
 
 
 @pytest.mark.parametrize(
@@ -187,7 +234,7 @@ def test_delta_maps_not_modified_repair_and_pending_without_fallback(metadata, e
                 "reason": "materialization is not ready",
             },
             b"",
-            HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.ACCEPTED,
             "pending",
         ),
         (
@@ -233,7 +280,7 @@ def test_not_modified_has_no_body_and_transport_failures_are_sanitized():
         HTTPStatus.NOT_MODIFIED
     )
     failure = unavailable.snapshot(query, authenticated_username="alice")
-    assert failure.status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert failure.status == HTTPStatus.FAILED_DEPENDENCY
     assert failure.payload == {
         "status": "unavailable",
         "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
@@ -242,7 +289,64 @@ def test_not_modified_has_no_body_and_transport_failures_are_sanitized():
     assert "/private/socket/path" not in str(failure.payload)
 
 
-def test_startup_failure_reason_and_terminal_state_reach_http_503():
+@pytest.mark.parametrize("method", ("snapshot", "delta"))
+def test_transient_statsd_transport_failure_is_retryable_pending(method):
+    adapter, _client = forwarder({
+        "ok": False,
+        "_transport_error": "rpc",
+        "error": "response exceeded deadline",
+    })
+    query = (
+        "range_seconds=300&resolution=1&client_id=browser-a&since_generation=9"
+        if method == "snapshot"
+        else "range_seconds=300&resolution_seconds=1&client_id=browser-a&after_cache_generation=9&after_revision=0"
+    )
+
+    result = getattr(adapter, method)(query, authenticated_username="alice")
+
+    assert result.status == HTTPStatus.ACCEPTED
+    expected = {
+        "status": "pending",
+        "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+        "retry_after_seconds": 1,
+        "reason": "statsd is refreshing",
+    }
+    if method == "snapshot":
+        expected.update({
+            "range_seconds": 300,
+            "requested_resolution": 1,
+            "resolution_seconds": 1,
+        })
+    assert result.payload == expected
+
+
+def test_transient_statsd_startup_refreshing_is_retryable_pending():
+    adapter, client = forwarder({
+        "ok": False,
+        "status": HTTPStatus.SERVICE_UNAVAILABLE,
+        "error": "refreshing",
+    })
+    client.started = False
+
+    result = adapter.snapshot(
+        "range_seconds=86400&resolution=AUTO&client_id=browser-a&since_generation=9",
+        authenticated_username="alice",
+    )
+
+    assert result.status == HTTPStatus.ACCEPTED
+    assert result.payload == {
+        "status": "pending",
+        "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+        "range_seconds": 86400,
+        "requested_resolution": "AUTO",
+        "resolution_seconds": 300,
+        "retry_after_seconds": 1,
+        "reason": "statsd is refreshing",
+    }
+    assert client.requests == []
+
+
+def test_startup_failure_reason_and_terminal_state_reach_typed_dependency_error():
     adapter, client = forwarder({
         "ok": False,
         "status": "unavailable",
@@ -256,7 +360,7 @@ def test_startup_failure_reason_and_terminal_state_reach_http_503():
         authenticated_username="alice",
     )
 
-    assert result.status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result.status == HTTPStatus.FAILED_DEPENDENCY
     assert result.payload == {
         "status": "unavailable",
         "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
@@ -350,8 +454,8 @@ def test_authenticated_route_passes_only_query_and_username_to_the_forwarder(res
         write_json=lambda payload, status=HTTPStatus.OK: writes.append(
             ("json", status, payload)
         ),
-        write_json_bytes=lambda body, status=HTTPStatus.OK: writes.append(
-            ("bytes", status, body)
+        write_product_bytes=lambda body, product: writes.append(
+            ("product", body, product)
         ),
     )
 
@@ -365,7 +469,15 @@ def test_authenticated_route_passes_only_query_and_username_to_the_forwarder(res
         ("range_seconds=300&resolution=1&client_id=browser-a", "alice")
     ]
     if result.payload is None:
-        assert writes == [("bytes", result.status, result.body)]
+        assert result.status == HTTPStatus.OK
+        assert writes == [("product", result.body, {
+            "format": "json",
+            "content_type": "application/json; charset=utf-8",
+            "length": len(result.body),
+            "sha256": hashlib.sha256(result.body).hexdigest(),
+            "disposition": "inline",
+            "filename": "",
+        })]
     else:
         assert writes == [("json", result.status, result.payload)]
 
@@ -440,9 +552,11 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
             )
 
     monkeypatch.setattr(server.time, "monotonic", lambda: current[0])
-    monkeypatch.setattr(server.threading, "Event", Waiter)
     request = SimpleNamespace(
-        server=SimpleNamespace(app=SimpleNamespace(stats_current_http=Forwarder())),
+        server=SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=Forwarder()),
+            persistent_request_stop=Waiter(),
+        ),
         send_response=lambda _status: None,
         send_header=lambda _name, _value: None,
         send_auth_cookie_if_needed=lambda: None,
@@ -463,6 +577,235 @@ def test_stream_delta_checks_keep_absolute_cadence_when_rpc_work_takes_time(monk
     assert events[-1] == (
         "repair", {"status": "repair_required", "cache_generation": 12},
     )
+
+
+def test_established_stream_keeps_cursor_open_across_transient_materialization_lag(monkeypatch):
+    current = [0.0]
+    events = []
+
+    class Waiter:
+        def wait(self, delay):
+            current[0] += delay
+            return False
+
+    class Forwarder:
+        def __init__(self):
+            self.results = iter((
+                http.DeltaStreamResult(
+                    HTTPStatus.NOT_MODIFIED,
+                    {"ok": True, "not_modified": True, "cache_generation": 10},
+                ),
+                http.DeltaStreamResult(
+                    HTTPStatus.ACCEPTED,
+                    {"status": "pending", "reason": "statsd is refreshing"},
+                ),
+                http.DeltaStreamResult(
+                    HTTPStatus.NOT_MODIFIED,
+                    {"ok": True, "not_modified": True, "cache_generation": 10},
+                ),
+                http.DeltaStreamResult(
+                    HTTPStatus.CONFLICT,
+                    {"status": "repair_required", "cache_generation": 12},
+                ),
+            ))
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return next(self.results)
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: current[0])
+    request = SimpleNamespace(
+        server=SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=Forwarder()),
+            persistent_request_stop=Waiter(),
+        ),
+        send_response=lambda _status: None,
+        send_header=lambda _name, _value: None,
+        send_auth_cookie_if_needed=lambda: None,
+        end_headers=lambda: None,
+        write_json=lambda _payload, status: None,
+        write_sse_bytes=lambda name, body: events.append((name, body)),
+        write_sse_json=lambda name, payload: events.append((name, payload)),
+    )
+
+    server.Handler.stream_stats_current_delta(
+        request,
+        "range_seconds=300&resolution_seconds=1&client_id=browser-a&"
+        "after_cache_generation=10&after_revision=0",
+        authenticated_username="alice",
+    )
+
+    assert [name for name, _payload in events] == ["ready", "ready", "repair"]
+    assert not [event for event in events if event[0] == "unavailable"]
+
+
+def test_stream_initial_repair_is_a_typed_sse_terminal_not_a_bare_http_conflict():
+    events = []
+    writes = []
+
+    class Forwarder:
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            return http.DeltaStreamResult(
+                HTTPStatus.CONFLICT,
+                {
+                    "status": "repair_required",
+                    "reason": "delta cursor is outside the retained exact chain",
+                    "cache_generation": 12,
+                },
+            )
+
+    request = SimpleNamespace(
+        server=SimpleNamespace(app=SimpleNamespace(stats_current_http=Forwarder())),
+        send_response=lambda status: writes.append(("status", status)),
+        send_header=lambda name, value: writes.append(("header", name, value)),
+        send_auth_cookie_if_needed=lambda: writes.append(("cookie",)),
+        end_headers=lambda: writes.append(("end",)),
+        write_json=lambda payload, status: writes.append(("json", status, payload)),
+        write_sse_bytes=lambda name, body: events.append((name, body)),
+        write_sse_json=lambda name, payload: events.append((name, payload)),
+    )
+
+    server.Handler.stream_stats_current_delta(
+        request,
+        "range_seconds=86400&resolution_seconds=300&client_id=browser-a&"
+        "after_cache_generation=10&after_revision=0",
+        authenticated_username="alice",
+    )
+
+    assert writes[0] == ("status", HTTPStatus.OK)
+    assert not [entry for entry in writes if entry[0] == "json"]
+    assert events == [
+        ("repair", {
+            "status": "repair_required",
+            "reason": "delta cursor is outside the retained exact chain",
+            "cache_generation": 12,
+        }),
+    ]
+
+
+def test_stream_initial_not_modified_opens_one_sse_and_emits_ready_without_recovery():
+    events = []
+    writes = []
+
+    class Waiter:
+        def wait(self, _delay):
+            raise BrokenPipeError
+
+    class Forwarder:
+        def __init__(self):
+            self.stream_calls = 0
+            self.snapshot_calls = 0
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.stream_calls += 1
+            return http.DeltaStreamResult(
+                HTTPStatus.NOT_MODIFIED,
+                {"ok": True, "not_modified": True, "cache_generation": 10},
+            )
+
+        def snapshot(self, *_args, **_kwargs):
+            self.snapshot_calls += 1
+            raise AssertionError("an established current stream must not recover by snapshot")
+
+    forwarder = Forwarder()
+    request = SimpleNamespace(
+        server=SimpleNamespace(
+            app=SimpleNamespace(stats_current_http=forwarder),
+            persistent_request_stop=Waiter(),
+        ),
+        send_response=lambda status: writes.append(("status", status)),
+        send_header=lambda name, value: writes.append(("header", name, value)),
+        send_auth_cookie_if_needed=lambda: writes.append(("cookie",)),
+        end_headers=lambda: writes.append(("end",)),
+        write_json=lambda payload, status: writes.append(("json", status, payload)),
+        write_sse_bytes=lambda name, body: events.append((name, body)),
+        write_sse_json=lambda name, payload: events.append((name, payload)),
+    )
+
+    server.Handler.stream_stats_current_delta(
+        request,
+        "range_seconds=300&resolution_seconds=1&client_id=browser-a&"
+        "after_cache_generation=10&after_revision=0",
+        authenticated_username="alice",
+    )
+
+    assert [item for item in writes if item[0] == "status"] == [
+        ("status", HTTPStatus.OK),
+    ]
+    assert not [item for item in writes if item[0] == "json"]
+    assert events == [("ready", {"cache_generation": 10, "revision": 0})]
+    assert forwarder.stream_calls == 1
+    assert forwarder.snapshot_calls == 0
+
+
+def test_server_shutdown_wakes_sixty_second_stats_stream_wait(monkeypatch):
+    wait_started = threading.Event()
+    stop_event = threading.Event()
+    waits = []
+
+    class ShutdownEvent:
+        def set(self):
+            stop_event.set()
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            wait_started.set()
+            return stop_event.wait(timeout)
+
+    class Forwarder:
+        def __init__(self):
+            self.calls = 0
+
+        def delta_stream(self, _query, *, authenticated_username):
+            assert authenticated_username == "alice"
+            self.calls += 1
+            return http.DeltaStreamResult(
+                HTTPStatus.NOT_MODIFIED,
+                {"ok": True, "not_modified": True, "cache_generation": 10},
+            )
+
+    forwarder = Forwarder()
+    live_server = object.__new__(server.TmuxWebtermHTTPServer)
+    live_server.app = SimpleNamespace(stats_current_http=forwarder)
+    live_server.persistent_request_stop = ShutdownEvent()
+    parent_shutdown_calls = []
+    monkeypatch.setattr(
+        server.ThreadingHTTPServer,
+        "shutdown",
+        lambda _server: parent_shutdown_calls.append(stop_event.is_set()),
+    )
+    request = SimpleNamespace(
+        server=live_server,
+        send_response=lambda _status: None,
+        send_header=lambda _name, _value: None,
+        send_auth_cookie_if_needed=lambda: None,
+        end_headers=lambda: None,
+        write_json=lambda _payload, status: None,
+        write_sse_bytes=lambda _name, _body: None,
+        write_sse_json=lambda _name, _payload: None,
+    )
+    stream_thread = threading.Thread(
+        target=server.Handler.stream_stats_current_delta,
+        args=(
+            request,
+            "range_seconds=86400&resolution_seconds=300&client_id=browser-a&"
+            "after_cache_generation=10&after_revision=0",
+        ),
+        kwargs={"authenticated_username": "alice"},
+        daemon=True,
+    )
+    stream_thread.start()
+    assert wait_started.wait(timeout=1)
+
+    live_server.shutdown()
+    stream_thread.join(timeout=1)
+
+    assert not stream_thread.is_alive()
+    assert waits == pytest.approx([60.0], abs=0.1)
+    assert forwarder.calls == 1
+    assert parent_shutdown_calls == [True]
 
 
 def test_capabilities_route_is_authenticated_and_uses_the_same_policy_owner():

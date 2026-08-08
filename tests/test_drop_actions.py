@@ -1,3 +1,5 @@
+import subprocess
+
 from yolomux_lib import drop_actions
 from yolomux_lib import filesystem
 
@@ -105,6 +107,29 @@ def test_drop_action_server_ocr_reports_unavailable_without_tesseract(monkeypatc
             }]],
         }],
     }
+
+
+def test_drop_action_server_ocr_streams_the_validated_bytes_to_tesseract_stdin(monkeypatch, tmp_path):
+    monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(tmp_path))
+    monkeypatch.setattr(drop_actions.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    path = tmp_path / "shot.png"
+    image_data = b"\x89PNG\r\n\x1a\nFAKE_IMAGE"
+    path.write_bytes(image_data)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout=b"recognized text\n", stderr=b"")
+
+    monkeypatch.setattr(drop_actions.subprocess, "run", run)
+
+    result, status = drop_actions.run_drop_action({"action": "server-ocr", "paths": [str(path)]})
+
+    assert status == 200
+    assert "recognized text" in result["body"]
+    assert calls[0][0] == ["/usr/bin/tesseract", "stdin", "stdout"]
+    assert calls[0][1]["input"] == image_data
+    assert "text" not in calls[0][1]
 
 
 def test_drop_action_rejects_missing_and_unknown_actions(monkeypatch, tmp_path):

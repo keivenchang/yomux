@@ -22,6 +22,15 @@ def write_event_lines(path, events):
     )
 
 
+def test_run_history_store_persists_rows_through_its_locked_storage_path(tmp_path):
+    store = RunHistoryStore(tmp_path / "run-history.json")
+
+    stored = store.upsert_rows([{"id": "run-1", "session": "s1", "prompt": "ship it", "ended_ts": 1}])
+
+    assert stored == store.load_rows()
+    assert stored[0]["id"] == "run-1"
+
+
 @pytest.fixture
 def make_app(make_tmux_webterm_app, tmp_path):
     def factory(sessions=("s1",)):

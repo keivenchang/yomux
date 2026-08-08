@@ -1,4 +1,6 @@
 from pathlib import Path
+import threading
+import time
 
 from yolomux_lib import approvald
 
@@ -133,6 +135,30 @@ def test_approvald_reports_lock_owner_without_recording_duplicate_worker(tmp_pat
     assert response["locked"] is True
     assert response["owner"] == {"pid": 123, "session": "6"}
     assert item.records == {}
+
+
+def test_approvald_handler_failure_is_typed_and_the_service_stays_available(tmp_path, monkeypatch):
+    item = service(tmp_path, monkeypatch)
+    monkeypatch.setattr(item, "_start_worker", lambda _request: (_ for _ in ()).throw(FileNotFoundError("retired approval root")))
+    worker = threading.Thread(target=item.run, daemon=True)
+    worker.start()
+    deadline = time.monotonic() + 2.0
+    while not item.socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    client = approvald.ApprovalClient(item.socket_path)
+    try:
+        failed = client.request({"action": "start_worker", "session": "6", "target": "%11"}, timeout=1.0)
+        assert failed == {
+            "ok": False,
+            "error": "service request failed",
+            "error_code": "handler_failed",
+            "exception_type": "FileNotFoundError",
+        }
+        assert client.request({"action": "ping"}, timeout=1.0)["ok"] is True
+    finally:
+        client.request({"action": "shutdown"}, timeout=1.0)
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
 
 
 def test_approvald_event_callback_writes_session_event_with_target(tmp_path, monkeypatch):

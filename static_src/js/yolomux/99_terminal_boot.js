@@ -1035,7 +1035,7 @@ function tmuxStatusToggleHtml(session) {
 }
 
 async function refreshTmuxStatusMode(session) {
-  if (!isTmuxSession(session)) return;
+  if (!clientCanUseUnscopedHostRequests() || !isTmuxSession(session)) return;
   const payload = await apiFetchJson(`/api/tmux-status?session=${encodeURIComponent(session)}`, {cache: 'no-store'});
   const mode = ['top', 'bottom', 'none'].includes(payload?.status) ? payload.status : 'none';
   tmuxStatusModes.set(String(session), mode);
@@ -3491,7 +3491,7 @@ function rawInfoBranchRows() {
       rowsByKey.set(key, mergeInfoBranchRow(rowsByKey.get(key), row));
     }
   }
-  return [...rowsByKey.values()];
+  return branchesNewestCommitFirst([...rowsByKey.values()]);
 }
 
 function shareInfoString(value, limit = 500) {
@@ -4209,12 +4209,31 @@ function insertIntoTerminal(session, text) {
 
 function noteTerminalExplicitInput(session) {
   const item = terminals.get(session);
-  if (item) {
-    item.lastExplicitInputMark = clientPerfMark(`terminal-keydown:${session}`);
-    item.lastExplicitInputAt = performanceNow();
+  if (!item) return;
+  item.lastExplicitInputStartedAt = performanceNow();
+  if (item.explicitInputOwnershipScheduled) return;
+  item.explicitInputOwnershipScheduled = true;
+  Promise.resolve().then(() => {
+    const current = terminals.get(session);
+    if (!current?.explicitInputOwnershipScheduled) return;
+    commitTerminalExplicitInputOwnership(session);
+  });
+}
+
+function commitTerminalExplicitInputOwnership(session) {
+  const item = terminals.get(session);
+  if (item) item.explicitInputOwnershipScheduled = false;
+  // Pointer/focus activation normally commits both owners before the first byte. Keep the fallback
+  // after transport delivery so secondary Finder/Differ or attention UI cannot delay xterm input.
+  if (!fileExplorerChangesSessionInteractionIsCurrent(session)) {
+    noteFileExplorerChangesSessionInteraction(session);
   }
-  noteFileExplorerChangesSessionInteraction(session);
-  setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
+  // focusin/pointer activation already established this ownership before a native key, paste, or
+  // beforeinput event. Re-entering the user-focus path for every byte synchronously repeats
+  // attention scans before xterm can emit onData; retain the fallback only for a stale owner.
+  if (focusedTerminal !== session || focusedPanelItem !== session) {
+    setFocusedTerminal(session, {userInitiated: true, syncFinder: false});
+  }
 }
 
 function terminalDataWithoutPassiveReports(data) {
@@ -4577,29 +4596,37 @@ function handleTerminalDataMeasured(session, data, options = {}) {
     ? stripTerminalQueryResponses(data)
     : terminalDataWithMobileAccessoryModifiers(session, stripTerminalQueryResponses(data));
   if (!filtered) return false;
+  const current = terminals.get(session);
+  const explicitInputStartedAt = Number(current?.lastExplicitInputStartedAt);
+  const explicitInput = Number.isFinite(explicitInputStartedAt);
+  if (explicitInput) {
+    const durationMs = performanceNow() - explicitInputStartedAt;
+    current.lastExplicitInputStartedAt = null;
+    recordClientPerfCounter('keydownToTermData', durationMs, {bytes: utf8ByteLength(filtered)});
+  }
   // Physical/mobile key input can arrive without another pointer event. Retire a touch-opened
   // tab detail here as well, while keeping passive terminal protocol reports from dismissing it.
   if (terminalDataShouldAcknowledgeAttention(filtered) && typeof closeOtherSessionPopovers === 'function') {
     closeOtherSessionPopovers(null, {force: true});
   }
-  const current = terminals.get(session);
-  if (current?.lastExplicitInputMark) {
-    clientPerfMeasureSinceMark('keydownToTermData', current.lastExplicitInputMark, {bytes: utf8ByteLength(filtered)});
-    current.lastExplicitInputMark = '';
-  }
   if (shareReplayShellActive && shareWriteMode) {
     acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
     shareSendTerminalInputIntent(session, filtered);
+    if (explicitInput) commitTerminalExplicitInputOwnership(session);
     return true;
   }
   const socket = current?.socket;
-  if (socket?.readyState !== WebSocket.OPEN) return false;
+  if (socket?.readyState !== WebSocket.OPEN) {
+    if (explicitInput) commitTerminalExplicitInputOwnership(session);
+    return false;
+  }
   observeTerminalTmuxPrefixWindowSwitches(session, filtered);
   acknowledgeTerminalAttentionFromTransportInput(session, filtered, options);
   const sendPerf = clientPerfStart('wsSend');
   socket.send(JSON.stringify({type: 'input', data: filtered}));
   clientPerfEnd(sendPerf, {bytes: utf8ByteLength(filtered)});
   current.lastInputSentAt = performanceNow();
+  if (explicitInput) commitTerminalExplicitInputOwnership(session);
   return true;
 }
 
@@ -5116,10 +5143,16 @@ function connectTerminalSocket(session, item) {
   if (!item?.term || !item?.container) return;
   if (item.socket && item.socket.readyState !== WebSocket.CLOSED && item.socket.readyState !== WebSocket.CLOSING) return;
   const socket = new WebSocket(wsUrl(session));
+  const lifecycleToken = tmuxSessionLifecycleOwnSource(session, socket);
+  const socketIsCurrent = () => terminals.get(session) === item
+    && item.socket === socket
+    && tmuxSessionLifecycleSourceIsCurrent(socket);
   socket.binaryType = 'arraybuffer';
   item.socket = socket;
+  item.sessionLifecycleToken = lifecycleToken;
   item.manualClose = false;
   socket.onopen = () => {
+    if (!socketIsCurrent()) return;
     clearTerminalRemovalLatency('session', session);
     item.terminalOutputSeen = false;
     item.reconnectAttempt = 0;
@@ -5145,7 +5178,7 @@ function connectTerminalSocket(session, item) {
     refreshTrackedSessionChrome(session);
   };
   socket.onmessage = event => {
-    if (terminals.get(session) !== item || !item.term) return;
+    if (!socketIsCurrent() || !item.term) return;
     try {
       processTerminalSocketFrame(session, item, event.data);
     } catch (_) {
@@ -5153,16 +5186,18 @@ function connectTerminalSocket(session, item) {
     }
   };
   socket.onclose = event => {
-    if (item.manualClose || terminals.get(session) !== item) return;
+    if (item.manualClose || !socketIsCurrent()) return;
+    tmuxSessionLifecycleReleaseSource(lifecycleToken, socket);
     postEvent(session, 'terminal_disconnected', `terminal disconnected from ${session}`, {});
     clearFocusedTerminal(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
     // Confirm once before reconnecting: a dead tmux session is pruned without the old reconnect
     // backoff loop, while a live session still reconnects after a transient close.
-    confirmSessionGoneOrReconnect(session, item, event);
+    confirmSessionGoneOrReconnect(session, item, event, lifecycleToken);
   };
   socket.onerror = () => {
+    if (!socketIsCurrent()) return;
     updateTypingIndicator(session);
     updateStatus();
     refreshTrackedSessionChrome(session);
@@ -5428,40 +5463,79 @@ async function toggleAutoApprove(session) {
   await setAutoApprove(session, !current);
 }
 
+function applyAutoApproveCommandState(session, state) {
+  autoApproveStates.set(session, state);
+  updateDocumentTitle();
+  updateSessionButtonStates();
+  renderInfoPanel();
+  renderAutoApproveButton(session, state);
+  scheduleTerminalAttentionHighlight(session);
+  scheduleShareUiStatePublish();
+}
+
+function beginAutoApproveCommand(session, enabled) {
+  const previous = autoApproveStates.get(session) || null;
+  const optimistic = {
+    ...(previous || {}),
+    target: session,
+    enabled: enabled === true,
+    last_action: enabled ? 'on' : 'off',
+  };
+  autoApproveStates.set(session, optimistic);
+  renderAutoApproveButton(session, optimistic);
+  return {previous};
+}
+
+function rollbackAutoApproveCommand(session, undo, error) {
+  const payload = error?.payload || {};
+  if (error?.status && (payload?.target || payload?.session)) {
+    applyAutoApproveCommandState(session, autoApproveStateWithSnapshotRevision(payload));
+    return;
+  }
+  const previous = undo?.previous || {target: session, enabled: false, last_action: 'off'};
+  autoApproveStates.set(session, previous);
+  renderAutoApproveButton(session, previous);
+}
+
+function applyAutoApproveCommandResult(session, payload) {
+  const state = autoApproveStateWithSnapshotRevision(payload);
+  applyAutoApproveCommandState(session, state);
+  showLayoutStatus(
+    payload.enabled
+      ? t('status.yoloEnabledFor', {session: sessionLabel(session)})
+      : t('status.yoloDisabledFor', {session: sessionLabel(session)}),
+    'advisory',
+  );
+  return payload;
+}
+
+function autoApproveCommandRoute(session, enabled) {
+  return commandRoute({
+    ...COMMAND_ROUTES['auto-approve-toggle'],
+    pendingLabel: t('status.yoloLoading'),
+    overdueLabel: 'Still working...',
+    overdueMs: 250,
+    optimistic: () => beginAutoApproveCommand(session, enabled),
+    rollback: (undo, _params, error) => rollbackAutoApproveCommand(session, undo, error),
+    applyResult: payload => applyAutoApproveCommandResult(session, payload),
+  });
+}
+
 async function setAutoApprove(session, enabled) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.yoloReadOnlyChange'));
     return;
   }
+  const source = document.querySelector(`[data-yolo-session="${cssEscape(session)}"]`);
+  const route = autoApproveCommandRoute(session, enabled);
   try {
-    const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`, {method: 'POST'});
-    const state = autoApproveStateWithSnapshotRevision(payload);
-    autoApproveStates.set(session, state);
-    updateDocumentTitle();
-    updateSessionButtonStates();
-    renderInfoPanel();
-    renderAutoApproveButton(session, state);
-    scheduleTerminalAttentionHighlight(session);
-    scheduleShareUiStatePublish();
-    statusEl.innerHTML = payload.enabled
-      ? `<span class="ok">${localizedHtml('status.yoloEnabledFor', {session: sessionLabel(session)})}</span>`
-      : `<span class="ok">${localizedHtml('status.yoloDisabledFor', {session: sessionLabel(session)})}</span>`;
-  } catch (error) {
-    const payload = error?.payload || {};
-    if (error?.status) {
-      if (payload?.target || payload?.session) {
-        const state = autoApproveStateWithSnapshotRevision(payload);
-        autoApproveStates.set(session, state);
-        updateDocumentTitle();
-        updateSessionButtonStates();
-        renderAutoApproveButton(session, state);
-        scheduleTerminalAttentionHighlight(session);
-        scheduleShareUiStatePublish();
-      }
-      statusErr(esc(userMessageText(error, t('status.yoloApprovalFailedDefault'))));
-      return;
-    }
-    statusErr(localizedHtml('status.yoloRequestFailed', {error}));
+    await dispatchCommand(route, {
+      url: `/api/auto-approve?session=${encodeURIComponent(session)}&enabled=${enabled ? '1' : '0'}`,
+    }, source);
+    return true;
+  } catch (_error) {
+    // dispatchCommand has already rolled back the optimistic state and surfaced the typed reason.
+    return false;
   }
 }
 
@@ -5478,21 +5552,47 @@ function autoApproveSnapshotIsFresh() {
 }
 
 function loadAutoStatuses(options = {}) {
-  if (loadAutoStatuses.request) return loadAutoStatuses.request;
+  if (!clientCanUseUnscopedHostRequests()) {
+    return Promise.resolve({applied: false, sessionsChanged: false, previousActive: activeSessions.slice()});
+  }
+  if (loadAutoStatuses.request && options.force !== true) return loadAutoStatuses.request;
   if (options.force !== true && options.preferFresh === true && autoApproveSnapshotIsFresh()) return Promise.resolve(loadAutoStatuses.lastResult);
+  const guardIsCurrent = loadAutoStatuses.guard.begin();
+  const topologyEpoch = tmuxTopologyEpoch;
+  const requestIsCurrent = () => guardIsCurrent() && topologyEpoch === tmuxTopologyEpoch;
   const request = (async () => {
   let result = null;
   try {
-    const payload = await apiFetchJson('/api/auto-approve');
-    result = applyAutoApprovePayload(payload, options);
-    loadAutoStatuses.lastResult = result;
-    loadAutoStatuses.updatedAt = Date.now();
+    let payload;
+    try {
+      payload = await apiFetchJson('/api/auto-approve');
+    } catch (error) {
+      if (!isApiPendingResponse(error)) throw error;
+      payload = await waitForApiOperationResult(error, {
+        kind: String(error?.operation?.kind || ''),
+        deadlineMs: apiFetchDeadlineMs('/api/auto-approve', {}),
+        url: '/api/auto-approve',
+        method: 'GET',
+      });
+    }
+    if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+    result = applyAutoApprovePayload(payload, {...options, topologyEpoch});
+    if (requestIsCurrent()) {
+      loadAutoStatuses.lastResult = result;
+      loadAutoStatuses.updatedAt = Date.now();
+    }
   } catch (_) {
-    for (const session of activeSessions.filter(isTmuxSession)) {
-      try {
-        const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
-        autoApproveStates.set(session, autoApproveStateWithSnapshotRevision(payload));
-      } catch (_) {}
+    if (!requestIsCurrent()) return {applied: false, staleRequest: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+    if (options.sessionFallback !== false) {
+      for (const session of activeSessions.filter(isTmuxSession)) {
+        if (!requestIsCurrent() || !tmuxSessionLifecycleAllowsTopologySession(session)) continue;
+        try {
+          const payload = await apiFetchJson(`/api/auto-approve?session=${encodeURIComponent(session)}`);
+          if (requestIsCurrent() && tmuxSessionLifecycleAllowsTopologySession(session)) {
+            autoApproveStates.set(session, autoApproveStateWithSnapshotRevision(payload));
+          }
+        } catch (_) {}
+      }
     }
     result = {applied: false, sessionsChanged: false, previousActive: activeSessions.slice()};
   }
@@ -5508,6 +5608,7 @@ function loadAutoStatuses(options = {}) {
 loadAutoStatuses.request = null;
 loadAutoStatuses.lastResult = null;
 loadAutoStatuses.updatedAt = 0;
+loadAutoStatuses.guard = makeGenerationGuard();
 
 function autoApproveStateWithSnapshotRevision(state, revision = agentWindowSnapshotRevision(state)) {
   if (!state || typeof state !== 'object') return state;
@@ -5539,10 +5640,75 @@ function renderAutoApproveStatusSurfaces(result = {}) {
   }
 }
 
+let deferredSealedAutoApprovePayload = null;
+
+function sealedAutoApprovePayloadNeedsMetadata(payload) {
+  if (transcriptMetadataState.loaded !== true) return false;
+  if (agentWindowSnapshotRevision(payload) <= 0) return false;
+  const statusSessions = payload?.sessions;
+  if (!statusSessions || typeof statusSessions !== 'object') return false;
+  const metadataSessions = transcriptMetadataState.payload?.sessions || {};
+  return Object.keys(statusSessions).some(session => !Object.prototype.hasOwnProperty.call(metadataSessions, session));
+}
+
+function deferSealedAutoApprovePayload(payload) {
+  const heldRevision = agentWindowSnapshotRevision(deferredSealedAutoApprovePayload);
+  if (agentWindowSnapshotRevision(payload) >= heldRevision) deferredSealedAutoApprovePayload = payload;
+}
+
+function applyClientEventKeyedPatch(current, payload, keyForRecord = null) {
+  if (!payload || payload.patch !== true || !current || typeof current !== 'object') return current;
+  const collection = String(payload.collection || '');
+  const currentRecords = current[collection];
+  const listCollection = Array.isArray(currentRecords);
+  if (!collection || (!listCollection && (!currentRecords || typeof currentRecords !== 'object'))) return null;
+  const records = new Map();
+  if (listCollection) {
+    if (typeof keyForRecord !== 'function') return null;
+    for (const record of currentRecords) {
+      const key = String(keyForRecord(record) || '');
+      if (!key || records.has(key)) return null;
+      records.set(key, record);
+    }
+  } else {
+    for (const [key, record] of Object.entries(currentRecords)) records.set(key, record);
+  }
+  const changes = payload.changes;
+  if (!changes || typeof changes !== 'object' || Array.isArray(changes)) return null;
+  for (const key of payload.removed_keys || []) records.delete(String(key || ''));
+  for (const [key, record] of Object.entries(changes)) records.set(key, record);
+  const fields = payload.fields && typeof payload.fields === 'object' && !Array.isArray(payload.fields) ? payload.fields : {};
+  const next = {...current, ...fields};
+  for (const field of payload.removed_fields || []) delete next[String(field || '')];
+  next[collection] = listCollection ? Array.from(records.values()) : Object.fromEntries(records);
+  return next;
+}
+
 function applyAutoApprovePayload(payload, options = {}) {
   if (!payload || typeof payload !== 'object') return false;
+  if (Number.isFinite(Number(options.topologyEpoch)) && Number(options.topologyEpoch) !== tmuxTopologyEpoch) {
+    return {applied: false, staleTopology: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+  }
+  if (payload.patch === true) {
+    payload = applyClientEventKeyedPatch({
+      session_order: sessions.slice(),
+      sessions: Object.fromEntries(autoApproveStates),
+      rules: yoloRulesPayload,
+    }, payload);
+    if (!payload) return false;
+  }
+  if (payload.status === 'refreshing') {
+    return {applied: false, refreshing: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+  }
+  if (options.deferForMetadata !== false && sealedAutoApprovePayloadNeedsMetadata(payload)) {
+    deferSealedAutoApprovePayload(payload);
+    return {applied: false, deferred: true, sessionsChanged: false, previousActive: activeSessions.slice()};
+  }
   const previousActive = activeSessions.slice();
-  const sessionsChanged = Array.isArray(payload.session_order) ? updateSessionList(payload.session_order) : false;
+  const topologySessions = Array.isArray(payload.session_order)
+    ? payload.session_order.filter(tmuxSessionLifecycleAllowsTopologySession)
+    : null;
+  const sessionsChanged = topologySessions ? updateSessionList(topologySessions) : false;
   if (payload.rules) {
     yoloRulesPayload = payload.rules;
     renderPreferencesPanels();
@@ -5667,22 +5833,30 @@ function startSummaryStream(session) {
   // plain paragraphs, then the model's markdown summary renders properly.
   let raw = `${t('summary.stream.starting')}\n\n`;
   let renderScheduled = false;
+  let source = null;
+  const streamIsCurrent = () => source
+    && summaryStreams.get(session) === source
+    && tmuxSessionLifecycleSourceIsCurrent(source);
   const renderSummary = () => {
     renderScheduled = false;
+    if (!streamIsCurrent()) return;
     renderMarkdownPreviewInto(node, raw);
     node.scrollTop = node.scrollHeight;
   };
   const appendSummary = text => {
+    if (!streamIsCurrent()) return;
     raw += text;
     if (!renderScheduled) {
       renderScheduled = true;
       requestAnimationFrame(renderSummary);
     }
   };
-  renderSummary();
-  const source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
+  source = new EventSource(`/api/summary-stream?session=${encodeURIComponent(session)}&lookback=${60 * 60}`);
+  tmuxSessionLifecycleOwnSource(session, source);
   summaryStreams.set(session, source);
+  renderSummary();
   source.addEventListener('meta', event => {
+    if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
     if (!payload) return;
     const fallback = t(payload.fallback ? 'summary.stream.source.recentTail' : 'summary.stream.source.lastHour');
@@ -5697,37 +5871,42 @@ function startSummaryStream(session) {
     appendSummary(`${tPlural('summary.stream.projectInventory', projectCount)}\n\n`);
   });
   source.addEventListener('log', event => {
+    if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
     if (payload?.text) appendSummary(`${t('summary.stream.log', {text: payload.text})}\n`);
   });
   source.addEventListener('delta', event => {
+    if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
     if (payload?.text) appendSummary(payload.text);
   });
   source.addEventListener('summary_error', event => {
+    if (!streamIsCurrent()) return;
     // A bad frame must still tear the stream down (this is the error path); guard the read but always stop
     // — an unguarded JSON.parse throw here would leak the EventSource.
     const payload = safeJsonParse(event.data, null);
     appendSummary(`\n${t('summary.stream.error', {error: userMessageText(payload, t('summary.stream.failed'))})}\n`);
-    stopSummaryStream(session);
+    stopSummaryStream(session, source);
   });
   source.addEventListener('done', event => {
+    if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
     if (payload?.return_code && payload.return_code !== 0) {
       appendSummary(`\n${t('summary.stream.exited', {code: payload.return_code})}\n`);
     }
-    stopSummaryStream(session);
+    stopSummaryStream(session, source);
   });
   source.onerror = () => {
-    if (summaryStreams.get(session) !== source) return;
+    if (!streamIsCurrent()) return;
     appendSummary(`\n${t('terminal.summary.streamDisconnected')}\n`);
-    stopSummaryStream(session);
+    stopSummaryStream(session, source);
   };
 }
 
-function stopSummaryStream(session) {
+function stopSummaryStream(session, expectedSource = null) {
   const source = summaryStreams.get(session);
-  if (!source) return;
+  if (!source || (expectedSource && source !== expectedSource)) return;
+  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
   source.close();
   summaryStreams.delete(session);
 }
@@ -5926,17 +6105,41 @@ function maybeHandleServerVersionChange(serverVersion, serverClientRevision = ''
 }
 
 async function applySessionMetadataPayload(payload, options = {}) {
-  if (!payload || typeof payload !== 'object') return false;
+  // Validate BEFORE adopting anything. A malformed or superseded response must be rejected while it
+  // still cannot touch shared identity: a late reply from the server that was just replaced would
+  // otherwise flip the epoch back after the replacement's bytes had already landed.
+  if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
-  if (!requestIsCurrent()) return false;
-  const nextPayload = transcriptPayloadWithTmuxWindowOverrides(payload);
-  const currentSessions = transcriptMetadataState.payload?.sessions || {};
+  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'superseded_request', payload);
+  const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
+  noteSessionMetadataPendingIdentity(payload);
+  const filteredSessions = Object.fromEntries(
+    Object.entries(payload.sessions || {}).filter(([session]) => tmuxSessionLifecycleAllowsTopologySession(session)),
+  );
+  const filteredOrder = Array.isArray(payload.session_order)
+    ? payload.session_order.filter(tmuxSessionLifecycleAllowsTopologySession)
+    : payload.session_order;
+  // A payload from a different server process shares NO baseline with the one on screen. Both the
+  // preserved lightweight metadata and `work_graph.generation` are process-local, so merging the
+  // previous epoch's graph into this payload would relabel a dead server's data as the new
+  // server's, and comparing their generations would refuse the new server's builds outright.
+  const priorPayload = epochChanged ? {} : transcriptMetadataState.payload;
+  const nextPayload = transcriptPayloadWithTmuxWindowOverrides({...payload, sessions: filteredSessions, session_order: filteredOrder}, priorPayload);
+  const currentSessions = priorPayload?.sessions || {};
   for (const [session, nextInfo] of Object.entries(nextPayload?.sessions || {})) {
     const nextGeneration = Number(nextInfo?.work_graph?.generation || 0);
     const currentGeneration = Number(currentSessions?.[session]?.work_graph?.generation || 0);
-    if (nextGeneration > 0 && currentGeneration > nextGeneration) return false;
+    if (nextGeneration > 0 && currentGeneration > nextGeneration) {
+      return noteSessionMetadataApply(false, 'older_work_graph_generation', payload, {session});
+    }
   }
-  setTranscriptMetadataPayload(transcriptPayloadWithTmuxWindowOverrides(payload), {invalidateRequest: options.source !== 'request'});
+  setTranscriptMetadataPayload(nextPayload, {invalidateRequest: options.source !== 'request'});
+  noteSessionMetadataApply(true, 'applied', payload);
+  if (deferredSealedAutoApprovePayload && !sealedAutoApprovePayloadNeedsMetadata(deferredSealedAutoApprovePayload)) {
+    const deferredPayload = deferredSealedAutoApprovePayload;
+    deferredSealedAutoApprovePayload = null;
+    applyAutoApprovePayload(deferredPayload, {render: false, deferForMetadata: false});
+  }
   // Metadata can arrive after the more-frequent auto-approve poll. Keep every agent window that
   // poll already proved exists, so a late or missed tmux window event cannot make buttons vanish
   // until the next poll repairs the client model.
@@ -5954,7 +6157,9 @@ async function applySessionMetadataPayload(payload, options = {}) {
   if (options.refreshAuto !== false) {
     await loadAutoStatuses();
   }
-  if (!requestIsCurrent()) return false;
+  // The payload is already committed above; only the render tail is abandoned here, so the applied
+  // generation stands and the reason says which half stopped.
+  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'committed_render_superseded', payload, {committed: true});
   transcriptMetadataState.loading = false;
   if (sessionsChanged) renderPanels(previousActive);
   // Keep a user-open Tabs menu alive while its background list-sessions refresh completes. The
@@ -6019,9 +6224,92 @@ function transcriptMetadataLoadErrorSnapshot(error, stage = 'fetch') {
   return {...userMessageSnapshot(error, fallback), stage: normalizedStage};
 }
 
+function noteForcedSessionMetadataSettleOutcome(reason, target, details = {}) {
+  transcriptMetadataState.lastApply = {
+    ...(transcriptMetadataState.lastApply || {}),
+    applied: false,
+    reason,
+    epoch: transcriptMetadataState.epoch,
+    awaitedGeneration: Number(target || 0),
+    appliedGeneration: Number(transcriptMetadataState.generation || 0),
+    at: Date.now(),
+    ...details,
+  };
+  // The diagnostic record stays -- it is what a Debug pane reads -- but the verdict is also
+  // RETURNED, because the caller that forced this refresh is the only code that can decide what a
+  // non-convergence means for the thing it just did.
+  return sessionMetadataResult(false, reason, {awaitedGeneration: Number(target || 0), ...details});
+}
+
+async function settleForcedSessionMetadata(target) {
+  // The server answers a forced read from its cache -- the bytes always predate the request -- and
+  // names the generation of the build that will observe it. That build is announced on the
+  // `transcripts` client-event channel, which a client only receives while it demands that channel,
+  // so a forced refresh cannot rely on the push to complete. Converge on the named generation with
+  // bounded cache reads, and record a machine-readable reason when it does not arrive.
+  //
+  // Convergence is a property of the model, not of one request: the applied generation is shared
+  // state, so a later refresh superseding this one still moves this one forward. The TARGET is not
+  // shared -- it is captured from this request's own response and never re-read -- because a
+  // concurrent force or an epoch adoption can change what the shared pending number means.
+  //
+  // Two things genuinely invalidate the work. A tmux topology mutation, because a payload built
+  // before it may still name a session this client has since created or killed. And a server epoch
+  // change, because the generation being awaited belongs to a process that is gone: the replacement
+  // restarts at zero, so waiting for "50" against it would either never end or -- before the epoch
+  // was part of the identity -- end instantly against a build that predates the request.
+  // A force that was handed no build identity is a protocol failure, never a normal outcome: the
+  // caller asked for a build that observes its mutation and the responder named none. It stays an
+  // error case so that a server -- or a fixture -- that stops speaking the contract is caught here
+  // rather than quietly turning every forced refresh into a no-op.
+  if (!target) return sessionMetadataResult(false, 'forced_no_pending_identity');
+  const topologyEpoch = tmuxTopologyEpoch;
+  const topologyIsCurrent = () => topologyEpoch === tmuxTopologyEpoch;
+  const serverIsCurrent = () => target.epoch === transcriptMetadataState.epoch;
+  const requestIsCurrent = () => topologyIsCurrent() && serverIsCurrent();
+  const settleGround = () => (serverIsCurrent() ? 'forced_settle_topology_changed' : 'forced_settle_epoch_changed');
+  const deadline = Date.now() + forcedSessionMetadataSettleTimeoutMs;
+  // The ground is checked BEFORE the applied generation on every pass, because a replacement
+  // server's counter is an unrelated sequence: reading "generation >= 50" against it and calling
+  // that convergence is the exact false success this loop exists to prevent.
+  while (true) {
+    if (!requestIsCurrent()) return noteForcedSessionMetadataSettleOutcome(settleGround(), target.generation);
+    if (Number(transcriptMetadataState.generation || 0) >= target.generation) {
+      return sessionMetadataResult(true, 'converged', {requested: target, applied: {epoch: transcriptMetadataState.epoch, generation: Number(transcriptMetadataState.generation || 0)}});
+    }
+    if (Date.now() >= deadline) return noteForcedSessionMetadataSettleOutcome('forced_generation_never_arrived', target.generation);
+    await new Promise(resolve => setTimeout(resolve, forcedSessionMetadataSettlePollMs));
+    if (!requestIsCurrent()) return noteForcedSessionMetadataSettleOutcome(settleGround(), target.generation);
+    // An unforced read is a pure cache hit server-side: it never starts work, it only reveals
+    // whether the build this request already asked for has committed. A read that fails is an
+    // outcome of the convergence, never of the caller's own work: the caller may be a session
+    // mutation that has already committed, and throwing here would roll it back.
+    //
+    // The apply is gated on topology alone: a payload from a replacement server is valid to render
+    // -- refusing it would leave the pane on bytes from a dead process -- it just cannot count as
+    // the awaited build, which the ground check at the top of the next pass decides.
+    try {
+      const payload = await apiFetchJson('/api/session-metadata');
+      await applySessionMetadataPayload(payload, {
+        refreshAuto: false,
+        refreshActivity: false,
+        refreshContext: false,
+        source: 'request',
+        requestIsCurrent: topologyIsCurrent,
+      });
+    } catch (error) {
+      return noteForcedSessionMetadataSettleOutcome('forced_settle_read_failed', target.generation, {
+        cause: userMessageText(error, String(error?.message || error || '')),
+      });
+    }
+  }
+}
+
 async function refreshSessionMetadata(options = {}) {
-  if (transcriptMetadataState.request) return transcriptMetadataState.request;
-  const requestIsCurrent = transcriptMetadataState.guard.begin();
+  if (transcriptMetadataState.request && options.force !== true) return transcriptMetadataState.request;
+  const guardIsCurrent = transcriptMetadataState.guard.begin();
+  const topologyEpoch = tmuxTopologyEpoch;
+  const requestIsCurrent = () => guardIsCurrent() && topologyEpoch === tmuxTopologyEpoch;
   transcriptMetadataState.loading = true;
   transcriptMetadataState.error = null;
   syncTranscriptMetaLoadingUi();
@@ -6048,6 +6336,20 @@ async function refreshSessionMetadata(options = {}) {
           renderTranscriptMetadataLoadError(session);
         }
       }
+      // Every exit reports a typed outcome. A forced refresh that never observed the generation it
+      // was promised used to resolve exactly like one that did, so the only way to tell a converged
+      // post-mutation refresh from a timed-out one was to read `lastApply` by hand.
+      if (!result.ok) {
+        return sessionMetadataResult(false, requestIsCurrent() ? `${result.stage}_failed` : 'superseded_request', {
+          stage: result.stage,
+          cause: userMessageText(result.error, String(result.error?.message || result.error || '')),
+        });
+      }
+      // The target comes from THIS response, captured before any other refresh can move shared
+      // state. A response that named no build to wait for cannot be settled against: the force is
+      // reported as unsatisfiable rather than resolved against bytes that predate the request.
+      if (options.force === true) return await settleForcedSessionMetadata(forcedSessionMetadataTarget(result.payload));
+      return sessionMetadataResult(transcriptMetadataState.lastApply?.applied === true, transcriptMetadataState.lastApply?.reason || 'applied');
     } finally {
       if (transcriptMetadataState.request === request) {
         transcriptMetadataState.loading = false;
@@ -6355,17 +6657,16 @@ function relocalizeTranscriptPanelStatus(session) {
 async function refreshTranscriptPreview(session, preview, options = {}) {
   try {
     const payload = await apiFetchJson(`/api/context-items?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-    if (payload?.pending === true) {
-      preview.textContent = t('transcript.loadingRecentContext');
-      setTimeout(() => {
-        if (transcriptPreviewPaneIsActive(session)) refreshTranscriptPreview(session, preview, options);
-      }, 200);
-      return;
-    }
     if (!applyContextItemsPayloadFromPush(payload, options)) {
       preview.textContent = JSON.stringify(payload, null, 2);
     }
   } catch (error) {
+    if (isApiPendingResponse(error)) {
+      if (error.operationId && apiOperationState.terminal.has(error.operationId)) return;
+      clearTranscriptContextLoadError(preview);
+      preview.textContent = t('transcript.loadingRecentContext');
+      return;
+    }
     preview._transcriptContextLoadError = userMessageSnapshot(error, {key: 'common.requestFailed', params: {}, fallback: ''});
     renderTranscriptContextLoadError(preview);
   }
@@ -6381,45 +6682,97 @@ function applyContextItemsPayloadFromPush(payload = {}, options = {}) {
   return true;
 }
 
+function renderContextTailPayload(session, payload = {}) {
+  const modal = document.getElementById('modal');
+  const body = document.getElementById('modalBody');
+  if (!modal || !body || modal.dataset.modalKind !== 'context' || modal.dataset.modalSession !== String(session || '')) return false;
+  delete body.dataset.localeTextKey;
+  body.textContent = payload.text
+    ? `${payload.path}\n\n${payload.text}`
+    : JSON.stringify(payload, null, 2);
+  scheduleSharePopupLayerPublish();
+  return true;
+}
+
+function applyContextProductOperationResult(record, result = {}) {
+  const context = record?.context && typeof record.context === 'object' ? record.context : {};
+  const session = String(context.session || '');
+  if (record?.kind === 'context_items') {
+    const preview = session ? document.getElementById(transcriptDomId(session)) : null;
+    if (result.state === 'ready' && result.data && typeof result.data === 'object') {
+      return applyContextItemsPayloadFromPush(result.data, {session, preview, preserveScroll: true});
+    }
+    if (result.state === 'failed' && preview) {
+      preview._transcriptContextLoadError = userMessageSnapshot(result, {key: 'common.requestFailed', params: {}, fallback: ''});
+      renderTranscriptContextLoadError(preview);
+      return true;
+    }
+    return false;
+  }
+  if (record?.kind !== 'context_tail') return false;
+  if (result.state === 'ready' && result.data && typeof result.data === 'object') {
+    return renderContextTailPayload(session, result.data);
+  }
+  if (result.state === 'failed') {
+    const modal = document.getElementById('modal');
+    const body = document.getElementById('modalBody');
+    if (!modal || !body || modal.dataset.modalKind !== 'context' || modal.dataset.modalSession !== session) return false;
+    delete body.dataset.localeTextKey;
+    body.textContent = userMessageText(result, t('common.requestFailed'));
+    scheduleSharePopupLayerPublish();
+    return true;
+  }
+  return false;
+}
+
 function startTranscriptStream(session, options = {}) {
   stopTranscriptStream(session);
   const preview = document.getElementById(transcriptDomId(session));
   if (!preview) return;
   const url = `/api/context-stream?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`;
   const source = new EventSource(url);
+  const lifecycleToken = tmuxSessionLifecycleOwnSource(session, source);
+  const streamIsCurrent = () => transcriptStreams.get(session) === source
+    && tmuxSessionLifecycleSourceIsCurrent(source);
   transcriptStreams.set(session, source);
   source.addEventListener('reset', event => {
+    if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
     if (!payload) return;
     updateTranscriptPathRow(session, payload.path);
     renderTranscriptItems(preview, payload.path, payload.items || [], {scrollBottom: options.scrollBottom === true});
   });
   source.addEventListener('items', event => {
+    if (!streamIsCurrent()) return;
     const payload = safeJsonParse(event.data, null);
     if (!payload) return;
     appendTranscriptItems(preview, payload.items || []);
   });
   source.addEventListener('ping', () => {});
   source.onerror = () => {
-    stopTranscriptStream(session);
+    if (!streamIsCurrent()) return;
+    stopTranscriptStream(session, source);
     const pane = document.getElementById(`transcript-pane-${session}`);
-    if (pane?.classList.contains(CLS.active)) {
+    if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken) && pane?.classList.contains(CLS.active)) {
       statusErr(localizedHtml('terminal.transcript.streamDisconnected', {session: sessionLabel(session)}));
-      setTimeout(() => {
-        if (document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
+      const reconnectTimer = setTimeout(() => {
+        tmuxSessionLifecycleReleaseTimer(lifecycleToken, reconnectTimer);
+        if (tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)
+            && document.getElementById(`transcript-pane-${session}`)?.classList.contains(CLS.active)) {
           startTranscriptStream(session, {scrollBottom: false});
         }
       }, 1500);
+      tmuxSessionLifecycleOwnTimer(lifecycleToken, reconnectTimer);
     }
   };
 }
 
-function stopTranscriptStream(session) {
+function stopTranscriptStream(session, expectedSource = null) {
   const source = transcriptStreams.get(session);
-  if (source) {
-    source.close();
-    transcriptStreams.delete(session);
-  }
+  if (!source || (expectedSource && source !== expectedSource)) return;
+  tmuxSessionLifecycleReleaseSource(source._tmuxSessionLifecycleToken, source);
+  source.close();
+  transcriptStreams.delete(session);
 }
 
 function renderTranscriptItems(container, path, items, options = {}) {
@@ -6518,6 +6871,8 @@ function eventLogRefreshRecord(session) {
 function refreshEventLog(session) {
   const node = document.getElementById(`events-${session}`);
   if (!node) return Promise.resolve(false);
+  const lifecycleToken = tmuxSessionLifecycleToken(session);
+  if (!tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
   const record = eventLogRefreshRecord(session);
   if (record.request) {
     record.pending = true;
@@ -6528,6 +6883,7 @@ function refreshEventLog(session) {
   const request = (async () => {
     try {
       const payload = await apiFetchJson(`/api/events?session=${encodeURIComponent(session)}&limit=120`);
+      if (!tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return false;
       const events = Array.isArray(payload.events) ? payload.events : [];
       node.innerHTML = events.length
         ? events.slice().reverse().map(eventItemHtml).join('')
@@ -6537,6 +6893,7 @@ function refreshEventLog(session) {
       node.scrollTop = scrollTop;
       return true;
     } catch (error) {
+      if (!tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return false;
       if (error?.status) {
         node.innerHTML = `<div class="event-empty">${esc(userMessageText(error.payload, t('events.loadFailed')))}</div>`;
         return false;
@@ -6546,7 +6903,7 @@ function refreshEventLog(session) {
     } finally {
       if (record.request === request) {
         record.request = null;
-        if (record.pending) {
+        if (record.pending && tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
           record.pending = false;
           Promise.resolve().then(() => refreshEventLog(session));
         }
@@ -6577,14 +6934,17 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
-  apiFetch('/api/event', {
+  const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
+  if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
+  return apiFetch('/api/event', {
     method: 'POST',
     credentials: 'same-origin',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({session, type, message, details}),
   }).then(() => {
-    refreshOpenEventLogs();
-  }).catch(() => {});
+    if (!lifecycleToken || tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) refreshOpenEventLogs();
+    return true;
+  }).catch(() => false);
 }
 
 function normalizeRole(role) {
@@ -6640,6 +7000,7 @@ function refreshAll() {
   refreshTranscripts({force: true});
   refreshBackgroundOwnerStatus({force: true});
   refreshAutoStatuses();
+  if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
   refreshWatchedFilesystem({full: true});
 }
 
@@ -6713,6 +7074,7 @@ async function boot() {
   installGlobalThemeMediaListener();
   if (installShareReplayShell()) {
     installDevAutoReload();
+    schedulePageLoadProfileCompletion();
     return;
   }
   applyFileExplorerStaticLabels();
@@ -6780,6 +7142,7 @@ async function boot() {
   installDevAutoReload();
   document.querySelector('[data-update-badge]')?.addEventListener('click', triggerSelfUpdate);
   checkForUpdateOnce();
+  schedulePageLoadProfileCompletion();
 }
 
 function clientEventEnvelope(event) {
@@ -6796,10 +7159,7 @@ function clientEventPayloadFromEnvelope(envelope) {
 function applyClientEventReadyEnvelope(envelope = {}) {
   const epoch = String(envelope.epoch || '');
   if (!epoch) return false;
-  if (clientEventTransportState.resourceEpoch !== epoch) {
-    clientEventTransportState.resourceEpoch = epoch;
-    clientEventTransportState.resourceRevisions.clear();
-  }
+  adoptServerEpoch(epoch);
   // `ready` is a reconnect fence, not state.  Seeding accepted revisions here
   // would discard queued frames without proving the corresponding panel read
   // happened.  Channel-scoped repair below establishes readable state first.
@@ -6807,7 +7167,10 @@ function applyClientEventReadyEnvelope(envelope = {}) {
 }
 
 function repairClientEventReadyChannels(channels) {
-  if (channels.has('files') && typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  if (channels.has('files')) {
+    if (typeof retryNetworkFailedFileExplorerExpansion === 'function') void retryNetworkFailedFileExplorerExpansion();
+    if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+  }
   if (channels.has('status') || channels.has('attention')) refreshAutoStatuses({force: true}).catch(error => console.warn('client-events ready auto-status refresh failed', error));
   if (channels.has('core')) refreshBackgroundOwnerStatus({preferFresh: true}).catch(error => console.warn('client-events ready background-owner refresh failed', error));
   if (channels.has('chat') && typeof loadChatBootstrap === 'function') loadChatBootstrap({incoming: true});
@@ -6838,7 +7201,7 @@ function clientEventRepairChannels(resources = []) {
     else if (/^(?:auto_approve_changed|attention_acks_changed|tmux_signals_changed)/.test(resource)) channels.add('status');
     else if (/^event_log_changed/.test(resource)) channels.add('events');
     else if (/^(?:transcripts_changed|context_changed|context_items_ready)/.test(resource)) channels.add('transcripts');
-    else if (/^activity_summary_ready|background:tabber-activity/.test(resource)) channels.add('activity');
+    else if (activitySummaryEnabled && /^activity_summary_ready|background:tabber-activity/.test(resource)) channels.add('activity');
     else if (/^yoagent_/.test(resource)) channels.add('yoagent');
     else if (/^chat_/.test(resource)) channels.add('chat');
     else channels.add('core');
@@ -6846,8 +7209,56 @@ function clientEventRepairChannels(resources = []) {
   return channels;
 }
 
-function repairClientEventResources(resources = []) {
-  const channels = clientEventRepairChannels(resources);
+async function refreshTmuxSignalsSnapshot() {
+  const payload = await apiFetchJson(tmuxWindowSignalReadbackUrl(''));
+  applyTmuxSignalsPayload({data: payload});
+  return payload;
+}
+
+function clientEventPatchResourceRevision(resource, envelope = {}) {
+  const revisions = envelope.resource_revisions;
+  const readyRevision = revisions && typeof revisions === 'object' ? Number(revisions[resource]) : 0;
+  if (Number.isSafeInteger(readyRevision) && readyRevision > 0) return readyRevision;
+  if (String(envelope.resource || '') !== resource) return 0;
+  const eventRevision = Number(envelope.resource_revision);
+  return Number.isSafeInteger(eventRevision) && eventRevision > 0 ? eventRevision : 0;
+}
+
+function repairClientEventPatchResource(resource, envelope = {}) {
+  if (!['auto_approve_changed', 'tmux_signals_changed'].includes(resource)) return false;
+  const epoch = String(envelope.epoch || clientEventTransportState.resourceEpoch || '');
+  const targetRevision = clientEventPatchResourceRevision(resource, envelope);
+  if (!epoch || targetRevision < 1) return false;
+  let record = clientEventTransportState.resourceRepairs.get(resource);
+  if (!record || record.epoch !== epoch) {
+    record = {epoch, targetRevision: 0, promise: null};
+    clientEventTransportState.resourceRepairs.set(resource, record);
+  }
+  record.targetRevision = Math.max(record.targetRevision, targetRevision);
+  if (record.promise) return true;
+  record.promise = (async () => {
+    while (clientEventTransportState.resourceEpoch === epoch) {
+      const repairingRevision = record.targetRevision;
+      if (resource === 'auto_approve_changed') await refreshAutoStatuses({force: true});
+      else await refreshTmuxSignalsSnapshot();
+      if (clientEventTransportState.resourceEpoch !== epoch) return;
+      if (record.targetRevision !== repairingRevision) continue;
+      clientEventTransportState.resourceRevisions.set(resource, repairingRevision);
+      return;
+    }
+  })().catch(error => console.warn(`client-events ${resource} repair failed`, error)).finally(() => {
+    if (clientEventTransportState.resourceRepairs.get(resource) === record) clientEventTransportState.resourceRepairs.delete(resource);
+  });
+  return true;
+}
+
+function repairClientEventResources(resources = [], envelope = {}) {
+  const genericResources = [];
+  for (const rawResource of resources || []) {
+    const resource = String(rawResource || '');
+    if (!repairClientEventPatchResource(resource, envelope)) genericResources.push(resource);
+  }
+  const channels = clientEventRepairChannels(genericResources);
   if (channels.size) repairClientEventReadyChannels(channels);
 }
 
@@ -6863,18 +7274,20 @@ function clientEventReadyGapResources(envelope = {}) {
   return gaps;
 }
 
-function clientEventEnvelopeIsCurrent(envelope = {}) {
+function clientEventEnvelopeIsCurrent(envelope = {}, payload = {}) {
   const epoch = String(envelope.epoch || '');
   const resource = String(envelope.resource || '');
   const revision = Number(envelope.resource_revision);
   // Older servers and direct unit-test calls remain valid until every dev server has re-execed.
   if (!epoch || !resource || !Number.isSafeInteger(revision) || revision < 1) return true;
-  if (clientEventTransportState.resourceEpoch !== epoch) {
-    clientEventTransportState.resourceEpoch = epoch;
-    clientEventTransportState.resourceRevisions.clear();
-  }
+  adoptServerEpoch(epoch);
   const previous = clientEventTransportState.resourceRevisions.get(resource) || 0;
   if (revision <= previous) return false;
+  const baseRevision = Number(envelope.base_resource_revision);
+  if (payload?.patch === true && (!Number.isSafeInteger(baseRevision) || baseRevision !== previous || revision !== baseRevision + 1)) {
+    repairClientEventResources([resource], envelope);
+    return false;
+  }
   clientEventTransportState.resourceRevisions.set(resource, revision);
   return true;
 }
@@ -6891,6 +7304,7 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
   const receiveLatencyMs = Number.isFinite(serverTimeMs)
     ? Math.max(0, Number((Date.now() - serverTimeMs).toFixed(1)))
     : undefined;
+  const diagnosticFailure = envelope?.diagnosticFailure === true;
   recordJsDebugEvent('sse', {
     eventType,
     serverEventId: Number(envelope?.id || 0) || undefined,
@@ -6904,6 +7318,13 @@ function recordSseDebugEvent(eventType, envelope = {}, rawEvent = null) {
     listingSummary: payload?.listing_summary && typeof payload.listing_summary === 'object' ? payload.listing_summary : null,
     phaseTimings: payload?.timings && typeof payload.timings === 'object' ? payload.timings : null,
     key: payload?.session || payload?.locale || payload?.request?.session || '',
+    disconnectEpisode: Number(envelope?.disconnectEpisode || 0) || undefined,
+    disconnectedMs: Number.isFinite(Number(envelope?.disconnectedMs)) ? Number(envelope.disconnectedMs) : undefined,
+    source: diagnosticFailure ? '/api/client-events' : undefined,
+    route: diagnosticFailure ? '/api/client-events' : undefined,
+    error: diagnosticFailure ? 'client-events stream unavailable after 15s grace' : undefined,
+    ok: diagnosticFailure ? false : undefined,
+    deliveryOutcome: diagnosticFailure ? 'stalled' : (envelope?.recovered === true ? 'recovered' : undefined),
   });
 }
 
@@ -6970,6 +7391,7 @@ function applyUpdateAvailable(status) {
 }
 
 async function checkForUpdateOnce() {
+  if (shareViewMode) return false;
   try {
     const status = await apiFetchJson(`/api/update-status${updateDryRunEnabled() ? '?dryrun=1' : ''}`);
     if (status && status.available) applyUpdateAvailable(status);
@@ -7031,21 +7453,7 @@ function tmuxSignalsPayloadWithWindowOverrides(data) {
 
 function tmuxSignalsPayloadWithPatch(data) {
   if (!data || typeof data !== 'object' || data.patch !== true) return data;
-  if (!tmuxSignalState || typeof tmuxSignalState !== 'object' || !Array.isArray(tmuxSignalState.windows)) return data;
-  const nextByKey = new Map(tmuxSignalState.windows.map(windowRecord => [tmuxSignalWindowKey(windowRecord), windowRecord]).filter(([key]) => key));
-  for (const key of data.removed_window_keys || []) {
-    nextByKey.delete(String(key || ''));
-  }
-  for (const windowRecord of data.windows || []) {
-    const key = tmuxSignalWindowKey(windowRecord);
-    if (key) nextByKey.set(key, windowRecord);
-  }
-  return {
-    ...tmuxSignalState,
-    ...data,
-    patch: false,
-    windows: Array.from(nextByKey.values()),
-  };
+  return applyClientEventKeyedPatch(tmuxSignalState, data, tmuxSignalWindowKey);
 }
 
 function recordTmuxSignalRemovedWindowLatencies(data) {
@@ -7080,19 +7488,26 @@ function clientPushEventSessionKey(payload = {}) {
 }
 
 // Keep EventSource registration and the browser dispatch owner on one typed contract. The server
-// still validates its authoritative set in ClientEventBroker; this prevents a browser-only typo or
-// a newly added handler from silently having no EventSource listener.
-const clientPushEventTypes = Object.freeze([
+// validates this authoritative set in ClientEventBroker; local browser notifications stay separate
+// so they cannot be mistaken for an EventSource type with no server producer.
+const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
   'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
   'chat_messages_changed', 'chat_typing_changed',
 ]);
+const clientLocalPushEventTypes = Object.freeze(['generation_ready']);
+const clientPushEventTypes = Object.freeze([...clientServerPushEventTypes, ...clientLocalPushEventTypes]);
 
 function clientPushEventCoalesceKey(type, payload = {}) {
   const key = String(type || 'event');
+  if (type === 'operation_terminal') {
+    const operationId = String(payload?.operation?.id || '');
+    if (operationId) return `${key}:${operationId}`;
+  }
   const session = clientPushEventSessionKey(payload);
   if (session) return `${key}:${session}`;
   return key;
@@ -7124,14 +7539,38 @@ function flushQueuedClientPushEvents() {
   for (const event of events) handleClientPushEventNow(event.type, event.payload, event.envelope);
 }
 
+// A pushed metadata payload carries its own identity because the HTTP path has no envelope to read
+// one from. The two must agree: an inner identity from a different process than the envelope that
+// delivered it is malformed, and applying it would stamp one server's generation under another's
+// epoch. Fail closed on the identity without going blind -- the inline bytes are dropped and the
+// handler falls back to an HTTP read, which carries an identity of its own.
+function clientPushEventPayloadWithVerifiedIdentity(type, payload = {}, envelope = {}) {
+  if (type !== 'transcripts_changed' || !payload?.data) return payload;
+  const envelopeEpoch = String(envelope?.epoch || '');
+  const identity = sessionMetadataPayloadIdentity(payload.data);
+  if (identity && (!envelopeEpoch || identity.epoch === envelopeEpoch)) return payload;
+  const {data, ...rest} = payload;
+  return rest;
+}
+
 function handleClientPushEvent(type, payload = {}, envelope = {}) {
-  repairClientEventResources(envelope.repair_resources);
-  if (!clientEventEnvelopeIsCurrent(envelope)) return false;
-  queueClientPushEvent(type, payload, envelope);
+  const repairResources = Array.isArray(envelope.repair_resources) ? envelope.repair_resources.map(resource => String(resource || '')) : [];
+  repairClientEventResources(repairResources, envelope);
+  if (payload?.patch === true && repairResources.includes(String(envelope.resource || ''))) return false;
+  if (!clientEventEnvelopeIsCurrent(envelope, payload)) return false;
+  queueClientPushEvent(type, clientPushEventPayloadWithVerifiedIdentity(type, payload, envelope), envelope);
   return true;
 }
 
 function handleClientPushEventNowByType(type, payload = {}) {
+  if (type === 'operation_terminal') {
+    applyApiOperationTerminal(payload);
+    return;
+  }
+  if (type === 'generation_ready') {
+    window.dispatchEvent(new CustomEvent('yolomux:generation-ready', {detail: payload}));
+    return;
+  }
   if (type === 'update_available') {
     applyUpdateAvailable(payload && payload.available !== undefined ? payload : (payload.data || {}));
     return;
@@ -7156,6 +7595,7 @@ function handleClientPushEventNowByType(type, payload = {}) {
       return;
     }
     if (payload.data) applyAutoApprovePayload(payload.data);
+    else if (payload.patch === true) applyAutoApprovePayload(payload);
     return;
   }
   if (type === 'attention_acks_changed') {
@@ -7300,6 +7740,7 @@ function clientEventDemandDescriptor() {
   const visible = document.visibilityState !== 'hidden';
   const activeItems = visible && typeof activePaneItems === 'function' ? activePaneItems() : [];
   const channels = new Set();
+  const operations = shareToken ? [] : Array.from(apiOperationState.pending.keys()).sort();
   const notificationAttention = typeof notificationDeliveryEnabled === 'function' && notificationDeliveryEnabled('system');
   const notificationChat = typeof notificationDeliveryEnabled === 'function'
     && (notificationDeliveryEnabled('inApp') || notificationDeliveryEnabled('system'));
@@ -7307,9 +7748,10 @@ function clientEventDemandDescriptor() {
     channels.add('core');
     channels.add('status');
     const finderActive = activeItems.includes(fileExplorerItemId);
+    const differActive = activeItems.includes(differItemId);
     const fileEditorActive = activeItems.some(item => isFileEditorItem(item));
     if (finderActive && fileExplorerMode === 'tabber') channels.add('activity');
-    if ((finderActive && fileExplorerMode !== 'tabber') || fileEditorActive) channels.add('files');
+    if ((finderActive && fileExplorerMode !== 'tabber') || differActive || fileEditorActive) channels.add('files');
     if (activeItems.includes(infoItemId)) {
       channels.add('activity');
       channels.add('transcripts');
@@ -7330,6 +7772,7 @@ function clientEventDemandDescriptor() {
     channels.add('attention');
     channels.add('chat');
   }
+  if (operations.length) channels.add('core');
   return {
     visibility: visible ? 'visible' : 'hidden',
     active_panes: activeItems.slice().sort(),
@@ -7339,6 +7782,7 @@ function clientEventDemandDescriptor() {
       chat: activeItems.includes(chatItemId),
     },
     channels: Array.from(channels).sort(),
+    operations,
     notification_attention: notificationAttention,
   };
 }
@@ -7347,33 +7791,142 @@ function finderActiveMode() {
   return itemIsActivePaneTab(fileExplorerItemId) ? normalizeFileExplorerMode(fileExplorerMode) : '';
 }
 
+const clientEventDemandItemLimit = 64;
+const clientEventDemandItemTextLimit = 128;
+
+function normalizedClientEventDemandItems(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value
+    .filter(item => typeof item === 'string')
+    .map(item => item.trim().slice(0, clientEventDemandItemTextLimit))
+    .filter(Boolean)))
+    .sort()
+    .slice(0, clientEventDemandItemLimit);
+}
+
+function normalizeClientEventDemandDescriptor(descriptor = {}) {
+  const source = descriptor && typeof descriptor === 'object' ? descriptor : {};
+  return {
+    ...source,
+    channels: normalizedClientEventDemandItems(source.channels),
+    operations: normalizedClientEventDemandItems(source.operations),
+  };
+}
+
 function clientEventDemandSignature(descriptor) {
-  return JSON.stringify(descriptor);
+  return JSON.stringify(normalizeClientEventDemandDescriptor(descriptor));
+}
+
+function clearClientEventDisconnectEpisode(source, options = {}) {
+  const episode = clientEventTransportState.disconnectEpisode;
+  if (!episode || episode.source !== source) return false;
+  if (clientEventTransportState.disconnectTimer) clearTimeout(clientEventTransportState.disconnectTimer);
+  clientEventTransportState.disconnectTimer = null;
+  clientEventTransportState.disconnectEpisode = null;
+  if (options.recovered === true && episode.reported === true) {
+    recordSseDebugEvent('client_events_recovered', {
+      disconnectEpisode: episode.id,
+      disconnectedMs: Math.max(0, performance.now() - episode.startedAt),
+      recovered: true,
+    });
+  }
+  return true;
+}
+
+function scheduleClientEventDisconnectEpisode(source) {
+  if (source !== null && clientEventTransportState.source !== source) return false;
+  if (source === null && clientEventTransportState.source !== null) return false;
+  const active = clientEventTransportState.disconnectEpisode;
+  if (active?.source === source) return false;
+  const episode = {
+    id: clientEventTransportState.nextDisconnectEpisode++,
+    source,
+    startedAt: performance.now(),
+    reported: false,
+  };
+  clientEventTransportState.disconnectEpisode = episode;
+  clientEventTransportState.disconnectTimer = setTimeout(() => {
+    clientEventTransportState.disconnectTimer = null;
+    if ((source !== null && clientEventTransportState.source !== source)
+        || (source === null && clientEventTransportState.source !== null)
+        || clientEventTransportState.connected
+        || clientEventTransportState.disconnectEpisode !== episode) return;
+    episode.reported = true;
+    recordSseDebugEvent('client_events_failure', {
+      disconnectEpisode: episode.id,
+      disconnectedMs: Math.max(clientEventDisconnectGraceMs, performance.now() - episode.startedAt),
+      diagnosticFailure: true,
+    });
+  }, clientEventDisconnectGraceMs);
+  return true;
 }
 
 function closeClientEventStream() {
   const source = clientEventTransportState.source;
+  clearClientEventDisconnectEpisode(source);
   clientEventTransportState.source = null;
+  const replacementSource = clientEventTransportState.replacementSource;
+  clientEventTransportState.replacementSource = null;
   clientEventTransportState.connected = false;
   source?.close?.();
+  if (replacementSource !== source) replacementSource?.close?.();
 }
 
-function openClientEventStream(descriptor) {
-  if (typeof EventSource === 'undefined' || !descriptor.channels.length) return null;
+function openClientEventStream(descriptor, options = {}) {
+  descriptor = normalizeClientEventDemandDescriptor(descriptor);
+  if (!descriptor.channels.length) return null;
+  if (typeof EventSource === 'undefined') {
+    clientEventTransportState.connected = false;
+    clientEventTransportState.reconnectPending = true;
+    scheduleClientEventDisconnectEpisode(null);
+    return null;
+  }
   const params = new URLSearchParams({
     channels: descriptor.channels.join(','),
     client_id: String(shareClientId || ''),
   });
+  if (descriptor.operations.length) params.set('operations', descriptor.operations.join(','));
   let source;
   try {
     source = new EventSource(`/api/client-events?${params.toString()}`);
   } catch (_error) {
+    clientEventTransportState.connected = false;
+    clientEventTransportState.reconnectPending = true;
+    if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+    scheduleClientEventDisconnectEpisode(null);
     return null;
   }
-  clientEventTransportState.source = source;
+  if (clientEventTransportState.disconnectEpisode?.source === null) {
+    clientEventTransportState.disconnectEpisode.source = source;
+  }
+  const replacing = options.replace === true && clientEventTransportState.source !== null;
+  if (replacing) {
+    const priorReplacement = clientEventTransportState.replacementSource;
+    clientEventTransportState.replacementSource = source;
+    priorReplacement?.close?.();
+  } else {
+    clientEventTransportState.source = source;
+  }
   const channels = new Set(descriptor.channels);
   source.addEventListener('ready', event => {
-    if (clientEventTransportState.source !== source) return;
+    if (clientEventTransportState.replacementSource === source) {
+      const demandedSignature = String(options.demandSignature || '');
+      if (demandedSignature && demandedSignature !== clientEventDemandSignature(clientEventDemandDescriptor())) {
+        clientEventTransportState.replacementSource = null;
+        source.close();
+        syncClientEventDemand({immediate: true});
+        return;
+      }
+      const previousSource = clientEventTransportState.source;
+      clientEventTransportState.source = source;
+      clientEventTransportState.replacementSource = null;
+      previousSource?.close?.();
+    } else if (clientEventTransportState.source !== source) {
+      return;
+    }
+    clearClientEventDisconnectEpisode(source, {recovered: true});
+    const isRecoveryReady = clientEventTransportState.reconnectPending;
+    clientEventTransportState.reconnectPending = false;
     clientEventTransportState.connected = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(true);
     const envelope = clientEventEnvelope(event);
@@ -7384,14 +7937,19 @@ function openClientEventStream(descriptor) {
     const freshEpoch = !readyEpoch || clientEventTransportState.resourceEpoch !== readyEpoch;
     applyClientEventReadyEnvelope(envelope);
     recordSseDebugEvent('ready', envelope, event);
+    if (isRecoveryReady && channels.has('files') && typeof drainFileExplorerFsBatchWithoutPush === 'function') {
+      void drainFileExplorerFsBatchWithoutPush();
+    }
     if (freshEpoch) {
-      repairClientEventReadyChannels(channels);
+      const readyResources = Object.keys(envelope.resource_revisions || {});
+      repairClientEventResources(readyResources, envelope);
+      const unrepairedChannels = new Set(channels);
+      for (const channel of clientEventRepairChannels(readyResources)) unrepairedChannels.delete(channel);
+      repairClientEventReadyChannels(unrepairedChannels);
     } else {
       const gapResources = clientEventReadyGapResources(envelope);
       repairReadyEventLogRevisions(gapResources, envelope);
-      const repairChannels = clientEventRepairChannels(gapResources);
-      repairChannels.delete('events');
-      repairClientEventReadyChannels(new Set([...repairChannels].filter(channel => channels.has(channel))));
+      repairClientEventResources(gapResources.filter(resource => !/^event_log_changed/.test(resource)), envelope);
     }
   });
   source.addEventListener('ping', event => {
@@ -7401,9 +7959,15 @@ function openClientEventStream(descriptor) {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
+    if (clientEventTransportState.replacementSource === source) return;
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
+    clientEventTransportState.reconnectPending = true;
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+    scheduleClientEventDisconnectEpisode(source);
+    if (channels.has('files') && typeof drainFileExplorerFsBatchWithoutPush === 'function') {
+      void drainFileExplorerFsBatchWithoutPush();
+    }
   };
   for (const type of Object.keys(clientPushEventHandlers)) {
     source.addEventListener(type, event => {
@@ -7423,15 +7987,16 @@ function applyClientEventDemand() {
   if (!clientEventTransportState.enabled) return false;
   const descriptor = clientEventDemandDescriptor();
   const signature = clientEventDemandSignature(descriptor);
-  if (signature === clientEventTransportState.demandSignature && clientEventTransportState.source) return false;
+  const sameDemand = signature === clientEventTransportState.demandSignature;
+  if (sameDemand && clientEventTransportState.source) return false;
   clientEventTransportState.demand = descriptor;
   clientEventTransportState.demandSignature = signature;
-  closeClientEventStream();
   if (!descriptor.channels.length) {
+    if (!sameDemand) closeClientEventStream();
     if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
     return true;
   }
-  openClientEventStream(descriptor);
+  openClientEventStream(descriptor, {replace: !sameDemand, demandSignature: signature});
   return true;
 }
 
@@ -7483,14 +8048,15 @@ async function showContext(session) {
   body.dataset.localeTextKey = 'common.loading';
   modal.classList.add(CLS.open);
   relocalizeModalChrome();
-  const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
-  delete body.dataset.localeTextKey;
-  if (payload.text) {
-    body.textContent = `${payload.path}\n\n${payload.text}`;
-  } else {
-    body.textContent = JSON.stringify(payload, null, 2);
+  try {
+    const payload = await apiFetchJson(`/api/context?session=${encodeURIComponent(session)}&messages=${transcriptPreviewMessages}`);
+    renderContextTailPayload(session, payload);
+  } catch (error) {
+    if (isApiPendingResponse(error)) return;
+    delete body.dataset.localeTextKey;
+    body.textContent = userMessageText(error, t('common.requestFailed'));
+    scheduleSharePopupLayerPublish();
   }
-  scheduleSharePopupLayerPublish();
 }
 
 function relocalizeModalChrome(options = {}) {
@@ -7716,7 +8282,7 @@ function handleGlobalShortcutKeydown(event) {
     return;
   }
   if (mod && platformActionAllowed) {
-    if (key === 'k') {
+    if (key === 'k' && (event.shiftKey || !shareFeatureQuarantined)) {
       event.preventDefault();
       event.stopPropagation();
       if (event.shiftKey) startPinTabShortcutChord();
@@ -7766,4 +8332,5 @@ window.addEventListener(APP_VIEWPORT_CHANGE_EVENT, () => {
   for (const session of activeSessions.filter(isTmuxSession)) scheduleFit(session);
 });
 
+pageLoadProfileState.bundleEvalEndedAt = performanceNow();
 boot();

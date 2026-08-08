@@ -24,10 +24,10 @@ const previewZoomShellClasses = Object.freeze([
 ]);
 
 const previewZoomRendererDefaults = Object.freeze({
-  imagePane: Object.freeze({zoomKey: 'image-pane', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
-  imagePreview: Object.freeze({zoomKey: 'image-preview', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, wheelZoom: true, panDrag: true}),
-  mermaidFull: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidFull, full: true, wheelZoom: true, panDrag: true}),
-  mermaidInline: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidInline, full: false, wheelZoom: true, panDrag: true}),
+  imagePane: Object.freeze({zoomKey: 'image-pane', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, panDrag: true}),
+  imagePreview: Object.freeze({zoomKey: 'image-preview', fitMaxScale: previewZoomPolicy.fitScaleCaps.image, full: true, panDrag: true}),
+  mermaidFull: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidFull, full: true, panDrag: true}),
+  mermaidInline: Object.freeze({zoomKey: 'mermaid', fitMaxScale: previewZoomPolicy.fitScaleCaps.mermaidInline, full: false, panDrag: true}),
   default: Object.freeze({zoomKey: 'default', fitMaxScale: Number.POSITIVE_INFINITY, full: true}),
 });
 
@@ -84,7 +84,6 @@ function previewZoomOptionsForKind(kind, options = {}) {
   result.zoomKey = previewZoomScopedKey(baseZoomKey, context);
   if (!Object.prototype.hasOwnProperty.call(options, 'fitMaxScale')) result.fitMaxScale = defaults.fitMaxScale;
   if (!Object.prototype.hasOwnProperty.call(options, 'full')) result.full = defaults.full;
-  if (!Object.prototype.hasOwnProperty.call(options, 'wheelZoom')) result.wheelZoom = defaults.wheelZoom === true;
   if (!Object.prototype.hasOwnProperty.call(options, 'panDrag')) result.panDrag = defaults.panDrag === true;
   return result;
 }
@@ -151,7 +150,6 @@ function writePreviewZoomSurfaceDataset(shell, options = {}) {
   shell.dataset.previewZoomPath = options.path || '';
   shell.dataset.previewZoomKey = options.zoomKey || 'default';
   shell.dataset.previewZoomFull = options.full === false ? '0' : '1';
-  shell.dataset.previewZoomWheel = options.wheelZoom === true ? '1' : '0';
   shell.dataset.previewZoomPan = options.panDrag === true ? '1' : '0';
   if (Number.isFinite(options.fitMaxScale)) shell.dataset.previewZoomFitMaxScale = String(options.fitMaxScale);
   else delete shell.dataset.previewZoomFitMaxScale;
@@ -163,7 +161,6 @@ function previewZoomOptionsFromSurface(shell) {
     path: shell?.dataset?.previewZoomPath || '',
     zoomKey: shell?.dataset?.previewZoomKey || 'default',
     full: shell?.dataset?.previewZoomFull !== '0',
-    wheelZoom: shell?.dataset?.previewZoomWheel === '1',
     panDrag: shell?.dataset?.previewZoomPan === '1',
     fitMaxScale: Number.isFinite(fitMaxScale) ? fitMaxScale : Number.POSITIVE_INFINITY,
   };
@@ -345,16 +342,6 @@ function hydratePreviewZoomSurface(shell, content = null, options = null) {
     const zoomState = previewZoomStateForAction(button.dataset.previewZoomAction, current);
     if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {centerIfUnfocused: true});
   });
-  bind(viewport, 'wheel', event => {
-    if (resolvedOptions.wheelZoom !== true && !event.ctrlKey && !event.metaKey) return;
-    event.preventDefault();
-    const current = Number.parseFloat(shell.dataset.previewZoomScale || '1') || 1;
-    const zoomState = previewZoomStateForAction(event.deltaY < 0 ? 'in' : 'out', current);
-    if (zoomState) setPreviewZoomSurfaceState(shell, resolvedContent, resolvedOptions, zoomState, {
-      focusClientX: event.clientX,
-      focusClientY: event.clientY,
-    });
-  }, {passive: false});
   if (resolvedOptions.panDrag === true) bindPreviewZoomDragPan(shell, viewport, bind);
   const ownerWindow = previewZoomOwnerWindow(shell);
   // Hide the diagram until its viewport size has settled, then reveal. A file editor pane opens at a

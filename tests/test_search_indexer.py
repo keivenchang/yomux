@@ -81,6 +81,28 @@ def test_persistent_indexer_serves_its_ready_snapshot_to_read_only_servers(tmp_p
     assert response == {"ok": True, "payload": expected}
 
 
+def test_search_client_deadline_is_typed_and_uses_the_bounded_search_timeout(tmp_path, monkeypatch):
+    client = search_indexer.SearchIndexerClient(tmp_path / "indexer.sock")
+    observed_timeouts = []
+
+    def deadline_expired(_socket_path, _envelope, *, timeout_seconds, fallback_legacy):
+        observed_timeouts.append((timeout_seconds, fallback_legacy))
+        raise TimeoutError("forced indexd deadline")
+
+    monkeypatch.setattr(search_indexer, "local_service_request", deadline_expired)
+    monkeypatch.setattr(client, "supports", lambda capability: capability == "search")
+
+    response = client.search("/repo", "needle", 20)
+
+    assert response == {
+        "ok": False,
+        "status": "unavailable",
+        "error_code": "deadline_expired",
+        "reason": "forced indexd deadline",
+    }
+    assert observed_timeouts == [(search_indexer.INDEXER_SEARCH_RPC_TIMEOUT_SECONDS, True)]
+
+
 def test_search_client_replaces_legacy_peer_that_lacks_search_capability(tmp_path, monkeypatch):
     class LegacyIndexer(search_indexer.PersistentSearchIndexer):
         def handle(self, request):
@@ -194,11 +216,11 @@ def test_local_service_registry_starts_real_indexd_and_recovers_stale_socket_rec
         LocalServiceSpec("indexd", "yolomux_lib.search.search_indexer", socket_path.name, search_indexer.INDEXER_PROTOCOL_VERSION, idle_seconds=30.0),
         socket_path=socket_path,
     )
-    socket_path.parent.mkdir(parents=True)
-    socket_path.write_text("stale", encoding="utf-8")
+    registry.socket_path.parent.mkdir(parents=True, exist_ok=True)
+    registry.socket_path.write_text("stale", encoding="utf-8")
     registry._write_record({"pid": 999_999_999, "service": "indexd"})
 
-    assert registry.ensure_started() is True
+    assert registry.ensure_started() is True, registry.status()
     status = registry.status()
     assert status["healthy"] is True
     assert status["record"]["pid"] > 0

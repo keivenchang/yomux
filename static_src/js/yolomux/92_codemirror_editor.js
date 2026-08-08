@@ -1440,7 +1440,7 @@ function loadFileEditorState(path, panel, item) {
       return;
     }
     try {
-      const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+      const payload = await fetchFileReadPayload(path);
       setFileState(path, applyFileGitMetadata({
         mtime: filePayloadMtime(payload),
         size: payload.size,
@@ -1978,6 +1978,92 @@ function nowMs() {
     : Date.now();
 }
 
+function fileEditorScrollCoordinates(panel, source) {
+  const element = fileEditorSourceElement(panel, source);
+  if (!element) return null;
+  return {
+    top: Number(element.scrollTop || 0),
+    left: Number(element.scrollLeft || 0),
+  };
+}
+
+function rememberFileEditorReflectedScroll(panel, targetSource, ownerSource, generation) {
+  const coordinates = fileEditorScrollCoordinates(panel, targetSource);
+  if (!panel || !coordinates) return false;
+  if (!panel._splitScrollReflections) panel._splitScrollReflections = Object.create(null);
+  panel._splitScrollReflections[targetSource] = {
+    generation,
+    ownerSource,
+    ...coordinates,
+  };
+  return true;
+}
+
+function fileEditorReflectedScrollMatches(panel, source) {
+  // A programmatic target event can arrive after the time guard expires. Keep it attached to
+  // the source generation only while the target still has the exact coordinates we wrote.
+  const record = panel?._splitScrollReflections?.[source];
+  if (!record || record.generation !== Number(panel?._splitScrollGeneration || 0)) return false;
+  const coordinates = fileEditorScrollCoordinates(panel, source);
+  if (coordinates && coordinates.top === record.top && coordinates.left === record.left) return true;
+  delete panel._splitScrollReflections[source];
+  return false;
+}
+
+function promoteFileEditorReflectedScrollOwner(panel, ownerSource, generation) {
+  for (const [targetSource, record] of Object.entries(panel?._splitScrollReflections || {})) {
+    if (record?.ownerSource !== ownerSource) continue;
+    const coordinates = fileEditorScrollCoordinates(panel, targetSource);
+    if (coordinates && coordinates.top === record.top && coordinates.left === record.left) record.generation = generation;
+    else delete panel._splitScrollReflections[targetSource];
+  }
+}
+
+function fileEditorScrollAtBottom(element) {
+  const maxTop = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
+  const current = Math.max(0, Number(element?.scrollTop || 0));
+  const edgeSnap = Math.max(2, Math.ceil(Number(element?.clientHeight || 0) * 0.01));
+  return maxTop > 0 && current >= maxTop - edgeSnap;
+}
+
+function scheduleFileEditorCodeMirrorBottomConvergence(panel, ownerSource, generation) {
+  const cmView = panel?._cmView;
+  if (!cmView?.scrollDOM || typeof cmView.requestMeasure !== 'function') return false;
+  const state = {ownerSource, generation, lastTop: null, lastMax: null, stableSnapshots: 0};
+  panel._splitScrollBottomConvergence = state;
+  // CodeMirror can discover more document height after the first scroll assignment. Its measure
+  // queue is the authoritative geometry boundary, so require two identical measured bottoms.
+  const request = () => cmView.requestMeasure({
+    read(view) {
+      const scroller = view.scrollDOM;
+      return {
+        top: Number(scroller?.scrollTop || 0),
+        max: Math.max(0, Number(scroller?.scrollHeight || 0) - Number(scroller?.clientHeight || 0)),
+      };
+    },
+    write(measure, view) {
+      if (panel._splitScrollBottomConvergence !== state || Number(panel._splitScrollGeneration || 0) !== generation) return;
+      const scroller = view.scrollDOM;
+      scroller.scrollTop = measure.max;
+      const top = Number(scroller.scrollTop || 0);
+      const max = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
+      rememberFileEditorReflectedScroll(panel, 'editor', ownerSource, generation);
+      state.stableSnapshots = state.lastTop === top && state.lastMax === max
+        ? state.stableSnapshots + 1
+        : 1;
+      state.lastTop = top;
+      state.lastMax = max;
+      if (state.stableSnapshots >= 2) {
+        panel._splitScrollBottomConvergence = null;
+        return;
+      }
+      request();
+    },
+  });
+  request();
+  return true;
+}
+
 function fileEditorScrollSyncBlocked(panel, source = '') {
   const suppressed = panel?._splitScrollSyncing || Number(panel?._splitScrollSuppressUntil || 0) > nowMs();
   if (!suppressed) return false;
@@ -2089,7 +2175,7 @@ function renderLinkedFilePreviewPanels(sourcePanel, path, content) {
   }
 }
 
-function syncFileEditorInPaneSplitScroll(host, source) {
+function syncFileEditorInPaneSplitScroll(host, source, generation) {
   const content = host.querySelector?.('.file-editor-content');
   if (!content?.classList?.contains('split-preview')) return false;
   const cmView = host._cmView || null;
@@ -2099,28 +2185,42 @@ function syncFileEditorInPaneSplitScroll(host, source) {
   if (!fileEditorSourceCanDrive(host, source)) return false;
   const from = source === 'preview' ? previewPane : editorScroller;
   const to = source === 'preview' ? editorScroller : previewPane;
+  const previewDrivesBottom = source === 'preview' && fileEditorScrollAtBottom(previewPane);
   setFileEditorScrollSyncGuardForSource(source, host);
-  if (syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane)) return true;
-  return syncScrollPositionByRatio(from, to);
+  const synced = syncFileEditorSplitScrollBySourceAnchors(host, source, editorScroller, previewPane)
+    || syncScrollPositionByRatio(from, to);
+  if (!synced) return false;
+  rememberFileEditorReflectedScroll(host, source === 'preview' ? 'editor' : 'preview', source, generation);
+  if (previewDrivesBottom) scheduleFileEditorCodeMirrorBottomConvergence(host, source, generation);
+  return true;
 }
 
-function syncFileEditorSplitScroll(host, source) {
+function syncFileEditorSplitScroll(host, source, generation = Number(host?._splitScrollGeneration || 0)) {
   if (!host || fileEditorScrollSyncBlocked(host, source)) return;
   const canDrive = fileEditorSourceCanDrive(host, source);
   if (!canDrive) return;
-  syncFileEditorInPaneSplitScroll(host, source);
+  syncFileEditorInPaneSplitScroll(host, source, generation);
   syncFilePreviewPopoutsFromPanel(host, source);
 }
 
-function scheduleFileEditorSplitScrollSync(host, source) {
+function scheduleFileEditorSplitScrollSync(host, source, options = {}) {
   if (!host) return false;
+  if (options.forceSource !== true && fileEditorReflectedScrollMatches(host, source)) return true;
+  const generation = Number(host._splitScrollGeneration || 0) + 1;
+  host._splitScrollGeneration = generation;
+  host._splitScrollBottomConvergence = null;
+  promoteFileEditorReflectedScrollOwner(host, source, generation);
+  host._splitScrollPendingGeneration = generation;
   host._splitScrollPendingSource = source;
   if (host._splitScrollFrame) return true;
   const run = () => {
     host._splitScrollFrame = 0;
     const pendingSource = host._splitScrollPendingSource || source;
+    const pendingGeneration = Number(host._splitScrollPendingGeneration || generation);
     host._splitScrollPendingSource = '';
-    syncFileEditorSplitScroll(host, pendingSource);
+    host._splitScrollPendingGeneration = 0;
+    if (pendingGeneration !== Number(host._splitScrollGeneration || 0)) return;
+    syncFileEditorSplitScroll(host, pendingSource, pendingGeneration);
   };
   if (typeof requestAnimationFrame === 'function') host._splitScrollFrame = requestAnimationFrame(run);
   else host._splitScrollFrame = setTimeout(run, 0);
@@ -2139,7 +2239,7 @@ function fileEditorPreviewScrollSyncSource(panel) {
 function scheduleFileEditorPreviewLayoutSync(panel) {
   if (!panel) return false;
   panel._previewLayoutScrollUntil = nowMs() + fileEditorPreviewLayoutScrollSyncMs;
-  return scheduleFileEditorSplitScrollSync(panel, 'editor');
+  return scheduleFileEditorSplitScrollSync(panel, 'editor', {forceSource: true});
 }
 
 function refreshEditorPreviews() {
@@ -2216,22 +2316,11 @@ async function saveFileEditor(path, panel, options = {}) {
       content: state.content,
     };
     if (options.force !== true) body.expected_mtime = state.mtime;
-    const response = await apiFetch('/api/fs/write', {
+    const payload = await apiFetchJson('/api/fs/write', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      const errorText = userMessageText(payload, response.statusText || String(response.status));
-      if (response.status === 409) {
-        setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
-        return showFileSaveConflictDialog(path, panel, {message: errorText});
-      }
-      setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: errorText}), 'error');
-      return false;
-    }
-    const payload = await response.json();
     applyFileIdentityMetadata(state, payload);
     registerFileIdentityForPath(path, state);
     state.mtime = filePayloadMtime(payload);
@@ -2254,6 +2343,10 @@ async function saveFileEditor(path, panel, options = {}) {
     sharePublishFileVersion(path, {mtime: state.mtime, size: state.size});
     return true;
   } catch (err) {
+    if (err?.status === 409) {
+      setFileEditorPanelStatus(panel, t('dialog.conflictTitle'), 'warn');
+      return showFileSaveConflictDialog(path, panel, {message: userMessageText(err, err.message)});
+    }
     setFileEditorPanelStatus(panel, t('editor.saveFailed', {error: err}), 'error');
     return false;
   }

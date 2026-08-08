@@ -145,6 +145,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def output_path_is_under_tmp(path: Path) -> bool:
+    """Authorize evidence output from its resolved path, not a lexical prefix."""
+    return Path(path).expanduser().resolve(strict=False).is_relative_to(Path("/tmp").resolve())
+
+
 def wait_for_app(driver: webdriver.Chrome, tmux_sessions: list[str], timeout: int) -> None:
     wait = WebDriverWait(driver, timeout)
     wait.until(lambda current: current.execute_script("return typeof setDebugGraphRange === 'function' && typeof selectSession === 'function' && document.getElementById('grid') !== null"))
@@ -511,7 +516,7 @@ def main() -> int:
     if not chrome:
         print("error: Chrome/Chromium is not installed", file=sys.stderr)
         return 2
-    if not str(args.output).startswith("/tmp/"):
+    if not output_path_is_under_tmp(args.output):
         print("error: output must be under /tmp", file=sys.stderr)
         return 2
     base_url = f"https://localhost:{args.port}"

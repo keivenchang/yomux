@@ -8,6 +8,7 @@ copy subtly different permissions, cleanup, or rolling-RPC behavior.
 from __future__ import annotations
 
 import fcntl
+import logging
 import multiprocessing
 import os
 import signal
@@ -15,11 +16,18 @@ import socket
 import struct
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
 from ..background_owner import pid_is_alive
+from ..host_identity import HostIdentity
+from ..host_identity import LocalProcessReason
+from ..host_identity import current_host_identity
+from ..host_identity import is_current_local_process
+from ..host_identity import process_start_identity
+from ..infra.filesystem_preflight import preflight_mutable_roots
 from .rpc import LocalRpcEnvelope
 from .rpc import LocalRpcError
 from .rpc import read_message
@@ -31,7 +39,14 @@ LocalServiceResponse = tuple[dict[str, object], bytes]
 SignalHandlers = list[tuple[int, signal.Handlers]]
 LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS = 0.5
 LOCAL_SERVICE_MAX_CLIENT_LEASES = 64
+# A serial listener charges every waiting client the full runtime of whichever handler is
+# already running, and that wait is invisible on the wire: `accepted_at` is stamped after
+# `accept()` returns, and `to_dict` omits the queue/capacity fields while `capacity_limit`
+# is 0.  One shared limit for every daemon so no service can silently go back to serial.
+LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT = 8
+LOCAL_SERVICE_STACK_FRAME_LIMIT = 32
 LOCAL_SERVICE_SECRET_MARKERS = ("token", "secret", "password", "cookie", "authorization", "api_key", "apikey", "bearer")
+logger = logging.getLogger(__name__)
 
 
 class LocalRpcServiceState:
@@ -44,17 +59,31 @@ class LocalRpcServiceState:
         self.idle_seconds = max(1.0, float(idle_seconds))
         self.started_at = time.time()
         self.last_client_at = time.monotonic()
-        self.leases: dict[str, int] = {}
+        self.leases: dict[str, dict[str, object]] = {}
 
 
-def reap_dead_client_leases(leases: dict[str, int]) -> int:
-    """Discard leases whose owning local process no longer exists."""
+def reap_dead_client_leases(
+    leases: dict[str, object],
+    *,
+    host_identity: HostIdentity | None = None,
+    start_identity_reader: Callable[[int], str | None] = process_start_identity,
+    pid_probe: Callable[[int], bool] = pid_is_alive,
+) -> int:
+    """Discard only same-host/current-boot leases whose recorded process birth is stale."""
 
-    dead = tuple(
-        lease_id
-        for lease_id, pid in leases.items()
-        if pid <= 0 or not pid_is_alive(pid)
-    )
+    identity = host_identity or current_host_identity()
+    dead: list[str] = []
+    for lease_id, value in leases.items():
+        if not isinstance(value, dict):
+            continue
+        diagnostic = is_current_local_process(
+            value,
+            host_identity=identity,
+            start_identity_reader=start_identity_reader,
+            pid_probe=pid_probe,
+        )
+        if diagnostic.may_remove_stale_record:
+            dead.append(lease_id)
     for lease_id in dead:
         leases.pop(lease_id, None)
     return len(dead)
@@ -108,28 +137,89 @@ def redact_local_service_text(value: object) -> str:
     return text[:256]
 
 
+def local_service_exception_cause(error: BaseException) -> dict[str, object]:
+    """Serialize one redacted exception type and traceback for RPC callers and supervisors."""
+    frames = []
+    for frame in traceback.extract_tb(error.__traceback__)[-LOCAL_SERVICE_STACK_FRAME_LIMIT:]:
+        path = Path(frame.filename)
+        parts = path.parts
+        if "yolomux_lib" in parts:
+            filename = str(Path(*parts[parts.index("yolomux_lib"):]))
+        elif "tests" in parts:
+            filename = str(Path(*parts[parts.index("tests"):]))
+        else:
+            filename = path.name
+        frames.append({
+            "file": redact_local_service_text(filename),
+            "line": int(frame.lineno),
+            "function": redact_local_service_text(frame.name),
+        })
+    return {
+        "exception": {
+            "type": type(error).__name__,
+            "message": redact_local_service_text(error),
+        },
+        "frames": frames,
+    }
+
+
 def acquire_client_lease(
-    leases: dict[str, int],
+    leases: dict[str, object],
     client_pid: object,
     existing_lease_id: object = None,
+    *,
+    host_identity: HostIdentity | None = None,
+    start_identity_reader: Callable[[int], str | None] = process_start_identity,
+    pid_probe: Callable[[int], bool] = pid_is_alive,
 ) -> dict[str, object]:
     """Bound the shared local-service lease table for every daemon."""
     try:
         pid = max(0, int(client_pid or 0))
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid client pid", "leases": len(leases)}
-    reap_dead_client_leases(leases)
+    identity = host_identity or current_host_identity()
+    reap_dead_client_leases(
+        leases,
+        host_identity=identity,
+        start_identity_reader=start_identity_reader,
+        pid_probe=pid_probe,
+    )
+    start_identity = start_identity_reader(pid) if pid > 1 else None
+    if not start_identity:
+        reason = LocalProcessReason.INVALID_PID
+        if pid > 1:
+            try:
+                reason = LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE if pid_probe(pid) else LocalProcessReason.PROCESS_NOT_FOUND
+            except ProcessLookupError:
+                reason = LocalProcessReason.PROCESS_NOT_FOUND
+            except (PermissionError, OSError):
+                reason = LocalProcessReason.PROCESS_IDENTITY_UNAVAILABLE
+        return {
+            "ok": False,
+            "error": "client process identity unavailable",
+            "diagnostic": {"reason": reason.value, "pid": pid},
+            "leases": len(leases),
+        }
+    record = identity.process_record_fields(pid=pid, start_identity=start_identity)
     lease_id = str(existing_lease_id or "")
-    if lease_id and leases.get(lease_id) == pid:
-        return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}
+    existing = leases.get(lease_id)
+    if lease_id and isinstance(existing, dict) and int(existing.get("pid") or 0) == pid:
+        diagnostic = is_current_local_process(
+            existing,
+            host_identity=identity,
+            start_identity_reader=start_identity_reader,
+            pid_probe=pid_probe,
+        )
+        if diagnostic.current:
+            return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}
     if len(leases) >= LOCAL_SERVICE_MAX_CLIENT_LEASES:
         return {"ok": False, "error": "too many clients", "leases": len(leases)}
     lease_id = f"{os.getpid()}-{time.time_ns()}-{len(leases)}"
-    leases[lease_id] = pid
+    leases[lease_id] = record
     return {"ok": True, "lease_id": lease_id, "pid": os.getpid(), "leases": len(leases)}
 
 
-def release_client_lease(leases: dict[str, int], lease_id: object) -> dict[str, object]:
+def release_client_lease(leases: dict[str, object], lease_id: object) -> dict[str, object]:
     """Release a local-service lease without exposing table internals."""
     text = str(lease_id or "")
     if text:
@@ -155,9 +245,10 @@ def run_local_rpc_service(
     lock_path: Path,
     service_name: str,
     stop_event: Event,
-    handle: Callable[[dict[str, object]], LocalServiceResponse],
+    handle: Callable[[dict[str, object], bytes], LocalServiceResponse],
     on_idle: Callable[[], bool],
     on_client: Callable[[], None],
+    on_idle_failure: Callable[[Exception, str], None] | None = None,
     on_start: Callable[[], None] | None = None,
     on_shutdown: Callable[[], None] | None = None,
     concurrent_handlers: int = 0,
@@ -168,13 +259,17 @@ def run_local_rpc_service(
     Unix-domain socket permissions, singleton locking, framing, response
     correlation, and cleanup.  Returning ``True`` from ``on_idle`` requests a
     bounded idle shutdown after the listener timeout. ``concurrent_handlers``
-    is opt-in for services whose handler contract is explicitly lock-safe;
-    most local daemons remain serial by default.
+    is opt-in for services whose handler contract is explicitly lock-safe.
+    Leaving it at 0 is not free: a serial listener charges every waiting client
+    the full runtime of whichever handler is already running, and no field on
+    the wire can express that wait, so the caller can only report it as
+    unattributed latency.
     """
     previous_handlers = install_stop_signal_handlers(stop_event)
     requested_socket_path = socket_path
     socket_path = safe_socket_path(socket_path, prefix=f"yolomux-{service_name}")
     socket_alias = requested_socket_path if requested_socket_path != socket_path else None
+    preflight_mutable_roots(unix_sockets=[socket_path])
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(socket_path.parent, 0o700)
@@ -219,8 +314,12 @@ def run_local_rpc_service(
             handler_slots = threading.BoundedSemaphore(handler_limit) if handler_limit else None
             handler_threads: set[threading.Thread] = set()
             handler_threads_lock = threading.Lock()
+            capacity_lock = threading.Lock()
+            active_handlers = 0
+            capacity_rejections = 0
 
-            def serve_connection(connection: socket.socket) -> None:
+            def serve_connection(connection: socket.socket, accepted_at: float, queue_wait_ms: float, capacity_saturated: bool, rejection_count: int) -> None:
+                nonlocal active_handlers
                 try:
                     with connection:
                         connection.settimeout(LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS)
@@ -230,14 +329,31 @@ def run_local_rpc_service(
                             return
                         on_client()
                         try:
-                            envelope, payload, _binary, legacy = read_message(connection)
+                            read_started = time.monotonic()
+                            envelope, payload, request_binary, legacy = read_message(connection)
+                            read_completed = time.monotonic()
                         except (LocalRpcError, OSError):
                             try:
                                 write_message(connection, None, {"ok": False, "error": "invalid request"}, legacy=True)
                             except OSError:
                                 pass
                         else:
-                            response, response_binary = handle(payload)
+                            service_started = time.monotonic()
+                            try:
+                                response, response_binary = handle(payload, request_binary)
+                            except Exception as exc:
+                                # A request failure is data-plane state. Letting it escape the
+                                # serial listener kills the daemon, turns one bad path into a
+                                # socket-retry loop, and hides the typed refusal from its caller.
+                                logger.exception("local service %s handler failed", service_name)
+                                response, response_binary = {
+                                    "ok": False,
+                                    "error": "service request failed",
+                                    "error_code": "handler_failed",
+                                    "exception_type": type(exc).__name__,
+                                }, b""
+                            with capacity_lock:
+                                response_rejection_count = capacity_rejections
                             response_envelope = None if legacy or envelope is None else LocalRpcEnvelope(
                                 service=service_name,
                                 method=envelope.method,
@@ -248,6 +364,14 @@ def run_local_rpc_service(
                                 owner_generation=envelope.owner_generation,
                                 config_generation=envelope.config_generation,
                                 payload=response,
+                                accept_to_read_ms=(read_started - accepted_at) * 1000.0,
+                                read_complete_ms=(read_completed - read_started) * 1000.0,
+                                service_duration_ms=(time.monotonic() - service_started) * 1000.0,
+                                queue_wait_ms=queue_wait_ms,
+                                queue_depth=0,
+                                capacity_limit=handler_limit,
+                                capacity_saturated=capacity_saturated,
+                                capacity_rejections=response_rejection_count,
                             )
                             try:
                                 write_message(connection, response_envelope, response, response_binary, legacy=legacy)
@@ -259,6 +383,8 @@ def run_local_rpc_service(
                 finally:
                     if handler_slots is not None:
                         handler_slots.release()
+                        with capacity_lock:
+                            active_handlers -= 1
                     with handler_threads_lock:
                         handler_threads.discard(threading.current_thread())
 
@@ -267,19 +393,47 @@ def run_local_rpc_service(
                     try:
                         connection, _address = server.accept()
                     except TimeoutError:
-                        if on_idle():
-                            stop_event.set()
+                        if handler_slots is not None:
+                            with capacity_lock:
+                                if active_handlers:
+                                    continue
+                        try:
+                            if on_idle():
+                                stop_event.set()
+                        except Exception as exc:
+                            traceback_text = traceback.format_exc()
+                            if on_idle_failure is not None:
+                                try:
+                                    on_idle_failure(exc, traceback_text)
+                                except Exception:
+                                    logger.exception("local service %s idle-failure callback failed", service_name)
+                            else:
+                                logger.exception("local service %s idle hook failed", service_name)
                         continue
+                    accepted_at = time.monotonic()
                     if handler_slots is None:
-                        serve_connection(connection)
-                    elif not handler_slots.acquire(blocking=False):
+                        serve_connection(connection, accepted_at, 0.0, False, 0)
+                    else:
+                        queue_started = time.monotonic()
+                        acquired = handler_slots.acquire(blocking=False)
+                        queue_wait_ms = (time.monotonic() - queue_started) * 1000.0
+                        with capacity_lock:
+                            if acquired:
+                                active_handlers += 1
+                                saturated = active_handlers >= handler_limit
+                                rejection_count = capacity_rejections
+                            else:
+                                capacity_rejections += 1
+                                saturated = True
+                                rejection_count = capacity_rejections
+                    if handler_slots is not None and not acquired:
                         with connection:
                             try:
-                                write_message(connection, None, {"ok": False, "error": "service busy"}, legacy=True)
+                                write_message(connection, None, {"ok": False, "error": "service busy", "queue_wait_ms": queue_wait_ms, "queue_depth": 0, "capacity_limit": handler_limit, "capacity_saturated": saturated, "capacity_rejected": True, "capacity_rejections": rejection_count}, legacy=True)
                             except OSError:
                                 pass
-                    else:
-                        worker = threading.Thread(target=serve_connection, args=(connection,), name=f"{service_name}-rpc", daemon=True)
+                    elif handler_slots is not None:
+                        worker = threading.Thread(target=serve_connection, args=(connection, accepted_at, queue_wait_ms, saturated, rejection_count), name=f"{service_name}-rpc", daemon=True)
                         with handler_threads_lock:
                             handler_threads.add(worker)
                         worker.start()

@@ -18,6 +18,9 @@ import yaml
 
 from ..atomic_file import atomic_write_text
 from ..common import CONFIG_DIR
+from ..infra.shared_config_lock import read_shared_document
+from ..infra.shared_config_lock import SharedConfigRevisionConflict
+from ..infra.shared_config_lock import write_shared_document
 from ..locales import message_descriptor
 from ..locales import message_fields
 from ..locales import user_message_payload
@@ -145,6 +148,15 @@ _RULES_CACHE: dict[str, Any] = {
 }
 _LAST_ERROR_PRINTED = ""
 
+
+class RuleLoadError(str):
+    """A load failure that keeps its machine-readable safety reason through caching."""
+
+    def __new__(cls, message: str, reason_code: str) -> "RuleLoadError":
+        value = super().__new__(cls, message)
+        value.reason_code = reason_code
+        return value
+
 BUILTIN_RULE_NAME_I18N_KEY_MAP = {
     "built-in dangerous commands": "yolo.rule.builtin.dangerousCommands",
     "built-in dangerous patterns": "yolo.rule.builtin.dangerousPatterns",
@@ -233,11 +245,22 @@ def ensure_rule_file(path: Path | None = None) -> Path:
     rule_path = path or active_rule_path()
     if rule_path.exists():
         return rule_path
-    # shared atomic write (adds the fsync this third copy lacked); 0o600 file in a 0o700 dir.
     rule_path.parent.mkdir(parents=True, exist_ok=True)
     rule_path.parent.chmod(0o700)
-    atomic_write_text(rule_path, default_rule_file_text("ask"), mode=0o600)
+    _text, revision = read_shared_document(rule_path)
+    if rule_path.exists():
+        return rule_path
+    try:
+        write_shared_document(rule_path, default_rule_file_text("ask"), expected_revision=revision)
+    except SharedConfigRevisionConflict:
+        if not rule_path.exists():
+            raise
     return rule_path
+
+
+def write_rule_file(path: Path, text: str, *, expected_revision: str | None = None) -> None:
+    """Replace hand-edited rules only when their optional captured revision matches."""
+    write_shared_document(path, text, expected_revision=expected_revision)
 
 
 def shell_tokens(cmd_line: str) -> list[str]:
@@ -540,17 +563,36 @@ def validate_rule_file_text(content: str, path: Path | None = None) -> YoloRules
 
 
 def is_rules_file_path(path: str | Path) -> bool:
-    try:
-        candidate = Path(os.path.expandvars(os.path.expanduser(str(path)))).resolve()
-    except OSError:
-        return False
+    candidate = Path(os.path.expandvars(os.path.expanduser(str(path)))).resolve()
     return candidate == active_rule_path()
 
 
 def load_rules_file(path: Path) -> YoloRuleset:
     if not path.exists():
-        return validate_rules(default_rule_data("approve"), path=path, source="built-in")
+        raise FileNotFoundError(path)
     return parse_rule_text(path.read_text(encoding="utf-8"), path=path, source="file")
+
+
+def rule_load_error_code(error: BaseException) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "rules_file_missing"
+    if isinstance(error, OSError):
+        return "rules_file_unreadable"
+    return "rules_file_malformed"
+
+
+def rule_failure_decision(path: Path, reason_code: str, error: str) -> dict[str, Any]:
+    """Return the one typed manual-approval decision for an unavailable safety check."""
+
+    return {
+        "action": "ask",
+        **rule_name_fields("ruleset error", "yolo.rule.rulesetError"),
+        "risk": "unknown",
+        **rule_source_fields("error"),
+        "path": str(path),
+        "reason_code": reason_code,
+        "error": error,
+    }
 
 
 def print_rule_error(error: str) -> None:
@@ -574,13 +616,14 @@ def cached_rules(force: bool = False) -> tuple[YoloRuleset | None, str]:
             and _RULES_CACHE.get("path") == path
             and _RULES_CACHE.get("mtime_ns") == mtime_ns
         ):
-            return _RULES_CACHE.get("ruleset"), str(_RULES_CACHE.get("error") or "")
+            cached_error = _RULES_CACHE.get("error")
+            return _RULES_CACHE.get("ruleset"), cached_error if isinstance(cached_error, str) else ""
         try:
             ruleset = load_rules_file(path)
             error = ""
         except (OSError, yaml.YAMLError, ValueError) as exc:
             ruleset = None
-            error = str(exc)
+            error = RuleLoadError(str(exc), rule_load_error_code(exc))
             print_rule_error(error)
         _RULES_CACHE.update({
             "path": path,
@@ -698,25 +741,23 @@ def evaluate(cmd: str, prompt_type: str = "bash", agent: str = "", session: str 
     else:
         ruleset, error = cached_rules()
         if error:
-            decision = {
-                "action": "ask",
-                **rule_name_fields("ruleset error", "yolo.rule.rulesetError"),
-                "risk": "unknown",
-                **rule_source_fields("error"),
-                "path": str(path),
-                "error": error,
-            }
+            reason_code = error.reason_code if isinstance(error, RuleLoadError) else "rules_file_unavailable"
+            decision = rule_failure_decision(path, reason_code, error)
         elif ruleset is None:
+            decision = rule_failure_decision(path, "rules_file_unavailable", "ruleset unavailable")
+        elif dangerously_yolo:
             decision = {
-                "action": "ask",
-                **rule_name_fields("ruleset unavailable", "yolo.rule.rulesetUnavailable"),
+                "action": "approve",
+                **rule_name_fields("dangerously-yolo bypass"),
                 "risk": "unknown",
-                **rule_source_fields("error"),
+                **rule_source_fields("bypass"),
                 "path": str(path),
-                "error": "ruleset unavailable",
             }
         else:
-            decision = evaluate_ruleset(cmd, ruleset)
+            try:
+                decision = evaluate_ruleset(cmd, ruleset)
+            except Exception as error:
+                decision = rule_failure_decision(path, "rules_evaluator_failed", str(error) or type(error).__name__)
     decision["prompt_type"] = prompt_type
     decision["agent"] = agent
     decision["session"] = session

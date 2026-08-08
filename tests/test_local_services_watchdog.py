@@ -1,6 +1,7 @@
 import json
 import signal
 
+from yolomux_lib.infra.host_identity import current_host_identity
 from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services.preflight import preflight_port
 from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
@@ -8,28 +9,37 @@ from yolomux_lib.local_services.watchdog import GroupOverloadWatchdog
 
 def _table(rows):
     return {
-        pid: registry_mod.ProcessTableEntry(ppid, pgid, cpu_seconds, command)
-        for pid, ppid, pgid, cpu_seconds, command in rows
+        pid: registry_mod.ProcessTableEntry(ppid, pgid, cpu_seconds, command, start_time)
+        for pid, ppid, pgid, cpu_seconds, command, *start in rows
+        for start_time in [start[0] if start else pid + 1000]
     }
 
 
-def _tracked_state(tmp_path, port=8881, web_pid=400):
+def _process_record(pid):
+    return current_host_identity().process_record_fields(pid=pid, start_identity=f"proc:{pid + 1000}")
+
+
+def _tracked_state(tmp_path, port=8881, web_pid=400, *, socket_name="jobd.sock", payload=None):
     lease_dir = tmp_path / "server-leases"
     lease_dir.mkdir(parents=True, exist_ok=True)
-    (lease_dir / f"{port}.lock").write_text(json.dumps({"pid": web_pid, "port": port}), encoding="utf-8")
+    (lease_dir / f"{port}.lock").write_text(
+        json.dumps({**_process_record(web_pid), "port": port}),
+        encoding="utf-8",
+    )
     service_dir = tmp_path / "services"
     service_dir.mkdir(parents=True, exist_ok=True)
-    jobd_socket = service_dir / "jobd.sock"
-    (service_dir / "jobd.service.json").write_text(
-        json.dumps({"service": "jobd", "pid": 500, "socket": str(jobd_socket)}), encoding="utf-8"
-    )
+    jobd_socket = service_dir / socket_name
+    record = {**_process_record(500), "service": "jobd", "socket": str(jobd_socket)}
+    if payload is not None:
+        record["payload"] = payload
+    (service_dir / "jobd.service.json").write_text(json.dumps(record), encoding="utf-8")
     return service_dir, jobd_socket
 
 
-def _rows(jobd_socket, web_cpu, worker_cpu, extra=()):
+def _rows(jobd_socket, web_cpu, worker_cpu, extra=(), command_payload=""):
     return [
-        (400, 1, 400, web_cpu, "python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev"),
-        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60"),
+        (400, 1, 400, web_cpu, f"python3 -u yolomux.py 8880 /tmp/log --host 0.0.0.0 --port 8881 --dang --dev {command_payload}"),
+        (500, 1, 500, 1.0, f"python3 -m yolomux_lib.jobd --serve --socket {jobd_socket} --idle-seconds 60 {command_payload}"),
         (501, 500, 500, worker_cpu, "python3 -c multiprocessing-spawn-worker"),
         # An untracked high-CPU bystander (Defender-shaped): never touched.
         (900, 1, 900, 100000.0, "/Applications/Microsoft Defender.app/Contents/MacOS/wdavdaemon"),
@@ -88,6 +98,50 @@ def test_sustained_overload_terms_leaders_and_kills_only_stilllive_tracked_pids(
     # Firing is once-only: further overload samples take no more actions.
     tables.append(survivors)
     assert "actions" not in watchdog.sample_once()
+
+
+def test_watchdog_excludes_foreign_service_and_reports_typed_reason(tmp_path):
+    service_dir, jobd_socket = _tracked_state(tmp_path)
+    record_path = service_dir / "jobd.service.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["stable_host_id"] = "fixture-foreign-host"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    tables = [
+        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+    ]
+    tables.append(_table([]))
+    kills = []
+    watchdog = _watchdog(tmp_path, service_dir, tables, kills, sustained=3)
+
+    for _ in range(4):
+        watchdog.sample_once()
+
+    assert kills == [(400, signal.SIGTERM)]
+    diagnostics = watchdog.last_snapshot["process_diagnostics"]
+    assert [(row["target"], row["pid"], row["diagnostic"]["reason"]) for row in diagnostics] == [
+        ("jobd", 500, "foreign_host")
+    ]
+    assert diagnostics[0]["record_path"] == str(record_path)
+
+
+def test_watchdog_refuses_recycled_member_before_sigkill(tmp_path):
+    service_dir, jobd_socket = _tracked_state(tmp_path)
+    tables = [
+        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(4)
+    ]
+    tables.append(_table([(501, 500, 500, 999.0, "python3 -c multiprocessing-spawn-worker", 9999)]))
+    kills = []
+    watchdog = _watchdog(tmp_path, service_dir, tables, kills, sustained=3)
+
+    for _ in range(4):
+        watchdog.sample_once()
+
+    assert kills == [(400, signal.SIGTERM), (500, signal.SIGTERM)]
+    refusal = watchdog.last_snapshot["actions"][-1]
+    assert refusal["action"] == "fence-refused"
+    assert refusal["requested_action"] == "sigkill"
+    assert refusal["pid"] == 501
+    assert refusal["diagnostic"]["reason"] == "process_identity_reused"
 
 
 def test_below_threshold_and_fluctuating_load_never_fires(tmp_path):
@@ -169,10 +223,13 @@ def test_tracked_child_count_breach_fires_containment(tmp_path):
     assert (400, signal.SIGTERM) in kills
 
 
-def _lease(tmp_path, port=8881, pid=400, pgid=400):
+def _lease(tmp_path, port=8881, pid=400, pgid=400, members=None):
     lease_dir = tmp_path / "server-leases"
     lease_dir.mkdir(parents=True, exist_ok=True)
-    (lease_dir / f"{port}.lock").write_text(json.dumps({"pid": pid, "pgid": pgid, "port": port}), encoding="utf-8")
+    record = {**_process_record(pid), "pgid": pgid, "port": port}
+    if members is not None:
+        record["members"] = members
+    (lease_dir / f"{port}.lock").write_text(json.dumps(record), encoding="utf-8")
 
 
 def test_preflight_refuses_a_wedged_live_owner(tmp_path):
@@ -189,18 +246,18 @@ def test_preflight_refuses_a_wedged_live_owner(tmp_path):
 
 
 def test_preflight_reaps_only_verified_orphans_of_a_dead_owner(tmp_path):
-    _lease(tmp_path)
-    # Owner 400 is dead; 410 is its orphaned tmux control client (ppid 1, same
-    # recorded pgid); 411 is a live-parented group member (not an orphan); 900
-    # is an unrelated process in another group.
+    # Owner 400 is dead. The member snapshot was written while it was alive,
+    # so only the matching orphan 410 is eligible; 411 still has a live parent
+    # and 900 was never an identified owner-group member.
+    _lease(tmp_path, members=[{"pid": 410, "start_time": 1010}])
     table = _table(
         [
-            (410, 1, 400, 1.0, "tmux -C attach-session -t x"),
-            (411, 350, 400, 1.0, "python3 helper.py"),
-            (900, 1, 900, 999.0, "wdavdaemon"),
+            (410, 1, 400, 1.0, "tmux -C attach-session -t x", 1010),
+            (411, 350, 400, 1.0, "python3 helper.py", 1011),
+            (900, 1, 900, 999.0, "wdavdaemon", 1012),
         ]
     )
-    survivors = _table([(410, 1, 400, 1.0, "tmux -C attach-session -t x")])
+    survivors = _table([(410, 1, 400, 1.0, "tmux -C attach-session -t x", 1010)])
     reads = [survivors]
     kills = []
 
@@ -214,12 +271,29 @@ def test_preflight_reaps_only_verified_orphans_of_a_dead_owner(tmp_path):
 def test_preflight_is_clear_with_no_lease_or_leftovers(tmp_path):
     result = preflight_port(8881, tmp_path, _table([]), kill=lambda *_: None, table_reader=lambda: _table([]), sleep=lambda _s: None)
 
-    assert result == {"ok": True, "reason": "clear to launch", "tracked_pids": [], "reaped_pids": []}
+    assert result == {
+        "ok": True,
+        "reason": "clear to launch",
+        "reason_code": "clear_to_launch",
+        "tracked_pids": [],
+        "reaped_pids": [],
+        "failures": {},
+    }
 
 
 def test_evidence_summary_is_bounded_and_redacted(tmp_path):
-    service_dir, jobd_socket = _tracked_state(tmp_path)
-    tables = [_table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step)) for step in range(5)]
+    command_canary = "command-canary-8f1a3c7d"
+    path_canary = "socket-path-canary-4b9e2d6a"
+    payload_canary = "payload-canary-6c2f8a1e"
+    service_dir, jobd_socket = _tracked_state(
+        tmp_path,
+        socket_name=f"{path_canary}.sock",
+        payload=payload_canary,
+    )
+    tables = [
+        _table(_rows(jobd_socket, web_cpu=10.0 * step, worker_cpu=10.0 * step, command_payload=command_canary))
+        for step in range(4)
+    ]
     tables.append(_table([]))
     watchdog = _watchdog(tmp_path, service_dir, tables, [], sustained=3)
 
@@ -228,12 +302,41 @@ def test_evidence_summary_is_bounded_and_redacted(tmp_path):
 
     evidence_path = watchdog.last_snapshot["evidence_path"]
     assert evidence_path
-    text = (tmp_path / evidence_path.rsplit("/", 1)[-1]).read_text(encoding="utf-8")
-    summary = json.loads(text)
+    summary = json.loads((tmp_path / evidence_path.rsplit("/", 1)[-1]).read_text(encoding="utf-8"))
+    assert set(summary) == {
+        "actions",
+        "cpu_percent_history",
+        "cpu_percent_limit",
+        "port",
+        "reason",
+        "shared_service_veto",
+        "sustained_samples",
+        "version",
+        "written_at",
+    }
+    assert summary["version"] == 1
     assert summary["port"] == 8881
     assert summary["reason"] == "sustained tracked-group overload"
-    assert summary["actions"]
-    # No command lines, paths, or payloads leak into the durable summary.
-    assert "yolomux.py" not in text
-    assert "--socket" not in text
-    assert "wdavdaemon" not in text
+    assert summary["cpu_percent_limit"] == 250.0
+    assert summary["sustained_samples"] == 3
+    assert summary["cpu_percent_history"] == [2000.0, 2000.0, 2000.0]
+    assert summary["shared_service_veto"] is False
+    assert isinstance(summary["written_at"], float)
+    assert summary["actions"] == [
+        {"target": "web", "pid": 400, "action": "sigterm", "result": "signalled"},
+        {"target": "jobd", "pid": 500, "action": "sigterm", "result": "signalled"},
+    ]
+
+    def leaves(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                yield from leaves(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from leaves(child)
+        else:
+            yield value
+
+    output_leaves = [str(value) for value in leaves(summary)]
+    for canary in (command_canary, path_canary, payload_canary):
+        assert all(canary not in value for value in output_leaves)

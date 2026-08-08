@@ -1406,6 +1406,7 @@ function installRuntimeIntervals() {
   }, eventLogRefreshMs);
   clearRuntimeInterval('events');
   resetRuntimeInterval('auto-approve', () => {
+    if (!clientCanUseUnscopedHostRequests()) return null;
     if (document.visibilityState === 'hidden') return null;
     if (clientEventTransportState.connected === true) return null;
     return refreshAutoStatuses();

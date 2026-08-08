@@ -16,14 +16,130 @@ function syncDirectoryRowExpansionVisual(row, expanded, loading = false) {
   if (icon) setDisclosureTriangleElement(icon, expanded);
 }
 
+function renderExpandedDirectoryRowChildren(row, fullPath, entries) {
+  fileExplorerExpanded.add(fullPath);
+  syncDirectoryRowExpansionVisual(row, true, false);
+  const existingChildren = childContainerForRow(row, fullPath);
+  const children = existingChildren || createFileTreeChildContainer(fullPath);
+  const nextDepth = fileTreeRowDepth(row) + 1;
+  renderTreeChildren(children, fullPath, entries, nextDepth, {view: 'finder'});
+  if (!existingChildren) row.insertAdjacentElement('afterend', children);
+  rememberFileExplorerSyncExpandedState();
+  scheduleShareUiStatePublish();
+  refreshLayoutUrlStateSoon();
+  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+}
+
+function renderDirectoryRowExpansionError(row, fullPath) {
+  const error = currentFileExplorerListError(fullPath) || t('common.requestFailed');
+  fileExplorerExpanded.delete(fullPath);
+  syncDirectoryRowExpansionVisual(row, false, false);
+  const existingChildren = childContainerForRow(row, fullPath);
+  const children = existingChildren || createFileTreeChildContainer(fullPath);
+  children.replaceChildren();
+  const errorRow = document.createElement('div');
+  errorRow.className = 'file-tree-row file-tree-status-row file-tree-status-error';
+  errorRow.setAttribute('role', 'status');
+  errorRow.textContent = error;
+  children.appendChild(errorRow);
+  if (!existingChildren) row.insertAdjacentElement('afterend', children);
+  rememberFileExplorerSyncExpandedState();
+}
+
+async function retryNetworkFailedFileExplorerExpansion() {
+  // A failed expansion is removed from the expanded/watch sets, so the generic reconnect refresh
+  // cannot rediscover it. The path-scoped network error preserves exactly the user intent to replay.
+  const failedPath = fileExplorerLastListError?.network === true
+    ? normalizeDirectoryPath(fileExplorerLastListError.path || '')
+    : '';
+  if (!failedPath || fileExplorerPendingExpansions.has(failedPath)) return false;
+  const row = liveDirectoryRows(failedPath, null)[0];
+  if (!row) return false;
+  await expandDirectoryRow(row, failedPath, {user: true});
+  return fileExplorerExpanded.has(failedPath) && !currentFileExplorerListError(failedPath);
+}
+
+function directoryRowExpansionIsSuppressed(fullPath, options) {
+  return options.auto === true
+    && fileExplorerRootMode === 'sync'
+    && fileExplorerSyncPathSuppressed(fullPath);
+}
+
+function settleSuppressedDirectoryRowExpansion(row, fullPath) {
+  if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
+  else syncDirectoryRowExpansionVisual(row, true, false);
+}
+
+function liveDirectoryRows(fullPath, fallbackRow) {
+  const rows = [];
+  for (const container of fileExplorerTreeContainers()) {
+    for (const currentRow of container.querySelectorAll('.file-tree-row[data-path]')) {
+      if (currentRow.dataset?.path === fullPath) rows.push(currentRow);
+    }
+  }
+  return rows.length ? rows : (fallbackRow?.isConnected ? [fallbackRow] : []);
+}
+
+function settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries) {
+  const rows = liveDirectoryRows(fullPath, row);
+  if (!entries) {
+    rows.forEach(currentRow => {
+      if (currentFileExplorerListError(fullPath)) renderDirectoryRowExpansionError(currentRow, fullPath);
+      else settleSuppressedDirectoryRowExpansion(currentRow, fullPath);
+    });
+    return;
+  }
+  rows.forEach(currentRow => renderExpandedDirectoryRowChildren(currentRow, fullPath, entries));
+}
+
+function collapseDirectoryRowsAcrossSurfaces(row, fullPath) {
+  fileExplorerExpanded.delete(fullPath);
+  fileExplorerPendingExpansions.delete(fullPath);
+  liveDirectoryRows(fullPath, row).forEach(currentRow => {
+    syncDirectoryRowExpansionVisual(currentRow, false, false);
+    Array.from(currentRow.parentElement?.children || [])
+      .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
+      .forEach(node => node.remove());
+  });
+}
+
 async function expandDirectoryRow(row, fullPath, options = {}) {
+  const cachedEntries = cachedFileExplorerFsResourceValue('list', fullPath);
+  if (Array.isArray(cachedEntries)) {
+    if (options.manual === true) {
+      forgetFileExplorerSyncManualCollapse(fullPath);
+      resetFileExplorerAppliedSyncPlan();
+    }
+    if (directoryRowExpansionIsSuppressed(fullPath, options)) {
+      settleSuppressedDirectoryRowExpansion(row, fullPath);
+      return;
+    }
+    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, cachedEntries);
+    void fetchDirectory(fullPath, {user: options.user === true, fresh: true}).then(entries => {
+      if (!Array.isArray(entries) || !fileExplorerExpanded.has(fullPath)) return;
+      if (directoryRowExpansionIsSuppressed(fullPath, options)) return;
+      settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries);
+    });
+    return;
+  }
   fileExplorerPendingExpansions.add(fullPath);
   syncDirectoryRowExpansionVisual(row, true, true);
-  const entries = await fetchDirectory(fullPath, {user: options.user === true});
-  fileExplorerPendingExpansions.delete(fullPath);
+  let entries;
+  try {
+    entries = await fetchDirectory(fullPath, {user: options.user === true});
+  } catch (error) {
+    const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
+    if (!ownsExpansion) return;
+    setFileExplorerListError(fullPath, error, Number(error?.status) || 0);
+    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
+    return;
+  }
+  // collapseDirectoryRow() deletes the pending path to cancel this reveal. The response may still
+  // arrive, but it no longer owns this row and must not restore children the user just hid.
+  const ownsExpansion = fileExplorerPendingExpansions.delete(fullPath);
+  if (!ownsExpansion) return;
   if (!entries) {
-    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
-    else syncDirectoryRowExpansionVisual(row, true, false);
+    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
     return;
   }
   if (options.manual === true) {
@@ -36,22 +152,11 @@ async function expandDirectoryRow(row, fullPath, options = {}) {
   // auto:true so it matches the expandFileTreeContainerToPath ancestor guard and does NOT touch the
   // remembered-state restore path (auto:false), which has its own pre-await suppression filter and must
   // be free to restore a directory across sync-target switches.
-  if (options.auto === true && fileExplorerRootMode === 'sync' && fileExplorerSyncPathSuppressed(fullPath)) {
-    if (!fileExplorerExpanded.has(fullPath)) syncDirectoryRowExpansionVisual(row, false, false);
-    else syncDirectoryRowExpansionVisual(row, true, false);
+  if (directoryRowExpansionIsSuppressed(fullPath, options)) {
+    settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, null);
     return;
   }
-  fileExplorerExpanded.add(fullPath);
-  syncDirectoryRowExpansionVisual(row, true, false);
-  const existingChildren = childContainerForRow(row, fullPath);
-  const children = existingChildren || createFileTreeChildContainer(fullPath);
-  const nextDepth = fileTreeRowDepth(row) + 1;
-  renderTreeChildren(children, fullPath, entries, nextDepth);
-  if (!existingChildren) row.insertAdjacentElement('afterend', children);
-  rememberFileExplorerSyncExpandedState();
-  scheduleShareUiStatePublish();
-  refreshLayoutUrlStateSoon();
-  if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
+  settleDirectoryRowExpansionAcrossSurfaces(row, fullPath, entries);
 }
 
 function collapseDirectoryRow(row, fullPath, options = {}) {
@@ -59,12 +164,7 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
     rememberFileExplorerSyncManualCollapse(fullPath);
     resetFileExplorerAppliedSyncPlan();
   }
-  fileExplorerExpanded.delete(fullPath);
-  fileExplorerPendingExpansions.delete(fullPath);
-  syncDirectoryRowExpansionVisual(row, false, false);
-  Array.from(row.parentElement?.children || [])
-    .filter(node => node.classList?.contains('file-tree-children') && node.dataset?.parent === fullPath)
-    .forEach(node => node.remove());
+  collapseDirectoryRowsAcrossSurfaces(row, fullPath);
   rememberFileExplorerSyncExpandedState();
   scheduleShareUiStatePublish();
   refreshLayoutUrlStateSoon();
@@ -72,7 +172,7 @@ function collapseDirectoryRow(row, fullPath, options = {}) {
 }
 
 if (fileExplorerClose) fileExplorerClose.addEventListener('click', () => toggleFileExplorer());
-if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', copyCurrentFileExplorerPath);
+if (fileExplorerPathCopy) fileExplorerPathCopy.addEventListener('click', event => copyCurrentFileExplorerPath({button: event.currentTarget}));
 bindFileExplorerPathInput(fileExplorerPath);
 bindFileExplorerHeaderActions(fileExplorer);
 if (fileExplorerRootModeButton) {
@@ -411,6 +511,7 @@ function tabInteractionControllerForApp() {
     return true;
   };
   const bindDetail = descriptor => {
+    if (descriptor.hover === false) return null;
     const {anchor} = descriptor;
     const detailPopover = () => {
       const current = currentDescriptor(descriptor);
@@ -464,6 +565,7 @@ function tabInteractionControllerForApp() {
       showActions(descriptor);
     }, true);
     anchor.addEventListener('pointerdown', event => {
+      if (event.pointerType !== 'touch' && event.button === 0) detail?.closeNow?.(event);
       if (event.pointerType !== 'touch' || event.button !== 0) return;
       cancelTouchPress();
       const current = currentDescriptor(descriptor);
@@ -1400,8 +1502,8 @@ function pullRequestTextForBranch(pr, fallback = '') {
 }
 
 function branchUpdatedText(branch) {
-  const ts = Number(branch?.updated_ts || 0);
-  if (Number.isFinite(ts) && ts > 0) {
+  const ts = branchUpdatedCommitTimestamp(branch);
+  if (ts > 0) {
     const seconds = Math.max(0, Math.floor(Date.now() / 1000) - ts);
     return relativeTimeFormat(seconds);
   }
@@ -1411,7 +1513,7 @@ function branchUpdatedText(branch) {
 function otherBranchesHtml(session, info) {
   const git = sessionWorkSummary(session, info).git;
   const inventory = git?.other_branches || {};
-  const branches = inventory.branches || [];
+  const branches = branchesNewestCommitFirst(inventory.branches);
   if (!branches.length) {
     return `<div class="branch-list"><div class="branch-list-title">${esc(t('branch.all'))}</div><div class="meta-muted">${esc(t('branch.none'))}</div></div>`;
   }

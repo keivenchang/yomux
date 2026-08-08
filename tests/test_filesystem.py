@@ -1,6 +1,11 @@
 import json
+import inspect
+import itertools
 import os
 import subprocess
+import threading
+import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -8,9 +13,42 @@ import pytest
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import search as filesystem_search
 from yolomux_lib.filesystem import FilesystemError
+from yolomux_lib.filesystem import io_ops as filesystem_io
+from yolomux_lib.filesystem import paths as filesystem_paths
 from yolomux_lib.filesystem.io_ops import read_json_file
+from yolomux_lib.filesystem import git_ops
+from yolomux_lib.workspace import metadata
 
 from _git_helpers import git, init_repo
+
+
+def _open_descriptors_beneath(root: Path) -> dict[str, str]:
+    descriptor_root = next(path for path in (Path("/proc/self/fd"), Path("/dev/fd")) if path.exists())
+    descriptors = {}
+    for descriptor in descriptor_root.iterdir():
+        try:
+            target = Path(os.readlink(descriptor))
+        except OSError:
+            continue
+        if target == root or target.is_relative_to(root):
+            descriptors[descriptor.name] = str(target)
+    return descriptors
+
+
+def _swap_path_after_authorization(monkeypatch, requested_path, link_to_swap, replacement):
+    original_ensure_path_allowed = filesystem_paths._ensure_path_allowed
+    state = {"swapped": False}
+
+    def authorize_then_swap(path, *, resolved=None):
+        result = original_ensure_path_allowed(path, resolved=resolved)
+        if path == requested_path and not state["swapped"]:
+            state["swapped"] = True
+            link_to_swap.unlink()
+            link_to_swap.symlink_to(replacement, target_is_directory=replacement.is_dir())
+        return result
+
+    monkeypatch.setattr(filesystem_paths, "_ensure_path_allowed", authorize_then_swap)
+    return state
 
 
 def test_read_json_file_returns_default_for_missing_or_invalid_json(tmp_path):
@@ -23,23 +61,17 @@ def test_read_json_file_returns_default_for_missing_or_invalid_json(tmp_path):
     assert read_json_file(path, []) == []
 
 
-def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog):
-    blocked = "/home/test/.azure"
-    safe = "/home/test/project/app.py"
+def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    blocked = str(tmp_path / ".azure" / "token")
+    safe = str(project / "app.py")
     dirty = []
-
-    def validated(raw_path):
-        if raw_path == blocked:
-            raise FilesystemError(
-                f"path is blocked because it may contain credentials: {raw_path}",
-                status=403,
-                message_key="fs.error.credentialBlocked",
-            )
-        return Path(raw_path)
-
-    monkeypatch.setattr(filesystem_search.paths, "_validated_path", validated)
-    monkeypatch.setattr(filesystem_search.paths, "_normalized_scope_path", lambda path: path)
-    monkeypatch.setattr(filesystem_search.file_index, "mark_path_dirty", lambda path, include_root: dirty.append(path) or [])
+    monkeypatch.setattr(
+        filesystem_search.file_index,
+        "mark_paths_dirty",
+        lambda paths, include_root, prepare_root=None: dirty.extend(paths) or {},
+    )
     monkeypatch.setattr(filesystem_search.file_index, "background_owner_can_build", lambda: True)
     monkeypatch.setattr(filesystem_search.file_index, "schedule_refreshes", lambda: 0)
     filesystem_search._LOGGED_BLOCKED_REINDEX_PATHS.clear()
@@ -78,11 +110,19 @@ def test_list_directory_returns_entries(tmp_path):
     assert names["big.dat"]["kind"] == "file"
 
 
-def test_listing_reuses_child_canonicalization_for_security_and_identity(monkeypatch, tmp_path):
+def test_listing_reuses_parent_canonicalization_for_ordinary_children(monkeypatch, tmp_path):
     (tmp_path / "first.txt").write_text("first\n", encoding="utf-8")
     (tmp_path / "second.txt").write_text("second\n", encoding="utf-8")
-    # Warm immutable root/secret policy caches.  The measured baseline used to resolve
-    # every visible entry once for the secret filter and again for physical identity.
+    real = tmp_path / "real"
+    (real / "first").mkdir(parents=True)
+    (real / "second").mkdir()
+    (tmp_path / "first-link").symlink_to(real / "first", target_is_directory=True)
+    (tmp_path / "second-link").symlink_to(real / "second", target_is_directory=True)
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (tmp_path / "blocked-link").symlink_to(blocked, target_is_directory=True)
+    # Warm immutable root/secret policy caches. The measured live baseline spent most
+    # of its handler time resolving every ordinary child independently.
     filesystem.list_directory(str(tmp_path))
     calls: list[Path] = []
     original = filesystem.listing.paths._normalized_scope_path
@@ -94,9 +134,657 @@ def test_listing_reuses_child_canonicalization_for_security_and_identity(monkeyp
     monkeypatch.setattr(filesystem.listing.paths, "_normalized_scope_path", counting_normalize)
     payload = filesystem.list_directory(str(tmp_path))
 
-    assert {entry["name"] for entry in payload["entries"]} == {"first.txt", "second.txt"}
-    assert calls.count(tmp_path / "first.txt") == 1
-    assert calls.count(tmp_path / "second.txt") == 1
+    assert {entry["name"] for entry in payload["entries"]} == {
+        "first-link", "first.txt", "real", "second-link", "second.txt",
+    }
+    assert calls.count(tmp_path / "first.txt") == 0
+    assert calls.count(tmp_path / "second.txt") == 0
+    assert calls.count(tmp_path / "first-link") == 0
+    assert calls.count(tmp_path / "second-link") == 0
+    assert calls.count(tmp_path / "blocked-link") == 0
+    assert calls.count(real) == 2
+
+
+def test_symlink_target_resolution_follows_parent_replacement(tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "item").write_text("safe\n", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "item").write_text("blocked\n", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(safe / "item")
+    assert filesystem.listing._resolved_symlink_target(link) == safe / "item"
+
+    safe.rename(tmp_path / "safe-old")
+    safe.symlink_to(blocked, target_is_directory=True)
+
+    assert filesystem.listing._resolved_symlink_target(link) == blocked / "item"
+
+
+def test_symlink_target_parent_resolution_does_not_poison_later_rows(monkeypatch, tmp_path):
+    first_target = tmp_path / "first-target"
+    (first_target / "subdirectory").mkdir(parents=True)
+    second_target = tmp_path / "second-target"
+    (second_target / "subdirectory").mkdir(parents=True)
+    target_root = tmp_path / "target-root"
+    target_root.symlink_to(first_target, target_is_directory=True)
+    target_parent = target_root / "subdirectory"
+    link = tmp_path / "link"
+    link.symlink_to(target_parent / "item")
+    original_normalize = filesystem.listing.paths._normalized_scope_path
+    raced = False
+
+    def normalize_during_temporary_repoint(path):
+        nonlocal raced
+        if path == target_parent and not raced:
+            raced = True
+            target_root.unlink()
+            target_root.symlink_to(second_target, target_is_directory=True)
+            try:
+                return original_normalize(path)
+            finally:
+                target_root.unlink()
+                target_root.symlink_to(first_target, target_is_directory=True)
+        return original_normalize(path)
+
+    monkeypatch.setattr(filesystem.listing.paths, "_normalized_scope_path", normalize_during_temporary_repoint)
+    assert filesystem.listing._resolved_symlink_target(link) == second_target / "subdirectory" / "item"
+    assert filesystem.listing._resolved_symlink_target(link) == first_target / "subdirectory" / "item"
+
+
+def test_listing_symlink_metadata_stays_bound_to_the_authorized_target(monkeypatch, tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    safe_target = safe / "item"
+    safe_target.write_bytes(b"s")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "item"
+    blocked_target.write_bytes(b"x" * 4096)
+    link = tmp_path / "link"
+    link.symlink_to(safe_target)
+    original_path_is_secret = filesystem.listing.paths._path_is_secret
+    swapped = False
+
+    def swap_after_authorization(path, *, resolved=None, resolve=True):
+        nonlocal swapped
+        result = original_path_is_secret(path, resolved=resolved, resolve=resolve)
+        if path.name == link.name and not result and not swapped:
+            swapped = True
+            link.unlink()
+            link.symlink_to(blocked_target)
+        return result
+
+    monkeypatch.setattr(filesystem.listing.paths, "_path_is_secret", swap_after_authorization)
+
+    payload = filesystem.list_directory(str(tmp_path))
+    listed_link = {entry["name"]: entry for entry in payload["entries"]}["link"]
+
+    assert swapped is True
+    assert listed_link["size"] == 1
+    assert listed_link["symlink_target"] == str(safe_target)
+    assert listed_link["realpath"] == str(safe_target)
+
+
+def test_listing_regular_child_repointed_to_blocked_symlink_never_leaks_metadata(monkeypatch, tmp_path):
+    child = tmp_path / "item.txt"
+    child.write_bytes(b"s")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_bytes(b"x" * 4096)
+    original_path_is_secret = filesystem.listing.paths._path_is_secret
+    swapped = False
+
+    def swap_after_child_authorization(path, *, resolved=None, resolve=True):
+        nonlocal swapped
+        result = original_path_is_secret(path, resolved=resolved, resolve=resolve)
+        if path.name == child.name and not result and not swapped:
+            swapped = True
+            child.unlink()
+            child.symlink_to(blocked_target)
+        return result
+
+    monkeypatch.setattr(filesystem.listing.paths, "_path_is_secret", swap_after_child_authorization)
+
+    payload = filesystem.list_directory(str(tmp_path))
+
+    assert swapped is True
+    assert child.name not in {entry["name"] for entry in payload["entries"]}
+
+
+def test_listing_opens_regular_children_from_the_pinned_parent_generation(monkeypatch, tmp_path):
+    root = tmp_path / "listed"
+    root.mkdir()
+    child = root / "item.txt"
+    child.write_bytes(b"s")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_bytes(b"x" * 4096)
+    original_path_is_secret = filesystem.listing.paths._path_is_secret
+    swapped = False
+
+    def swap_parent_after_child_authorization(path, *, resolved=None, resolve=True):
+        nonlocal swapped
+        result = original_path_is_secret(path, resolved=resolved, resolve=resolve)
+        if resolved == child and not result and not swapped:
+            swapped = True
+            root.rename(tmp_path / "listed-old")
+            root.mkdir()
+            (root / child.name).symlink_to(blocked_target)
+        return result
+
+    monkeypatch.setattr(filesystem.listing.paths, "_path_is_secret", swap_parent_after_child_authorization)
+
+    payload = filesystem.list_directory(str(root))
+    listed_child = {entry["name"]: entry for entry in payload["entries"]}[child.name]
+
+    assert swapped is True
+    assert listed_child["size"] == 1
+    assert listed_child["realpath"] == str(child)
+
+
+def test_watch_signature_reports_missing_but_propagates_blocked_paths(tmp_path):
+    assert filesystem.watch_signature(str(tmp_path / "missing")) == (str(tmp_path / "missing"), "missing")
+
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    with pytest.raises(filesystem.FilesystemError) as error:
+        filesystem.watch_signature(str(blocked))
+
+    assert error.value.status == 403
+    assert error.value.message_key == "fs.error.credentialBlocked"
+
+
+def test_watch_signature_stops_child_security_work_at_requested_limit(tmp_path, monkeypatch):
+    for index in range(6):
+        (tmp_path / f"entry-{index}.txt").write_text(str(index), encoding="utf-8")
+    observed = []
+    original = filesystem.listing.paths.name_observed
+
+    def record(operation, path):
+        observed.append((operation, path.name))
+        return original(operation, path)
+
+    monkeypatch.setattr(filesystem.listing.paths, "name_observed", record)
+    signature = filesystem.watch_signature(str(tmp_path), child_limit=3)
+
+    assert len(signature[-1]) == 3
+    assert len(observed) == 4  # The root is observed once; exactly three children reach the security scan.
+
+
+def test_filesystem_batch_watch_signature_reuses_the_directory_listing_scan(tmp_path, monkeypatch):
+    for index in range(6):
+        (tmp_path / f"entry-{index}.txt").write_text(str(index), encoding="utf-8")
+    expected_signature = filesystem.watch_signature(
+        str(tmp_path),
+        child_limit=filesystem.WATCH_SIGNATURE_CHILD_LIMIT,
+    )
+    scans = []
+    original = filesystem.listing._visible_directory_names
+
+    def count_scan(*args, **kwargs):
+        scans.append(str(args[0]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(filesystem.listing, "_visible_directory_names", count_scan)
+    result = filesystem.filesystem_batch_result({
+        "requests": [{
+            "id": "root",
+            "type": "list",
+            "path": str(tmp_path),
+            "trigger_counts": {"watch-diff": 1},
+            "include_watch_signature": True,
+        }],
+        "client_scope": "browser",
+    })
+
+    assert len(scans) == 1
+    assert result["responses"][0]["watch_signature"] == expected_signature
+    assert "watch_signature" not in result["responses"][0]["payload"]
+
+
+@pytest.mark.parametrize("reader", [filesystem_io.read_file, filesystem_io.read_raw])
+def test_file_readers_consume_the_authorized_target_handle(monkeypatch, tmp_path, reader):
+    safe = tmp_path / "safe.txt"
+    safe.write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_text("FAKE_SECRET_CONTENT", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(safe)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked_target)
+
+    payload = reader(str(link))
+    content = payload["content"] if isinstance(payload, dict) else payload[0].decode("utf-8")
+
+    assert state["swapped"] is True
+    assert content == "safe"
+
+
+def test_write_file_consumes_the_authorized_target_handle(monkeypatch, tmp_path):
+    safe = tmp_path / "safe.txt"
+    safe.write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_text("FAKE_SECRET_ORIGINAL", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(safe)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked_target)
+
+    filesystem_io.write_file(str(link), "updated")
+
+    assert state["swapped"] is True
+    assert safe.read_text(encoding="utf-8") == "updated"
+    assert blocked_target.read_text(encoding="utf-8") == "FAKE_SECRET_ORIGINAL"
+
+
+def test_zip_directory_consumes_the_authorized_directory_handle(monkeypatch, tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "fake-key").write_text("FAKE_ZIP_SECRET", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(safe, target_is_directory=True)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked)
+
+    archive_file, _archive_size = filesystem_io.zip_directory(str(link), max_bytes=1024 * 1024)
+    try:
+        with zipfile.ZipFile(archive_file) as archive:
+            names = archive.namelist()
+            content = archive.read(next(name for name in names if name.endswith("safe.txt"))).decode("utf-8")
+    finally:
+        archive_file.close()
+
+    assert state["swapped"] is True
+    assert content == "safe"
+    assert all(not name.endswith("fake-key") for name in names)
+
+
+def test_zip_directory_keeps_each_descendant_descriptor_live_through_archive_write(monkeypatch, tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    member = safe / "member.txt"
+    member.write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_text("FAKE_ZIP_DESCENDANT_SECRET", encoding="utf-8")
+    original_write = zipfile.ZipFile.write
+    original_open = zipfile.ZipFile.open
+    swapped = False
+
+    def swap_member():
+        nonlocal swapped
+        if swapped:
+            return
+        swapped = True
+        member.unlink()
+        member.symlink_to(blocked_target)
+
+    def swap_before_legacy_write(archive, *args, **kwargs):
+        swap_member()
+        return original_write(archive, *args, **kwargs)
+
+    def swap_after_pinned_open(archive, *args, **kwargs):
+        if args and str(getattr(args[0], "filename", args[0])).endswith("member.txt"):
+            swap_member()
+        return original_open(archive, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "write", swap_before_legacy_write)
+    monkeypatch.setattr(zipfile.ZipFile, "open", swap_after_pinned_open)
+
+    archive_file, _archive_size = filesystem_io.zip_directory(str(safe), max_bytes=1024 * 1024)
+    try:
+        with zipfile.ZipFile(archive_file) as archive:
+            content = archive.read("safe/member.txt").decode("utf-8")
+    finally:
+        archive_file.close()
+
+    assert swapped is True
+    assert content == "safe"
+
+
+def test_zip_directory_never_follows_a_repointed_descendant_directory(monkeypatch, tmp_path):
+    source = tmp_path / "archive"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    (nested / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_bytes = b"FAKE_ZIP_DIRECTORY_SECRET"
+    (blocked / "secret.txt").write_bytes(blocked_bytes)
+    original_open = filesystem_paths.os.open
+    swapped = False
+
+    def swap_before_descendant_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            nested.rename(source / "nested-old")
+            nested.symlink_to(blocked, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(filesystem_paths.os, "open", swap_before_descendant_open)
+
+    archive_file, _archive_size = filesystem_io.zip_directory(str(source), max_bytes=1024 * 1024)
+    try:
+        with zipfile.ZipFile(archive_file) as archive:
+            archived_bytes = b"\n".join(
+                archive.read(name)
+                for name in archive.namelist()
+                if not name.endswith("/")
+            )
+    finally:
+        archive_file.close()
+
+    assert swapped is True
+    assert blocked_bytes not in archived_bytes
+
+
+def test_search_files_consumes_the_authorized_directory_handle(monkeypatch, tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "fake-key").write_text("FAKE_SEARCH_SECRET", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(safe, target_is_directory=True)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked)
+
+    payload = filesystem_search.search_files(str(link), query="safe", recursive=False)
+
+    assert state["swapped"] is True
+    assert [item["name"] for item in payload["files"]] == ["safe.txt"]
+
+
+def test_recursive_search_never_follows_a_repointed_descendant(monkeypatch, tmp_path):
+    indexed = tmp_path / "indexed"
+    nested = indexed / "nested"
+    nested.mkdir(parents=True)
+    (nested / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "secret.txt").write_text("FAKE_SEARCH_DESCENDANT_SECRET", encoding="utf-8")
+    original_open = filesystem_paths.os.open
+    swapped = False
+
+    def swap_before_descendant_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            nested.rename(indexed / "nested-old")
+            nested.symlink_to(blocked, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(filesystem_paths.os, "open", swap_before_descendant_open)
+
+    payload = filesystem_search.search_files(str(indexed), query="secret", recursive=True)
+
+    assert swapped is True
+    assert payload["files"] == []
+
+
+def test_async_index_build_consumes_the_authorized_directory_handle(monkeypatch, tmp_path):
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "fake-key").write_text("FAKE_INDEX_SECRET", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(safe, target_is_directory=True)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked)
+    filesystem_search.file_index.clear_memory_indexes()
+
+    with filesystem_paths.safe_path(
+        str(link),
+        flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    ) as handle:
+        index = filesystem_search.file_index.build_now(
+            handle.resolved,
+            set(),
+            persist_enabled=False,
+            root_fd=handle.descriptor,
+        )
+
+    assert state["swapped"] is True
+    assert [entry[1] for entry in index.entries] == ["safe.txt"]
+    filesystem_search.file_index.clear_memory_indexes()
+
+
+def test_async_index_never_follows_a_repointed_descendant(monkeypatch, tmp_path):
+    indexed = tmp_path / "indexed"
+    nested = indexed / "nested"
+    nested.mkdir(parents=True)
+    (nested / "safe.txt").write_text("safe", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    (blocked / "secret.txt").write_text("FAKE_INDEX_DESCENDANT_SECRET", encoding="utf-8")
+    original_open = filesystem_paths.os.open
+    swapped = False
+
+    def swap_before_descendant_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if path == "nested" and kwargs.get("dir_fd") is not None and not swapped:
+            swapped = True
+            nested.rename(indexed / "nested-old")
+            nested.symlink_to(blocked, target_is_directory=True)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(filesystem_paths.os, "open", swap_before_descendant_open)
+    filesystem_search.file_index.clear_memory_indexes()
+
+    with filesystem_paths.safe_path(
+        str(indexed),
+        flags=os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    ) as handle:
+        index = filesystem_search.file_index.build_now(
+            handle.resolved,
+            set(),
+            persist_enabled=False,
+            root_fd=handle.descriptor,
+        )
+
+    assert swapped is True
+    assert all(entry[1] != "secret.txt" for entry in index.entries)
+    filesystem_search.file_index.clear_memory_indexes()
+
+
+@pytest.mark.parametrize("operation", ["mkdir", "rename", "delete"])
+def test_parent_mutations_consume_the_authorized_parent_handle(monkeypatch, tmp_path, operation):
+    safe_parent = tmp_path / "safe"
+    safe_parent.mkdir()
+    blocked_parent = tmp_path / ".ssh"
+    blocked_parent.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(safe_parent, target_is_directory=True)
+    if operation == "mkdir":
+        requested = alias / "created"
+    else:
+        requested = alias / "item"
+        (safe_parent / "item").write_text("safe", encoding="utf-8")
+        (blocked_parent / "item").write_text("blocked", encoding="utf-8")
+    state = _swap_path_after_authorization(monkeypatch, requested, alias, blocked_parent)
+
+    if operation == "mkdir":
+        filesystem_io.create_directory(str(requested))
+        assert (safe_parent / "created").is_dir()
+        assert not (blocked_parent / "created").exists()
+    elif operation == "rename":
+        filesystem_io.rename_path(str(requested), "moved")
+        assert (safe_parent / "moved").read_text(encoding="utf-8") == "safe"
+        assert (blocked_parent / "item").read_text(encoding="utf-8") == "blocked"
+    else:
+        filesystem_io.delete_path(str(requested))
+        assert not (safe_parent / "item").exists()
+        assert (blocked_parent / "item").read_text(encoding="utf-8") == "blocked"
+    assert state["swapped"] is True
+
+
+def test_diff_final_symlink_swap_never_returns_target_file_content(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    safe = tmp_path / "safe.txt"
+    safe.write_text("safe\n", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_text("FAKE_DIFF_SECRET\n", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(safe)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked_target)
+
+    payload = git_ops.diff_file(str(link))
+
+    assert state["swapped"] is True
+    assert "FAKE_DIFF_SECRET" not in payload["diff"]
+
+
+def test_diff_keeps_working_file_descriptor_live_through_git_consumption(monkeypatch, tmp_path):
+    init_repo(tmp_path)
+    target = tmp_path / "app.py"
+    target.write_text("base\n", encoding="utf-8")
+    git(tmp_path, "add", "app.py")
+    git(tmp_path, "commit", "-m", "base")
+    target.write_text("safe\n", encoding="utf-8")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_text("FAKE_DIFF_CONSUMER_SECRET\n", encoding="utf-8")
+    original_pinned_repo_root = git_ops._pinned_repo_root
+    swapped = False
+
+    def swap_before_repo_discovery(handle, *, operation=""):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            target.rename(tmp_path / "safe-old.py")
+            target.symlink_to(blocked_target)
+        return original_pinned_repo_root(handle, operation=operation)
+
+    monkeypatch.setattr(git_ops, "_pinned_repo_root", swap_before_repo_discovery)
+
+    payload = git_ops.diff_file(str(target))
+
+    assert swapped is True
+    assert "FAKE_DIFF_CONSUMER_SECRET" not in payload["diff"]
+    assert "+safe" in payload["diff"]
+
+
+def test_indexed_search_annotation_binds_realpath_and_size_to_one_descriptor(monkeypatch, tmp_path):
+    safe = tmp_path / "safe.txt"
+    safe.write_bytes(b"s")
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_bytes(b"x" * 4096)
+    link = tmp_path / "link.txt"
+    link.symlink_to(safe)
+    state = _swap_path_after_authorization(monkeypatch, link, link, blocked_target)
+    entry = {"path": str(link), "realpath": "stale", "size": 999, "file_id": "stale"}
+
+    filesystem_search._annotate_search_dedupe_fields(entry)
+
+    assert state["swapped"] is True
+    assert entry["realpath"] == str(safe)
+    assert entry["size"] == 1
+    assert entry["file_id"] != "stale"
+
+
+def test_indexed_search_annotation_omits_stale_metadata_when_current_path_is_blocked(tmp_path):
+    blocked = tmp_path / ".ssh"
+    blocked.mkdir()
+    blocked_target = blocked / "secret.txt"
+    blocked_target.write_bytes(b"blocked")
+    link = tmp_path / "link.txt"
+    link.symlink_to(blocked_target)
+    entry = {
+        "path": str(link),
+        "realpath": "stale",
+        "size": 999,
+        "file_id": "stale",
+        "file_identity": "stale",
+    }
+
+    filesystem_search._annotate_search_dedupe_fields(entry)
+
+    assert not {"realpath", "size", "file_id", "file_identity"} & entry.keys()
+
+
+def test_filesystem_entrypoints_route_through_the_shared_safe_path_primitive():
+    entrypoints = {
+        filesystem.listing.list_directory,
+        filesystem.listing.watch_signature,
+        filesystem_io.read_file,
+        filesystem_io.read_raw,
+        filesystem_io.write_file,
+        filesystem_io.delete_path,
+        filesystem_io.rename_path,
+        filesystem_io.create_directory,
+        filesystem_io.path_info,
+        filesystem_io.is_text_path,
+        filesystem_io.zip_directory,
+        filesystem_io.count_directory_files,
+        filesystem_search.search_files,
+        filesystem_search.index_status,
+        filesystem_search.unindex_root,
+        filesystem_search.reindex_roots_for_paths,
+        git_ops.diff_file,
+        git_ops.blame_file,
+    }
+
+    bypasses = []
+    for entrypoint in entrypoints:
+        source = inspect.getsource(entrypoint)
+        if "paths.safe_path(" not in source and "paths.safe_parent(" not in source:
+            bypasses.append(f"{entrypoint.__module__}.{entrypoint.__name__}")
+
+    assert bypasses == []
+
+
+def test_listing_reports_stage_timings_without_exposing_entry_names(tmp_path):
+    (tmp_path / "child").mkdir()
+    (tmp_path / "private-name.txt").write_text("content\n", encoding="utf-8")
+    performance_details = {}
+
+    payload = filesystem.list_directory(
+        str(tmp_path),
+        performance_details=performance_details,
+    )
+
+    assert {entry["name"] for entry in payload["entries"]} == {"child", "private-name.txt"}
+    assert {
+        "validate_ms",
+        "scan_ms",
+        "scan_open_ms",
+        "scan_iterate_ms",
+        "scan_resolve_ms",
+        "scan_secret_filter_ms",
+        "scan_child_context_ms",
+        "scan_child_open_ms",
+        "scan_child_info_ms",
+        "entry_loop_ms",
+        "entry_lstat_ms",
+        "symlink_stat_ms",
+        "repo_probe_ms",
+        "repo_info_ms",
+        "identity_ms",
+        "sort_ms",
+        "assemble_ms",
+        "entry_count",
+        "repo_count",
+        "repo_deferred_count",
+    } <= performance_details.keys()
+    assert all(value >= 0 for value in performance_details.values())
+    assert performance_details["entry_count"] == 2
+    assert "private-name.txt" not in json.dumps(performance_details, sort_keys=True)
 
 
 def test_index_secret_filter_avoids_realpath_for_ordinary_walk_entries(monkeypatch, tmp_path):
@@ -109,6 +797,178 @@ def test_index_secret_filter_avoids_realpath_for_ordinary_walk_entries(monkeypat
 
     assert paths._path_is_secret(tmp_path / "ordinary.txt", resolve=False) is False
     assert paths._path_is_secret(tmp_path / ".ssh" / "id_rsa", resolve=False) is True
+
+
+def test_normalized_absolute_containment_matches_pathlib_oracle():
+    paths = filesystem.paths
+    alias_path = Path("/home/keivenc/dev").resolve(strict=False)
+    alias_root = Path("/nfs/keivenc").resolve(strict=False)
+    corpus = (
+        (Path("/tmp"), Path("/")),
+        (Path("/tmp"), Path("//")),
+        (Path("/home/keivenc/.ssh"), Path("/home/keivenc/.ssh")),
+        (Path("/home/keivenc/.ssh/id_ed25519"), Path("/home/keivenc/.ssh")),
+        (Path("/home/keivenc/.sshx"), Path("/home/keivenc/.ssh")),
+        (Path("/tmp/root/../outside"), Path("/tmp/root")),
+        (Path("/tmp//root/child/"), Path("/tmp/root/")),
+        (Path("tests/../tests/test_filesystem.py"), Path(".")),
+        (alias_path, alias_root),
+    )
+
+    for candidate, root in corpus:
+        assert paths._normalized_absolute_path_is_within(candidate, root) is paths._path_is_within(candidate, root)
+
+
+def test_secret_classifier_matches_retained_oracle_over_adversarial_corpus(tmp_path):
+    paths = filesystem.paths
+    repeated_separator = Path(f"{tmp_path}//ordinary///child.txt")
+    candidates = (
+        tmp_path / "ordinary.txt",
+        tmp_path / ".ssh" / "id_ed25519",
+        tmp_path / ".sshx" / "not-secret.txt",
+        tmp_path / ".config" / "gh" / "hosts.yml",
+        tmp_path / ".config" / "ghx" / "hosts.yml",
+        tmp_path / ".cache" / "huggingface" / "token",
+        tmp_path / "safe" / ".." / ".gnupg" / "key",
+        repeated_separator,
+        Path("."),
+        Path("..") / ".aws" / "credentials",
+        Path("/home/keivenc/dev").resolve(strict=False),
+    )
+
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve(strict=False)
+        assert paths._path_is_secret(candidate, resolve=False) is paths._path_is_secret_reference(candidate, resolve=False)
+        assert paths._path_is_secret(candidate, resolved=resolved) is paths._path_is_secret_reference(candidate, resolved=resolved)
+        assert paths._path_is_secret(candidate) is paths._path_is_secret_reference(candidate)
+
+
+def test_secret_classifier_avoids_generic_pathlib_containment(monkeypatch, tmp_path):
+    paths = filesystem.paths
+    candidate = tmp_path / "ordinary.txt"
+    resolved = candidate.resolve(strict=False)
+    paths._compiled_secret_policy()
+    monkeypatch.setattr(paths, "_path_is_within", lambda *_args: (_ for _ in ()).throw(AssertionError("hot classifier used Path.relative_to")))
+
+    assert paths._path_is_secret(candidate, resolved=resolved) is False
+
+
+def test_secret_policy_generation_and_resolution_mode_survive_symlink_retargets(monkeypatch, tmp_path):
+    paths = filesystem.paths
+    fake_home = tmp_path / "home"
+    first_secret_target = tmp_path / "first-secret-target"
+    second_secret_target = tmp_path / "second-secret-target"
+    safe_target = tmp_path / "safe-target"
+    for directory in (fake_home, first_secret_target, second_secret_target, safe_target):
+        directory.mkdir()
+    secret_alias = fake_home / ".ssh"
+    secret_alias.symlink_to(first_secret_target, target_is_directory=True)
+    candidate = tmp_path / "candidate"
+    candidate.symlink_to(safe_target, target_is_directory=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: fake_home))
+    paths.invalidate_path_policy_caches()
+
+    first_generation = paths._compiled_secret_policy().generation
+    assert paths._path_is_secret(candidate, resolve=False) is False
+    assert paths._path_is_secret(candidate) is False
+
+    candidate.unlink()
+    candidate.symlink_to(second_secret_target, target_is_directory=True)
+    assert paths._path_is_secret(candidate, resolve=False) is False
+    assert paths._path_is_secret(candidate) is False
+
+    secret_alias.unlink()
+    secret_alias.symlink_to(second_secret_target, target_is_directory=True)
+    paths.invalidate_path_policy_caches()
+
+    assert paths._compiled_secret_policy().generation > first_generation
+    assert paths._path_is_secret(candidate, resolve=False) is False
+    assert paths._path_is_secret(candidate) is True
+
+
+def test_configured_root_generation_rejects_inflight_stale_cache_fill(monkeypatch, tmp_path):
+    paths = filesystem.paths
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    alias = tmp_path / "root-alias"
+    alias.symlink_to(first, target_is_directory=True)
+    monkeypatch.setenv(paths.FS_ROOTS_ENV, str(alias))
+    paths.invalidate_path_policy_caches()
+    original_normalize = paths._normalized_scope_path
+    old_resolution_ready = threading.Event()
+    release_old_resolution = threading.Event()
+
+    def pause_old_alias_resolution(path):
+        result = original_normalize(path)
+        if path == alias and result == first:
+            old_resolution_ready.set()
+            assert release_old_resolution.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(paths, "_normalized_scope_path", pause_old_alias_resolution)
+    stale_result = []
+    worker = threading.Thread(target=lambda: stale_result.append(paths._configured_fs_roots()))
+    worker.start()
+    assert old_resolution_ready.wait(timeout=2)
+    alias.unlink()
+    alias.symlink_to(second, target_is_directory=True)
+    paths.invalidate_path_policy_caches()
+    release_old_resolution.set()
+    worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    assert stale_result == [(first,)]
+    assert paths._configured_fs_roots() == (second,)
+
+
+def test_secret_policy_generation_rejects_inflight_stale_cache_fill(monkeypatch, tmp_path):
+    paths = filesystem.paths
+    fake_home = tmp_path / "home"
+    first = tmp_path / "first-secret"
+    second = tmp_path / "second-secret"
+    for directory in (fake_home, first, second):
+        directory.mkdir()
+    secret_alias = fake_home / ".ssh"
+    secret_alias.symlink_to(first, target_is_directory=True)
+    candidate = second / "generic-key"
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: fake_home))
+    paths.invalidate_path_policy_caches()
+    original_normalize = paths._normalized_scope_path
+    old_resolution_ready = threading.Event()
+    release_old_resolution = threading.Event()
+
+    def pause_old_secret_resolution(path):
+        result = original_normalize(path)
+        if path == secret_alias and result == first:
+            old_resolution_ready.set()
+            assert release_old_resolution.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(paths, "_normalized_scope_path", pause_old_secret_resolution)
+    stale_policy = []
+    worker = threading.Thread(target=lambda: stale_policy.append(paths._compiled_secret_policy()))
+    worker.start()
+    assert old_resolution_ready.wait(timeout=2)
+    secret_alias.unlink()
+    secret_alias.symlink_to(second, target_is_directory=True)
+    paths.invalidate_path_policy_caches()
+    release_old_resolution.set()
+    worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    assert str(first) in stale_policy[0].secret_directories
+    assert paths._path_is_secret(candidate, resolved=candidate) is True
+
+
+def test_secret_classifier_matches_oracle_over_generated_path_shapes(tmp_path):
+    paths = filesystem.paths
+    components = ("safe", ".ssh", ".sshx", ".config", "gh", "ghx", ".cache", "huggingface", "token", "..")
+    for size in (1, 2, 3):
+        for parts in itertools.product(components, repeat=size):
+            candidate = tmp_path.joinpath(*parts)
+            assert paths._path_is_secret(candidate, resolve=False) is paths._path_is_secret_reference(candidate, resolve=False)
 
 
 def test_listing_does_not_cache_stale_identity_after_inode_replacement(tmp_path):
@@ -149,6 +1009,134 @@ def test_list_directory_eagerly_returns_git_repo_info(tmp_path):
     assert entries["repo"]["repo"]["branch"] == "feature/repo-row"
 
 
+def test_git_repo_info_cache_returns_independent_values_and_watcher_invalidation(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    calls = []
+
+    def fake_git(args, cwd, timeout):
+        calls.append(tuple(args))
+        if args[:2] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "main\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    monkeypatch.setattr(git_ops, "git", fake_git)
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        git_ops._REPO_INFO_CACHE.clear()
+
+    first = git_ops.git_repo_info(repo, include_status=False)
+    first["branch"] = "mutated"
+    second = git_ops.git_repo_info(repo, include_status=False)
+    assert second["branch"] == "main"
+    assert len(calls) == 2
+
+    assert metadata.invalidate_git_metadata_paths([repo / "tracked.txt"]) == set()
+    third = git_ops.git_repo_info(repo, include_status=False)
+    assert third["branch"] == "main"
+    assert len(calls) == 4, "watcher-owned invalidation must make Finder recompute"
+
+
+def test_git_repo_info_cache_ttl_is_stable_and_desynchronizes_repo_roots():
+    roots = [f"/workspace/repo-{index}" for index in range(64)]
+    first = [git_ops._repo_info_cache_ttl_seconds(root) for root in roots]
+    second = [git_ops._repo_info_cache_ttl_seconds(root) for root in roots]
+
+    assert first == second
+    assert min(first) >= git_ops.REPO_INFO_CACHE_SECONDS * 0.5
+    assert max(first) <= git_ops.REPO_INFO_CACHE_SECONDS * 1.5
+    assert max(first) - min(first) > git_ops.REPO_INFO_CACHE_SECONDS * 0.75
+
+
+def test_git_repo_info_cache_applies_each_repo_ttl_independently(tmp_path, monkeypatch):
+    repo_short = tmp_path / "repo-short"
+    repo_long = tmp_path / "repo-long"
+    repo_short.mkdir()
+    repo_long.mkdir()
+    now = [100.0]
+    calls = []
+
+    def fake_git(args, cwd, timeout):
+        calls.append((tuple(args), cwd, timeout))
+        if args[:2] == ["symbolic-ref", "--quiet"]:
+            return subprocess.CompletedProcess(args, 0, "main\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(git_ops, "git", fake_git)
+    monkeypatch.setattr(
+        git_ops,
+        "_repo_info_cache_ttl_seconds",
+        lambda root: 10.0 if root.endswith("repo-short") else 20.0,
+    )
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        git_ops._REPO_INFO_CACHE.clear()
+
+    git_ops.git_repo_info(repo_short, include_status=False)
+    git_ops.git_repo_info(repo_long, include_status=False)
+    assert len(calls) == 4
+
+    now[0] = 115.0
+    git_ops.git_repo_info(repo_short, include_status=False)
+    git_ops.git_repo_info(repo_long, include_status=False)
+    assert len(calls) == 6, "only the short-TTL repository should revalidate"
+
+
+@pytest.mark.parametrize(("timeout", "expected_call_count"), [(0.001, 0), (1.0, 3)])
+def test_git_repo_info_bounds_tiny_budgets_and_subprocess_timeouts(tmp_path, monkeypatch, timeout, expected_call_count):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init")
+    calls = []
+
+    def timeout_git(args, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        raise subprocess.TimeoutExpired(args, timeout)
+
+    monkeypatch.setattr(git_ops.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(git_ops, "git", timeout_git)
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        git_ops._REPO_INFO_CACHE.clear()
+
+    info = git_ops.git_repo_info(repo, include_status=False, timeout=timeout)
+
+    assert len(calls) == expected_call_count
+    assert info["branch"] == ""
+    assert info["upstream"] == ""
+    assert info["ahead"] == 0
+    assert info["behind"] == 0
+
+
+def test_list_directory_bounds_slow_repo_enrichment_without_dropping_repo_row(tmp_path, monkeypatch):
+    slow = tmp_path / "a-slow"
+    fast = tmp_path / "z-fast"
+    for repo in (slow, fast):
+        repo.mkdir()
+        git(repo, "init")
+    now = [100.0]
+
+    def clock():
+        return now[0]
+
+    def slow_git(args, cwd, timeout):
+        now[0] += timeout
+        return subprocess.CompletedProcess(args, 124, "", "timed out")
+
+    monkeypatch.setattr(filesystem.listing.time, "monotonic", clock)
+    monkeypatch.setattr(git_ops.time, "monotonic", clock)
+    monkeypatch.setattr(git_ops, "git", slow_git)
+    with git_ops._REPO_INFO_CACHE_LOCK:
+        git_ops._REPO_INFO_CACHE.clear()
+
+    started = time.perf_counter()
+    entries = {entry["name"]: entry for entry in filesystem.list_directory(str(tmp_path))["entries"]}
+    assert time.perf_counter() - started < 0.25
+    assert entries["a-slow"]["is_repo"] is True
+    assert "repo" in entries["a-slow"]
+    assert entries["z-fast"]["is_repo"] is True
+    assert entries["z-fast"]["repo_info_deferred"] is True
+
+
 def test_list_directory_allows_root_by_default(monkeypatch):
     monkeypatch.delenv(filesystem.FS_ROOTS_ENV, raising=False)
     payload = filesystem.list_directory("/")
@@ -172,13 +1160,13 @@ def test_filesystem_entrypoints_reject_outside_root_through_paths_validator(monk
     outside_file.write_text("outside\n", encoding="utf-8")
     monkeypatch.setenv(filesystem.FS_ROOTS_ENV, str(allowed))
     calls = []
-    original = filesystem.paths._validated_path
+    original = filesystem.paths._ensure_path_allowed
 
-    def tracking_validator(raw):
-        calls.append(raw)
-        return original(raw)
+    def tracking_validator(path, *, resolved=None):
+        calls.append(path)
+        return original(path, resolved=resolved)
 
-    monkeypatch.setattr(filesystem.paths, "_validated_path", tracking_validator)
+    monkeypatch.setattr(filesystem.paths, "_ensure_path_allowed", tracking_validator)
 
     cases = [
         ("listing", lambda: filesystem.list_directory(str(outside))),
@@ -192,7 +1180,7 @@ def test_filesystem_entrypoints_reject_outside_root_through_paths_validator(monk
         with pytest.raises(FilesystemError) as info:
             action()
         assert info.value.status == 403
-        assert len(calls) == before + 1, name
+        assert len(calls) >= before + 1, name
 
 
 def test_filesystem_blocks_home_secret_paths(monkeypatch, tmp_path):
@@ -386,23 +1374,13 @@ def test_path_info_returns_sniffed_preview_mime_for_misleading_extension(tmp_pat
 
 
 def test_package_path_info_normalizes_required_stat_permission_failure(monkeypatch):
-    class DeniedFile:
-        name = "item"
-        suffix = ".txt"
-
-        def exists(self):
-            return True
-
-        def is_symlink(self):
-            return False
-
-        def is_dir(self):
-            return False
-
-        def stat(self):
-            raise PermissionError(13, "permission denied", "/restricted/item")
-
-    monkeypatch.setattr(filesystem.io_ops.paths, "_validated_path", lambda _raw_path: DeniedFile())
+    monkeypatch.setattr(
+        filesystem.io_ops.paths,
+        "_open_resolved_path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError(13, "permission denied", "/restricted/item")
+        ),
+    )
 
     with pytest.raises(FilesystemError) as info:
         filesystem.path_info("/restricted/item")
@@ -413,7 +1391,8 @@ def test_package_path_info_normalizes_required_stat_permission_failure(monkeypat
 
 
 def test_package_list_and_search_normalize_raw_os_failures(monkeypatch, tmp_path):
-    def denied_list(_path):
+    def denied_list(_path, *, performance_details=None, requested_path=None, operation="list_directory"):
+        del requested_path, operation
         raise PermissionError(13, "list denied", str(tmp_path))
 
     monkeypatch.setattr(filesystem.listing, "_visible_directory_names", denied_list)
@@ -422,7 +1401,6 @@ def test_package_list_and_search_normalize_raw_os_failures(monkeypatch, tmp_path
     assert listed.value.status == 403
     assert "list denied" in listed.value.diagnostic
 
-    monkeypatch.setattr(filesystem.search, "git_root_for_path", lambda _path: "")
     monkeypatch.setattr(filesystem.search.os, "listdir", lambda _path: (_ for _ in ()).throw(OSError("search failed")))
     with pytest.raises(FilesystemError) as searched:
         filesystem.search_files(str(tmp_path), query="item")
@@ -431,38 +1409,105 @@ def test_package_list_and_search_normalize_raw_os_failures(monkeypatch, tmp_path
 
 
 def test_package_walk_archive_and_write_normalize_raw_os_failures(monkeypatch, tmp_path):
-    def denied_walk(_path, *, onerror, **_kwargs):
-        onerror(PermissionError(13, "walk denied", str(tmp_path)))
-        return iter(())
+    original_walk = filesystem_paths.walk_directory
 
-    monkeypatch.setattr(filesystem.io_ops.os, "walk", denied_walk)
+    def denied_walk(_descriptor, **_kwargs):
+        raise PermissionError(13, "walk denied", str(tmp_path))
+
+    monkeypatch.setattr(filesystem_paths, "walk_directory", denied_walk)
     with pytest.raises(FilesystemError) as walked:
         filesystem.count_directory_files(str(tmp_path))
     assert walked.value.status == 403
     assert "walk denied" in walked.value.diagnostic
+    monkeypatch.setattr(filesystem_paths, "walk_directory", original_walk)
 
-    archive_file = tmp_path / "archive.txt"
-    archive_file.write_text("archive", encoding="utf-8")
-    monkeypatch.setattr(filesystem.io_ops, "_walk_zip_sources", lambda _path, _max_bytes: ([], [archive_file], archive_file.stat().st_size))
-    monkeypatch.setattr(filesystem.io_ops.zipfile.ZipFile, "write", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("archive failed")))
+    monkeypatch.setattr(filesystem.io_ops.zipfile.ZipFile, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("archive failed")))
     with pytest.raises(FilesystemError) as archived:
         filesystem.zip_directory(str(tmp_path))
     assert archived.value.status == 500
     assert "archive failed" in archived.value.diagnostic
 
-    original_open = Path.open
     write_target = tmp_path / "write.txt"
-
-    def denied_open(path, *args, **kwargs):
-        if path == write_target:
-            raise PermissionError(13, "write denied", str(path))
-        return original_open(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "open", denied_open)
+    monkeypatch.setattr(
+        filesystem.io_ops.os,
+        "ftruncate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError(13, "write denied", str(write_target))
+        ),
+    )
     with pytest.raises(FilesystemError) as written:
         filesystem.write_file(str(write_target), "content")
     assert written.value.status == 403
     assert "write denied" in written.value.diagnostic
+
+
+def test_walk_directory_closes_open_children_when_directory_filter_raises(tmp_path):
+    (tmp_path / "a-opened").mkdir()
+    (tmp_path / "b-raises").mkdir()
+
+    def include_directory(relative):
+        if relative == Path("b-raises"):
+            raise RuntimeError("filter failed")
+        return True
+
+    unrelated_fd = os.open(os.devnull, os.O_RDONLY)
+    root_fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        assert _open_descriptors_beneath(tmp_path) == {str(root_fd): str(tmp_path)}
+        with pytest.raises(RuntimeError, match="filter failed"):
+            next(filesystem_paths.walk_directory(root_fd, include_directory=include_directory))
+    finally:
+        os.close(root_fd)
+    try:
+        assert _open_descriptors_beneath(tmp_path) == {}
+    finally:
+        os.close(unrelated_fd)
+
+
+def test_list_directory_repeated_success_closes_scan_descriptor(tmp_path):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+
+    before = _open_descriptors_beneath(tmp_path)
+
+    for _ in range(25):
+        filesystem.list_directory(str(tmp_path))
+
+    assert _open_descriptors_beneath(tmp_path) == before
+
+
+def test_authorization_observer_reports_recursive_and_namespace_descriptor_boundaries(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    child = nested / "child.txt"
+    child.write_text("safe\n", encoding="utf-8")
+    events = []
+
+    class Observer:
+        def name_observed(self, operation, requested_path):
+            events.append(("name", operation, requested_path))
+
+        def authority_pinned(self, operation, requested_path):
+            events.append(("authority", operation, requested_path))
+
+    with filesystem_paths.observe_authorization(Observer()):
+        filesystem.count_directory_files(str(tmp_path))
+        filesystem.rename_path(str(child), "renamed.txt")
+
+    renamed = nested / "renamed.txt"
+    for operation, requested_path in (
+        ("count_directory_files", nested),
+        ("count_directory_files", child),
+        ("rename_path", child),
+        ("rename_path", renamed),
+    ):
+        assert events.index(("name", operation, requested_path)) < events.index(
+            ("authority", operation, requested_path)
+        )
+
+    observed_count = len(events)
+    filesystem.read_file(str(renamed))
+    assert len(events) == observed_count
 
 
 def test_filesystem_implementations_leave_os_error_normalization_to_package_facade():
@@ -473,7 +1518,9 @@ def test_filesystem_implementations_leave_os_error_normalization_to_package_faca
     assert "FilesystemError.os_error" not in implementations
     assert "_fs_io_errors" not in implementations
     assert "_fs_io_errors" not in package_source
-    assert implementations.count("onerror=raise_os_error") == 2
+    assert "os.walk(" not in implementations
+    assert "os.fwalk(" not in implementations
+    assert implementations.count("paths.walk_directory(") == 3
 
 
 def test_delete_path_refuses_configured_root(monkeypatch, tmp_path):
@@ -1114,9 +2161,8 @@ def test_blame_file_on_a_tracked_repo_file():
     assert first["author"]
 
 
-def test_rename_path_uses_git_mv_for_tracked_file(tmp_path):
-    # Renaming a git-TRACKED file uses `git mv`, so the new path lands TRACKED (staged), not untracked
-    # like a plain rename would leave it.
+def test_rename_path_stages_a_tracked_file_at_its_new_name(tmp_path):
+    # A tracked rename stages both names in the repository generation pinned before the namespace move.
     def run(*args):
         subprocess.run(args, cwd=str(tmp_path), check=True, capture_output=True)
 
@@ -1132,7 +2178,45 @@ def test_rename_path_uses_git_mv_for_tracked_file(tmp_path):
     assert (tmp_path / "new.txt").exists()
     assert not (tmp_path / "old.txt").exists()
     tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "new.txt"], cwd=str(tmp_path), capture_output=True)
-    assert tracked.returncode == 0, "git mv staged the new path (a plain mv would leave it untracked)"
+    assert tracked.returncode == 0, "the rename must stage the new path"
+
+
+def test_rename_git_staging_keeps_the_authorized_repository_descriptor_live(monkeypatch, tmp_path):
+    safe_repo = tmp_path / "safe-repo"
+    blocked_repo = tmp_path / ".ssh" / "blocked-repo"
+    safe_repo.mkdir()
+    blocked_repo.mkdir(parents=True)
+    for repo in (safe_repo, blocked_repo):
+        init_repo(repo)
+        (repo / "item.txt").write_text("base\n", encoding="utf-8")
+        git(repo, "add", "item.txt")
+        git(repo, "commit", "-m", "base")
+    (safe_repo / "item.txt").write_text("safe\n", encoding="utf-8")
+    (blocked_repo / "moved.txt").write_text("blocked-untracked\n", encoding="utf-8")
+    blocked_status = git(blocked_repo, "status", "--porcelain=v1").stdout.splitlines()
+    parked = tmp_path / "safe-repo-parked"
+    original_git = git_ops._git_with_pinned_repo
+    swapped = False
+
+    def swap_before_stage(repo_handle, args, **kwargs):
+        nonlocal swapped
+        if args and args[0] == "add" and not swapped:
+            swapped = True
+            safe_repo.rename(parked)
+            safe_repo.symlink_to(blocked_repo, target_is_directory=True)
+            try:
+                return original_git(repo_handle, args, **kwargs)
+            finally:
+                safe_repo.unlink()
+                parked.rename(safe_repo)
+        return original_git(repo_handle, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_git_with_pinned_repo", swap_before_stage)
+
+    filesystem_io.rename_path(str(safe_repo / "item.txt"), "moved.txt")
+
+    assert swapped is True
+    assert git(blocked_repo, "status", "--porcelain=v1").stdout.splitlines() == blocked_status
 
 
 def test_rename_path_plain_rename_for_untracked_file(tmp_path):

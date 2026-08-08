@@ -213,6 +213,7 @@
   "debug.cost.backfillPartial": "Geri doldurma tamamlanmadı",
   "debug.cost.backfillPending": "Geri doldurma bekliyor",
   "debug.cost.backfillRunning": "Geri doldurma sürüyor",
+  "debug.cost.backfillUnknown": "Geri doldurma durumu bilinmiyor",
   "debug.cost.byModel": "Modele göre",
   "debug.cost.bySource": "Aracı ve kaynak atfı",
   "debug.cost.byTmux": "tmux penceresine göre maliyet",

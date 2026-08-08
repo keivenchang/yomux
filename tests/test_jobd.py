@@ -1,3 +1,4 @@
+import hashlib
 import json
 import multiprocessing
 import os
@@ -23,6 +24,7 @@ from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import TmuxPaneInfo
+from yolomux_lib.filesystem import FilesystemError
 from yolomux_lib.local_services import rpc
 from yolomux_lib.local_services import runtime
 
@@ -114,6 +116,219 @@ def test_session_files_view_task_rejects_malformed_or_oversized_payload():
     # A payload larger than the broker's input ceiling is rejected by run_registered_task itself.
     with pytest.raises(ValueError):
         jobd.run_registered_task("session_files_view", b"{" + b" " * (jobd.JOBD_MAX_PAYLOAD_BYTES + 1))
+
+
+def test_jobd_product_exposes_uniform_framing_metadata(tmp_path):
+    server = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    body = b'{"retained":true}'
+    server.latest_product["framing-key"] = (1, body, 123.0)
+    server.latest_product_metadata["framing-key"] = {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(body),
+        "sha256": "af7e0e60ef1cb6299c9cf719e651eac394d2005ba01ea0028f5b8c88c6ef992d",
+        "disposition": "inline",
+        "filename": "",
+    }
+
+    response, returned = server._product({"coalesce_key": "framing-key"})
+
+    assert returned == body
+    assert response["product"] == {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(body),
+        "sha256": "af7e0e60ef1cb6299c9cf719e651eac394d2005ba01ea0028f5b8c88c6ef992d",
+        "disposition": "inline",
+        "filename": "",
+    }
+
+
+def test_jobd_source_epoch_is_opaque_and_per_broker_start(tmp_path):
+    first = jobd.PersistentJobBroker(tmp_path / "first.sock", workers=1)
+    second = jobd.PersistentJobBroker(tmp_path / "second.sock", workers=1)
+
+    first_epoch = first.common_status()["source_epoch"]
+
+    assert isinstance(first_epoch, str)
+    assert len(first_epoch) == 32
+    assert first_epoch == first.common_status()["source_epoch"]
+    assert first_epoch != second.common_status()["source_epoch"]
+
+
+def test_registered_task_result_preserves_opaque_body_and_metadata(monkeypatch):
+    body = b"\x00opaque\xff"
+    product = {
+        "format": "opaque_bytes",
+        "content_type": "application/octet-stream",
+        "length": len(body),
+        "sha256": "ec37a96514e60e745734819845f20428b2244b2a190abf32227302b706328122",
+        "disposition": "attachment",
+        "filename": "payload.bin",
+    }
+    monkeypatch.setitem(jobd.REGISTERED_TASKS, "opaque-test", lambda _payload: jobd.JobdTaskResult(body, product))
+
+    result = jobd.run_registered_task_result("opaque-test", b"{}")
+
+    assert result.body == body
+    assert result.product == product
+
+
+def test_filesystem_operation_task_reads_in_jobd(tmp_path):
+    path = tmp_path / "note.txt"
+    path.write_text("jobd owns this read\n", encoding="utf-8")
+
+    result = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps({
+        "op": "read",
+        "path": str(path),
+        "args": {},
+    }).encode("utf-8")))
+
+    assert result["content"] == "jobd owns this read\n"
+
+
+def test_filesystem_operation_task_preserves_raw_bytes(tmp_path):
+    path = tmp_path / "payload.bin"
+    body = b"\x00raw\xff"
+    path.write_bytes(body)
+
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
+        "op": "raw",
+        "path": str(path),
+        "args": {"download": True},
+    }).encode("utf-8"))
+
+    assert result.body == body
+    assert result.product["format"] == "opaque_bytes"
+    assert result.product["disposition"] == "attachment"
+    assert result.product["filename"] == "payload.bin"
+
+
+def test_filesystem_operation_task_frames_html_preview_as_opaque_bytes(tmp_path):
+    path = tmp_path / "preview.html"
+    path.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
+
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
+        "op": "html_preview",
+        "path": str(path),
+        "args": {"locale": "he"},
+    }).encode("utf-8"))
+
+    assert result.product["format"] == "opaque_bytes"
+    assert result.product["content_type"] == "text/html; charset=utf-8"
+    assert result.product["disposition"] == "inline"
+    assert result.product["filename"] == ""
+    document = result.body.decode("utf-8")
+    assert '<html lang="he" dir="rtl">' in document
+    assert 'sandbox="allow-scripts allow-forms allow-popups"' in document
+    assert "allow-same-origin" not in document
+    assert "&lt;script&gt;window.answer = 42;&lt;/script&gt;" in document
+
+
+def test_filesystem_operation_relay_waits_in_jobd_and_returns_opaque_bytes(tmp_path):
+    path = tmp_path / "payload.bin"
+    body = b"\x00raw\xff"
+    path.write_bytes(body)
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker._start_scheduler()
+    try:
+        response, returned = broker.handle({
+            "action": "relay",
+            "task": "filesystem_operation",
+            "payload": {"op": "raw", "path": str(path), "args": {"download": True}},
+            "priority": "interactive",
+            "deadline_ms": 5_000,
+        })
+    finally:
+        broker.stop_event.set()
+        broker._on_shutdown()
+
+    assert response["ok"] is True
+    assert response["state"] == "ready"
+    assert response["product"]["format"] == "opaque_bytes"
+    assert returned == body
+
+
+def test_filesystem_operation_relay_preserves_typed_filesystem_failure(tmp_path):
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    broker._start_scheduler()
+    try:
+        response, returned = broker.handle({
+            "action": "relay",
+            "task": "filesystem_operation",
+            "payload": {"op": "raw", "path": str(tmp_path / "missing.bin"), "args": {}},
+            "priority": "interactive",
+            "deadline_ms": 5_000,
+        })
+    finally:
+        broker.stop_event.set()
+        broker._on_shutdown()
+
+    assert response["ok"] is False
+    assert returned == b""
+    assert response["job"]["failure"]["status"] == 404
+    assert response["job"]["failure"]["filesystem_error"]["path"].endswith("missing.bin")
+
+
+@pytest.mark.parametrize(
+    ("operation", "contents", "maximum", "expected_status", "expected_key"),
+    (
+        ("read", None, None, 404, "common.pathNotFound"),
+        ("diff", None, None, 400, "fs.error.notGitRepo"),
+        ("read", b"abc\0def", None, 415, "fs.error.binary"),
+        ("read", b"x" * 100, 10, 413, "fs.error.tooLarge"),
+    ),
+)
+def test_filesystem_operation_parent_preserves_typed_failures(monkeypatch, tmp_path, operation, contents, maximum, expected_status, expected_key):
+    path = tmp_path / "typed.txt"
+    if contents is not None:
+        path.write_bytes(contents)
+    if maximum is not None:
+        monkeypatch.setattr(jobd.filesystem, "MAX_READ_BYTES", maximum)
+    payload = json.dumps({"op": operation, "path": str(path), "args": {}}).encode("utf-8")
+
+    with pytest.raises(jobd.JobdFilesystemOperationFailure) as failure:
+        jobd._filesystem_operation(payload)
+
+    assert failure.value.status == expected_status
+    assert failure.value.payload["status"] == expected_status
+    assert failure.value.payload["user_message"]["key"] == expected_key
+
+
+def test_session_files_view_skips_deleted_root_from_durable_transcript_cache(tmp_path, monkeypatch):
+    """A cache entry mentioning a retired worktree is a typed partial result, never a worker crash."""
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    retired_root = tmp_path / "retired-worktree"
+    retired_root.mkdir()
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": str(retired_root / "gone.py")}}]},
+        "padding": "x" * (session_files._TRANSCRIPT_SCAN_PERSIST_MIN_BYTES + 1),
+    }) + "\n", encoding="utf-8")
+    assert str(retired_root / "gone.py") in session_files.scan_claude_transcript(transcript, str(retired_root))
+    cache_key = session_files.claude_transcript_scan_cache_key(transcript)
+    assert cache_key is not None
+    cache_path = session_files.transcript_scan_store_path(cache_key)
+    assert cache_path.exists()
+    with session_files._TRANSCRIPT_SCAN_CACHE_GUARD:
+        session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    retired_root.rmdir()
+
+    result = session_files.session_files_view_result({
+        "session": "s1",
+        "infos": {"s1": _session_info_json("s1", retired_root, transcript)},
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+    }, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
+
+    assert result["status"] == 200
+    assert any(
+        warning.get("key") == "common.pathNotFound"
+        and warning.get("params", {}).get("reason_code") == "root_gone"
+        for warning in result["payload"]["warnings"]
+    )
+    assert cache_path.exists()
 
 
 def test_session_files_view_memoizes_git_snapshot_per_repo(tmp_path, monkeypatch):
@@ -385,7 +600,7 @@ def test_repository_snapshot_cache_rebuilds_corrupt_records_and_propagates_git_f
 def test_repository_snapshot_cache_prunes_only_expired_entries(tmp_path, monkeypatch):
     monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(session_files, "_repository_snapshot_cache_last_pruned_at", 0.0)
-    directory = tmp_path / "state" / session_files._REPOSITORY_SNAPSHOT_CACHE_DIRNAME
+    directory = session_files.host_partitioned_state_dir(tmp_path / "state") / session_files._REPOSITORY_SNAPSHOT_CACHE_DIRNAME
     directory.mkdir(parents=True)
     expired = directory / "expired.json"
     current = directory / "current.json"
@@ -560,6 +775,14 @@ def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path
     first = client.submit("json_compact", {"z": 1, "a": [2]}, priority="interactive", generation=3, coalesce_key="fixture")
     duplicate = client.submit("json_compact", {"z": 1, "a": [2]}, priority="interactive", generation=3, coalesce_key="fixture")
     result = _wait_for_result(client, first["job"]["job_id"])
+    produced, produced_body = client.produce(
+        "json_compact",
+        {"z": 1, "a": [2]},
+        priority="interactive",
+        generation=3,
+        coalesce_key="fixture",
+        deadline_ms=5_000,
+    )
     status = client.request({"action": "status"})
 
     assert rejected == {"ok": False, "error": "unknown task"}
@@ -567,6 +790,8 @@ def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path
     assert duplicate["ok"] is True and duplicate["coalesced"] is True
     assert result["job"]["status"] == "completed"
     assert result["job"]["result"] == {"a": [2], "z": 1}
+    assert produced["state"] == "ready"
+    assert json.loads(produced_body) == {"a": [2], "z": 1}
     assert status["queues"] == {"interactive": 0, "freshness": 0, "maintenance": 0}
     assert status["cache"]["records"] == 1
     assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
@@ -596,6 +821,19 @@ def test_registry_launched_jobd_executes_a_spawn_worker(tmp_path):
             pytest.fail(f"registry-launched jobd did not complete: {client.request({'action': 'status'})}")
     finally:
         assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
+
+
+def test_scheduler_started_jobd_holds_a_lease_until_scheduler_stop(tmp_path):
+    client = jobd.JobClient(tmp_path / "jobd.sock")
+    assert client.start_for_scheduler() is True
+    try:
+        assert client.request({"action": "status"})["clients"] == 1
+        assert client.start_for_scheduler() is True
+        assert client.request({"action": "status"})["clients"] == 1
+        assert client.stop_for_scheduler() is True
+        assert client.request({"action": "status"})["clients"] == 0
+    finally:
+        client.request({"action": "shutdown"})
 
 
 def test_registry_launched_jobd_spawn_worker_survives_closed_parent_stdin(tmp_path):
@@ -836,23 +1074,79 @@ def test_jobd_supersedes_stale_queued_generations_and_keeps_payloads_bounded(tmp
     assert oversized == {"ok": False, "error": "payload too large"}
 
 
-def test_jobd_prevents_maintenance_starvation_and_times_out_before_worker_start(tmp_path):
+def test_jobd_prevents_maintenance_starvation_and_times_out_before_worker_start(tmp_path, monkeypatch):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    for number in range(jobd.JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY + 1):
+    interactive = [
         service._queue_record("text_facts", {"text": f"interactive-{number}"}, "interactive", number, f"interactive-{number}")
+        for number in range(jobd.JOBD_INTERACTIVE_WORKERS + 1)
+    ]
     maintenance = service._queue_record("text_facts", {"text": "maintenance"}, "maintenance", 1, "maintenance")
-
-    selected = [service._next_queued_record() for _ in range(jobd.JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY + 1)]
-
-    assert [record.priority for record in selected if record is not None] == ["interactive"] * jobd.JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY + ["maintenance"]
-    assert selected[-1] is maintenance
-
     expired = service._queue_record("text_facts", {"text": "expired"}, "freshness", 1, "expired", deadline_at=time.monotonic() - 1.0)
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
     service._pump()
 
+    assert interactive[0].status == "running"
+    assert interactive[1].status == "queued"
+    assert maintenance.status == "running"
     assert expired.status == "timed_out"
     assert expired.error == "deadline exceeded before execution"
     assert service._submit({"task": "text_facts", "payload": {"text": "late"}, "deadline_ms": jobd.JOBD_MAX_DEADLINE_MS + 1}) == {"ok": False, "error": "deadline too large"}
+
+
+def test_jobd_general_saturation_does_not_block_interactive_dispatch(tmp_path, monkeypatch):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    for number in range(service.general_worker_count):
+        blocking = service._queue_record("text_facts", {"text": f"background-{number}"}, "freshness", number, f"background-{number}")
+        blocking.status = "running"
+        blocking.future = Future()
+    submitted_future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return submitted_future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    interactive = service._queue_record("json_compact", {"interactive": True}, "interactive", 1, "interactive")
+
+    started = time.monotonic()
+    service._pump()
+
+    assert interactive.status == "running"
+    assert interactive.future is submitted_future
+    assert time.monotonic() - started < jobd.JOBD_SCHEDULER_POLL_SECONDS
+
+
+def test_jobd_interactive_saturation_queues_until_reserved_capacity_is_released(tmp_path, monkeypatch):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    submitted_futures: list[Future] = []
+
+    class Executor:
+        def submit(self, *_args):
+            future = Future()
+            submitted_futures.append(future)
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    first = service._queue_record("json_compact", {"order": 1}, "interactive", 1, "interactive-1")
+    second = service._queue_record("json_compact", {"order": 2}, "interactive", 1, "interactive-2")
+
+    service._pump()
+
+    assert first.status == "running"
+    assert second.status == "queued"
+    assert len(submitted_futures) == 1
+
+    submitted_futures[0].set_result(b'{"order":1}')
+    service._pump()
+
+    assert first.status == "completed"
+    assert second.status == "running"
+    assert len(submitted_futures) == 2
 
 
 def test_jobd_rejects_malformed_worker_result_and_bounds_retained_records(tmp_path):
@@ -880,9 +1174,29 @@ def test_jobd_rejects_malformed_worker_result_and_bounds_retained_records(tmp_pa
     assert len(service.records) <= jobd.JOBD_MAX_RECORDS
 
 
+def test_jobd_marks_filesystem_worker_failure_terminal_and_continues_serving(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    poisoned = service._queue_record("session_files_view", {}, "interactive", 1, "retired-root")
+    poisoned.status = "running"
+    poisoned.future = Future()
+    poisoned.future.set_exception(FilesystemError.path_not_found("/gone/worktree"))
+
+    service._pump()
+
+    assert poisoned.status == "failed"
+    assert poisoned.error == "FilesystemError: path not found: /gone/worktree"
+    assert service.common_status()["scheduler_pump"]["failures"] == 0
+    survivor = service._queue_record("text_facts", {"text": "still-serving"}, "interactive", 2, "survivor")
+    survivor.status = "running"
+    survivor.future = Future()
+    survivor.future.set_result(b'{"bytes":13,"lines":1,"nonempty_lines":1}')
+    service._pump()
+    assert survivor.status == "completed"
+
+
 def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    occupying = service._queue_record("text_facts", {"text": "active"}, "interactive", 1, "active")
+    occupying = service._queue_record("text_facts", {"text": "active"}, "freshness", 1, "active")
     occupying.status = "running"
     occupying.future = Future()
     for number in range(jobd.JOBD_MAX_QUEUE):
@@ -892,10 +1206,8 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
     assert service._submit({"task": "text_facts", "payload": {"text": "overflow"}}) == {"ok": False, "error": "queue full"}
     assert service._submit({"task": "text_facts", "payload": {"text": "invalid"}, "deadline_ms": "tomorrow"}) == {"ok": False, "error": "invalid generation or deadline"}
     assert service._submit({"task": "text_facts", "payload": {"text": "negative"}, "deadline_ms": -1}) == {"ok": False, "error": "invalid deadline"}
-    service.leases = {
-        str(number): os.getpid()
-        for number in range(runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES)
-    }
+    lease_record = runtime.current_host_identity().process_record_fields()
+    service.leases = {str(number): dict(lease_record) for number in range(runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES)}
     lease_response, _binary = service.handle({"action": "lease", "client_pid": os.getpid()})
     assert lease_response == {"ok": False, "error": "too many clients", "leases": runtime.LOCAL_SERVICE_MAX_CLIENT_LEASES, "version": jobd.JOBD_PROTOCOL_VERSION}
 
@@ -908,12 +1220,25 @@ def test_jobd_enforces_queue_saturation_deadlines_and_recovers_a_broken_executor
         def shutdown(self, **_kwargs):
             return None
 
-    service.executor = BrokenExecutor()  # type: ignore[assignment]
+    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
 
     assert broken.status == "failed"
     assert broken.error == "worker crashed"
-    assert service.executor is None
+    assert service.interactive_executor is None
+
+
+def test_jobd_rejects_newer_protocol_before_dispatch(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+
+    response, binary = service.handle({"action": "ping", "protocol_version": jobd.JOBD_PROTOCOL_VERSION + 1})
+
+    assert binary == b""
+    assert response == {
+        "ok": False,
+        "error": "upgrade_required",
+        "required_protocol_version": jobd.JOBD_PROTOCOL_VERSION,
+    }
 
 
 def test_jobd_clients_share_one_registry_and_coalesce_across_ports(tmp_path):
@@ -956,12 +1281,13 @@ def test_jobd_submit_never_creates_a_process_in_the_request_path(tmp_path, monke
     assert calls == [{"action": "submit", "task": "text_facts", "payload": {"text": "queued"}, "priority": "freshness", "generation": 0, "coalesce_key": "", "deadline_ms": 0}]
 
 
-def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_exit(tmp_path):
+@pytest.mark.parametrize("priority", ["interactive", "freshness"])
+def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_exit(tmp_path, priority):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
-    timed_out = service._queue_record("text_facts", {"text": "slow"}, "interactive", 1, "slow", deadline_at=time.monotonic() - 1.0)
+    timed_out = service._queue_record("text_facts", {"text": "slow"}, priority, 1, "slow", deadline_at=time.monotonic() - 1.0)
     timed_out.status = "running"
     timed_out.future = Future()
-    waiting = service._queue_record("text_facts", {"text": "wait"}, "freshness", 1, "wait")
+    waiting = service._queue_record("text_facts", {"text": "wait"}, priority, 1, "wait")
 
     service._pump()
 
@@ -972,6 +1298,7 @@ def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_ex
     timed_out.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
     service._pump()
 
+    assert timed_out.future is None
     assert waiting.status == "running"
 
 
@@ -1002,7 +1329,7 @@ def test_jobd_respawns_after_worker_crash_and_restart_accepts_new_work(tmp_path)
         def shutdown(self, **_kwargs):
             return None
 
-    service.executor = BrokenExecutor()  # type: ignore[assignment]
+    service.interactive_executor = BrokenExecutor()  # type: ignore[assignment]
     service._pump()
     recovered = service._queue_record("json_compact", {"z": 1, "a": 2}, "interactive", 2, "recovered")
     deadline = time.monotonic() + 5.0
@@ -1021,8 +1348,10 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, and v12 records requester attribution at acceptance.
-    assert jobd.JOBD_PROTOCOL_VERSION == 12
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, and v18 adds byte-product relay requests for browser filesystem consumers.
+    assert jobd.JOBD_PROTOCOL_VERSION == 18
+    assert "filesystem_batch" in jobd.REGISTERED_TASKS
+    assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
     assert "session_files_view" in jobd.REGISTERED_TASKS
     assert "tabber_activity_view" in jobd.REGISTERED_TASKS
     assert "metadata_warm_view" in jobd.REGISTERED_TASKS
@@ -1063,6 +1392,300 @@ def test_jobd_product_serves_last_known_good_bytes_across_the_state_taxonomy(tmp
     newer.future.set_result(b'{"a":2}')
     service._pump()
     assert service.common_status()["cache"]["products_stale"] == 0
+
+
+def test_jobd_produce_preserves_one_bounded_batch_product_and_caller_delivery_mode(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    service._pump = lambda: None
+    items = [{"id": f"item-{index}", "type": "info", "path": f"/repo/{index}"} for index in range(64)]
+    ready_body = json.dumps({"results": items}, separators=(",", ":")).encode("utf-8")
+    service.latest_product["fs-batch"] = (7, ready_body, time.time())
+    service.latest_product_metadata["fs-batch"] = {
+        "format": "json",
+        "content_type": "application/json; charset=utf-8",
+        "length": len(ready_body),
+        "sha256": hashlib.sha256(ready_body).hexdigest(),
+        "disposition": "inline",
+        "filename": "",
+    }
+
+    ready_meta, forwarded = service._produce({
+        "task": "filesystem_batch",
+        "payload": {"requests": items},
+        "priority": "interactive",
+        "generation": 7,
+        "coalesce_key": "fs-batch",
+        "deadline_ms": 15_000,
+        "delivery": "ready_or_receipt",
+    })
+    receipt_meta, receipt_body = service._produce({
+        "task": "filesystem_batch",
+        "payload": {"requests": items},
+        "priority": "interactive",
+        "generation": 8,
+        "coalesce_key": "fs-batch-new",
+        "deadline_ms": 15_000,
+        "delivery": "receipt",
+    })
+
+    assert ready_meta["state"] == "ready"
+    assert ready_meta["job"]["generation"] == 7
+    assert ready_meta["product"] == service.latest_product_metadata["fs-batch"]
+    assert json.loads(forwarded)["results"] == items
+    assert receipt_meta["state"] == "queued"
+    assert receipt_meta["job"]["generation"] == 8
+    assert receipt_body == b""
+    assert json.loads(service.records[receipt_meta["job"]["job_id"]].payload)["requests"] == items
+
+
+def test_filesystem_batch_task_preserves_64_item_ids_and_results(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "entry.txt").write_text("one\n", encoding="utf-8")
+    requests = [
+        {
+            "id": f"request-{index}",
+            "type": "list" if index % 2 == 0 else "info",
+            "path": str(root),
+            "trigger_counts": {"tree-render": 1},
+            "include_watch_signature": index == 0,
+        }
+        for index in range(64)
+    ]
+
+    result = json.loads(jobd.run_registered_task(
+        "filesystem_batch",
+        json.dumps({"requests": requests, "client_scope": "browser"}).encode("utf-8"),
+    ))
+
+    assert [response["id"] for response in result["responses"]] == [request["id"] for request in requests]
+    assert all(response["ok"] is True for response in result["responses"])
+    assert all(response["payload"]["path"] == str(root) for response in result["responses"])
+    assert result["responses"][0]["watch_signature"][0] == str(root)
+    assert all("watch_signature" not in response for response in result["responses"][1:])
+    with pytest.raises(ValueError, match="at most 64"):
+        jobd.run_registered_task(
+            "filesystem_batch",
+            json.dumps({"requests": [*requests, {"id": "overflow", "type": "info", "path": str(root)}]}).encode("utf-8"),
+        )
+
+
+def test_session_files_cache_prune_task_removes_expired_payload_and_manifest(tmp_path):
+    cache_dir = tmp_path / "session-files-cache"
+    cache_dir.mkdir()
+    payload_path = cache_dir / "expired.json"
+    manifest_path = cache_dir / "expired.manifest.json"
+    payload_path.write_text("payload", encoding="utf-8")
+    manifest_path.write_text("manifest", encoding="utf-8")
+    os.utime(payload_path, (10.0, 10.0))
+    os.utime(manifest_path, (10.0, 10.0))
+
+    result = json.loads(jobd.run_registered_task(
+        "session_files_cache_prune",
+        json.dumps({
+            "cache_dir": str(cache_dir),
+            "max_age_seconds": 1.0,
+            "max_bytes": 1024,
+            "batch_size": 8,
+        }).encode("utf-8"),
+    ))
+
+    assert result["entries"] == 1
+    assert result["removed_entries"] == 1
+    assert result["removed_files"] == 2
+    assert payload_path.exists() is False
+    assert manifest_path.exists() is False
+
+
+def test_filesystem_batch_task_uses_the_bounded_binary_product_budget(monkeypatch):
+    large_payload = "x" * (jobd.JOBD_MAX_RESULT_BYTES + 1024)
+    monkeypatch.setattr(
+        jobd.filesystem,
+        "filesystem_batch_result",
+        lambda _payload: {"responses": [{"id": "large", "ok": True, "payload": {"text": large_payload}}]},
+    )
+
+    result = jobd.run_registered_task("filesystem_batch", b'{"requests":[]}')
+
+    assert len(result) > jobd.JOBD_MAX_RESULT_BYTES
+    assert len(result) <= jobd.JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES
+
+
+def test_jobd_produce_executes_one_typed_64_item_filesystem_batch(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    requests = [
+        {"id": f"item-{index}", "type": "info", "path": str(root), "trigger_counts": {"tree-render": 1}}
+        for index in range(64)
+    ]
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    metadata, body = client.produce(
+        "filesystem_batch",
+        {"requests": requests, "client_scope": "browser"},
+        priority="interactive",
+        generation=1,
+        coalesce_key="filesystem-batch-integration",
+        deadline_ms=15_000,
+        delivery="receipt",
+    )
+    assert metadata["state"] == "queued"
+    assert body == b""
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        product, body = client.product("filesystem-batch-integration")
+        if product.get("state") == "ready" and body:
+            break
+        time.sleep(0.02)
+    else:
+        pytest.fail(f"filesystem batch did not settle: {client.request({'action': 'status'})}")
+
+    result = json.loads(body)
+    assert [response["id"] for response in result["responses"]] == [request["id"] for request in requests]
+    assert all(response["ok"] is True for response in result["responses"])
+    assert len([record for record in service.records.values() if record.task == "filesystem_batch"]) == 1
+    assert client.request({"action": "shutdown"}) == {"ok": True, "shutdown": True}
+    worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
+def test_jobd_produce_receipt_does_not_wait_for_cold_executor_start(tmp_path, monkeypatch):
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+    executor_start_entered = threading.Event()
+    release_executor_start = threading.Event()
+    original_executor = service._executor
+
+    def delayed_executor_start(priority="freshness"):
+        executor_start_entered.set()
+        assert release_executor_start.wait(2.0)
+        return original_executor(priority)
+
+    monkeypatch.setattr(service, "_executor", delayed_executor_start)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    try:
+        started = time.monotonic()
+        metadata, body = client.produce(
+            "filesystem_batch",
+            {"requests": [{"id": "root", "type": "info", "path": str(tmp_path)}]},
+            priority="interactive",
+            generation=1,
+            coalesce_key="cold-filesystem-batch",
+            deadline_ms=5_000,
+            delivery="receipt",
+            timeout=0.1,
+        )
+        elapsed = time.monotonic() - started
+
+        assert metadata["ok"] is True
+        assert metadata["state"] == "queued"
+        assert body == b""
+        assert elapsed < 0.1
+        assert executor_start_entered.wait(1.0)
+        product_started = time.monotonic()
+        product, product_body = client.product("cold-filesystem-batch", timeout=0.1)
+        assert product["state"] == "pending"
+        assert product_body == b""
+        assert time.monotonic() - product_started < 0.1
+    finally:
+        release_executor_start.set()
+        deadline = time.monotonic() + 2.0
+        while not client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        client.request({"action": "shutdown"}, timeout=2.0)
+        worker.join(timeout=2.0)
+
+
+def test_filesystem_batch_large_real_rpc_uses_binary_product_not_result_metadata(tmp_path):
+    root = tmp_path / "workspace" / "projects" / "long-provider-repository-name" / "nested-components"
+    root.mkdir(parents=True)
+    requests = []
+    for index in range(64):
+        directory = root / f"component-{index:02d}-with-a-realistic-long-directory-name"
+        directory.mkdir()
+        for entry_index in range(48):
+            (directory / f"generated-client-artifact-{entry_index:03d}-with-descriptive-name.json").write_text(
+                "{}\n",
+                encoding="utf-8",
+            )
+        requests.append({
+            "id": f"directory-{index:02d}",
+            "type": "list",
+            "path": str(directory),
+            "trigger_counts": {"tree-render": 1},
+        })
+    payload = {"requests": requests, "client_scope": "browser"}
+    request_bytes = len(json.dumps({
+        "action": "produce",
+        "task": "filesystem_batch",
+        "payload": payload,
+        "priority": "interactive",
+        "generation": 1,
+        "coalesce_key": "large-filesystem-batch",
+        "deadline_ms": 15_000,
+        "delivery": "receipt",
+        "allow_stale": False,
+    }, separators=(",", ":")).encode("utf-8"))
+    assert request_bytes < rpc.LOCAL_RPC_MAX_METADATA_BYTES
+
+    socket_path = tmp_path / "jobd.sock"
+    service = jobd.PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
+    worker = threading.Thread(target=service.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    try:
+        metadata, body = client.produce(
+            "filesystem_batch",
+            payload,
+            priority="interactive",
+            generation=1,
+            coalesce_key="large-filesystem-batch",
+            deadline_ms=15_000,
+            delivery="receipt",
+            timeout=2.0,
+        )
+        assert metadata["state"] == "queued"
+        assert body == b""
+        job_id = metadata["job"]["job_id"]
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            product, body = client.product("large-filesystem-batch", timeout=2.0)
+            if product.get("state") == "ready" and body:
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail(f"filesystem batch did not settle: {client.request({'action': 'status'}, timeout=2.0)}")
+
+        result = json.loads(body)
+        assert len(body) > rpc.LOCAL_RPC_MAX_METADATA_BYTES
+        assert len(body) <= rpc.LOCAL_RPC_MAX_BINARY_BYTES
+        assert [response["id"] for response in result["responses"]] == [request["id"] for request in requests]
+        assert all(len(response["payload"]["entries"]) == 48 for response in result["responses"])
+        oversized_result = client.result(job_id)
+        assert oversized_result == {"ok": False, "error": "response too large"}
+        assert service.request_counters["produce"] == 1
+        assert service.request_counters["product"] >= 1
+        assert service.request_counters["result"] == 1
+    finally:
+        client.request({"action": "shutdown"}, timeout=2.0)
+        worker.join(timeout=2.0)
 
 
 def test_jobd_older_or_failed_completion_cannot_overwrite_a_newer_product(tmp_path):
@@ -1147,6 +1770,35 @@ def test_jobd_status_lists_all_running_records_without_product_payloads(tmp_path
     assert status["worker_pids"] == []
 
 
+def test_jobd_status_and_shutdown_cover_general_and_interactive_executors(tmp_path):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    shutdown_pids: list[int] = []
+
+    class Process:
+        def __init__(self, pid):
+            self.pid = pid
+
+    class Executor:
+        def __init__(self, pid):
+            self.pid = pid
+            self._processes = {pid: Process(pid)}
+
+        def shutdown(self, **_kwargs):
+            shutdown_pids.append(self.pid)
+
+    service.executor = Executor(101)  # type: ignore[assignment]
+    service.interactive_executor = Executor(102)  # type: ignore[assignment]
+
+    status = service.common_status()
+    service._on_shutdown()
+
+    assert status["worker_count"] == 3
+    assert status["worker_pids"] == [101, 102]
+    assert sorted(shutdown_pids) == [101, 102]
+    assert service.executor is None
+    assert service.interactive_executor is None
+
+
 def test_jobd_status_exposes_bounded_request_action_counters(tmp_path):
     service = jobd.PersistentJobBroker(tmp_path / "jobd.sock")
 
@@ -1195,7 +1847,7 @@ def test_jobd_tracks_per_task_runtime_count_total_and_max(tmp_path, monkeypatch)
 
     fast = service._queue_record("json_compact", {"a": 1}, "freshness", 1, "fast")
     fast.status = "running"
-    fast.running_started_at = clock_state["now"]  # 100.0
+    fast.running_started_monotonic = clock_state["now"]  # 100.0
     fast.future = Future()
     fast.future.set_result(b'{"a":1}')
     clock_state["now"] = 100.05  # 50ms of pure execution
@@ -1203,7 +1855,7 @@ def test_jobd_tracks_per_task_runtime_count_total_and_max(tmp_path, monkeypatch)
 
     slow = service._queue_record("json_compact", {"a": 2}, "freshness", 2, "slow")
     slow.status = "running"
-    slow.running_started_at = clock_state["now"]  # 100.05
+    slow.running_started_monotonic = clock_state["now"]  # 100.05
     slow.future = Future()
     slow.future.set_result(b'{"a":2}')
     clock_state["now"] = 100.25  # 200ms of pure execution
@@ -1217,6 +1869,50 @@ def test_jobd_tracks_per_task_runtime_count_total_and_max(tmp_path, monkeypatch)
     status_stats = service.common_status()["product_runtime_ms"]["json_compact"]
     assert status_stats["count"] == 2
     assert status_stats["avg_ms"] == pytest.approx(125.0, abs=1.0)
+
+
+def test_jobd_future_completion_wakes_scheduler_before_poll_interval(tmp_path, monkeypatch):
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    record = service._queue_record("json_compact", {"a": 1}, "interactive", 1, "wake-on-done")
+    service.scheduler_event.clear()
+    service._pump()
+
+    assert record.status == "running"
+    assert service.scheduler_event.is_set() is False
+    future.set_result(b'{"a":1}')
+    assert service.scheduler_event.wait(0.01), "completed future waited for the 50 ms scheduler poll"
+
+
+def test_jobd_result_exposes_wall_clock_running_start_separate_from_runtime_clock(tmp_path, monkeypatch):
+    wall_clock = {"now": 1_800_000_000.0}
+    runtime_clock = {"now": 100.0}
+    monkeypatch.setattr(jobd.time, "time", lambda: wall_clock["now"])
+    monkeypatch.setattr(jobd.time, "monotonic", lambda: runtime_clock["now"])
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
+    future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return future
+
+    monkeypatch.setattr(service, "_executor", lambda *_args: Executor())
+    record = service._queue_record("json_compact", {"a": 1}, "interactive", 1, "phase-clock")
+    wall_clock["now"] += 0.25
+    runtime_clock["now"] += 0.5
+
+    service._pump()
+
+    result = service._record_payload(record)
+    assert result["submitted_at"] == 1_800_000_000.0
+    assert result["running_started_at"] == 1_800_000_000.25
+    assert record.running_started_monotonic == 100.5
 
 
 def test_jobd_records_only_bounded_session_files_phase_aggregates(tmp_path):

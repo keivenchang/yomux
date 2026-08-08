@@ -1,37 +1,47 @@
 """Bounded stateless CPU broker for YOLOmux background transforms.
 
 The web process submits only registered, immutable JSON payloads.  ``jobd``
-owns priority ordering, coalescing, cancellation, and a small spawn-based
-executor pool so CPU-bound Python work cannot run in HTTP request threads.
+owns priority ordering, coalescing, cancellation, and bounded spawn-based
+executor capacity so CPU-bound Python work cannot run in HTTP request threads.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import multiprocessing
 import os
+import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from concurrent.futures import Future
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from .. import filesystem
 from ..workspace import session_files
 from ..observability.activity_summary import tabber_activity_view_result
-from .common import STATE_DIR
+from .common import RUNTIME_DIR
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import MAX_TRANSCRIPT_TAIL_LINES
+from .common import inline_json_product_metadata
+from .common import product_filename
 from .common import tail_file_lines
+from ..local_services.rpc import LOCAL_RPC_MAX_BINARY_BYTES
 from ..local_services.rpc import LOCAL_RPC_VERSION, safe_socket_path  # noqa: F401 - public transport-version compatibility export
+from ..local_services.runtime import LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
+from ..local_services.runtime import local_service_exception_cause
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -44,6 +54,7 @@ from ..observability.transcripts import compact_transcript_lines
 from ..observability.transcripts import newest_transcript_activity_timestamp
 from ..observability.transcripts import newest_transcript_timestamp
 from ..observability.transcripts import transcript_activity_state_from_text
+from ..web import html_preview_document
 
 
 # The envelope transport remains LOCAL_RPC_VERSION. Bump this service generation whenever the
@@ -60,9 +71,27 @@ from ..observability.transcripts import transcript_activity_state_from_text
 # v11: timed-out products are counted and reported as the latest failure.
 # v12: session-files requester attribution is recorded when a product is accepted, not only after
 # a worker completes, so timeouts and still-running expensive jobs remain attributable.
-JOBD_PROTOCOL_VERSION = 12
+# v13: tabber_activity_view accepts bounded precomputed recent-path summaries instead of full
+# session-files payloads, so an older worker must not silently discard the projected field.
+# v14: `produce` atomically submits one typed product request and either forwards already
+# materialized bytes or returns its accepted job receipt without waiting in the RPC handler.
+# v15: registered one max-64 filesystem list/info batch product for Finder.
+# v16: dispatches cold process starts from a scheduler thread so RPC handlers stay available.
+# v17: moves durable session-files cache pruning out of the web process.
+# v18: adds byte-product relay requests for browser-owned filesystem consumers.
+JOBD_PROTOCOL_VERSION = 18
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
+# jobd is the one local service with a handler that waits by contract: `_relay` blocks on
+# `record.completion_event` for up to JOBD_MAX_DEADLINE_MS.  On a serial listener that wait is
+# charged to every other client, including the cheap last-known-good `product` reads that poll
+# on a 500 ms deadline, and the wait is invisible on the wire.  jobd's handler is lock-safe --
+# every mutation runs under `state_lock` and `_relay` drops it around the wait -- so it takes
+# the same shared concurrency limit as watchd and statusd.
+JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
+# General work keeps the existing pool capacity. Interactive work has one dedicated slot so a
+# long background transform cannot consume every process available to a browser request.
 JOBD_MAX_WORKERS = 2
+JOBD_INTERACTIVE_WORKERS = 1
 JOBD_SESSION_FILES_REQUESTERS = frozenset({
     "api-session-files", "api-session-files-batch", "background-refresh",
     "background-info-refresh", "metadata-cache-miss", "metadata-follower-fallback",
@@ -70,23 +99,26 @@ JOBD_SESSION_FILES_REQUESTERS = frozenset({
 JOBD_MAX_QUEUE = 64
 JOBD_MAX_PAYLOAD_BYTES = 256 * 1024
 JOBD_MAX_RESULT_BYTES = 512 * 1024
+JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES = LOCAL_RPC_MAX_BINARY_BYTES
+JOBD_MAX_RETAINED_RESULT_BYTES = 32 * 1024 * 1024
 JOBD_MAX_RECORDS = 256
 # The last-known-good product store is keyed by coalesce_key (per file/session), so bound it
 # independently of the job-record ring and evict the oldest completed bytes past this many keys.
 JOBD_MAX_PRODUCTS = 256
 JOBD_MAX_SOURCE_DIAGNOSTICS = 256
 JOBD_MAX_DEADLINE_MS = 120_000
-JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY = 4
+JOBD_SCHEDULER_POLL_SECONDS = 0.05
 JOBD_SOCKET_NAME = "jobd.sock"
 JOBD_PRIORITIES = ("interactive", "freshness", "maintenance")
 JOBD_REQUEST_ACTIONS = frozenset({
-    "ping", "status", "profile", "submit", "result", "product", "cancel",
+    "ping", "status", "profile", "submit", "result", "product", "produce", "relay", "cancel",
     "lease", "release", "shutdown", "shutdown_if_idle",
 })
+JOBD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
 
 
 def default_socket_path() -> Path:
-    return safe_socket_path(STATE_DIR / "services" / JOBD_SOCKET_NAME, prefix="yolomux-jobd")
+    return safe_socket_path(RUNTIME_DIR / "services" / JOBD_SOCKET_NAME, prefix="yolomux-jobd")
 
 
 def default_worker_count(cpu_count: int | None = None) -> int:
@@ -230,10 +262,129 @@ def _metadata_warm_view(payload: bytes) -> bytes:
     return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _filesystem_batch(payload: bytes) -> bytes:
+    """Compute one bounded Finder list/info batch outside the web process."""
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("filesystem batch payload must be an object")
+    result = filesystem.filesystem_batch_result(value)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _filesystem_operation_untyped(payload: bytes) -> bytes:
+    """Execute one typed filesystem snapshot descriptor outside the web process."""
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("filesystem operation payload must be an object")
+    operation = str(value.get("op") or "")
+    path = str(value.get("path") or "")
+    args = value.get("args", {})
+    if not isinstance(args, dict):
+        raise ValueError("filesystem operation args must be an object")
+    if operation == "list":
+        result = filesystem.list_directory(path)
+    elif operation == "read":
+        result = filesystem.read_file(path)
+    elif operation == "html_preview":
+        result = filesystem.read_file(path)
+        body = html_preview_document(
+            str(result.get("content") or ""),
+            path,
+            str(args.get("locale") or "en"),
+        ).encode("utf-8")
+        return JobdTaskResult(body, {
+            "format": "opaque_bytes",
+            "content_type": "text/html; charset=utf-8",
+            "length": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "disposition": "inline",
+            "filename": "",
+        })
+    elif operation == "info":
+        result = filesystem.path_info(path, operation="filesystem_operation.info")
+    elif operation == "search":
+        result = filesystem.search_files(path, str(args.get("query") or ""), args.get("limit", 400), recursive=args.get("recursive") is True)
+    elif operation == "index_status":
+        result = filesystem.index_status(path)
+    elif operation == "count":
+        result = filesystem.count_directory_files(path)
+    elif operation == "diff":
+        result = filesystem.diff_file(path, from_ref=args.get("from_ref"), to_ref=args.get("to_ref"))
+    elif operation == "blame":
+        result = filesystem.blame_file(path, ref=args.get("ref"))
+    elif operation == "write":
+        result = filesystem.write_file(path, str(args.get("content") or ""), expected_mtime=args.get("expected_mtime"))
+    elif operation == "delete":
+        result = filesystem.delete_path(path)
+    elif operation == "unindex":
+        result = filesystem.unindex_root(path)
+    elif operation == "rename":
+        result = filesystem.rename_path(path, str(args.get("new_name") or ""))
+    elif operation == "mkdir":
+        result = filesystem.create_directory(path)
+    elif operation == "raw":
+        body, content_type = filesystem.read_raw(path, max_bytes=args.get("max_bytes"))
+        return JobdTaskResult(body, {
+            "format": "opaque_bytes",
+            "content_type": content_type,
+            "length": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "disposition": "attachment" if args.get("download") is True else "inline",
+            "filename": product_filename(Path(path).name, fallback="download") if args.get("download") is True else "",
+        })
+    elif operation == "zip":
+        archive, _size = filesystem.zip_directory(path, max_bytes=args.get("max_bytes"))
+        try:
+            body = archive.read()
+        finally:
+            archive.close()
+        return JobdTaskResult(body, {
+            "format": "opaque_bytes",
+            "content_type": "application/zip",
+            "length": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "disposition": "attachment",
+            "filename": product_filename(args.get("filename") or f"{Path(path).name or 'archive'}.zip", fallback="archive.zip"),
+        })
+    else:
+        raise ValueError("unsupported filesystem operation")
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _filesystem_operation(payload: bytes) -> bytes:
+    """Preserve every filesystem facade failure across the jobd process boundary."""
+    try:
+        return _filesystem_operation_untyped(payload)
+    except filesystem.FilesystemError as exc:
+        value = json.loads(payload.decode("utf-8"))
+        path = str(value.get("path") or "") if isinstance(value, dict) else ""
+        raise JobdFilesystemOperationFailure(exc.status, exc.payload(path=path)) from exc
+
+
+def _session_files_cache_prune(payload: bytes) -> bytes:
+    """Prune the durable session-files cache in a jobd worker process."""
+    value = json.loads(payload.decode("utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("session-files cache prune payload must be an object")
+    cache_dir = Path(str(value.get("cache_dir") or "")).expanduser()
+    if not cache_dir.is_absolute() or ".." in cache_dir.parts:
+        raise ValueError("session-files cache directory must be absolute and normalized")
+    result = session_files.prune_disk_cache(
+        cache_dir,
+        max_age_seconds=float(value.get("max_age_seconds") or 0.0),
+        max_bytes=int(value.get("max_bytes") or 0),
+        batch_size=int(value.get("batch_size") or 1),
+    )
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
 REGISTERED_TASKS = {
+    "filesystem_batch": _filesystem_batch,
+    "filesystem_operation": _filesystem_operation,
     "indexed_repo_roots": _indexed_repo_roots,
     "json_compact": _json_compact,
     "metadata_warm_view": _metadata_warm_view,
+    "session_files_cache_prune": _session_files_cache_prune,
     "session_files_view": _session_files_view,
     "tabber_activity_view": _tabber_activity_view,
     "text_facts": _text_facts,
@@ -241,16 +392,62 @@ REGISTERED_TASKS = {
 }
 
 
-def run_registered_task(task: str, payload: bytes) -> bytes:
-    """Executor entry point; accepts only known names and bounded bytes."""
+@dataclass(frozen=True)
+class JobdTaskResult:
+    """Opaque task bytes plus the uniform product metadata retained with them."""
+
+    body: bytes
+    product: dict[str, object]
+
+
+class JobdFilesystemOperationFailure(RuntimeError):
+    """Preserve a worker filesystem error's HTTP payload across the process boundary."""
+
+    def __init__(self, status: int, payload: dict[str, object]):
+        super().__init__(str(payload.get("error") or "filesystem operation failed"))
+        self.status = int(status)
+        self.payload = dict(payload)
+
+    def __reduce__(self) -> tuple[object, tuple[int, dict[str, object]]]:
+        return type(self), (self.status, self.payload)
+
+
+def _validated_product_metadata(body: bytes, product: dict[str, object]) -> dict[str, object]:
+    if set(product) != {"format", "content_type", "length", "sha256", "disposition", "filename"}:
+        raise ValueError("invalid product metadata fields")
+    if product["format"] not in {"json", "opaque_bytes"} or product["disposition"] not in {"inline", "attachment"}:
+        raise ValueError("invalid product metadata")
+    if not isinstance(product["content_type"], str) or not product["content_type"]:
+        raise ValueError("invalid product content type")
+    if product["length"] != len(body) or not isinstance(product["sha256"], str) or product["sha256"] != hashlib.sha256(body).hexdigest():
+        raise ValueError("invalid product integrity")
+    if not isinstance(product["filename"], str) or "/" in product["filename"] or "\\" in product["filename"]:
+        raise ValueError("invalid product filename")
+    return dict(product)
+
+
+def run_registered_task_result(task: str, payload: bytes) -> JobdTaskResult:
+    """Executor entry point that preserves opaque task bodies for broker retention."""
     if task not in REGISTERED_TASKS:
         raise ValueError("unknown task")
     if len(payload) > JOBD_MAX_PAYLOAD_BYTES:
         raise ValueError("payload too large")
     result = REGISTERED_TASKS[task](payload)
-    if len(result) > JOBD_MAX_RESULT_BYTES:
+    if isinstance(result, JobdTaskResult):
+        body = result.body
+        product = _validated_product_metadata(body, result.product)
+    else:
+        body = result
+        product = inline_json_product_metadata(body)
+    result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
+    if len(body) > result_limit:
         raise ValueError("result too large")
-    return result
+    return JobdTaskResult(body, product)
+
+
+def run_registered_task(task: str, payload: bytes) -> bytes:
+    """Compatibility entry point for existing JSON-task callers."""
+    return run_registered_task_result(task, payload).body
 
 
 @dataclass
@@ -265,24 +462,29 @@ class JobRecord:
     status: str = "queued"
     future: Future[bytes] | None = None
     result: bytes = b""
+    product: dict[str, object] = field(default_factory=dict)
     error: str = ""
+    failure: dict[str, object] = field(default_factory=dict)
     completed_at: float = 0.0
     deadline_at: float = 0.0
     running_started_at: float = 0.0
+    running_started_monotonic: float = 0.0
+    completion_event: threading.Event = field(default_factory=threading.Event)
 
 
 class PersistentJobBroker:
-    """One local broker with a small spawn-only pool for typed CPU jobs."""
+    """One local broker with bounded spawn-only capacity for typed CPU jobs."""
 
     def __init__(self, socket_path: Path, idle_seconds: float = JOBD_DEFAULT_IDLE_SECONDS, workers: int | None = None):
         self.socket_path = safe_socket_path(socket_path, prefix="yolomux-jobd")
         self.lock_path = self.socket_path.with_suffix(".lock")
         self.stop_event = multiprocessing.get_context("spawn").Event()
         self.idle_seconds = max(1.0, float(idle_seconds))
-        self.worker_count = max(1, min(JOBD_MAX_WORKERS, int(workers or default_worker_count())))
+        self.general_worker_count = max(1, min(JOBD_MAX_WORKERS, int(workers or default_worker_count())))
         self.started_at = time.time()
+        self.source_epoch = uuid.uuid4().hex
         self.last_client_at = time.monotonic()
-        self.leases: dict[str, int] = {}
+        self.leases: dict[str, object] = {}
         self.records: dict[str, JobRecord] = {}
         self.queues = {priority: deque() for priority in JOBD_PRIORITIES}
         self.coalesced: dict[tuple[str, str], str] = {}
@@ -291,6 +493,7 @@ class PersistentJobBroker:
         # and bounded per-task counters. These make stale-while-revalidate a broker property so a
         # web route can serve a prior complete product while a newer generation is still building.
         self.latest_product: dict[str, tuple[int, bytes, float]] = {}
+        self.latest_product_metadata: dict[str, dict[str, object]] = {}
         self.product_counters: dict[str, dict[str, int]] = {}
         # Per-task pure execution duration (excludes queue wait): count/total/max in milliseconds,
         # bounded per task name (not per job) so this dict cannot grow with job volume.
@@ -304,8 +507,13 @@ class PersistentJobBroker:
         self.session_files_accepted_requester_counters: dict[str, int] = {}
         self.session_files_requester_counters: dict[str, int] = {}
         self.request_counters: dict[str, int] = {}
+        self.scheduler_pump_failures = 0
+        self.scheduler_pump_last_failure: dict[str, str] = {}
         self.executor: ProcessPoolExecutor | None = None
-        self.high_priority_streak = 0
+        self.interactive_executor: ProcessPoolExecutor | None = None
+        self.state_lock = threading.RLock()
+        self.scheduler_event = threading.Event()
+        self.scheduler_thread: threading.Thread | None = None
 
     def _bump_counter(self, task: str, name: str) -> None:
         counters = self.product_counters.setdefault(task, {"accepted": 0, "coalesced": 0, "superseded": 0, "completed": 0, "failed": 0, "timed_out": 0})
@@ -403,15 +611,43 @@ class PersistentJobBroker:
         stored = self.latest_product.get(record.coalesce_key)
         if stored is not None and record.generation < stored[0]:
             return
-        self.latest_product[record.coalesce_key] = (record.generation, record.result, time.time())
-        if len(self.latest_product) > JOBD_MAX_PRODUCTS:
+        stored_at = time.time()
+        self.latest_product[record.coalesce_key] = (record.generation, record.result, stored_at)
+        self.latest_product_metadata[record.coalesce_key] = dict(record.product)
+        while (
+            len(self.latest_product) > JOBD_MAX_PRODUCTS
+            or sum(len(body) for _generation, body, _stored_at in self.latest_product.values()) > JOBD_MAX_RETAINED_RESULT_BYTES
+        ):
             oldest_key = min(self.latest_product, key=lambda key: self.latest_product[key][2])
             self.latest_product.pop(oldest_key, None)
+            self.latest_product_metadata.pop(oldest_key, None)
 
-    def _executor(self) -> ProcessPoolExecutor:
+    @staticmethod
+    def _uses_interactive_capacity(priority: str) -> bool:
+        return priority == "interactive"
+
+    @staticmethod
+    def _new_executor(worker_count: int) -> ProcessPoolExecutor:
+        return ProcessPoolExecutor(max_workers=worker_count, mp_context=multiprocessing.get_context("spawn"))
+
+    def _executor(self, priority: str = "freshness") -> ProcessPoolExecutor:
+        if self._uses_interactive_capacity(priority):
+            if self.interactive_executor is None:
+                self.interactive_executor = self._new_executor(JOBD_INTERACTIVE_WORKERS)
+            return self.interactive_executor
         if self.executor is None:
-            self.executor = ProcessPoolExecutor(max_workers=self.worker_count, mp_context=multiprocessing.get_context("spawn"))
+            self.executor = self._new_executor(self.general_worker_count)
         return self.executor
+
+    def _shutdown_executor(self, *, interactive: bool) -> None:
+        if interactive:
+            executor = self.interactive_executor
+            self.interactive_executor = None
+        else:
+            executor = self.executor
+            self.executor = None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _record_payload(self, record: JobRecord, *, include_result: bool = False) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -421,22 +657,39 @@ class PersistentJobBroker:
             "generation": record.generation,
             "status": record.status,
             "submitted_at": record.submitted_at,
+            "running_started_at": record.running_started_at,
             "completed_at": record.completed_at,
             "deadline_at": record.deadline_at,
             "error": record.error,
         }
-        if include_result and record.status == "completed":
+        if record.failure:
+            payload["failure"] = dict(record.failure)
+        if include_result and record.status == "completed" and record.product.get("format") == "json":
             payload["result"] = json.loads(record.result.decode("utf-8"))
         return payload
 
-    def _mark_terminal(self, record: JobRecord, status: str, error: str = "") -> None:
+    def _mark_terminal(
+        self,
+        record: JobRecord,
+        status: str,
+        error: str = "",
+        failure: dict[str, object] | None = None,
+    ) -> None:
         record.status = status
         record.error = error
+        record.failure = dict(failure or {})
         record.completed_at = time.time()
+        record.completion_event.set()
 
-    def _future_slots(self) -> int:
+    def _future_slots(self, *, interactive: bool) -> int:
         """Count executor work, including timed-out work that cannot be killed safely."""
-        return sum(1 for record in self.records.values() if record.future is not None and not record.future.done())
+        return sum(
+            1
+            for record in self.records.values()
+            if record.future is not None
+            and not record.future.done()
+            and self._uses_interactive_capacity(record.priority) is interactive
+        )
 
     def _expire_deadlines(self, now: float) -> None:
         for record in self.records.values():
@@ -452,91 +705,168 @@ class PersistentJobBroker:
             self._bump_counter(record.task, "timed_out")
 
     def _handle_finished_futures(self) -> None:
-        restart_executor = False
+        restart_executors: set[bool] = set()
         for record in self.records.values():
             if record.future is None or not record.future.done():
                 continue
             future = record.future
-            if record.status in {"completed", "failed", "cancelled", "superseded"}:
+            if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}:
+                record.future = None
                 continue
             try:
-                result = future.result()
-                if len(result) > JOBD_MAX_RESULT_BYTES:
+                task_result = future.result()
+                if isinstance(task_result, bytes):
+                    task_result = JobdTaskResult(task_result, inline_json_product_metadata(task_result))
+                result = task_result.body
+                result_limit = JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES if record.task == "filesystem_batch" else JOBD_MAX_RESULT_BYTES
+                if len(result) > result_limit:
                     raise ValueError("result too large")
-                json.loads(result.decode("utf-8"))
+                if task_result.product.get("format") == "json":
+                    json.loads(result.decode("utf-8"))
                 if record.status != "timed_out":
                     record.result = result
+                    record.product = dict(task_result.product)
                     self._mark_terminal(record, "completed")
                     self._store_product(record)
                     self._bump_counter(record.task, "completed")
                     self._record_phase_runtime_ms(record.task, result)
-                    if record.running_started_at > 0:
-                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
+                    if record.running_started_monotonic > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+            except JobdFilesystemOperationFailure as exc:
+                if record.status != "timed_out":
+                    self._mark_terminal(record, "failed", str(exc), {
+                        "filesystem_error": dict(exc.payload),
+                        "status": exc.status,
+                    })
+                    self._bump_counter(record.task, "failed")
             except BrokenProcessPool:
                 if record.status != "timed_out":
-                    self._mark_terminal(record, "failed", "worker crashed")
+                    error = BrokenProcessPool("worker crashed")
+                    self._mark_terminal(
+                        record,
+                        "failed",
+                        "worker crashed",
+                        local_service_exception_cause(error),
+                    )
                     self._bump_counter(record.task, "failed")
-                    if record.running_started_at > 0:
-                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
-                restart_executor = True
+                    if record.running_started_monotonic > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+                restart_executors.add(self._uses_interactive_capacity(record.priority))
             except (OSError, RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 if record.status != "timed_out":
-                    self._mark_terminal(record, "failed", redact_local_service_text(exc))
+                    self._mark_terminal(
+                        record,
+                        "failed",
+                        redact_local_service_text(exc),
+                        local_service_exception_cause(exc),
+                    )
                     self._bump_counter(record.task, "failed")
-                    if record.running_started_at > 0:
-                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_at) * 1000.0)
-        if restart_executor and self.executor is not None:
-            self.executor.shutdown(wait=False, cancel_futures=True)
-            self.executor = None
+                    if record.running_started_monotonic > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+            except Exception as exc:
+                # A worker's task failure is data-plane state, not a scheduler failure. Keep the
+                # broker serving unrelated work and preserve a typed, redacted reason for the
+                # requester instead of letting ``future.result()`` escape through ``on_idle``.
+                if record.status != "timed_out":
+                    self._mark_terminal(
+                        record,
+                        "failed",
+                        f"{type(exc).__name__}: {redact_local_service_text(exc)}",
+                        local_service_exception_cause(exc),
+                    )
+                    self._bump_counter(record.task, "failed")
+                    if record.running_started_monotonic > 0:
+                        self._record_runtime_ms(record.task, (time.monotonic() - record.running_started_monotonic) * 1000.0)
+        for interactive in restart_executors:
+            self._shutdown_executor(interactive=interactive)
 
-    def _next_queued_record(self) -> JobRecord | None:
-        candidates: dict[str, JobRecord | None] = {}
-        for priority in JOBD_PRIORITIES:
-            candidates[priority] = None
+    def _next_queued_record(self, priorities: tuple[str, ...]) -> JobRecord | None:
+        for priority in priorities:
             queue = self.queues[priority]
             while queue:
                 record = self.records.get(queue[0])
                 if record is None or record.status != "queued":
                     queue.popleft()
                     continue
-                candidates[priority] = record
-                break
-        lower = next((candidates[priority] for priority in JOBD_PRIORITIES[1:] if candidates[priority] is not None), None)
-        selected = lower if self.high_priority_streak >= JOBD_MAX_CONSECUTIVE_HIGH_PRIORITY and lower is not None else next((candidates[priority] for priority in JOBD_PRIORITIES if candidates[priority] is not None), None)
-        if selected is None:
-            return None
-        self.queues[selected.priority].popleft()
-        self.high_priority_streak = self.high_priority_streak + 1 if selected.priority == "interactive" else 0
-        return selected
+                queue.popleft()
+                return record
+        return None
 
     def _prune_records(self) -> None:
         terminal = sorted((record for record in self.records.values() if record.status in {"completed", "failed", "cancelled", "superseded", "timed_out"}), key=lambda record: record.completed_at)
-        for record in terminal[:max(0, len(self.records) - JOBD_MAX_RECORDS)]:
+        remove_count = max(0, len(self.records) - JOBD_MAX_RECORDS)
+        retained_result_bytes = sum(len(record.result) for record in self.records.values())
+        while remove_count < len(terminal) and retained_result_bytes > JOBD_MAX_RETAINED_RESULT_BYTES:
+            retained_result_bytes -= len(terminal[remove_count].result)
+            remove_count += 1
+        for record in terminal[:remove_count]:
             self.records.pop(record.job_id, None)
             if self.coalesced.get((record.task, record.coalesce_key)) == record.job_id:
                 self.coalesced.pop((record.task, record.coalesce_key), None)
 
-    def _pump(self) -> None:
+    def _refresh_records(self) -> None:
         now = time.monotonic()
         self._expire_deadlines(now)
         self._handle_finished_futures()
-        active = self._future_slots()
-        while active < self.worker_count:
-            record = self._next_queued_record()
-            if record is None:
-                break
-            if record.generation < self.latest_generation.get(record.coalesce_key, record.generation):
-                self._mark_terminal(record, "superseded")
-                self._bump_counter(record.task, "superseded")
-                continue
-            if record.deadline_at > 0 and now >= record.deadline_at:
-                self._mark_terminal(record, "timed_out", "deadline exceeded before execution")
-                continue
-            record.future = self._executor().submit(run_registered_task, record.task, record.payload)
-            record.status = "running"
-            record.running_started_at = time.monotonic()
-            active += 1
         self._prune_records()
+
+    def _pump(self) -> None:
+        dispatch: list[JobRecord] = []
+        with self.state_lock:
+            self._refresh_records()
+            now = time.monotonic()
+            executor_queues = (
+                (True, (JOBD_PRIORITIES[0],), JOBD_INTERACTIVE_WORKERS),
+                (False, JOBD_PRIORITIES[1:], self.general_worker_count),
+            )
+            for interactive, priorities, capacity in executor_queues:
+                active = self._future_slots(interactive=interactive)
+                while active < capacity:
+                    record = self._next_queued_record(priorities)
+                    if record is None:
+                        break
+                    if record.generation < self.latest_generation.get(record.coalesce_key, record.generation):
+                        self._mark_terminal(record, "superseded")
+                        self._bump_counter(record.task, "superseded")
+                        continue
+                    if record.deadline_at > 0 and now >= record.deadline_at:
+                        self._mark_terminal(record, "timed_out", "deadline exceeded before execution")
+                        continue
+                    # Mark the record in flight before starting cold process capacity. Product reads
+                    # can now return `pending` without waiting for ProcessPoolExecutor startup.
+                    record.status = "running"
+                    record.running_started_at = time.time()
+                    record.running_started_monotonic = time.monotonic()
+                    dispatch.append(record)
+                    active += 1
+        for record in dispatch:
+            try:
+                future = self._executor(record.priority).submit(run_registered_task_result, record.task, record.payload)
+            except Exception as exc:
+                with self.state_lock:
+                    self._mark_terminal(
+                        record,
+                        "failed",
+                        redact_local_service_text(exc),
+                        local_service_exception_cause(exc),
+                    )
+                    self._bump_counter(record.task, "failed")
+                    if isinstance(exc, BrokenProcessPool):
+                        self._shutdown_executor(interactive=self._uses_interactive_capacity(record.priority))
+                continue
+            with self.state_lock:
+                record.future = future
+            # Queue submission wakes the scheduler, but worker completion otherwise waits for the
+            # 50 ms maintenance poll before `_handle_finished_futures` can publish the product.
+            future.add_done_callback(lambda _completed: self.scheduler_event.set())
+
+    def _record_scheduler_pump_failure(self, exc: Exception, traceback_text: str) -> None:
+        self.scheduler_pump_failures += 1
+        self.scheduler_pump_last_failure = {
+            "exception_type": type(exc).__name__,
+            "reason": redact_local_service_text(exc),
+            "traceback": redact_local_service_text(traceback_text),
+        }
 
     def _queue_record(self, task: str, payload: dict[str, Any], priority: str, generation: int, coalesce_key: str, deadline_at: float = 0.0) -> JobRecord:
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -544,6 +874,7 @@ class PersistentJobBroker:
         self.records[record.job_id] = record
         self.coalesced[(task, coalesce_key)] = record.job_id
         self.queues[priority].append(record.job_id)
+        self.scheduler_event.set()
         return record
 
     def _supersede_stale_queued(self, coalesce_key: str, generation: int) -> None:
@@ -556,34 +887,49 @@ class PersistentJobBroker:
     def _queued_count(self) -> int:
         return sum(1 for record in self.records.values() if record.status == "queued")
 
-    def _submit(self, request: dict[str, Any]) -> dict[str, Any]:
-        self._pump()
+    @staticmethod
+    def _validated_submission(request: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         task = str(request.get("task") or "")
         priority = str(request.get("priority") or "normal")
         if priority == "normal":
             priority = "freshness"
         if task not in REGISTERED_TASKS:
-            return {"ok": False, "error": "unknown task"}
+            return None, {"ok": False, "error": "unknown task"}
         if priority not in JOBD_PRIORITIES:
-            return {"ok": False, "error": "invalid priority"}
+            return None, {"ok": False, "error": "invalid priority"}
         payload = request.get("payload")
         if not isinstance(payload, dict):
-            return {"ok": False, "error": "payload must be an object"}
+            return None, {"ok": False, "error": "payload must be an object"}
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > JOBD_MAX_PAYLOAD_BYTES:
-            return {"ok": False, "error": "payload too large"}
+            return None, {"ok": False, "error": "payload too large"}
         try:
             generation = max(0, int(request.get("generation") or 0))
             requested_deadline_ms = int(request.get("deadline_ms") or 0)
         except (TypeError, ValueError):
-            return {"ok": False, "error": "invalid generation or deadline"}
+            return None, {"ok": False, "error": "invalid generation or deadline"}
         if requested_deadline_ms < 0:
-            return {"ok": False, "error": "invalid deadline"}
+            return None, {"ok": False, "error": "invalid deadline"}
         if requested_deadline_ms > JOBD_MAX_DEADLINE_MS:
-            return {"ok": False, "error": "deadline too large"}
-        deadline_ms = requested_deadline_ms
-        deadline_at = time.monotonic() + (deadline_ms / 1000.0) if deadline_ms else 0.0
+            return None, {"ok": False, "error": "deadline too large"}
         coalesce_key = str(request.get("coalesce_key") or f"{task}:{encoded.hex()}")[:256]
+        return {
+            "task": task,
+            "priority": priority,
+            "payload": payload,
+            "generation": generation,
+            "deadline_ms": requested_deadline_ms,
+            "deadline_at": time.monotonic() + (requested_deadline_ms / 1000.0) if requested_deadline_ms else 0.0,
+            "coalesce_key": coalesce_key,
+        }, None
+
+    def _submit_validated(self, submission: dict[str, Any]) -> dict[str, Any]:
+        task = str(submission["task"])
+        priority = str(submission["priority"])
+        payload = submission["payload"]
+        generation = int(submission["generation"])
+        deadline_at = float(submission["deadline_at"])
+        coalesce_key = str(submission["coalesce_key"])
         existing_id = self.coalesced.get((task, coalesce_key))
         existing = self.records.get(existing_id or "")
         if existing is not None and existing.generation >= generation and existing.status in {"queued", "running", "completed"}:
@@ -599,8 +945,14 @@ class PersistentJobBroker:
             requester_key = self._session_files_requester_key(payload)
             counters = self.session_files_accepted_requester_counters
             counters[requester_key] = counters.get(requester_key, 0) + 1
-        self._pump()
         return {"ok": True, "coalesced": False, "job": self._record_payload(record)}
+
+    def _submit(self, request: dict[str, Any]) -> dict[str, Any]:
+        self._refresh_records()
+        submission, error = self._validated_submission(request)
+        if submission is None:
+            return error or {"ok": False, "error": "invalid submission"}
+        return self._submit_validated(submission)
 
     def _product(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
         coalesce_key = str(request.get("coalesce_key") or "")
@@ -614,29 +966,147 @@ class PersistentJobBroker:
             # nothing in flight and nothing ever produced (distinct from an RPC failure = unavailable).
             return {"ok": True, "state": "pending" if inflight else "none", "generation": 0, "inflight": inflight}, b""
         generation, body, stored_at = stored
+        product = self.latest_product_metadata.get(coalesce_key)
+        if product is None:
+            return {"ok": False, "error": "retained product metadata missing"}, b""
         state = "stale" if (inflight or latest_gen > generation) else "ready"
-        return {"ok": True, "state": state, "generation": generation, "stored_at": stored_at, "inflight": inflight}, body
+        return {
+            "ok": True,
+            "state": state,
+            "generation": generation,
+            "source_epoch": self.source_epoch,
+            "stored_at": stored_at,
+            "inflight": inflight,
+            "product": dict(product),
+        }, body
+
+    def _produce(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+        """Submit one product job and return materialized bytes or its accepted receipt.
+
+        This is intentionally a zero-wait operation. The broker can atomically submit and inspect
+        its product store, but waiting here would hold one of JOBD_CONCURRENT_HANDLER_LIMIT
+        handler slots for the whole job; enough of those and later callers are refused with
+        `service busy` instead of being served. `relay` is the one action that may wait, because
+        its caller has no receipt protocol to fall back on. Result bytes remain opaque so a
+        bounded batch keeps every item id and result exactly as its registered task emitted them.
+        """
+        delivery = str(request.get("delivery") or "ready_or_receipt")
+        if delivery not in JOBD_PRODUCT_DELIVERY_MODES:
+            return {"ok": False, "error": "invalid product delivery mode"}, b""
+        self._refresh_records()
+        submission, error = self._validated_submission(request)
+        if submission is None:
+            return error or {"ok": False, "error": "invalid submission"}, b""
+        coalesce_key = str(submission["coalesce_key"])
+        stored = self.latest_product.get(coalesce_key)
+        if delivery == "ready_or_receipt" and stored is not None and stored[0] >= int(submission["generation"]):
+            product_response, body = self._product({"coalesce_key": coalesce_key})
+            state = str(product_response.get("state") or "")
+            if body and (state == "ready" or request.get("allow_stale") is True):
+                existing_id = self.coalesced.get((str(submission["task"]), coalesce_key))
+                existing = self.records.get(existing_id or "")
+                job = self._record_payload(existing) if existing is not None else {
+                    "job_id": "",
+                    "task": str(submission["task"]),
+                    "priority": str(submission["priority"]),
+                    "generation": int(stored[0]),
+                    "status": "completed",
+                    "submitted_at": 0.0,
+                    "running_started_at": 0.0,
+                    "completed_at": float(stored[2]),
+                    "deadline_at": 0.0,
+                    "error": "",
+                }
+                return {
+                    "ok": True,
+                    "state": state,
+                    "coalesced": True,
+                    "job": job,
+                    "product": dict(product_response.get("product") or {}),
+                }, body
+        submitted = self._submit_validated(submission)
+        if submitted.get("ok") is not True:
+            return submitted, b""
+        job = submitted.get("job") if isinstance(submitted.get("job"), dict) else {}
+        product_meta: dict[str, Any] = {
+            "coalesce_key": coalesce_key,
+            "generation": 0,
+            "inflight": str(job.get("status") or "") in {"queued", "running"},
+        }
+        response = {
+            "ok": True,
+            "state": "queued",
+            "coalesced": bool(submitted.get("coalesced")),
+            "job": job,
+            "product": product_meta,
+        }
+        if delivery == "receipt":
+            return response, b""
+        product_response, body = self._product(request)
+        if product_response.get("ok") is not True:
+            return product_response, b""
+        product_meta.update({
+            "generation": int(product_response.get("generation") or 0),
+            "stored_at": float(product_response.get("stored_at") or 0.0),
+            "inflight": bool(product_response.get("inflight")),
+        })
+        state = str(product_response.get("state") or "")
+        allow_stale = request.get("allow_stale") is True
+        if body and (state == "ready" or (allow_stale and state == "stale")):
+            response["state"] = state
+            response["product"] = dict(product_response.get("product") or {})
+            return response, body
+        return response, b""
+
+    def _relay(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
+        """Relay one worker-produced byte product without exposing a receipt to the web caller."""
+        if request.get("protocol_version", JOBD_PROTOCOL_VERSION) != JOBD_PROTOCOL_VERSION:
+            return {"ok": False, "error": "upgrade_required", "required_protocol_version": JOBD_PROTOCOL_VERSION}, b""
+        with self.state_lock:
+            self.request_counters["relay"] = self.request_counters.get("relay", 0) + 1
+            self._refresh_records()
+            submission, error = self._validated_submission(request)
+            if submission is None:
+                return error or {"ok": False, "error": "invalid submission"}, b""
+            submitted = self._submit_validated(submission)
+            if submitted.get("ok") is not True:
+                return submitted, b""
+            job = submitted.get("job") if isinstance(submitted.get("job"), dict) else {}
+            record = self.records.get(str(job.get("job_id") or ""))
+            if record is None:
+                return {"ok": False, "error": "relay job missing"}, b""
+            wait_seconds = max(0.001, float(submission["deadline_ms"]) / 1000.0) if int(submission["deadline_ms"]) else JOBD_MAX_DEADLINE_MS / 1000.0
+        if not record.completion_event.wait(wait_seconds):
+            return {"ok": False, "error": "relay deadline expired", "job": self._record_payload(record)}, b""
+        with self.state_lock:
+            self._refresh_records()
+            if record.status != "completed":
+                return {"ok": False, "error": record.error or f"relay job {record.status}", "job": self._record_payload(record)}, b""
+            return {"ok": True, "state": "ready", "job": self._record_payload(record), "product": dict(record.product)}, bytes(record.result)
 
     def common_status(self) -> dict[str, Any]:
-        self._pump()
+        self._refresh_records()
         active_records = [
             self._record_payload(record)
             for record in self.records.values()
             if record.status == "running"
         ]
-        worker_pids = sorted(
+        worker_pids = sorted({
             int(process.pid)
-            for process in (self.executor._processes.values() if self.executor is not None else [])
+            for executor in (self.interactive_executor, self.executor)
+            if executor is not None
+            for process in executor._processes.values()
             if process.pid is not None
-        )
+        })
         return {
             "ok": True,
             "version": JOBD_PROTOCOL_VERSION,
             "pid": os.getpid(),
             "started_at": self.started_at,
+            "source_epoch": self.source_epoch,
             "socket": str(self.socket_path),
             "clients": len(self.leases),
-            "worker_count": self.worker_count,
+            "worker_count": self.general_worker_count + JOBD_INTERACTIVE_WORKERS,
             "queues": {priority: sum(1 for job_id in queue if self.records.get(job_id, JobRecord("", "", b"", priority, 0, "", 0)).status == "queued") for priority, queue in self.queues.items()},
             "active_task": next((record.task for record in self.records.values() if record.status == "running"), ""),
             "active_records": active_records,
@@ -668,17 +1138,34 @@ class PersistentJobBroker:
             "request_counters": dict(self.request_counters),
             "last_success": max((record.completed_at for record in self.records.values() if record.status == "completed"), default=0.0),
             "last_failure": next((record.error for record in reversed(list(self.records.values())) if record.status in {"failed", "timed_out"}), ""),
+            "scheduler_pump": {
+                "failures": self.scheduler_pump_failures,
+                "last_failure": dict(self.scheduler_pump_last_failure),
+            },
             "restart_backoff_seconds": 0.0,
             "generation": max(self.latest_generation.values(), default=0),
             "idle_seconds": self.idle_seconds,
         }
 
-    def handle(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
+    def handle(self, request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
+        if request.get("action") == "relay":
+            return self._relay(request)
+        with self.state_lock:
+            return self._handle_locked(request)
+
+    def _handle_locked(self, request: dict[str, object]) -> tuple[dict[str, object], bytes]:
+        protocol_version = request.get("protocol_version", JOBD_PROTOCOL_VERSION)
+        if protocol_version != JOBD_PROTOCOL_VERSION:
+            return {
+                "ok": False,
+                "error": "upgrade_required",
+                "required_protocol_version": JOBD_PROTOCOL_VERSION,
+            }, b""
         action = str(request.get("action") or "")
         action_counter = action if action in JOBD_REQUEST_ACTIONS else "unknown"
         self.request_counters[action_counter] = self.request_counters.get(action_counter, 0) + 1
         if action == "ping":
-            return {"ok": True, "version": JOBD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at}, b""
+            return {"ok": True, "version": JOBD_PROTOCOL_VERSION, "pid": os.getpid(), "started_at": self.started_at, "source_epoch": self.source_epoch}, b""
         if action == "status":
             return self.common_status(), b""
         if action == "profile":
@@ -686,12 +1173,14 @@ class PersistentJobBroker:
         if action == "submit":
             return self._submit(request), b""
         if action == "result":
-            self._pump()
+            self._refresh_records()
             record = self.records.get(str(request.get("job_id") or ""))
             return ({"ok": False, "error": "unknown job"} if record is None else {"ok": True, "job": self._record_payload(record, include_result=True)}), b""
         if action == "product":
-            self._pump()
+            self._refresh_records()
             return self._product(request)
+        if action == "produce":
+            return self._produce(request)
         if action == "cancel":
             record = self.records.get(str(request.get("job_id") or ""))
             if record is None:
@@ -706,7 +1195,11 @@ class PersistentJobBroker:
                     return {"ok": False, "error": "job already executing", "job": self._record_payload(record)}, b""
             return {"ok": True, "job": self._record_payload(record)}, b""
         if action == "lease":
-            response = acquire_client_lease(self.leases, request.get("client_pid"))
+            response = acquire_client_lease(
+                self.leases,
+                request.get("client_pid"),
+                request.get("lease_id"),
+            )
             return {**response, "version": JOBD_PROTOCOL_VERSION}, b""
         if action == "release":
             return release_client_lease(self.leases, request.get("lease_id")), b""
@@ -717,9 +1210,40 @@ class PersistentJobBroker:
             return {"ok": True, "shutdown": True}, b""
         return {"ok": False, "error": "unknown jobd action"}, b""
 
+    def _scheduler_loop(self) -> None:
+        while not self.stop_event.is_set():
+            self.scheduler_event.wait(JOBD_SCHEDULER_POLL_SECONDS)
+            self.scheduler_event.clear()
+            try:
+                self._pump()
+            except Exception as exc:
+                self._record_scheduler_pump_failure(exc, traceback.format_exc())
+
+    def _start_scheduler(self) -> None:
+        if self.scheduler_thread is not None and self.scheduler_thread.is_alive():
+            return
+        self.scheduler_thread = threading.Thread(
+            target=self._scheduler_loop,
+            name="jobd-scheduler",
+            daemon=True,
+        )
+        self.scheduler_thread.start()
+
+    def _idle_should_stop(self) -> bool:
+        with self.state_lock:
+            return (
+                not self.leases
+                and not self._queued_count()
+                and not any(record.status == "running" for record in self.records.values())
+                and time.monotonic() - self.last_client_at >= self.idle_seconds
+            )
+
     def _on_shutdown(self) -> None:
-        if self.executor is not None:
-            self.executor.shutdown(wait=False, cancel_futures=True)
+        self.scheduler_event.set()
+        if self.scheduler_thread is not None:
+            self.scheduler_thread.join(timeout=0.5)
+        self._shutdown_executor(interactive=True)
+        self._shutdown_executor(interactive=False)
 
     def run(self) -> int:
         return run_local_rpc_service(
@@ -728,9 +1252,12 @@ class PersistentJobBroker:
             service_name="jobd",
             stop_event=self.stop_event,
             handle=self.handle,
-            on_idle=lambda: (self._pump() is None) and not self.leases and not self._queued_count() and not any(record.status == "running" for record in self.records.values()) and time.monotonic() - self.last_client_at >= self.idle_seconds,
+            on_idle=self._idle_should_stop,
             on_client=lambda: setattr(self, "last_client_at", time.monotonic()),
+            on_idle_failure=self._record_scheduler_pump_failure,
+            on_start=self._start_scheduler,
             on_shutdown=self._on_shutdown,
+            concurrent_handlers=JOBD_CONCURRENT_HANDLER_LIMIT,
         )
 
 
@@ -744,12 +1271,31 @@ class JobClient(LocalServiceClient):
             socket_path or default_socket_path(),
             JOBD_PROTOCOL_VERSION,
             idle_seconds=JOBD_DEFAULT_IDLE_SECONDS,
-            service_dir=Path(socket_path).parent if socket_path is not None else STATE_DIR / "services",
+            service_dir=Path(socket_path).parent if socket_path is not None else RUNTIME_DIR / "services",
         )
+        self._scheduler_lease_id = ""
+        self._scheduler_lease_lock = threading.Lock()
 
     def start_for_scheduler(self) -> bool:
-        """Start jobd from a scheduler/owner path, never an HTTP submission path."""
-        return self.ensure_started()
+        """Keep jobd leased while this process owns background scheduling."""
+        with self._scheduler_lease_lock:
+            response = self.registry.acquire_lease(self._scheduler_lease_id)
+            lease_id = response.get("lease_id")
+            if response.get("ok") is not True or not isinstance(lease_id, str) or not lease_id:
+                return False
+            self._scheduler_lease_id = lease_id
+            return True
+
+    def stop_for_scheduler(self) -> bool:
+        """Release the scheduler lease when this process is demoted."""
+        with self._scheduler_lease_lock:
+            if not self._scheduler_lease_id:
+                return True
+            response = self.registry.release_lease(self._scheduler_lease_id)
+            if response.get("ok") is not True:
+                return False
+            self._scheduler_lease_id = ""
+            return True
 
     def submit(self, task: str, payload: dict[str, Any], *, priority: str = "freshness", generation: int = 0, coalesce_key: str = "", deadline_ms: int = 0) -> dict[str, Any]:
         return self.request({"action": "submit", "task": task, "payload": payload, "priority": priority, "generation": generation, "coalesce_key": coalesce_key, "deadline_ms": deadline_ms})
@@ -765,6 +1311,50 @@ class JobClient(LocalServiceClient):
         """
         return self.request_with_binary({"action": "product", "coalesce_key": coalesce_key}, timeout=timeout)
 
+    def produce(
+        self,
+        task: str,
+        payload: dict[str, Any],
+        *,
+        priority: str = "freshness",
+        generation: int = 0,
+        coalesce_key: str = "",
+        deadline_ms: int = 0,
+        delivery: str = "ready_or_receipt",
+        allow_stale: bool = False,
+        timeout: float = 0.5,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Submit once and forward ready product bytes without waiting for cold work."""
+        return self.request_with_binary({
+            "action": "produce",
+            "task": task,
+            "payload": payload,
+            "priority": priority,
+            "generation": generation,
+            "coalesce_key": coalesce_key,
+            "deadline_ms": deadline_ms,
+            "delivery": delivery,
+            "allow_stale": bool(allow_stale),
+        }, timeout=timeout)
+
+    def relay(
+        self,
+        task: str,
+        payload: dict[str, Any],
+        *,
+        priority: str = "interactive",
+        deadline_ms: int = 0,
+        timeout: float = 120.5,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Wait at the daemon boundary for one browser-owned byte relay."""
+        return self.request_with_binary({
+            "action": "relay",
+            "task": task,
+            "payload": payload,
+            "priority": priority,
+            "deadline_ms": deadline_ms,
+        }, timeout=timeout)
+
     def runtime_status(self) -> dict[str, Any]:
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
@@ -778,7 +1368,7 @@ class JobClient(LocalServiceClient):
                     continue
                 if worker_pid > 0:
                     worker_pids.append(worker_pid)
-        return {"service": "jobd", "pid": pid, "started_at": float(payload.get("started_at") or 0.0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [], "worker_count": int(payload.get("worker_count") or len(worker_pids)), "worker_pids": worker_pids, "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {}, "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {}, "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {}, "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {}, "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {}, "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""), "resources": self.registry.resources_for_pids(pid, worker_pids)}
+        return {"service": "jobd", "pid": pid, "started_at": float(payload.get("started_at") or 0.0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [], "worker_count": int(payload.get("worker_count") or len(worker_pids)), "worker_pids": worker_pids, "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {}, "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {}, "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {}, "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {}, "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {}, "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": str(payload.get("last_failure") or ""), "scheduler_pump": payload.get("scheduler_pump") if isinstance(payload.get("scheduler_pump"), dict) else {}, "resources": self.registry.resources_for_pids(pid, worker_pids)}
 
 
 def main(argv: list[str] | None = None) -> int:

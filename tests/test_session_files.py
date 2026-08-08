@@ -3,19 +3,22 @@ import os
 import time
 import tracemalloc
 from http import HTTPStatus
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import get_args
 from typing import get_origin
 from typing import get_type_hints
+from urllib.parse import quote
 
+import pytest
 
 import threading as threading_module
 
 import yolomux_lib.app as app_module
 from yolomux_lib import common as common_module
 from yolomux_lib import sessions as sessions_module
+from yolomux_lib import watchd
 from yolomux_lib.app import TmuxWebtermApp
-from yolomux_lib.state_services import ClientEventWatcherRecord
 from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
@@ -24,9 +27,17 @@ from yolomux_lib.sessions import CODEX_TRANSCRIPT_SCAN_LIMIT
 from yolomux_lib.types import RepoPayload
 from yolomux_lib.types import SessionFileEntry
 from yolomux_lib.types import SessionFilesPayload
+from yolomux_lib.watchd_protocol import EffectiveWatchConfiguration
 
 from _git_helpers import git
 from _git_helpers import init_repo
+from tests.browser_helpers.browser_console import validate_server_log_ring_payload
+from tests.browser_helpers.browser_console import validate_server_log_ring_transition
+from tests.browser_helpers.browser_layout import start_browser_share_server
+from tests.browser_helpers.browser_layout import stop_browser_share_server
+from yolomux_lib.local_services.registry import process_state
+from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yolomux_lib.server_logs import SERVER_LOGS
 
 
 def agent(kind, transcript, cwd, session="s1"):
@@ -54,6 +65,78 @@ def dict_return_args(value):
     return get_args(value)
 
 
+def operation_terminal_response(server, status_url, timeout=10):
+    deadline = time.monotonic() + timeout
+    while True:
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=timeout)
+        connection.request("GET", status_url)
+        response = connection.getresponse()
+        payload = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        if response.status != HTTPStatus.ACCEPTED:
+            return response.status, payload
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"operation did not become terminal: {status_url}")
+        time.sleep(0.02)
+
+
+def retire_expected_session_files_failure_logs(
+    server,
+    *,
+    request_id,
+    operation_id,
+    stack_operation,
+    expect_transport,
+):
+    """Retire one exact correlated session-files failure from this fixture boundary."""
+
+    start = validate_server_log_ring_payload(server._fixture_server_log_boundary)
+    current = validate_server_log_ring_payload(SERVER_LOGS.payload())
+    transition = validate_server_log_ring_transition(start, current)
+    failures = [
+        entry
+        for entry in transition["newLogs"]
+        if str(entry.get("level") or "").lower() in {"warning", "error"}
+    ]
+    owners = [(entry.get("source"), entry.get("category")) for entry in failures]
+    structured_owners = [
+        ("jobd-operation", "operation"),
+        ("api-response", "api"),
+    ]
+    assert transition["droppedCount"] == 0, transition
+    if expect_transport:
+        # The transport owner deliberately deduplicates identical submit failures for five
+        # seconds. The typed operation and API owners are never deduplicated and must remain exact.
+        assert owners in [
+            [("local-service:jobd", "transport"), *structured_owners],
+            structured_owners,
+        ], failures
+    else:
+        assert owners == structured_owners, failures
+
+    if owners[0] == ("local-service:jobd", "transport"):
+        transport = failures[0]
+        message = str(transport.get("message") or "")
+        assert message.startswith("action=submit request_id="), transport
+        transport_request_id = message.removeprefix("action=submit request_id=").split(maxsplit=1)[0]
+        assert len(transport_request_id) == 32 and all(
+            character in "0123456789abcdef" for character in transport_request_id
+        ), transport
+        assert "FileNotFoundError" in message, transport
+
+    structured = [json.loads(entry["message"]) for entry in failures[-2:]]
+    for payload in structured:
+        assert payload["request"]["id"] == request_id, payload
+        assert payload["code"] == "service_unavailable", payload
+        assert payload["origin"] == "local_services.jobd", payload
+        assert payload["stack"][0]["operation"] == "GET /api/session-files", payload
+        assert payload["stack"][-1]["operation"] == stack_operation, payload
+    assert str(structured[0]["operation"]["id"] or "") == str(operation_id or ""), structured[0]
+    assert structured[1].get("operation") is None, structured[1]
+    server._fixture_server_log_boundary = current
+    return tuple(failures)
+
+
 def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert {
         "session",
@@ -68,7 +151,7 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
         "diff_tracked",
         "uploaded",
     } <= set(SessionFileEntry.__annotations__)
-    assert {"from_ref", "to_ref", "error", "error_message", "ahead", "behind"} <= set(RepoPayload.__annotations__)
+    assert {"branch", "from_ref", "to_ref", "error", "error_message", "ahead", "behind"} <= set(RepoPayload.__annotations__)
     assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
 
     assert get_type_hints(session_files.session_file_entry)["return"] is SessionFileEntry
@@ -80,6 +163,627 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert dict_return_args(get_type_hints(TmuxWebtermApp.cached_session_files_payloads_for_infos)["return"]) == (str, SessionFilesPayload)
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload_for_infos)["return"]) == (SessionFilesPayload, HTTPStatus)
     assert tuple_return_args(get_type_hints(TmuxWebtermApp.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
+
+
+def test_session_files_scheduler_lease_keeps_jobd_alive_through_next_demand(monkeypatch, tmp_path):
+    monkeypatch.setenv("YOLOMUX_LOCAL_SERVICE_IDLE_SECONDS", "0.1")
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    webapp = TmuxWebtermApp([])
+    webapp.refresh_sessions = lambda: []
+    assert webapp.job_client.start_for_scheduler()
+    first_pid = int(webapp.job_client.registry._read_record()["pid"])
+    server = thread = None
+    try:
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            record = webapp.job_client.registry._read_record()
+            recorded_pid = int(record.get("pid") or 0)
+            if process_state(first_pid) in {"", "Z"} or recorded_pid != first_pid:
+                break
+            time.sleep(0.02)
+        assert process_state(first_pid) not in {"", "Z"}
+        assert int(webapp.job_client.registry._read_record().get("pid") or 0) == first_pid
+        assert webapp.job_client.socket_path.exists()
+
+        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+        connection.request("GET", "/api/session-files?force=1")
+        response = connection.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        connection.close()
+
+        assert response.status == HTTPStatus.ACCEPTED
+        terminal_status, terminal = operation_terminal_response(server, body["operation"]["status_url"])
+        assert terminal_status == HTTPStatus.OK
+        assert isinstance(terminal["data"].get("files"), list)
+        retained_pid = int(webapp.job_client.registry._read_record()["pid"])
+        assert retained_pid == first_pid
+        assert process_state(first_pid) not in {"", "Z"}
+        assert webapp.job_client.socket_path.exists()
+        assert webapp.job_client.registry.healthy()
+    finally:
+        if server is not None:
+            stop_browser_share_server(server, thread)
+        process = webapp.job_client.registry.process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+        webapp.control_server.stop()
+
+
+def test_session_files_public_start_failure_is_typed_terminal_not_queued(monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module.JobClient, "start_for_scheduler", lambda self: False)
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    webapp = TmuxWebtermApp([])
+    webapp.refresh_sessions = lambda: []
+    webapp.job_client = app_module.JobClient(tmp_path / "services" / "jobd.sock")
+    monkeypatch.setattr(webapp.job_client.registry, "_spawn", lambda: None)
+    server = thread = None
+    try:
+        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+        connection.request("GET", "/api/session-files?force=1")
+        response = connection.getresponse()
+        body = json.loads(response.read().decode("utf-8"))
+        connection.close()
+
+        assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+        assert body["state"] == "failed"
+        assert body["request"]["id"].startswith("r-")
+        assert body["error"]["code"] == "service_unavailable"
+        assert body["error"]["origin"] == "local_services.jobd"
+        assert body["error"]["retryable"] is False
+        assert body["error"]["stack"][-1]["operation"] == "jobd.submit"
+        assert "operation" not in body
+        retired = retire_expected_session_files_failure_logs(
+            server,
+            request_id=body["request"]["id"],
+            operation_id=None,
+            stack_operation="jobd.submit",
+            expect_transport=True,
+        )
+        assert len(retired) in {2, 3}
+    finally:
+        if server is not None:
+            stop_browser_share_server(server, thread)
+        webapp.control_server.stop()
+
+
+def test_session_files_route_returns_operation_receipt_then_publishes_and_replays_ready(
+    monkeypatch,
+    tmp_path,
+):
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(
+        app_module,
+        "SESSION_FILES_OPERATION_STATE_PATH",
+        tmp_path / "operations" / "session-files.json",
+        raising=False,
+    )
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    release_result = threading_module.Event()
+    terminal_published = threading_module.Event()
+    published = []
+
+    class ControlledJobClient:
+        def stop_for_scheduler(self):
+            return None
+
+        def submit(self, *_args, **_kwargs):
+            return {
+                "ok": True,
+                "job": {
+                    "job_id": "job-session-files-ready",
+                    "generation": 7,
+                    "status": "queued",
+                },
+            }
+
+        def product(self, *_args, **_kwargs):
+            return {"ok": True, "state": "pending", "generation": 7}, b""
+
+        def result(self, job_id):
+            assert job_id == "job-session-files-ready"
+            assert release_result.wait(2.0), "test did not release the accepted job"
+            return {
+                "ok": True,
+                "job": {
+                    "job_id": job_id,
+                    "status": "completed",
+                    "result": {
+                        "payload": {
+                            "session": "5",
+                            "loaded": True,
+                            "files": [{"path": "done.py"}],
+                            "repos": [],
+                            "errors": [],
+                        },
+                        "status": int(HTTPStatus.OK),
+                    },
+                },
+            }
+
+    webapp = TmuxWebtermApp(["5"])
+    webapp.job_client = ControlledJobClient()
+    webapp.refresh_sessions = lambda: []
+    webapp.request_session_files_disk_cache_prune = lambda *_args, **_kwargs: None
+    original_publish = webapp.publish_client_event
+
+    def capture_publish(event_type, payload, **kwargs):
+        event = original_publish(event_type, payload, **kwargs)
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal_published.set()
+        return event
+
+    webapp.publish_client_event = capture_publish
+    webapp.start_client_event_watcher = lambda: None
+    webapp.wake_client_event_watcher = lambda: None
+    webapp.stop_client_event_watcher_if_idle = lambda: True
+    server = thread = None
+    try:
+        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        refs = {"/repo/z": {"to": " current ", "from": " HEAD~2 "}}
+        encoded_refs = quote(json.dumps(refs, separators=(",", ":")), safe="")
+        connection.request("GET", f"/api/session-files?session=5&force=1&hours=7.5&from=HEAD~3&to=current&refs={encoded_refs}")
+        response = connection.getresponse()
+        receipt = json.loads(response.read().decode("utf-8"))
+        connection.close()
+
+        assert response.status == HTTPStatus.ACCEPTED
+        assert receipt["state"] == "queued"
+        assert receipt["request"]["id"].startswith("r-")
+        operation = receipt["operation"]
+        assert operation["id"].startswith("op-")
+        assert operation["status_url"] == f"/api/operations/{operation['id']}"
+        assert operation["events_url"] == f"/api/client-events?operation_id={operation['id']}"
+        assert operation["cursor"]["seq"] == 0
+        assert operation["context"] == {
+            "session": "5",
+            "from_ref": "HEAD~3",
+            "to_ref": "current",
+            "hours": 7.5,
+            "repo_refs": {"/repo/z": {"from": "HEAD~2", "to": "current"}},
+        }
+        assert operation["progress"] == {
+            "phase": "waiting_for_product",
+            "producer": "jobd",
+            "producer_state": "queued",
+        }
+
+        release_result.set()
+        assert terminal_published.wait(2.0), "accepted operation did not publish a terminal result"
+        terminal = published[-1]
+        assert terminal["operation"]["id"] == operation["id"]
+        assert terminal["operation"]["cursor"]["seq"] == 1
+        assert terminal["result"]["state"] == "ready"
+        assert terminal["result"]["data"]["files"] == [{"path": "done.py"}]
+
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", operation["status_url"])
+        status_response = connection.getresponse()
+        replayed_status = json.loads(status_response.read().decode("utf-8"))
+        connection.close()
+        assert status_response.status == HTTPStatus.OK
+        assert replayed_status == terminal["result"]
+
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", operation["events_url"])
+        replay_response = connection.getresponse()
+        assert replay_response.status == HTTPStatus.OK
+        assert replay_response.readline().decode("utf-8") == "event: ready\n"
+        replay_response.readline()
+        replay_response.readline()
+        assert replay_response.readline().decode("utf-8") == "event: operation_terminal\n"
+        replay_payload = json.loads(replay_response.readline().decode("utf-8").removeprefix("data: "))
+        connection.close()
+        assert replay_payload["payload"] == terminal
+        operation_state_path = tmp_path / "operations" / "session-files.json"
+        assert operation_state_path.is_file()
+        persisted = QueuedDeliveryLedger(state_path=operation_state_path).operation_status(operation["id"])
+        assert persisted == (terminal["result"], HTTPStatus.OK)
+    finally:
+        release_result.set()
+        if server is not None:
+            stop_browser_share_server(server, thread)
+        webapp.control_server.stop()
+
+
+def test_session_files_operation_failure_preserves_exception_type_and_frames(
+    monkeypatch,
+    tmp_path,
+):
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module, "SESSION_FILES_JOBD_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(
+        app_module,
+        "SESSION_FILES_OPERATION_STATE_PATH",
+        tmp_path / "operations" / "session-files.json",
+        raising=False,
+    )
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    terminal_published = threading_module.Event()
+    published = []
+    root_cause = {
+        "exception": {"type": "FileNotFoundError", "message": "service socket is absent"},
+        "frames": [
+            {
+                "file": "yolomux_lib/local_services/rpc.py",
+                "line": 272,
+                "function": "request",
+            },
+        ],
+    }
+
+    class FailingJobClient:
+        def stop_for_scheduler(self):
+            return None
+
+        def submit(self, *_args, **_kwargs):
+            return {
+                "ok": True,
+                "job": {
+                    "job_id": "job-session-files-failed",
+                    "generation": 9,
+                    "status": "queued",
+                },
+            }
+
+        def product(self, *_args, **_kwargs):
+            return {"ok": True, "state": "pending", "generation": 9}, b""
+
+        def result(self, job_id):
+            assert job_id == "job-session-files-failed"
+            return {
+                "ok": False,
+                "error": "service socket is absent",
+                "exception_type": "FileNotFoundError",
+                "_transport_error": "absent",
+                "cause": root_cause,
+            }
+
+    webapp = TmuxWebtermApp(["5"])
+    webapp.job_client = FailingJobClient()
+    webapp.refresh_sessions = lambda: []
+    original_publish = webapp.publish_client_event
+
+    def capture_publish(event_type, payload, **kwargs):
+        event = original_publish(event_type, payload, **kwargs)
+        if event_type == "operation_terminal":
+            published.append(payload)
+            terminal_published.set()
+        return event
+
+    webapp.publish_client_event = capture_publish
+    server = thread = None
+    try:
+        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", "/api/session-files?session=5&force=1")
+        response = connection.getresponse()
+        receipt = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        assert response.status == HTTPStatus.ACCEPTED
+        assert terminal_published.wait(2.0), "accepted failure did not publish a terminal result"
+
+        terminal = published[-1]
+        result = terminal["result"]
+        assert result["state"] == "failed"
+        assert result["request"] == receipt["request"]
+        assert result["error"]["code"] == "service_unavailable"
+        assert result["error"]["stack"][-1]["exception"] == root_cause["exception"]
+        assert result["error"]["stack"][-1]["frames"] == root_cause["frames"]
+
+        operation_id = receipt["operation"]["id"]
+        connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+        connection.request("GET", f"/api/operations/{operation_id}")
+        status_response = connection.getresponse()
+        replayed = json.loads(status_response.read().decode("utf-8"))
+        connection.close()
+        assert status_response.status == HTTPStatus.SERVICE_UNAVAILABLE
+        assert replayed == result
+        retired = retire_expected_session_files_failure_logs(
+            server,
+            request_id=result["request"]["id"],
+            operation_id=operation_id,
+            stack_operation="jobd.result",
+            expect_transport=False,
+        )
+        assert len(retired) == 2
+        webapp.demote_background_owner()
+    finally:
+        if server is not None:
+            stop_browser_share_server(server, thread)
+        webapp.control_server.stop()
+
+
+def test_queued_operation_ledger_appends_acceptance_and_terminal_without_snapshot_rewrite(monkeypatch, tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    monkeypatch.setattr("yolomux_lib.observability.queued_delivery.atomic_write_text", lambda *_args, **_kwargs: pytest.fail("request path must not rewrite the full ledger"))
+
+    receipt = ledger.accept_operation(
+        request_id="r-append",
+        route="GET /api/fs/list",
+        deadline_at=10.0,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-append"},
+        kind="filesystem_operation",
+        context={"path": "/repo"},
+    )
+    operation_id = receipt["operation"]["id"]
+    result = {"state": "ready", "request": {"id": "r-append"}, "data": {"entries": []}}
+    terminal = ledger.terminalize_operation(operation_id, result, HTTPStatus.OK)
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+    assert terminal["status"] == HTTPStatus.OK
+    assert recovered.operation_replay_event(operation_id) == terminal
+    assert recovered.operation_status(operation_id) == (result, HTTPStatus.OK)
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_queued_operation_ledger_loads_legacy_snapshot(tmp_path):
+    path = tmp_path / "operations.json"
+    result = {"state": "ready", "request": {"id": "r-legacy"}, "data": {"entries": []}}
+    event = {"operation": {"id": "op-legacy", "cursor": {"epoch": "legacy", "seq": 1}}, "result": result}
+    path.write_text(json.dumps({
+        "version": 1,
+        "epoch": "legacy",
+        "operations": [{
+            "id": "op-legacy",
+            "state": "ready",
+            "created_at": time.time(),
+            "terminal_at": time.time(),
+            "terminal_event": event,
+            "http_status": int(HTTPStatus.OK),
+        }],
+    }), encoding="utf-8")
+
+    ledger = QueuedDeliveryLedger(state_path=path)
+
+    assert ledger.operation_replay_event("op-legacy") == event
+    assert ledger.operation_status("op-legacy") == (result, HTTPStatus.OK)
+
+
+def test_queued_operation_ledger_ignores_truncated_trailing_journal_record(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-truncated",
+        route="GET /api/fs/list",
+        deadline_at=10.0,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-truncated"},
+    )
+    operation_id = receipt["operation"]["id"]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"version":2,"type":"operation"')
+
+    recovered = QueuedDeliveryLedger(state_path=path)
+
+    assert recovered.operation_status(operation_id) == (receipt, HTTPStatus.ACCEPTED)
+
+
+def test_queued_operation_ledger_compacts_only_when_called_out_of_band(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-compact",
+        route="GET /api/fs/list",
+        deadline_at=10.0,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-compact"},
+    )
+    operation_id = receipt["operation"]["id"]
+
+    ledger.compact_operations()
+    ledger.terminalize_operation(operation_id, {"state": "ready"}, HTTPStatus.OK)
+
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 2
+    assert QueuedDeliveryLedger(state_path=path).operation_status(operation_id) == ({"state": "ready"}, HTTPStatus.OK)
+
+
+def test_terminal_before_receipt_remains_exact_until_delivery_ack_then_bounds_replay(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-bounded-replay",
+        route="GET /api/session-files",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-bounded-replay"},
+    )
+    operation_id = receipt["operation"]["id"]
+    exact_result = {
+        "state": "ready",
+        "request": {"id": "r-bounded-replay"},
+        "data": {"blob": "x" * (512 * 1024)},
+    }
+
+    terminal = ledger.terminalize_operation(operation_id, exact_result, HTTPStatus.OK)
+    assert terminal["result"] == exact_result
+    assert ledger.operation_replay_event(operation_id) == terminal
+
+    ledger.observe_http_response(receipt, HTTPStatus.ACCEPTED)
+
+    replay, status = ledger.operation_status(operation_id)
+    assert status == HTTPStatus.OK
+    assert replay == exact_result
+
+    assert ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"]) is True
+    replay, status = ledger.operation_status(operation_id)
+    assert status == HTTPStatus.GONE
+    assert replay["state"] == "failed"
+    assert replay["request"] == receipt["request"]
+    assert replay["error"]["code"] == "operation_replay_evicted"
+    assert path.stat().st_size < 64 * 1024
+    recovered = QueuedDeliveryLedger(state_path=path)
+    assert recovered.operation_status(operation_id) == (replay, HTTPStatus.GONE)
+
+
+def test_queued_operation_terminal_after_exposed_receipt_remains_exact_until_delivery_ack(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    receipt = ledger.accept_operation(
+        request_id="r-exposed-replay",
+        route="GET /api/fs/read",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product"},
+        producer={"service": "jobd", "job_id": "job-exposed-replay"},
+    )
+    operation_id = receipt["operation"]["id"]
+    ledger.observe_http_response(receipt, HTTPStatus.ACCEPTED)
+    exact_result = {
+        "state": "ready",
+        "request": {"id": "r-exposed-replay"},
+        "data": {"blob": "y" * (512 * 1024)},
+    }
+
+    terminal = ledger.terminalize_operation(operation_id, exact_result, HTTPStatus.OK)
+
+    assert terminal["result"] == exact_result
+    replay, status = ledger.operation_status(operation_id)
+    assert status == HTTPStatus.OK
+    assert replay == exact_result
+
+    assert ledger.acknowledge_operation_delivery(operation_id, terminal["operation"]["cursor"]) is True
+    replay, status = ledger.operation_status(operation_id)
+    assert status == HTTPStatus.GONE
+    assert replay["error"]["code"] == "operation_replay_evicted"
+    assert path.stat().st_size < 64 * 1024
+
+
+def test_operation_terminal_batch_ack_is_exact_idempotent_and_bounds_once(tmp_path):
+    path = tmp_path / "operations.json"
+    ledger = QueuedDeliveryLedger(state_path=path)
+    terminals = []
+    for suffix in ("a", "b"):
+        receipt = ledger.accept_operation(
+            request_id=f"r-batch-{suffix}",
+            route="GET /api/fs/watch-diff",
+            deadline_at=time.time() + 30,
+            progress={"phase": "waiting_for_product"},
+            producer={"service": "jobd", "job_id": f"job-batch-{suffix}"},
+        )
+        terminals.append(ledger.terminalize_operation(
+            receipt["operation"]["id"],
+            {"state": "ready", "request": receipt["request"], "data": {"blob": suffix * (512 * 1024)}},
+            HTTPStatus.OK,
+        ))
+
+    stale = {
+        "id": terminals[0]["operation"]["id"],
+        "cursor": {**terminals[0]["operation"]["cursor"], "seq": 99},
+    }
+    exact = [
+        {"id": terminal["operation"]["id"], "cursor": terminal["operation"]["cursor"]}
+        for terminal in terminals
+    ]
+
+    assert ledger.acknowledge_operation_deliveries([stale]) == []
+    assert ledger.operation_replay_event(stale["id"])["result"]["data"]["blob"].startswith("a")
+    assert ledger.acknowledge_operation_deliveries(exact) == [item["id"] for item in exact]
+    assert ledger.acknowledge_operation_deliveries(exact) == [item["id"] for item in exact]
+    for item in exact:
+        replay, status = ledger.operation_status(item["id"])
+        assert status == HTTPStatus.GONE
+        assert replay["error"]["code"] == "operation_replay_evicted"
+    assert path.stat().st_size < 64 * 1024
+
+
+def test_session_files_recovered_receipt_replays_producer_abandoned(monkeypatch, tmp_path):
+    operation_state_path = tmp_path / "operations" / "session-files.json"
+    ledger = QueuedDeliveryLedger(state_path=operation_state_path)
+    receipt = ledger.accept_operation(
+        request_id="r-recovered-session-files",
+        route="GET /api/session-files",
+        deadline_at=time.time() + 30,
+        progress={"phase": "waiting_for_product", "producer": "jobd", "producer_state": "queued"},
+        producer={"service": "jobd", "job_id": "job-abandoned"},
+        kind="session_files",
+        context={"session": "5"},
+    )
+    operation_id = receipt["operation"]["id"]
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", operation_state_path)
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+
+    webapp = TmuxWebtermApp([])
+    try:
+        result, status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert result["state"] == "failed"
+    assert result["request"] == {"id": "r-recovered-session-files"}
+    assert result["error"]["code"] == "producer_abandoned"
+    assert result["error"]["stack"][-1]["code"] == "producer_abandoned"
+    assert QueuedDeliveryLedger(state_path=operation_state_path).operation_status(operation_id) == (
+        result,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+    )
+
+
+def test_session_files_public_deleted_root_cache_keeps_jobd_serving(monkeypatch, tmp_path):
+    """A retired worktree cached by transcript scanning must not crash jobd or poison later demands."""
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    retired_root = tmp_path / "retired-worktree"
+    retired_root.mkdir()
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "assistant",
+        "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": str(retired_root / "gone.py")}}]},
+        "padding": "x" * (session_files._TRANSCRIPT_SCAN_PERSIST_MIN_BYTES + 1),
+    }) + "\n", encoding="utf-8")
+    assert str(retired_root / "gone.py") in session_files.scan_claude_transcript(transcript, str(retired_root))
+    cache_key = session_files.claude_transcript_scan_cache_key(transcript)
+    assert cache_key is not None and session_files.transcript_scan_store_path(cache_key).exists()
+    with session_files._TRANSCRIPT_SCAN_CACHE_GUARD:
+        session_files._TRANSCRIPT_SCAN_CACHE.clear()
+    retired_root.rmdir()
+    info = SessionInfo(session="5", panes=[], selected_pane=None, agents=[agent("claude", transcript, retired_root, session="5")])
+    monkeypatch.setattr(app_module, "discover_sessions", lambda _sessions: ({"5": info}, []))
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    webapp = TmuxWebtermApp(["5"])
+    webapp.refresh_sessions = lambda: []
+    server = thread = None
+    try:
+        assert webapp.job_client.start_for_scheduler()
+        server, thread = start_browser_share_server(monkeypatch, tmp_path, webapp, auth_bypass=True)
+        for hours in (1, 2, 3):
+            connection = HTTPConnection("127.0.0.1", server.server_address[1], timeout=15)
+            connection.request("GET", f"/api/session-files?session=5&force=1&hours={hours}")
+            response = connection.getresponse()
+            receipt = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            assert response.status == HTTPStatus.ACCEPTED
+            terminal_status, terminal = operation_terminal_response(server, receipt["operation"]["status_url"])
+            assert terminal_status == HTTPStatus.OK
+            assert any(
+                warning.get("key") == "common.pathNotFound"
+                and warning.get("params", {}).get("reason_code") == "root_gone"
+                for warning in terminal["data"]["warnings"]
+            )
+        pid = int(webapp.job_client.registry._read_record()["pid"])
+        assert process_state(pid) != "Z"
+        assert webapp.job_client.socket_path.exists()
+        assert webapp.job_client.registry.healthy()
+        assert webapp.job_client.runtime_status()["product_counters"]["session_files_view"]["completed"] >= 3
+    finally:
+        if server is not None:
+            stop_browser_share_server(server, thread)
+        process = webapp.job_client.registry.process
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)
+        webapp.control_server.stop()
 
 
 def test_shared_git_snapshot_reuses_one_worktree_build_and_invalidates_every_state_input(no_control_socket, monkeypatch, tmp_path):
@@ -923,6 +1627,31 @@ def test_historical_codex_index_reuses_warm_raw_candidates_without_decoding(tmp_
     assert session_files.historical_codex_transcript_for_cwd(str(second_repo), cutoff=0) == second
 
 
+def test_historical_codex_index_skips_candidates_older_than_cutoff_before_decoding(tmp_path, monkeypatch):
+    session_files._HISTORICAL_CODEX_TRANSCRIPT_INDEX.clear()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    old = tmp_path / "old.jsonl"
+    recent = tmp_path / "recent.jsonl"
+    old.write_text("old\n", encoding="utf-8")
+    recent.write_text("recent\n", encoding="utf-8")
+    os.utime(old, (100, 100))
+    os.utime(recent, (200, 200))
+    scanned = []
+
+    monkeypatch.setattr(session_files, "find_recent_codex_transcript", lambda _cwd: None)
+    monkeypatch.setattr(session_files, "recent_codex_transcript_candidates", lambda: [old, recent])
+
+    def raw_changes(path):
+        scanned.append(path)
+        return {str(repo / "changed.py"): {"M"}}
+
+    monkeypatch.setattr(session_files, "codex_transcript_raw_shell_changes", raw_changes)
+
+    assert session_files.historical_codex_transcript_for_cwd(str(repo), cutoff=150) == recent
+    assert scanned == [recent]
+
+
 def test_codex_transcript_scan_cache_holds_full_recent_candidate_window(tmp_path, monkeypatch):
     session_files._TRANSCRIPT_SCAN_CACHE.clear()
     line = json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n"
@@ -1075,6 +1804,51 @@ def test_transcript_scan_store_is_bounded_and_atomic_failure_is_nonfatal(tmp_pat
     assert "failed to persist transcript scan cache" in caplog.text
 
 
+def test_transcript_scan_store_keeps_incomplete_stats_backfill_cursors(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    store_dir = session_files.transcript_scan_store_dir()
+    store_dir.mkdir(parents=True)
+
+    def write_cursor(name, identity, state, mtime):
+        path = store_dir / name
+        path.write_text(json.dumps({
+            "schema_version": session_files._TRANSCRIPT_SCAN_STORE_VERSION,
+            "identity": identity,
+            "state": state,
+        }), encoding="utf-8")
+        os.utime(path, (mtime, mtime))
+        return path
+
+    incomplete = write_cursor(
+        "incomplete.json",
+        ["stats-current-codex", 3, 1, 2, "/tmp/incomplete.jsonl"],
+        {"offset": 10, "size": 20},
+        100,
+    )
+    completed = write_cursor(
+        "completed.json",
+        ["stats-current-codex", 3, 1, 3, "/tmp/completed.jsonl"],
+        {"offset": 20, "size": 20},
+        102,
+    )
+    generic = write_cursor(
+        "generic.json",
+        ["codex", 7, 1, 4, "/tmp/generic.jsonl"],
+        {"offset": 20, "size": 20},
+        101,
+    )
+
+    session_files.prune_transcript_scan_store(max_entries=1, max_bytes=10_000)
+
+    assert incomplete.exists()
+    assert completed.exists()
+    assert generic.exists() is False
+
+    session_files.prune_transcript_scan_store(max_entries=1, max_bytes=1)
+    assert incomplete.exists() is False
+    assert completed.exists() is False
+
+
 def test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids():
     state = session_files.new_claude_transcript_scan_state()
     for index in range(session_files._TRANSCRIPT_SCAN_MESSAGE_ID_MAX + 3):
@@ -1088,6 +1862,54 @@ def test_transcript_scan_cache_has_one_owner_and_bounds_claude_message_ids():
     assert "_CODEX_TRANSCRIPT_SCAN_CACHE" not in source
     assert "_CLAUDE_TRANSCRIPT_SCAN_CACHE" not in source
     assert source.count("_TRANSCRIPT_SCAN_CACHE: dict") == 1
+
+
+def test_transcript_change_maps_keep_only_the_newest_bounded_paths():
+    assert session_files.TRANSCRIPT_CHANGE_PATH_LIMIT == 256
+
+    claude_state = session_files.new_claude_transcript_scan_state()
+    codex_state = session_files.new_codex_transcript_scan_state()
+    for index in range(session_files.TRANSCRIPT_CHANGE_PATH_LIMIT + 3):
+        claude_path = f"/tmp/claude-{index:03d}.py"
+        session_files.update_claude_transcript_scan_state(claude_state, json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": claude_path}}],
+            },
+        }))
+        codex_path = f"codex-{index:03d}.py"
+        session_files.update_codex_transcript_scan_state(
+            codex_state,
+            json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": f"git add {codex_path}", "workdir": "/tmp"}),
+                },
+            }),
+        )
+        session_files.update_codex_transcript_scan_state(
+            codex_state,
+            f"*** Update File: {codex_path}",
+        )
+
+    expected_first_claude = "/tmp/claude-003.py"
+    expected_first_codex_suffix = "codex-003.py"
+    assert len(claude_state["raw_changes"]) == session_files.TRANSCRIPT_CHANGE_PATH_LIMIT
+    assert next(iter(claude_state["raw_changes"])) == expected_first_claude
+    assert len(codex_state["shell_changes"]) == session_files.TRANSCRIPT_CHANGE_PATH_LIMIT
+    assert next(iter(codex_state["shell_changes"])).endswith(expected_first_codex_suffix)
+    assert len(codex_state["patch_changes"]) == session_files.TRANSCRIPT_CHANGE_PATH_LIMIT
+    assert next(iter(codex_state["patch_changes"])).endswith(expected_first_codex_suffix)
+
+    oversized = {
+        f"/tmp/persisted-{index:03d}.py": {"M"}
+        for index in range(session_files.TRANSCRIPT_CHANGE_PATH_LIMIT + 2)
+    }
+    serialized = session_files.serialized_transcript_marker_map(oversized)
+    assert len(serialized) == session_files.TRANSCRIPT_CHANGE_PATH_LIMIT
+    assert next(iter(serialized)) == "/tmp/persisted-002.py"
 
 
 def test_codex_transcript_scan_restarts_after_truncation(tmp_path):
@@ -1314,6 +2136,7 @@ def test_session_files_payload_includes_clean_numbered_workdir_repo_when_pane_is
     assert payload["files"] == []
     assert payload["repos"] == [{
         "repo": str(repo),
+        "branch": "master",
         "count": 0,
         "touched_count": 0,
         "added": 0,
@@ -1535,7 +2358,7 @@ def test_session_files_payload_merges_tool_attribution_with_git_status(tmp_path)
     assert by_path["new.txt"]["added"] == 1
     assert by_path["new.txt"]["removed"] == 0
     assert by_path["new.txt"]["diff_tracked"] is False
-    assert payload["repos"] == [{"repo": str(repo), "count": 2, "touched_count": 2, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
+    assert payload["repos"] == [{"repo": str(repo), "branch": "master", "count": 2, "touched_count": 2, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
 def test_session_files_payload_keeps_transcript_paths_when_branch_is_clean(tmp_path):
@@ -1675,6 +2498,7 @@ def test_session_files_payload_uses_historical_codex_transcript_for_clean_pane_r
     assert item["agents"] == ["codex"]
     assert payload["repos"] == [{
         "repo": str(repo),
+        "branch": "master",
         "count": 0,
         "touched_count": 1,
         "added": 0,
@@ -1782,6 +2606,7 @@ def test_session_files_payload_marks_statless_touched_path_missing(tmp_path):
     tracked.write_text("base\n", encoding="utf-8")
     git(repo, "add", "README.md")
     git(repo, "commit", "-m", "base")
+    (repo / "docs" / "specs").mkdir(parents=True)
     transcript = tmp_path / "rollout.jsonl"
     transcript.write_text('{"msg":"*** Begin Patch\\n*** Update File: docs/specs/GUI.md\\n"}\n', encoding="utf-8")
     os.utime(transcript, (2000, 2000))
@@ -2133,7 +2958,7 @@ def test_session_files_payload_counts_branch_commits_since_main(tmp_path):
     assert by_path["tracked.txt"]["status"] == "M"
     assert by_path["tracked.txt"]["added"] == 1
     assert by_path["tracked.txt"]["removed"] == 1
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 1, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
+    assert payload["repos"] == [{"repo": str(repo), "branch": "feature", "count": 1, "touched_count": 1, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
 def test_session_files_payload_accepts_explicit_commit_refs(tmp_path):
@@ -2400,6 +3225,7 @@ def test_session_files_payload_reports_invalid_ref_order(tmp_path):
 
     assert payload["files"] == []
     assert payload["errors"] == []
+    assert payload["repos"][0]["branch"] == "master"
     assert payload["repos"][0]["error_message"] == {
         "key": "diff.warning.refsFallback",
         "params": {"repo": "repo"},
@@ -2414,6 +3240,7 @@ def test_session_files_payload_reports_invalid_ref_order(tmp_path):
         to_ref=older,
     )
     assert status == HTTPStatus.OK
+    assert aggregate["repos"][0]["branch"] == "master"
     assert aggregate["repos"][0]["error_message"] == payload["repos"][0]["error_message"]
 
 
@@ -2460,7 +3287,7 @@ def test_session_files_payload_uses_session_repo_without_ai_attribution(tmp_path
 
     assert payload["files"][0]["path"] == "tracked.txt"
     assert payload["files"][0]["source"] == "git"
-    assert payload["repos"] == [{"repo": str(repo), "count": 1, "touched_count": 0, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
+    assert payload["repos"] == [{"repo": str(repo), "branch": "master", "count": 1, "touched_count": 0, "added": 1, "removed": 1, "from_ref": "default", "to_ref": "base", "error": ""}]
 
 
 def test_session_files_payload_does_not_invent_agent_for_repo_only_change(tmp_path):
@@ -2713,26 +3540,37 @@ def test_repo_state_record_warm_hit_runs_zero_git_commands_and_dirty_event_recom
         webapp.control_server.stop()
 
 
-def test_git_metadata_event_filter_admits_identity_inputs_only(tmp_path):
-    """The watch filter admits exactly the .git paths that change
-    git_snapshot_identity (HEAD, index, refs, packed-refs, MERGE_HEAD) and keeps
-    objects/ and logs/ churn out."""
+def test_watchd_git_metadata_event_filter_admits_no_git_internal_at_all(tmp_path):
+    """No ``.git`` path is admitted, and the floor holds without configuration.
 
-    webapp = object.__new__(TmuxWebtermApp)
-    record = ClientEventWatcherRecord()
-    record.filesystem_watch_paths = (str(tmp_path),)
+    This test previously pinned the opposite: HEAD, index, packed-refs, config,
+    MERGE_HEAD and refs/** were admitted so a branch change could be delivered
+    through them.  That made an ignored pathname the transport signal for the
+    branch/status UI.  ``.git`` is now ignored like any other ignored directory,
+    and because version-control metadata is never user content it stays excluded
+    even though this configuration declares no ``skip_dirs`` at all.
+    """
+
+    service = object.__new__(watchd.PersistentWatchService)
+    configuration = EffectiveWatchConfiguration(
+        configured_roots=(str(tmp_path),),
+        watch_paths=(str(tmp_path),),
+    )
+    assert configuration.skip_dirs == ()
     git_dir = tmp_path / "repo" / ".git"
-    assert webapp.git_metadata_event_allowed(git_dir / "HEAD", record) is True
-    assert webapp.git_metadata_event_allowed(git_dir / "index", record) is True
-    assert webapp.git_metadata_event_allowed(git_dir / "packed-refs", record) is True
-    assert webapp.git_metadata_event_allowed(git_dir / "config", record) is True
-    assert webapp.git_metadata_event_allowed(git_dir / "MERGE_HEAD", record) is True
-    assert webapp.git_metadata_event_allowed(git_dir / "refs" / "heads" / "main", record) is True
-    assert webapp.git_metadata_event_allowed(git_dir / "objects" / "ab" / "cdef", record) is False
-    assert webapp.git_metadata_event_allowed(git_dir / "logs" / "HEAD", record) is False
-    assert webapp.git_metadata_event_allowed(Path("/outside/.git/HEAD"), record) is False
-    # The general filter routes .git paths through this policy.
-    assert webapp.native_filesystem_event_allowed(git_dir / "objects" / "pack" / "p.idx", record) is False
+    for candidate in (
+        git_dir / "HEAD",
+        git_dir / "index",
+        git_dir / "packed-refs",
+        git_dir / "config",
+        git_dir / "MERGE_HEAD",
+        git_dir / "refs" / "heads" / "main",
+        git_dir / "objects" / "ab" / "cdef",
+        git_dir / "logs" / "HEAD",
+        Path("/outside/.git/HEAD"),
+    ):
+        assert service._path_allowed(candidate, configuration) is False, candidate
+    assert service._path_allowed(tmp_path / "repo" / "src" / "main.py", configuration) is True
 
 
 def _new_git_verbs(before):

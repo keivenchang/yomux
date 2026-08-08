@@ -9,9 +9,9 @@ deltas to stdout, prints tool/Claude thinking metadata in gray, captures the ret
 session id, and resumes that session on later turns.
 
 Usage:
-  python3 tools/agent_clients/claude.py
-  python3 tools/agent_clients/claude.py -C . --model sonnet "summarize this repo"
-  python3 tools/agent_clients/claude.py -C . --resume <session-id>
+  python3 tools/mockers/claude.py
+  python3 tools/mockers/claude.py -C . --model sonnet "summarize this repo"
+  python3 tools/mockers/claude.py -C . --resume <session-id>
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from yolomux_lib.agent_comms.stream_events import ClaudeStreamJsonNormalizer
-import mock_agent_common
+import common as mock_agent_common
 from text_client_common import (
     CLAUDE_CONFIG_KEYS,
     CLAUDE_OUTPUT_TERMS,

@@ -341,7 +341,14 @@ class AutoApproveWorker:
             except EXPECTED_AUTO_APPROVE_ERRORS as exc:
                 self.update(error=str(exc))
                 self.update_last_action("yolo.status.activityGateError", "tmux activity gate error")
-                should_capture = True
+                self.emit_event(
+                    "worker_error",
+                    "tmux activity gate error",
+                    message_key="yolo.status.activityGateError",
+                    reason="activity_gate_failed",
+                    error=str(exc),
+                )
+                return False
             if should_capture is False:
                 self.update_last_action("yolo.status.activityQuiet", "idle; tmux activity quiet")
                 self.last_poll_is_quiet = self.last_screen_key != "working"
@@ -545,6 +552,7 @@ class AutoApproveWorker:
             "ruleset_source_key": decision.get("source_key") or "",
             "ruleset_source_params": decision.get("source_params") or {},
             "ruleset_path": decision.get("path") or "",
+            "reason_code": decision.get("reason_code") or "",
             "dry_run": decision.get("dry_run") is True,
             "would_action": decision.get("would_action") or "",
             "prompt_source": prompt_source,
@@ -659,6 +667,7 @@ class AutoApproveWorker:
             "ruleset_source_key": decision.get("source_key") or "",
             "ruleset_source_params": decision.get("source_params") or {},
             "ruleset_path": decision.get("path") or "",
+            "reason_code": decision.get("reason_code") or "",
             "dry_run": decision.get("dry_run") is True,
             "would_action": decision.get("would_action") or "",
             "prompt_source": prompt_source,

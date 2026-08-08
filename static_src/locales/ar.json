@@ -237,6 +237,7 @@
   "debug.cost.backfillPartial": "استكمال البيانات غير مكتمل",
   "debug.cost.backfillPending": "استكمال البيانات معلّق",
   "debug.cost.backfillRunning": "استكمال البيانات جارٍ",
+  "debug.cost.backfillUnknown": "حالة استكمال البيانات غير معروفة",
   "debug.cost.byModel": "حسب النموذج",
   "debug.cost.bySource": "إسناد الوكيل والمصدر",
   "debug.cost.byTmux": "التكلفة حسب نافذة tmux",

@@ -17,6 +17,7 @@ function shareReadOnlyFinderStateIsHostOwned() {
 
 async function openFileExplorerAt(path, options = {}) {
   if (shareReadOnlyFinderStateIsHostOwned()) return false;
+  const observabilityJourney = options.observabilityJourney || newFinderUsableJourney();
   const root = normalizeDirectoryPath(expandUserPath(path));
   if (options.manualSelection === true) {
     cancelPendingFileExplorerActiveSync();
@@ -52,9 +53,10 @@ async function openFileExplorerAt(path, options = {}) {
   fileExplorerExpanded.clear();
   if (fileExplorerTree) {
     renderTreeChildren(fileExplorerTree, fileExplorerRoot, entries, 0, {view: 'finder'});
+    scheduleFinderUsableObservation(fileExplorerTree, entries, observabilityJourney);
   }
   if (options.refreshPanels !== false) {
-    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false});
+    await refreshFileExplorerPanelTrees({root: fileExplorerRoot, entries, restoreState: false, observabilityJourney});
     if (!openStillCurrent()) return false;
   }
   if (previousExpanded.length) {
@@ -85,6 +87,10 @@ async function saveFileExplorerRootMode(mode) {
 const fileExplorerFsResourceRecords = new Map();
 const fileExplorerFsBatchQueue = [];
 const fileExplorerFsBatchPending = new Map();
+const fileExplorerFsBatchOperations = new Map();
+// A generation can publish before its matching 202 reaches the browser. Keep
+// the bounded completion so the queued item can repair immediately on arrival.
+const fileExplorerFsBatchReadyGenerations = new Map();
 const fileExplorerFsBatchDelayMs = 8;
 const fileExplorerFsBatchTriggerCountLimit = 64;
 let fileExplorerFsBatchSeq = 0;
@@ -173,7 +179,7 @@ function fileExplorerFsResourceRecord(type, path) {
   const key = fileExplorerFsBatchKey(type, path);
   let record = fileExplorerFsResourceRecords.get(key);
   if (!record) {
-    record = {value: undefined, storedAt: 0, request: null, generation: 0};
+    record = {value: undefined, storedAt: 0, request: null, requestUserInitiated: false, generation: 0};
     setLimitedMapEntry(fileExplorerFsResourceRecords, key, record, fileExplorerMemoryCacheLimit);
   }
   return {key, record};
@@ -223,7 +229,11 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
     lifecycle.onReuse?.(record.value);
     return Promise.resolve(record.value);
   }
-  if (canReuse && record.request) {
+  // A Finder click must not wait behind an unrelated bootstrap/refresh request for the same
+  // directory.  Give it one successor batch; later clicks share that user-owned request so this
+  // is a priority handoff, not an unbounded duplicate-request path.
+  const supersedeBackgroundRequest = options.user === true && record.request && record.requestUserInitiated !== true;
+  if (canReuse && record.request && !supersedeBackgroundRequest) {
     lifecycle.onCoalesce?.();
     return record.request;
   }
@@ -236,7 +246,7 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
   let request = null;
   request = (async () => {
     try {
-      const value = await makeRequest();
+      const value = await makeRequest(supersedeBackgroundRequest ? {...options, dedupe: false} : options);
       if (fileExplorerFsResourceCurrent(key, record, generation) && value !== undefined && value !== null) {
         record.value = value;
         record.storedAt = Date.now();
@@ -252,6 +262,7 @@ function requestFileExplorerFsResource(type, path, options, makeRequest, lifecyc
     }
   })();
   record.request = request;
+  record.requestUserInitiated = options.user === true;
   return request;
 }
 
@@ -293,9 +304,11 @@ function recordPendingFileExplorerFsBatchTrigger(type, path, options = {}) {
 
 function fileExplorerFsBatchClientMetadata() {
   const revision = String((typeof bootstrap === 'object' && bootstrap?.clientRevision) || '');
+  const watchToken = String(fileExplorerFilesystemWatchToken || '');
   return {
     client_revision: /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : '',
     client_scope: shareViewMode ? 'share' : 'browser',
+    watch_token: watchToken.slice(0, 128),
   };
 }
 
@@ -316,29 +329,68 @@ function fetchFilesystemBatchItem(type, path, options = {}) {
     reject = fail;
   });
   const trigger = fileExplorerFsBatchTrigger(options);
-  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, resolve, reject, sent: false};
+  const item = {id: ++fileExplorerFsBatchSeq, type, path: normalized, triggerCounts: {[trigger]: 1}, key, promise, resolve, reject, sent: false};
   if (options.dedupe !== false) fileExplorerFsBatchPending.set(key, {promise, item});
   fileExplorerFsBatchQueue.push(item);
   scheduleFileExplorerFsBatchFlush();
   return promise;
 }
 
-async function settleFileExplorerFsBatchItemFallback(item) {
-  try {
-    item.resolve(await apiFetchJson(fileExplorerFsBatchSingleUrl(item.type, item.path)));
-  } catch (error) {
-    item.reject(error);
-  } finally {
-    if (fileExplorerFsBatchPending.get(item.key)?.item === item) {
-      fileExplorerFsBatchPending.delete(item.key);
+function fileExplorerFsBatchQueuedProduct(response = {}) {
+  const pending = apiPendingResponseFromNestedEnvelope(response);
+  return pending ? {ticket: pending.ticket, key: pending.key, generation: 0} : null;
+}
+
+function applyFileExplorerFsBatchOperationResult(record, result = {}) {
+  const operationId = String(record?.id || '');
+  const items = fileExplorerFsBatchOperations.get(operationId);
+  if (!operationId || !Array.isArray(items)) return false;
+  fileExplorerFsBatchOperations.delete(operationId);
+  if (result.state === 'ready' && Array.isArray(result.data?.responses)) {
+    const responses = new Map(result.data.responses.map(response => [response?.id, response]));
+    for (const item of items) {
+      settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
+    return true;
   }
+  const error = new Error(userMessageText(result, t('common.requestFailed')));
+  error.status = Number(result?.error?.status || 0);
+  error.payload = result;
+  for (const item of items) rejectFileExplorerFsBatchItem(item, error);
+  return true;
+}
+
+function acceptFileExplorerFsBatchOperation(items, error) {
+  if (!isApiPendingResponse(error) || !error.operationId) return false;
+  fileExplorerFsBatchOperations.set(error.operationId, items);
+  const terminal = apiOperationState.terminal.get(error.operationId);
+  if (terminal?.result) {
+    applyFileExplorerFsBatchOperationResult({id: error.operationId, kind: 'fs_batch'}, terminal.result);
+  }
+  return true;
 }
 
 function settleFileExplorerFsBatchItem(item, response) {
+  const queuedProduct = fileExplorerFsBatchQueuedProduct(response);
+  if (queuedProduct) {
+    const previousQueuedProduct = item.queuedProduct;
+    if (previousQueuedProduct && apiGenerationReadyMatchesKey(previousQueuedProduct.key, queuedProduct)) {
+      queuedProduct.generation = previousQueuedProduct.generation;
+    }
+    item.queuedProduct = queuedProduct;
+    item.repairing = false;
+    if (!fileExplorerFsBatchPending.has(item.key)) fileExplorerFsBatchPending.set(item.key, {promise: item.promise, item});
+    const generation = fileExplorerFsBatchReadyGenerations.get(apiGenerationReadyKey(queuedProduct.key));
+    if (Number.isSafeInteger(generation) && generation > 0) {
+      handleFileExplorerFsBatchGenerationReady({...queuedProduct, generation});
+    }
+    return;
+  }
   if (fileExplorerFsBatchPending.get(item.key)?.item === item) {
     fileExplorerFsBatchPending.delete(item.key);
   }
+  item.queuedProduct = null;
+  item.repairing = false;
   if (response?.ok) {
     item.resolve(response.payload || {});
     return;
@@ -347,6 +399,96 @@ function settleFileExplorerFsBatchItem(item, response) {
   error.status = Number(response?.status) || 0;
   error.payload = response || {};
   item.reject(error);
+}
+
+function rejectFileExplorerFsBatchItem(item, error) {
+  if (fileExplorerFsBatchPending.get(item.key)?.item === item) fileExplorerFsBatchPending.delete(item.key);
+  item.queuedProduct = null;
+  item.repairing = false;
+  item.reject(error);
+}
+
+async function fetchFileExplorerFsBatchSingleItem(item) {
+  item.sent = true;
+  try {
+    const payload = await apiFetchJson(fileExplorerFsBatchSingleUrl(item.type, item.path));
+    settleFileExplorerFsBatchItem(item, {ok: true, status: 200, payload});
+    return {ok: true};
+  } catch (error) {
+    if (isApiPendingResponse(error)) {
+      settleFileExplorerFsBatchItem(item, {
+        ok: false,
+        pending: true,
+        status: error.status,
+        payload: {status: 'QUEUED', ticket: error.ticket, key: error.key},
+      });
+      return {ok: true, pending: true};
+    }
+    rejectFileExplorerFsBatchItem(item, error);
+    return {ok: false, error};
+  }
+}
+
+async function drainFileExplorerFsBatchWithoutPush() {
+  if (fileExplorerFsBatchTimer) clearTimeout(fileExplorerFsBatchTimer);
+  fileExplorerFsBatchTimer = null;
+  const queuedItems = fileExplorerFsBatchQueue.splice(0);
+  const admittedItems = Array.from(fileExplorerFsBatchPending.values())
+    .map(pending => pending?.item)
+    .filter(item => item?.sent === true && item.queuedProduct && item.repairing !== true);
+  for (const item of admittedItems) item.repairing = true;
+  const items = [...queuedItems, ...admittedItems];
+  if (!items.length) return {ok: true, failures: []};
+  const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
+  const failures = results.filter(result => result.ok !== true).map(result => result.error);
+  return {ok: failures.length === 0, failures};
+}
+
+async function repairPendingFileExplorerFsBatchItem(item) {
+  try {
+    const request = {
+      id: item.id,
+      type: item.type,
+      path: item.path,
+      trigger_counts: {[fileExplorerFsBatchTrigger({fresh: true})]: 1},
+    };
+    const payload = await apiFetchJson('/api/fs/batch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({requests: [request], ...fileExplorerFsBatchClientMetadata()}),
+    });
+    const response = Array.isArray(payload.responses) ? payload.responses.find(candidate => candidate?.id === item.id) : null;
+    settleFileExplorerFsBatchItem(item, response || {ok: false, status: 500, error: t('common.requestFailed')});
+  } catch (error) {
+    if (acceptFileExplorerFsBatchOperation([item], error)) return;
+    rejectFileExplorerFsBatchItem(item, error);
+  } finally {
+    if (fileExplorerFsBatchPending.get(item.key)?.item === item) item.repairing = false;
+  }
+}
+
+function handleFileExplorerFsBatchGenerationReady(payload = {}) {
+  const key = String(payload?.key || '');
+  const generation = Number(payload?.generation);
+  if (!key || !Number.isSafeInteger(generation) || generation < 1) return false;
+  setLimitedMapEntry(fileExplorerFsBatchReadyGenerations, apiGenerationReadyKey(key), generation, fileExplorerMemoryCacheLimit);
+  let handled = false;
+  for (const pending of fileExplorerFsBatchPending.values()) {
+    const item = pending?.item;
+    const queued = item?.queuedProduct;
+    if (!queued || !apiGenerationReadyMatchesKey(queued.key, payload) || generation <= queued.generation || item.repairing === true) continue;
+    queued.generation = generation;
+    item.repairing = true;
+    handled = true;
+    void repairPendingFileExplorerFsBatchItem(item);
+  }
+  return handled;
+}
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('yolomux:generation-ready', event => {
+    handleFileExplorerFsBatchGenerationReady(event?.detail);
+  });
 }
 
 async function flushFileExplorerFsBatch() {
@@ -367,19 +509,21 @@ async function flushFileExplorerFsBatch() {
     for (const item of items) {
       settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
-  } catch (_) {
-    await Promise.all(items.map(settleFileExplorerFsBatchItemFallback));
+  } catch (error) {
+    if (acceptFileExplorerFsBatchOperation(items, error)) return {ok: true, pending: true};
+    const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
+    return {ok: results.every(result => result.ok === true)};
   }
 }
 
 async function fetchDirectory(path, options = {}) {
   const root = normalizeDirectoryPath(path);
-  return requestFileExplorerFsResource('list', root, options, async () => {
+  return requestFileExplorerFsResource('list', root, options, async requestOptions => {
       hydrateFileExplorerRepoInfoCache();
       // `fresh` bypasses the completed-value TTL; it must not multiply an
       // identical in-flight list request when several UI refresh owners fire
       // in the same batch window.
-      const payload = await fetchFilesystemBatchItem('list', root, {trigger: fileExplorerFsBatchTrigger(options)});
+      const payload = await fetchFilesystemBatchItem('list', root, {...requestOptions, trigger: fileExplorerFsBatchTrigger(requestOptions)});
       return payload.entries || [];
     }, {
       onReuse: () => clearFileExplorerListError(root),
@@ -457,22 +601,67 @@ async function fetchFilesystemWatchDiff(options = {}) {
   return apiFetchJson(`/api/fs/watch-diff?${params.toString()}`);
 }
 
-async function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+function queueFileExplorerWatchDiffRefresh(payload = {}, options = {}) {
+  const previous = serverWatchRootsState.watchDiffTrailing;
+  serverWatchRootsState.watchDiffTrailing = {
+    payload,
+    options: {
+      ...options,
+      full: previous?.options?.full === true || options.full === true,
+    },
+  };
+}
+
+async function refreshFileExplorerFromWatchDiffOnce(payload = {}, options = {}) {
   if (!fileExplorerTreePaneIsVisible()) {
     recordClientPerfCounter('finderRefresh', 0, {skipped: 1});
     return;
   }
   const fullDue = Date.now() - fileExplorerFilesystemLastFullAt >= fileExplorerFilesystemKeyframeMs;
   const previousToken = fileExplorerFilesystemWatchToken;
+  const previousPushToken = fileExplorerFilesystemPushToken;
   const requestedFull = options.full === true || payload.full === true || fullDue || !previousToken;
+  const params = new URLSearchParams();
+  if (requestedFull) params.set('full', '1');
+  if (previousToken) params.set('since', previousToken);
+  const requestUrl = `/api/fs/watch-diff?${params.toString()}`;
   try {
-    const diffPayload = await fetchFilesystemWatchDiff({since: previousToken, full: requestedFull});
-    await refreshFileExplorerFromPush(diffPayload);
+    let diffPayload;
+    try {
+      diffPayload = await fetchFilesystemWatchDiff({since: previousToken, full: requestedFull});
+    } catch (error) {
+      if (!isApiPendingResponse(error) || !error.operationId) throw error;
+      const record = apiOperationState.records.get(error.operationId);
+      if (record) record.terminalOwner = 'filesystem-watch-diff-refresh';
+      diffPayload = await waitForApiOperationResult(error, {
+        kind: 'fs_watch_diff',
+        url: requestUrl,
+        method: 'GET',
+      });
+    }
+    if (fileExplorerFilesystemWatchToken !== previousToken || fileExplorerFilesystemPushToken !== previousPushToken) return;
+    await refreshFileExplorerFromPush(diffPayload, {fromWatchDiff: true});
   } catch (error) {
     console.warn('client fs watch diff refresh failed', error);
     if (requestedFull) await refreshFileExplorerTrees({preserveExpanded: true, preserveScroll: true, trigger: 'watch-diff-fallback'});
     else await refreshFileExplorerIfChanged({trigger: 'watch-diff-fallback'});
   }
+}
+
+function refreshFileExplorerFromWatchDiff(payload = {}, options = {}) {
+  queueFileExplorerWatchDiffRefresh(payload, options);
+  if (serverWatchRootsState.watchDiffPromise) return serverWatchRootsState.watchDiffPromise;
+  const owned = (async () => {
+    while (serverWatchRootsState.watchDiffTrailing) {
+      const next = serverWatchRootsState.watchDiffTrailing;
+      serverWatchRootsState.watchDiffTrailing = null;
+      await refreshFileExplorerFromWatchDiffOnce(next.payload, next.options);
+    }
+  })().finally(() => {
+    if (serverWatchRootsState.watchDiffPromise === owned) serverWatchRootsState.watchDiffPromise = null;
+  });
+  serverWatchRootsState.watchDiffPromise = owned;
+  return owned;
 }
 
 function fileEntryStatusFromWatchFilePayload(item) {
@@ -510,8 +699,13 @@ async function refreshOpenFilesFromPush(payload = {}) {
   }
 }
 
-async function refreshFileExplorerFromPush(payload = {}) {
+async function refreshFileExplorerFromPush(payload = {}, options = {}) {
   const nextToken = payload?.token ? String(payload.token || '') : '';
+  if (payload?.mode === 'full' && nextToken) fileExplorerFilesystemWatchToken = nextToken;
+  if (options.fromWatchDiff !== true && nextToken) {
+    if (fileExplorerFilesystemPushToken === nextToken) return;
+    fileExplorerFilesystemPushToken = nextToken;
+  }
   const treeVisible = fileExplorerTreePaneIsVisible();
   const changedPaths = [
     ...(Array.isArray(payload?.directories) ? payload.directories.map(item => item?.path || item?.data?.path || '') : []),
@@ -527,14 +721,18 @@ async function refreshFileExplorerFromPush(payload = {}) {
   let skipped = 0;
   const perf = clientPerfStart('finderRefresh');
   try {
+    if (options.fromWatchDiff === true && nextToken) {
+      fileExplorerFilesystemWatchToken = nextToken;
+      fileExplorerFilesystemPushToken = nextToken;
+    }
     const entriesByDir = treeVisible ? entriesByDirFromFilesystemPush(payload) : new Map();
     renderedRows = Array.from(entriesByDir.values()).reduce((total, entries) => total + (Array.isArray(entries) ? entries.length : 0), 0);
     const visibleRootRemoved = treeVisible ? invalidateFileExplorerRoots(payload?.removed_roots) : false;
-    if (!entriesByDir.size && payload?.refresh === true) {
+    if (!entriesByDir.size && payload?.refresh === true && options.fromWatchDiff !== true) {
       await refreshFileExplorerFromWatchDiff(payload);
       return;
     }
-    if (nextToken) fileExplorerFilesystemWatchToken = nextToken;
+    if (options.fromWatchDiff === true && nextToken) fileExplorerFilesystemWatchToken = nextToken;
     if (payload?.mode === 'full' || (Array.isArray(payload?.directories) && payload.directories.length && payload.refresh !== true)) {
       fileExplorerFilesystemLastFullAt = Date.now();
     }
@@ -884,6 +1082,35 @@ function fileExplorerExpandedPathsForRoot(root, paths = Array.from(fileExplorerE
       childPathParts(normalizedRoot, left).length - childPathParts(normalizedRoot, right).length
       || left.localeCompare(right)
     ));
+}
+
+function fileExplorerSyncUserExpansionEntries() {
+  return Array.from(fileExplorerSyncUserExpansionState.entries())
+    .filter(([path, expanded]) => normalizeDirectoryPath(path) && typeof expanded === 'boolean')
+    .sort(([left], [right]) => left.localeCompare(right));
+}
+
+function applyFileExplorerSyncUserExpansionState(entries) {
+  fileExplorerSyncUserExpansionState.clear();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[1] !== 'boolean') continue;
+    const path = normalizeDirectoryPath(entry[0]);
+    if (path) fileExplorerSyncUserExpansionState.set(path, entry[1]);
+  }
+}
+
+function setFileExplorerSyncUserExpansion(path, expanded) {
+  if (fileExplorerRootMode !== 'sync') return;
+  const normalized = normalizeDirectoryPath(path || '');
+  if (!normalized) return;
+  fileExplorerSyncUserExpansionState.set(normalized, expanded === true);
+}
+
+function fileExplorerSyncUserExpandedPathsForRoot(root) {
+  return fileExplorerExpandedPathsForRoot(root, Array.from(fileExplorerSyncUserExpansionState)
+    .filter(([, expanded]) => expanded === true)
+    .map(([path]) => path))
+    .filter(path => !fileExplorerSyncPathSuppressed(path));
 }
 
 function fileExplorerSyncTargetRecord(targetKey, create = false, touch = false) {
@@ -1243,6 +1470,9 @@ function fileExplorerSyncManualCollapsePlanForPath(path) {
 function fileExplorerSyncPathSuppressed(path) {
   const normalized = normalizeDirectoryPath(path || '');
   if (!normalized) return false;
+  for (const [userPath, expanded] of fileExplorerSyncUserExpansionState) {
+    if (expanded === false && pathIsInsideDirectory(normalized, userPath)) return true;
+  }
   for (const collapsedPath of fileExplorerSyncManualCollapsedPaths) {
     if (pathIsInsideDirectory(normalized, collapsedPath)) return true;
   }
@@ -1288,6 +1518,7 @@ function rememberFileExplorerSyncManualCollapse(path) {
   const plan = fileExplorerSyncManualCollapsePlanForPath(path);
   if (!plan?.root || !pathIsInsideDirectory(path, plan.root)) return;
   resetFileExplorerSyncManualCollapsesIfNeeded(plan);
+  setFileExplorerSyncUserExpansion(path, false);
   fileExplorerSyncManualCollapsedPaths.add(normalizeDirectoryPath(path));
   rememberFileExplorerSyncManualCollapseState();
   resetFileExplorerAppliedSyncPlan();
@@ -1304,9 +1535,11 @@ function forgetFileExplorerSyncManualCollapse(path) {
   for (const collapsedPath of Array.from(fileExplorerSyncManualCollapsedPaths)) {
     if (pathIsInsideDirectory(collapsedPath, normalized) || pathIsInsideDirectory(normalized, collapsedPath)) {
       fileExplorerSyncManualCollapsedPaths.delete(collapsedPath);
+      fileExplorerSyncUserExpansionState.delete(collapsedPath);
       changed = true;
     }
   }
+  if (fileExplorerRootMode === 'sync' && normalized) setFileExplorerSyncUserExpansion(normalized, true);
   if (changed) rememberFileExplorerSyncManualCollapseState();
   if (changed) resetFileExplorerAppliedSyncPlan();
 }
@@ -1790,6 +2023,7 @@ function renderCachedFileExplorerSyncPlan(plan, renderPaths, entriesByDir, optio
   renderFileExplorerRootModeControls();
   if (!preserveState) fileExplorerExpanded.clear();
   for (const path of previousExpanded) fileExplorerExpanded.add(path);
+  for (const path of fileExplorerSyncUserExpandedPathsForRoot(root)) fileExplorerExpanded.add(path);
   for (const path of renderPaths) fileExplorerExpanded.add(path);
   if (fileExplorerTree) renderTreeChildren(fileExplorerTree, root, rootEntries, 0, {view: 'finder', entriesByDir});
   for (const panel of document.querySelectorAll('.panel.file-explorer-panel')) {
@@ -3001,9 +3235,6 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   for (const entry of visible) {
     const fullPath = parentPath === '/' ? `/${entry.name}` : `${parentPath}/${entry.name}`;
     const row = existingRows.get(fullPath) || document.createElement('div');
-    const hasRenderedChildren = entry.kind === 'dir' && Boolean(childContainerForRow(row, fullPath));
-    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren});
-    nextNodes.push(row);
     const isDifferDir = renderOptions.differMode === true && entry.kind === 'dir';
     // collapsedSet (the Tabber) = default-expanded, collapse to opt out; expandedSet = default-collapsed,
     // expand to opt in (fixed-root Finder uses fileExplorerExpanded). Differences as data, no mode branch.
@@ -3015,8 +3246,19 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
         autoExpand: renderOptions.autoExpand,
         expandedSet: expandSet,
       });
+    const normalizedFullPath = normalizeDirectoryPath(fullPath);
+    const suppliedChildEntries = entriesByDir?.get(normalizedFullPath);
+    const childEntries = Array.isArray(suppliedChildEntries)
+      ? suppliedChildEntries
+      : (entry.kind === 'dir' && dirExpanded && renderOptions.view === 'finder'
+        ? cachedFileExplorerFsResourceValue('list', normalizedFullPath)
+        : undefined);
+    const hasRenderedChildren = entry.kind === 'dir' && (
+      Boolean(childContainerForRow(row, fullPath)) || Array.isArray(childEntries)
+    );
+    updateFileTreeRow(row, parentPath, entry, depth, {...renderOptions, hasRenderedChildren});
+    nextNodes.push(row);
     if (entry.kind === 'dir' && dirExpanded) {
-      const childEntries = entriesByDir?.get(normalizeDirectoryPath(fullPath));
       const existingChildContainer = childContainerForRow(row, fullPath);
       const childContainer = existingChildContainer || (Array.isArray(childEntries) ? createFileTreeChildContainer(fullPath) : null);
       if (childContainer) {
@@ -3862,7 +4104,7 @@ function setFileExplorerDirectoryIndexed(path, indexed) {
     clearFileIndexStatus(normalized);
     abortFileQuickOpenSearch();
     if (!applyingIndexedDirsSetting) {
-      apiFetch(`/api/fs/unindex?root=${encodeURIComponent(normalized)}`, {method: 'POST', body: JSON.stringify({root: normalized})}).catch(() => {});
+      apiFetchJson(`/api/fs/unindex?root=${encodeURIComponent(normalized)}`, {method: 'POST', body: JSON.stringify({root: normalized})}).catch(() => {});
     }
   }
   writeStoredFileExplorerIndexedDirs();
@@ -3932,7 +4174,7 @@ function reconcileIndexedDirsFromSetting(options = {}) {
     for (const dir of adds) setFileExplorerDirectoryIndexed(dir, true);
     for (const dir of removes) {
       setFileExplorerDirectoryIndexed(dir, false);
-      apiFetch(`/api/fs/unindex?root=${encodeURIComponent(dir)}`, {method: 'POST', body: JSON.stringify({root: dir})}).catch(() => {});
+      apiFetchJson(`/api/fs/unindex?root=${encodeURIComponent(dir)}`, {method: 'POST', body: JSON.stringify({root: dir})}).catch(() => {});
     }
   } finally {
     applyingIndexedDirsSetting = false;

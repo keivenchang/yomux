@@ -1,4 +1,7 @@
 import io
+import select
+import socket
+import ssl
 import struct
 
 from yolomux_lib import websocket
@@ -27,6 +30,46 @@ def test_read_ws_frame_reassembles_fragmented_client_message():
 
     assert opcode == 1
     assert payload == b'{"type":"dom-keyframe","payload":{"root":{"tag":"div"}}}'
+
+
+def test_wait_for_ws_frame_detects_a_second_frame_prefetched_by_buffered_reader():
+    server_socket, client_socket = socket.socketpair()
+    stream = server_socket.makefile("rb")
+    try:
+        client_socket.sendall(masked_client_frame(b"first") + masked_client_frame(b"second"))
+
+        assert websocket.wait_for_ws_frame(server_socket, stream, 1.0) is True
+        assert websocket.read_ws_frame(stream) == (1, b"first")
+        assert select.select([server_socket], [], [], 0)[0] == []
+        assert websocket.wait_for_ws_frame(server_socket, stream, 0) is True
+        assert websocket.read_ws_frame(stream) == (1, b"second")
+    finally:
+        stream.close()
+        server_socket.close()
+        client_socket.close()
+
+
+def test_wait_for_ws_frame_treats_tls_want_read_as_unbuffered(monkeypatch):
+    """A TLS no-data probe is normal, not a bridge-ending socket failure."""
+
+    class TlsConnection:
+        def gettimeout(self):
+            return None
+
+        def setblocking(self, _value):
+            pass
+
+        def settimeout(self, _value):
+            pass
+
+    class TlsBufferedReader:
+        def peek(self, _size):
+            raise ssl.SSLWantReadError(ssl.SSL_ERROR_WANT_READ, "need more TLS bytes")
+
+    connection = TlsConnection()
+    monkeypatch.setattr(websocket.select, "select", lambda readers, _write, _error, _timeout: (readers, [], []))
+
+    assert websocket.wait_for_ws_frame(connection, TlsBufferedReader(), 0) is True
 
 
 def test_make_ws_frame_round_trips_server_binary_payload():

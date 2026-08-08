@@ -7,12 +7,15 @@ import math
 import os
 import threading
 from contextlib import contextmanager
+from http import HTTPStatus
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 
+from yolomux_lib.host_identity import current_host_identity
 from yolomux_lib.stats_current import client as client_module
+from yolomux_lib.stats_current import http as http_module
 from yolomux_lib.stats_current import materializer, migration, pricing, protocol, revision, storage
 from yolomux_lib.stats_current import resolution as stats_resolution
 from yolomux_lib.stats_current import service as service_module
@@ -21,6 +24,22 @@ FENCE = {
     "protocol_version": storage.MIN_WRITER_PROTOCOL,
     "schema_generation": storage.SCHEMA_VERSION,
 }
+
+
+def current_view_count() -> int:
+    return sum(
+        1 + len(stats_resolution.explicit_resolutions(range_seconds))
+        for range_seconds in stats_resolution.RANGE_SECONDS
+    )
+
+
+def fully_warm_status() -> dict[str, float | int]:
+    count = current_view_count()
+    return {"ready": count, "total": count, "percent": 100.0}
+
+
+def dead_client_lease_record(pid: int) -> dict[str, object]:
+    return current_host_identity().process_record_fields(pid=pid, start_identity="proc:1")
 
 
 def cpu_record(event_id: str = "cpu-1", observed_at: float = 10.0) -> dict[str, object]:
@@ -130,15 +149,61 @@ class FakeStore:
         self.source_generation += int(count > 0)
         return storage.AppendResult(
             self.source_generation,
-            len(values["observations"]),
+            len(values.get("observations", ())),
             0,
-            len(values["coverage_epochs"]),
+            len(values.get("coverage_epochs", ())),
             0,
-            len(values["usage_atoms"]),
+            len(values.get("usage_atoms", ())),
             0,
-            len(values["unavailable_spans"]),
+            len(values.get("unavailable_spans", ())),
             0,
+            usage_tombstones_accepted=len(values.get("usage_tombstones", ())),
+            accepted_observation_ids=tuple(
+                item.event_id for item in values.get("observations", ())
+            ),
+            accepted_original_timestamps=tuple(
+                item.observed_at
+                for key in ("observations", "usage_atoms", "usage_tombstones")
+                for item in values.get(key, ())
+            ),
         )
+
+    def latest_coverage_epoch(self, family, source_id, owner_generation, native_cadence_seconds):
+        return next((
+            item
+            for item in self.last_append.get("coverage_epochs", ())
+            if (item.family, item.source_id, item.owner_generation, item.native_cadence_seconds)
+            == (family, source_id, owner_generation, native_cadence_seconds)
+        ), None)
+
+    def inline_coverage_source_ids(self, family, owner_generation):
+        prefix = f"inline:{owner_generation}:{family}:"
+        return tuple(sorted({
+            item.source_id
+            for item in self.last_append.get("coverage_epochs", ())
+            if item.family == family
+            and item.owner_generation == owner_generation
+            and item.epoch_id.startswith(prefix)
+        }))
+
+    def recent_browser_profiles(self, _limit):
+        return ()
+
+    def browser_observation_status(self, _now):
+        return {
+            "retained_observations": 0,
+            "retained_failures": 0,
+            "confirmed_real_failures": 0,
+            "probe_failures": 0,
+            "unknown_failures": 0,
+            "retained_errors": 0,
+            "retained_unhandled_rejections": 0,
+            "last_retained_observed_at": None,
+            "last_retained_observed_age_seconds": None,
+            "fingerprints": (),
+            "classification_counts": {"open": 0, "fixed": 0, "live_verified": 0},
+            "unprovable_states": ("fixed", "live_verified"),
+        }
 
     def read_snapshot(self, *, dirty_intervals=None):
         self.reads += 1
@@ -153,9 +218,12 @@ class FakeStore:
         )
 
     @contextmanager
-    def pinned_snapshot(self, *, dirty_intervals=None, private_observation_sources=0, include_coverage=True):
+    def pinned_snapshot(self, *, dirty_intervals=None, include_coverage=True):
         self.coverage_reads.append(include_coverage)
         yield lambda: self.read_snapshot(dirty_intervals=dirty_intervals)
+
+    def read_ring_window(self, **_values):
+        raise storage.StatsCurrentError("aggregate ring storage is not initialized")
 
     def prune(self, *, now):
         self.prunes += 1
@@ -255,6 +323,7 @@ def test_startup_migrates_before_writer_open_preserves_legacy_and_reports_bounde
         "unavailable_spans": 0,
         "issues": 0,
         "issue_kinds": (),
+        "issue_records": (),
         "skipped_history": False,
     }
     assert json.loads(legacy.read_text(encoding="utf-8")) == {}
@@ -338,7 +407,7 @@ def test_old_or_mismatched_protocol_is_terminal_before_dispatch_or_mutation(tmp_
 
     assert response["status"] == "upgrade_required"
     assert response["required_protocol_version"] == 24
-    assert response["required_schema_generation"] == 6
+    assert response["required_schema_generation"] == storage.SCHEMA_VERSION
     assert binary == b""
     assert store.appends == 0
     assert service._status()["requests"]["rejected_old"] == 1
@@ -732,9 +801,9 @@ def test_cache_hit_does_zero_storage_build_report_or_encoding_work(tmp_path, mon
     assert first[0]["cache_generation"] == 100_000_000
     assert first[1].startswith(b"{")
     assert (store.reads, builds, encodes) == before
-    assert before == (1, 1, 26)
+    assert before == (1, 1, current_view_count())
     status, _binary = service.handle_with_binary({**FENCE, "action": "status"})
-    assert status["warm"] == {"ready": 26, "total": 26, "percent": 100.0}
+    assert status["warm"] == fully_warm_status()
     assert status["requests"]["hits"] == 2
     service._close()
 
@@ -792,7 +861,7 @@ def test_shared_browser_snapshots_are_preencoded_and_identical_for_all_clients(t
     assert browser_series("browser-b") == expected
     assert browser_series("browser-unknown") == expected
     assert encodes == built_encodes
-    assert built_encodes == 26
+    assert built_encodes == current_view_count()
 
 
 def test_current_browser_batch_ack_materializes_shared_all_client_series(tmp_path):
@@ -1140,7 +1209,10 @@ def test_every_trusted_preencoded_snapshot_and_delta_passes_the_canonical_valida
             protocol.validate_delta(json.loads(entry.binary))
 
 
-def test_service_keeps_only_previous_to_current_delta_and_repairs_older_cursors(tmp_path, monkeypatch):
+def test_service_composes_the_cadence_delta_bound_and_repairs_only_overflow(
+    tmp_path,
+    monkeypatch,
+):
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
@@ -1149,27 +1221,20 @@ def test_service_keeps_only_previous_to_current_delta_and_repairs_older_cursors(
     empty = storage.StoreSnapshot(
         storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), (),
     )
-    first = materializer.build_generation(
-        empty,
-        source_generation=0,
-        cache_generation=10,
-        generated_at=100_000,
-        observed_until=100_000,
-    )
-    second = materializer.build_generation(
-        empty,
-        source_generation=0,
-        cache_generation=20,
-        generated_at=100_001,
-        observed_until=100_001,
-    )
-    third = materializer.build_generation(
-        empty,
-        source_generation=0,
-        cache_generation=30,
-        generated_at=100_002,
-        observed_until=100_002,
-    )
+    assert service_module.DELTA_RING_ENTRY_BOUNDS == {1: 5, 10: 4, 60: 9, 300: 9}
+    expected_bound = service_module.DELTA_RING_ENTRY_BOUNDS[1]
+
+    def generation(index):
+        return materializer.build_generation(
+            empty,
+            source_generation=0,
+            cache_generation=index * 10,
+            generated_at=100_000 + index,
+            observed_until=100_000 + index,
+        )
+
+    first = generation(1)
+    second = generation(2)
     assert service._publish(first, service._encode_generation(first)) is True
     second_entries = service._encode_generation(second)
     monkeypatch.setattr(materializer, "build_cost_report", lambda _layer: (_ for _ in ()).throw(
@@ -1177,7 +1242,25 @@ def test_service_keeps_only_previous_to_current_delta_and_repairs_older_cursors(
     ))
     assert service._publish(second, second_entries) is True
     monkeypatch.undo()
-    assert service._publish(third, service._encode_generation(third)) is True
+    for index in range(3, expected_bound + 2):
+        item = generation(index)
+        assert service._publish(item, service._encode_generation(item)) is True
+
+    current_generation = (expected_bound + 1) * 10
+
+    metadata, binary = service.handle_with_binary(delta_request(after_cache_generation=10))
+    composed = protocol.validate_delta(json.loads(binary))
+    assert metadata["revision"] == composed["revision"] == 1
+    assert composed["base_cache_generation"] == 10
+    assert composed["cache_generation"] == current_generation
+    assert service._delta_repairs == 0
+
+    assert service._status()["delta"]["max_entries_per_key"] == 9
+    assert len(service._delta_entries[(300, 1, None)]) == expected_bound
+
+    overflow = generation(expected_bound + 2)
+    assert service._publish(overflow, service._encode_generation(overflow)) is True
+    overflow_generation = (expected_bound + 2) * 10
 
     repair, repair_binary = service.handle_with_binary(delta_request(after_cache_generation=10))
     assert repair["status"] == "repair_required"
@@ -1187,25 +1270,200 @@ def test_service_keeps_only_previous_to_current_delta_and_repairs_older_cursors(
         after_cache_generation=20,
         after_revision=1,
     ))
-    second_delta = protocol.validate_delta(json.loads(binary))
-    assert metadata["revision"] == second_delta["revision"] == 2
-    assert second_delta["base_cache_generation"] == 20
-    assert second_delta["cache_generation"] == 30
-    assert service._status()["delta"]["max_entries_per_key"] == 1
+    retained = protocol.validate_delta(json.loads(binary))
+    assert metadata["revision"] == retained["revision"] == 2
+    assert retained["base_cache_generation"] == 20
+    assert retained["cache_generation"] == overflow_generation
+    assert len(service._delta_entries[(300, 1, None)]) == expected_bound
 
     repair, repair_binary = service.handle_with_binary(delta_request(
         after_cache_generation=20,
-        after_revision=9,
+        after_revision=99,
     ))
     assert repair["status"] == "repair_required"
     assert repair_binary == b""
 
     current, current_binary = service.handle_with_binary(delta_request(
-        after_cache_generation=30,
+        after_cache_generation=overflow_generation,
         after_revision=2,
     ))
     assert current["not_modified"] is True
     assert current_binary == b""
+
+
+def test_composed_identity_overflow_is_typed_repair_through_http(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    empty = storage.StoreSnapshot(
+        storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), (),
+    )
+    current = materializer.build_generation(
+        empty,
+        source_generation=0,
+        cache_generation=30,
+        generated_at=100_000,
+        observed_until=100_000,
+    )
+    assert service._publish(current, service._encode_generation(current)) is True
+    snapshot = protocol.validate_snapshot(json.loads(
+        service._cache.entries[(300, 1, None)].binary
+    ))
+
+    def edge(prefix, base, target, revision_number):
+        return service._encoded_delta_entry({
+            "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+            "range_seconds": 300,
+            "resolution_seconds": 1,
+            "source_generation": 0,
+            "base_cache_generation": base,
+            "cache_generation": target,
+            "revision": revision_number,
+            "buckets": [],
+            "no_data": [],
+            "tombstones": [
+                {
+                    "kind": "no_data",
+                    "family": "cpu",
+                    "source_id": f"{prefix}{index:04d}",
+                    "epoch": "epoch",
+                    "start": 0,
+                    "end": 1,
+                }
+                for index in range(601)
+            ],
+            "cost_report": snapshot["cost_report"],
+        })
+
+    key = (300, 1, None)
+    service._delta_entries[key] = [
+        edge("a", 10, 20, 1),
+        edge("b", 20, 30, 2),
+    ]
+    service._delta_revisions[key] = 2
+
+    metadata, binary = service.handle_with_binary(
+        delta_request(after_cache_generation=10)
+    )
+
+    class DirectClient:
+        def ensure_started(self):
+            return True
+
+        def status(self):
+            return {"ok": True}
+
+        def retry(self):
+            return True
+
+        def snapshot(self, _request):
+            raise AssertionError("delta repair must not fetch a snapshot in the forwarder")
+
+        def delta(self, request):
+            return service.handle_with_binary({
+                **FENCE,
+                "action": "delta",
+                "range_seconds": request.range_seconds,
+                "resolution_seconds": request.resolution_seconds,
+                "client_id": request.client_id,
+                "after_cache_generation": request.after_cache_generation,
+                "after_revision": request.after_revision,
+            })
+
+    forwarded = http_module.StatsHttpForwarder(
+        DirectClient(),
+        client_binding_secret=b"s" * 32,
+    ).delta_stream(
+        "range_seconds=300&resolution_seconds=1&client_id=browser-a&"
+        "after_cache_generation=10&after_revision=0",
+        authenticated_username="alice",
+    )
+
+    assert metadata["status"] == "repair_required"
+    assert binary == b""
+    assert service._delta_repairs == 2
+    assert forwarded.status == HTTPStatus.CONFLICT
+    assert forwarded.metadata["status"] == "repair_required"
+
+
+def test_malformed_retained_edge_is_not_composition_repair(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    empty = storage.StoreSnapshot(
+        storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), (),
+    )
+    current = materializer.build_generation(
+        empty,
+        source_generation=0,
+        cache_generation=30,
+        generated_at=100_000,
+        observed_until=100_000,
+    )
+    assert service._publish(current, service._encode_generation(current)) is True
+    key = (300, 1, None)
+    service._delta_entries[key] = [service_module.CacheEntry(
+        MappingProxyType({
+            "base_cache_generation": 10,
+            "cache_generation": 30,
+        }),
+        b"{}",
+    )]
+    service._delta_revisions[key] = 1
+
+    metadata, binary = service.handle_with_binary(
+        delta_request(after_cache_generation=10)
+    )
+
+    assert metadata["status"] == "unsupported"
+    assert binary == b""
+    assert service._delta_repairs == 0
+
+
+@pytest.mark.parametrize(
+    ("resolution_seconds", "expected_bound"),
+    sorted(service_module.DELTA_RING_ENTRY_BOUNDS.items()),
+)
+def test_fallback_delta_history_enforces_each_resolution_bound(
+    tmp_path,
+    resolution_seconds,
+    expected_bound,
+):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    service._view_demanded = lambda *args: True
+    empty = storage.StoreSnapshot(
+        storage.SchemaMetadata(5, 23, 1, 0), (), (), (), (), (),
+    )
+    for index in range(expected_bound + 3):
+        generation = materializer.build_generation(
+            empty,
+            source_generation=0,
+            cache_generation=(index + 1) * 10,
+            generated_at=100_000 + index,
+            observed_until=100_000 + index,
+        )
+        encoded = service._encode_generation(
+            generation,
+            resolutions=frozenset({resolution_seconds}),
+        )
+        assert service._publish(
+            generation,
+            encoded,
+            resolutions=frozenset({resolution_seconds}),
+        ) is True
+
+    retained = [
+        len(entries)
+        for key, entries in service._delta_entries.items()
+        if key[1] == resolution_seconds
+    ]
+    assert retained
+    assert set(retained) == {expected_bound}
 
 
 def test_delta_carries_the_full_precomputed_candidate_cost_report(tmp_path):
@@ -1345,6 +1603,419 @@ def test_vacuum_runs_only_after_idle_and_persists_its_schedule(tmp_path):
     }
 
 
+@pytest.mark.parametrize(
+    ("collector", "dirty", "ring_deadline", "host_deadlines", "now", "expected"),
+    (
+        pytest.param(False, False, None, (100.0, 100.0), 100.0, None, id="no-collector-idle"),
+        pytest.param(False, False, 90.0, (100.0, 100.0), 100.0, None, id="no-collector-stale-ring"),
+        pytest.param(False, True, 105.0, (100.0, 100.0), 100.0, 5.0, id="no-collector-future-ring"),
+        pytest.param(False, True, 100.0, (110.0, 110.0), 100.0, 0.0, id="no-collector-due-ring"),
+        pytest.param(False, True, None, (100.0, 100.0), 100.0, None, id="no-collector-waiting-source"),
+        pytest.param(True, False, None, (105.0, 110.0), 100.0, 5.0, id="collector-future"),
+        pytest.param(True, False, None, (90.0, 110.0), 100.0, 0.0, id="collector-due"),
+        pytest.param(True, True, 103.0, (105.0, 110.0), 100.0, 3.0, id="collector-with-earlier-ring"),
+        pytest.param(True, False, None, (100.0, 110.0), 90.0, 10.0, id="monotonic-rollback"),
+    ),
+)
+def test_ring_wait_timeout_uses_only_owned_deadlines(
+    tmp_path,
+    collector,
+    dirty,
+    ring_deadline,
+    host_deadlines,
+    now,
+    expected,
+):
+    monotonic_now = [100.0]
+    service = service_module.StatsCurrentService(
+        tmp_path / "stats.sock",
+        tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0],
+    )
+    if collector:
+        service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at, service._next_host_gpu_at = host_deadlines
+    if dirty:
+        service._pending_ring_dirty.add(materializer.DirtyCell(1, 0))
+    service._next_ring_flush_at = ring_deadline
+    if dirty and ring_deadline is None:
+        service._ring_waiting_for_source = 1
+    monotonic_now[0] = now
+
+    assert service._ring_wait_timeout() == expected
+
+
+def test_collector_context_accepts_only_bounded_owner_identity(tmp_path):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+
+    rejected, binary = service.handle_with_binary({
+        **FENCE,
+        "action": "collector_context",
+        "pid": os.getpid(),
+        "port": 7443,
+        "owner_generation": 42,
+        "sessions": ["must-not-cross-the-boundary"],
+    })
+
+    assert binary == b""
+    assert rejected["status"] == "unsupported"
+
+    accepted, binary = service.handle_with_binary({
+        **FENCE,
+        "action": "collector_context",
+        "pid": os.getpid(),
+        "port": 7443,
+        "owner_generation": 42,
+    })
+
+    assert binary == b""
+    assert accepted == {
+        "ok": True,
+        "pid": os.getpid(),
+        "port": 7443,
+        "owner_generation": 42,
+    }
+    assert service.collector_context == {
+        "pid": os.getpid(),
+        "port": 7443,
+        "owner_generation": 42,
+    }
+
+
+def test_statsd_collects_registered_web_cpu_and_pushes_it_to_the_matching_owner(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+
+    class CpuSampler:
+        def sample(self, pid):
+            assert pid == 1234
+            return {"time": 100.0, "pid": 1234, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}
+
+    pushed = []
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(service, "_matching_web_owner", lambda context: {"control_socket": "owned.sock"})
+    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda owner, request, timeout: pushed.append((owner, request, timeout)) or {"ok": True})
+
+    service._collect_host_facts_if_due(publisher)
+
+    observation = publisher.last_append["observations"][0]
+    assert observation.family == "cpu"
+    assert observation.source_id == "port:7443"
+    assert observation.payload == {"process_percent": 12.0, "system_percent": 20.0}
+    assert pushed == [({"control_socket": "owned.sock"}, {"action": "stats_cpu_sample", "sample": {"time": 100.0, "pid": 1234, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}}, 0.25)]
+
+
+def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacement(tmp_path, monkeypatch):
+    monotonic_now = [0.0]
+    wall_now = [100.0]
+
+    class RecordingStore(FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.batches = []
+
+        def append_batch(self, **values):
+            self.batches.append(values)
+            return super().append_batch(**values)
+
+        def latest_coverage_epoch(self, family, source_id, owner_generation, native_cadence_seconds):
+            return next((
+                item
+                for batch in reversed(self.batches)
+                for item in batch.get("coverage_epochs", ())
+                if (item.family, item.source_id, item.owner_generation, item.native_cadence_seconds)
+                == (family, source_id, owner_generation, native_cadence_seconds)
+            ), None)
+
+        def inline_coverage_source_ids(self, family, owner_generation):
+            prefix = f"inline:{owner_generation}:{family}:"
+            return tuple(sorted({
+                item.source_id
+                for batch in self.batches
+                for item in batch.get("coverage_epochs", ())
+                if item.family == family
+                and item.owner_generation == owner_generation
+                and item.epoch_id.startswith(prefix)
+            }))
+
+    class CpuSampler:
+        def sample(self, _pid):
+            return {"cpu_percent": 12.0, "system_cpu_percent": 20.0}
+
+    gpu_pass = [0]
+
+    def gpu_devices():
+        gpu_pass[0] += 1
+        sources = {
+            1: ("gpu:0", "gpu:1"),
+            2: ("gpu:1", "gpu:2"),
+        }.get(gpu_pass[0], ("gpu:0", "gpu:1", "gpu:2"))
+        return {
+            source: {
+                "util_percent": 10.0,
+                "memory_used_bytes": 20.0,
+                "memory_capacity_bytes": 100.0,
+                "label": source,
+            }
+            for source in sources
+        }
+
+    service = service_module.StatsCurrentService(
+        tmp_path / "stats.sock",
+        tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+    )
+    publisher = RecordingStore()
+    service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(service, "_matching_web_owner", lambda _context: None)
+    monkeypatch.setattr(service_module.host_collectors, "gpu_devices", gpu_devices)
+
+    service._collect_host_facts_if_due(publisher)
+    monotonic_now[0] = wall_now[0] = 110.0
+    service._collect_host_facts_if_due(publisher)
+
+    observations = [item for batch in publisher.batches for item in batch["observations"]]
+    coverage = [item for batch in publisher.batches for item in batch["coverage_epochs"]]
+    for family, source_id in (("cpu", "port:7443"), ("gpu", "gpu:1")):
+        source_observations = [item for item in observations if (item.family, item.source_id) == (family, source_id)]
+        source_coverage = [item for item in coverage if (item.family, item.source_id) == (family, source_id)]
+        assert len(source_observations) == len(source_coverage) == 2
+        assert len({item.epoch_id for item in source_observations}) == 1
+        assert len({item.started_at for item in source_coverage}) == 1
+    gpu_two = next(item for item in coverage if item.source_id == "gpu:2")
+    assert gpu_two.started_at == 110.0
+
+    first_cpu_epoch = next(item.epoch_id for item in observations if item.family == "cpu")
+    accepted, _binary = service.handle_with_binary({
+        **FENCE,
+        "action": "collector_context",
+        "pid": 1234,
+        "port": 7443,
+        "owner_generation": 42,
+    })
+    assert accepted["ok"] is True
+    wall_now[0] = monotonic_now[0] = 120.0
+    service._collect_host_facts_if_due(publisher)
+    later_coverage = [item for batch in publisher.batches for item in batch["coverage_epochs"]]
+    gpu_zero = [item for item in later_coverage if item.source_id == "gpu:0"]
+    assert len(gpu_zero) == 2
+    assert gpu_zero[1].epoch_id != gpu_zero[0].epoch_id
+    assert (gpu_zero[0].started_at, gpu_zero[1].started_at) == (100.0, 120.0)
+
+    accepted, _binary = service.handle_with_binary({
+        **FENCE,
+        "action": "collector_context",
+        "pid": 1234,
+        "port": 7443,
+        "owner_generation": 43,
+    })
+    assert accepted["ok"] is True
+    wall_now[0] = monotonic_now[0] = 130.0
+    service._next_host_gpu_at = float("inf")
+    service._collect_host_facts_if_due(publisher)
+    cpu_epochs = [
+        item.epoch_id
+        for batch in publisher.batches
+        for item in batch["observations"]
+        if item.family == "cpu"
+    ]
+    assert cpu_epochs[2] == first_cpu_epoch, "idempotent registration preserves the source epoch"
+    assert cpu_epochs[3] != cpu_epochs[2], "a new owner generation rotates the source epoch"
+
+    restarted = service_module.StatsCurrentService(
+        tmp_path / "restarted.sock",
+        tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+    )
+    restarted.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    restarted._host_cpu_sampler = CpuSampler()
+    restarted._next_host_gpu_at = float("inf")
+    monkeypatch.setattr(restarted, "_matching_web_owner", lambda _context: None)
+    wall_now[0] = monotonic_now[0] = 140.0
+    restarted._collect_host_facts_if_due(publisher)
+    restarted_cpu = publisher.batches[-1]["coverage_epochs"][0]
+    original_cpu = next(
+        item
+        for batch in publisher.batches
+        for item in batch["coverage_epochs"]
+        if item.family == "cpu" and item.owner_generation == 42
+    )
+    assert (restarted_cpu.epoch_id, restarted_cpu.started_at) == (
+        original_cpu.epoch_id,
+        original_cpu.started_at,
+    )
+
+    restarted_gpu = service_module.StatsCurrentService(
+        tmp_path / "restarted-gpu.sock",
+        tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+    )
+    restarted_gpu.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    restarted_gpu._next_host_cpu_at = float("inf")
+    wall_now[0] = monotonic_now[0] = 150.0
+    restarted_gpu._collect_host_facts_if_due(publisher)
+    restarted_gpu_one = next(
+        item for item in publisher.batches[-1]["coverage_epochs"] if item.source_id == "gpu:1"
+    )
+    original_gpu_one = next(
+        item
+        for batch in publisher.batches
+        for item in reversed(batch["coverage_epochs"])
+        if item.source_id == "gpu:1" and item.owner_generation == 42
+    )
+    assert (restarted_gpu_one.epoch_id, restarted_gpu_one.started_at) == (
+        original_gpu_one.epoch_id,
+        original_gpu_one.started_at,
+    )
+
+
+def test_statsd_restart_rotates_only_gpu_missing_from_initial_roster(tmp_path, monkeypatch):
+    monotonic_now = [0.0]
+    wall_now = [100.0]
+
+    class RecordingStore(FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.batches = []
+
+        def append_batch(self, **values):
+            self.batches.append(values)
+            return super().append_batch(**values)
+
+        def latest_coverage_epoch(self, family, source_id, owner_generation, native_cadence_seconds):
+            return next((
+                item
+                for batch in reversed(self.batches)
+                for item in batch.get("coverage_epochs", ())
+                if (item.family, item.source_id, item.owner_generation, item.native_cadence_seconds)
+                == (family, source_id, owner_generation, native_cadence_seconds)
+            ), None)
+
+        def inline_coverage_source_ids(self, family, owner_generation):
+            prefix = f"inline:{owner_generation}:{family}:"
+            return tuple(sorted({
+                item.source_id
+                for batch in self.batches
+                for item in batch.get("coverage_epochs", ())
+                if item.family == family
+                and item.owner_generation == owner_generation
+                and item.epoch_id.startswith(prefix)
+            }))
+
+    class CpuSampler:
+        def sample(self, _pid):
+            return {"cpu_percent": 12.0, "system_cpu_percent": 20.0}
+
+    gpu_pass = [0]
+
+    def gpu_devices():
+        gpu_pass[0] += 1
+        sources = ("gpu:0", "gpu:1") if gpu_pass[0] != 2 else ("gpu:1",)
+        return {
+            source: {
+                "util_percent": 10.0,
+                "memory_used_bytes": 20.0,
+                "memory_capacity_bytes": 100.0,
+                "label": source,
+            }
+            for source in sources
+        }
+
+    publisher = RecordingStore()
+    monkeypatch.setattr(service_module.host_collectors, "gpu_devices", gpu_devices)
+
+    initial = service_module.StatsCurrentService(
+        tmp_path / "initial.sock", tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0],
+    )
+    initial.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    initial._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(initial, "_matching_web_owner", lambda _context: None)
+    initial._collect_host_facts_if_due(publisher)
+
+    restarted = service_module.StatsCurrentService(
+        tmp_path / "restarted.sock", tmp_path / "stats.sqlite3",
+        monotonic=lambda: monotonic_now[0], clock=lambda: wall_now[0],
+    )
+    restarted.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    restarted._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(restarted, "_matching_web_owner", lambda _context: None)
+    wall_now[0] = monotonic_now[0] = 110.0
+    restarted._collect_host_facts_if_due(publisher)
+    wall_now[0] = monotonic_now[0] = 120.0
+    restarted._collect_host_facts_if_due(publisher)
+
+    coverage = [item for batch in publisher.batches for item in batch["coverage_epochs"]]
+    cpu = [item for item in coverage if item.family == "cpu"]
+    gpu_zero = [item for item in coverage if item.source_id == "gpu:0"]
+    gpu_one = [item for item in coverage if item.source_id == "gpu:1"]
+    assert len({(item.epoch_id, item.started_at) for item in cpu}) == 1
+    assert len({(item.epoch_id, item.started_at) for item in gpu_one}) == 1
+    assert len(gpu_zero) == 2
+    assert gpu_zero[1].epoch_id != gpu_zero[0].epoch_id
+    assert (gpu_zero[0].started_at, gpu_zero[1].started_at) == (100.0, 120.0)
+
+
+def test_browser_diagnostics_and_delta_remain_schedulable_during_active_materialization(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    now = [100_000.0]
+    store = FakeStore()
+    service = service_module.StatsCurrentService(
+        tmp_path / "stats.sock",
+        tmp_path / "stats.sqlite3",
+        clock=lambda: now[0],
+    )
+    service.writer = store
+    service._build_once(store, True, frozenset())
+    assert service._cache is not None
+    current_generation = service._cache.generation.cache_generation
+    original_builder = service.incremental_builder
+
+    def delayed_builder(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return original_builder(*args, **kwargs)
+
+    service.incremental_builder = delayed_builder
+    store.source_generation = 1
+    observation = storage.Observation(
+        "cpu-later", "cpu", "host", now[0] - 0.25, "cpu:1", 1,
+        {"process_percent": 2, "system_percent": 4},
+    )
+    store.last_append = {"observations": (observation,)}
+    dirty = service._dirty_cells((observation,), (), ())
+    build = threading.Thread(
+        target=lambda: service._build_once(store, False, frozenset(dirty)),
+    )
+    build.start()
+    assert entered.wait(1)
+
+    profiles, profiles_binary = service.handle_with_binary({
+        **FENCE,
+        "action": "browser_profiles",
+    })
+    delta_metadata, delta_binary = service.handle_with_binary(
+        delta_request(after_cache_generation=current_generation),
+    )
+    release.set()
+    build.join(timeout=2)
+
+    assert build.is_alive() is False
+    assert profiles["ok"] is True
+    assert profiles_binary == b""
+    assert delta_metadata.get("ok") is True
+    assert delta_metadata.get("not_modified") is True
+    assert delta_binary == b""
+
+
 def test_active_client_lease_prevents_idle_exit_until_released(tmp_path):
     monotonic_now = [0.0]
     service = service_module.StatsCurrentService(
@@ -1398,9 +2069,10 @@ def test_genuine_idle_exit_restarts_and_cold_warms_the_same_database(tmp_path):
     first_thread.start()
     assert first.cache_ready_event.wait(5), first._status()
     first_status = first._status()
-    first_thread.join(timeout=3)
+    # Persisted rings flush on a ten-second cadence before idle exit is safe.
+    first_thread.join(timeout=15)
     assert first_thread.is_alive() is False
-    assert first_status["warm"] == {"ready": 26, "total": 26, "percent": 100.0}
+    assert first_status["warm"] == fully_warm_status()
 
     second = service_module.StatsCurrentService(
         socket_path,
@@ -1412,9 +2084,14 @@ def test_genuine_idle_exit_restarts_and_cold_warms_the_same_database(tmp_path):
     try:
         assert second.cache_ready_event.wait(5), second._status()
         second_status = second._status()
-        assert second_status["warm"] == {"ready": 26, "total": 26, "percent": 100.0}
+        assert second_status["warm"] == fully_warm_status()
         assert second_status["generations"]["source"] == first_status["generations"]["source"]
-        assert second_status["generations"]["cache"] > first_status["generations"]["cache"]
+        # This database is empty, so under G3 neither run publishes a generation:
+        # succeeded-with-nothing-in-it must not report as published. The property
+        # this test owns is that a cold restart re-warms every resolution over the
+        # same database, which the warm assertion above proves.
+        assert second_status["generations"]["cache"] == first_status["generations"]["cache"] == 0
+        assert second_status["warm"] == first_status["warm"]
     finally:
         second.stop_event.set()
         second.work_event.set()
@@ -1427,7 +2104,7 @@ def test_new_lease_reaps_dead_process_owners_instead_of_leaking_capacity(tmp_pat
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
     )
-    service.leases["dead"] = 2_147_483_647
+    service.leases["dead"] = dead_client_lease_record(2_147_483_647)
 
     lease, _binary = service.handle_with_binary({
         **FENCE,
@@ -1450,7 +2127,7 @@ def test_idle_check_reaps_dead_leases_when_no_new_client_arrives(tmp_path):
         monotonic=lambda: monotonic_now[0],
     )
     service._pending_full = False
-    service.leases["dead"] = 2_147_483_647
+    service.leases["dead"] = dead_client_lease_record(2_147_483_647)
     monotonic_now[0] = 10.0
 
     assert service._idle() is True
@@ -1494,7 +2171,9 @@ def test_system_status_exposes_current_pipeline_health_without_private_values(tm
     service.handle_with_binary(snapshot_request())
     service.handle_with_binary(delta_request(after_cache_generation=10))
     private_value = "status-must-not-expose-this-browser"
-    service.handle_with_binary(append_request(observations=[browser_record(private_value)]))
+    private_record = browser_record(private_value)
+    private_record["observed_at"] = 99_999.0
+    service.handle_with_binary(append_request(observations=[private_record]))
     service.handle_with_binary({"protocol_version": 22, "schema_generation": 5, "action": "status"})
     service._record_build_failure(ValueError(f"must not expose {private_value} or /private/path"))
 
@@ -1521,19 +2200,14 @@ def test_system_status_exposes_current_pipeline_health_without_private_values(tm
         for key in ("source", "cache", "cache_matches_source")
     } == {
         "source": 1,
-        "cache": 20,
+        "cache": 0,
         "cache_matches_source": False,
     }
-    assert status["generations"]["by_resolution"] == {
-        f"{resolution}s": {
-            "source": 0,
-            "cache": 20,
-            "published_at": 100_001,
-            "cadence_seconds": stats_resolution.live_cadence_seconds(resolution),
-        }
-        for resolution in stats_resolution.RESOLUTION_CHOICES
-    }
-    assert status["warm"] == {"ready": 26, "total": 26, "percent": 100.0}
+    # source_generation is 0 -- an empty payload -- so no resolution is
+    # reported as published. G3: succeeded-with-nothing-in-it must not look
+    # identical to a real publication on the wire.
+    assert status["generations"]["by_resolution"] == {}
+    assert status["warm"] == fully_warm_status()
     assert status["queue"]["writer_depth"] == 0
     assert status["queue"]["materializer_depth"] == 5
     assert status["materializer"] == {
@@ -1542,7 +2216,7 @@ def test_system_status_exposes_current_pipeline_health_without_private_values(tm
         "building": False,
         "failed_builds": 1,
     }
-    assert status["cache"]["snapshot_entries"] == 26
+    assert status["cache"]["snapshot_entries"] == current_view_count()
     assert status["cache"]["delta_entries"] > 0
     assert status["cache"]["shared_bytes"] > 0
     assert status["cache"]["private_bytes"] == 0
@@ -1701,6 +2375,244 @@ def test_incremental_build_reads_only_the_union_of_dirty_bucket_intervals(tmp_pa
     assert service._cache.generation.source_generation == 1
 
 
+def test_incremental_build_does_not_rescan_retired_private_browser_history(tmp_path):
+    path = tmp_path / storage.DATABASE_FILENAME
+    now = [100_000.0]
+    browser_history = tuple(
+        storage.Observation(
+            f"browser-{source}-{index}",
+            "browser",
+            f"browser:{source}",
+            10_000.0 + index,
+            f"browser:{source}",
+            1,
+            {"kind": "api"},
+        )
+        for source in range(materializer.MAX_PRIVATE_BROWSER_CLIENTS)
+        for index in range(16)
+    )
+    current = storage.Observation(
+        "cpu-current",
+        "cpu",
+        "web",
+        now[0] - 0.25,
+        "cpu:current",
+        1,
+        {"process_percent": 4, "system_percent": 20},
+    )
+    incremental_rows = []
+
+    with storage.Store.open(path) as writer:
+        writer.append_batch(observations=browser_history)
+        with storage.Store.open_reader(path) as reader:
+            service = service_module.StatsCurrentService(
+                tmp_path / "statsd.sock",
+                path,
+                clock=lambda: now[0],
+            )
+            service._build_once(reader, True, frozenset())
+            assert writer.append_observation(current) is True
+            original_builder = service.incremental_builder
+
+            def recording_builder(previous, snapshot, dirty, **kwargs):
+                incremental_rows.append(snapshot.observations)
+                return original_builder(previous, snapshot, dirty, **kwargs)
+
+            service.incremental_builder = recording_builder
+            service._build_once(
+                reader,
+                False,
+                frozenset(service._dirty_cells((current,), ())),
+            )
+
+    assert incremental_rows == [(current,)]
+
+
+def test_incremental_build_reuses_compacted_legacy_coverage_model(tmp_path, monkeypatch):
+    now = [100_000.0]
+    store = FakeStore()
+    legacy_rows = tuple(
+        storage.CoverageEpoch(
+            "cpu",
+            "retired:cpu",
+            f"42:cpu:{started_at}",
+            started_at,
+            started_at + 1,
+            1,
+            42,
+        )
+        for started_at in range(60_000, 60_000 + 16_178)
+    )
+    cpu_rows = tuple(
+        storage.CoverageEpoch(
+            "cpu",
+            "port:7443",
+            f"stable:cpu:{index}",
+            90_000 + (index * 2),
+            None if index == 4_909 else 90_001 + (index * 2),
+            1,
+            42,
+        )
+        for index in range(4_910)
+    )
+    gpu_rows = tuple(
+        storage.CoverageEpoch(
+            "gpu",
+            "gpu:0",
+            f"stable:gpu:{index}",
+            98_000 + index,
+            None if index == 1_154 else 98_001 + index,
+            10,
+            42,
+        )
+        for index in range(1_155)
+    )
+    raw_coverage = tuple(sorted(
+        (*legacy_rows, *cpu_rows, *gpu_rows),
+        key=lambda item: (item.started_at, item.family, item.source_id, item.epoch_id),
+    ))
+    store.last_append = {"coverage_epochs": raw_coverage}
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: now[0],
+    )
+    coalesce_sizes = []
+    original_coalesce = materializer._coalesce_coverage_epochs
+
+    def recording_coalesce(coverage_epochs, unavailable_spans):
+        coverage_epochs = tuple(coverage_epochs)
+        coalesce_sizes.append(len(coverage_epochs))
+        return original_coalesce(coverage_epochs, unavailable_spans)
+
+    monkeypatch.setattr(materializer, "_coalesce_coverage_epochs", recording_coalesce)
+    service._build_once(store, True, frozenset())
+
+    current = storage.Observation(
+        "cpu-current",
+        "cpu",
+        "port:7443",
+        now[0] - 0.25,
+        "inline:42:cpu:stable",
+        42,
+        {"process_percent": 4, "system_percent": 20},
+    )
+    store.source_generation += 1
+    store.last_append = {"observations": (current,)}
+    now[0] += 1
+    service._build_once(
+        store,
+        False,
+        frozenset(service._dirty_cells((current,), ())),
+    )
+
+    assert len(raw_coverage) == coalesce_sizes[0] == 22_243
+    assert max(coalesce_sizes[1:]) == 6_066
+    assert len(service._cached_coverage_epochs) == 6_066
+
+
+def test_ring_change_detection_indexes_each_gap_once_at_live_scale():
+    gap_count = 4_909
+
+    class CountingGaps(tuple):
+        def __new__(cls, values):
+            return super().__new__(cls, values)
+
+        def __init__(self, _values):
+            self.visits = 0
+
+        def __iter__(self):
+            for item in super().__iter__():
+                self.visits += 1
+                yield item
+
+    buckets = tuple(
+        materializer.Bucket(start, 1, (), 0, None, None, True)
+        for start in range(stats_resolution.RING_CAPACITIES[1])
+    )
+    gap_values = tuple(
+        materializer.NoData(
+            "cpu",
+            f"source:{index}",
+            f"epoch:{index}",
+            (index % len(buckets)) + 0.1,
+            (index % len(buckets)) + 0.9,
+            1,
+        )
+        for index in range(gap_count)
+    )
+    previous_gaps = CountingGaps(gap_values)
+    candidate_gaps = CountingGaps(gap_values)
+    previous_layer = materializer.Layer(1, 0, len(buckets), buckets, previous_gaps)
+    candidate_layer = materializer.Layer(1, 0, len(buckets), buckets, candidate_gaps)
+    previous = materializer.Generation(1, 10, 100.0, 100.0, (previous_layer,))
+    candidate = materializer.Generation(1, 20, 101.0, 101.0, (candidate_layer,))
+
+    changed = service_module.StatsCurrentService._changed_ring_cells(previous, candidate)
+    carrier_starts = {
+        start for _range_seconds, start in service_module._ring_view_carriers(candidate_layer)
+    }
+
+    assert changed == frozenset(materializer.DirtyCell(1, start) for start in carrier_starts)
+    assert previous_gaps.visits == gap_count
+    assert candidate_gaps.visits == gap_count
+
+
+@pytest.mark.parametrize("range_seconds", stats_resolution.RANGE_SECONDS)
+def test_ring_no_data_index_matches_exact_bucket_clipping_for_every_range(range_seconds):
+    resolution_seconds = stats_resolution.auto_resolution(range_seconds)
+    layer_start = 100 * resolution_seconds
+    buckets = tuple(
+        materializer.Bucket(
+            layer_start + (index * resolution_seconds),
+            resolution_seconds,
+            (),
+            0,
+            None,
+            None,
+            True,
+        )
+        for index in range(6)
+    )
+    layer_end = buckets[-1].start + resolution_seconds
+    no_data = tuple(
+        materializer.NoData(
+            "cpu",
+            f"source:{index}",
+            f"epoch:{index}",
+            start,
+            end,
+            resolution_seconds,
+        )
+        for index, (start, end) in enumerate((
+            (layer_start - resolution_seconds, layer_start),
+            (layer_start - (resolution_seconds / 2), layer_start + (resolution_seconds / 4)),
+            (layer_start, layer_start + resolution_seconds),
+            (layer_start + (resolution_seconds * 1.25), layer_start + (resolution_seconds * 1.75)),
+            (layer_start + (resolution_seconds * 1.5), layer_start + (resolution_seconds * 3.5)),
+            (layer_end - (resolution_seconds / 4), layer_end),
+            (layer_end, layer_end + resolution_seconds),
+        ))
+    )
+    layer = materializer.Layer(
+        resolution_seconds,
+        layer_start,
+        layer_end,
+        buckets,
+        no_data,
+    )
+
+    indexed = service_module._ring_no_data_by_bucket(layer)
+
+    assert {
+        bucket.start: indexed.get(bucket.start, ())
+        for bucket in buckets
+    } == {
+        bucket.start: service_module._ring_bucket_no_data(layer, bucket)
+        for bucket in buckets
+    }
+
+
 def test_partial_reader_generation_is_pinned_before_later_append_commits(tmp_path):
     class RacingStore(FakeStore):
         def __init__(self):
@@ -1716,7 +2628,7 @@ def test_partial_reader_generation_is_pinned_before_later_append_commits(tmp_pat
             return result
 
         @contextmanager
-        def pinned_snapshot(self, *, dirty_intervals=None, private_observation_sources=0, include_coverage=True):
+        def pinned_snapshot(self, *, dirty_intervals=None, include_coverage=True):
             self.reads += 1
             self.dirty_reads.append(dirty_intervals)
             pinned_generation = self.source_generation
@@ -1791,6 +2703,99 @@ def test_partial_reader_generation_is_pinned_before_later_append_commits(tmp_pat
     assert any(cell.start <= 99_995.25 < cell.start + cell.resolution for cell in later_work[1])
 
 
+@pytest.mark.parametrize("warm_cache", [False, True], ids=["cold-cache", "warm-cache"])
+def test_pinned_build_keeps_coverage_generation_atomic_across_append(tmp_path, warm_cache):
+    class RacingCoverageStore(FakeStore):
+        def __init__(self):
+            super().__init__()
+            self.observations = []
+            self.coverage = []
+            self.block_reads = False
+            self.read_entered = threading.Event()
+            self.release_read = threading.Event()
+
+        def append_batch(self, **values):
+            result = super().append_batch(**values)
+            self.observations.extend(values.get("observations", ()))
+            self.coverage.extend(values.get("coverage_epochs", ()))
+            return result
+
+        @contextmanager
+        def pinned_snapshot(self, *, dirty_intervals=None, include_coverage=True):
+            self.coverage_reads.append(include_coverage)
+            pinned_generation = self.source_generation
+            pinned_observations = tuple(self.observations)
+            pinned_coverage = tuple(self.coverage) if include_coverage else ()
+
+            def read():
+                if self.block_reads:
+                    self.read_entered.set()
+                    assert self.release_read.wait(2)
+                return storage.StoreSnapshot(
+                    storage.SchemaMetadata(5, 23, 1, pinned_generation),
+                    pinned_observations, pinned_coverage, (), (), (),
+                )
+
+            yield read
+
+    built = []
+
+    def record_full(snapshot, **values):
+        built.append((snapshot.schema.source_generation, snapshot.coverage_epochs))
+        return materializer.build_generation(snapshot, **values)
+
+    def record_incremental(previous, snapshot, dirty, **values):
+        built.append((snapshot.schema.source_generation, snapshot.coverage_epochs))
+        return materializer.update_generation(previous, snapshot, dirty, **values)
+
+    base = storage.CoverageEpoch("cpu", "host", "inline:1:cpu:base", 99_980, 99_990, 1, 1)
+    appended = storage.CoverageEpoch("cpu", "host", "inline:1:cpu:next", 99_990, 100_000, 1, 1)
+    store = RacingCoverageStore()
+    if warm_cache:
+        store.append_batch(coverage_epochs=(base,))
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+        clock=lambda: 100_000.0,
+        full_builder=record_full,
+        incremental_builder=record_incremental,
+    )
+    service.writer = store
+    first_work = service._take_work()
+    assert first_work is not None
+    if warm_cache:
+        service._build_once(store, *first_work)
+        service.handle_with_binary(append_request(observations=[cpu_record("trigger", 99_995.25)]))
+        first_work = service._take_work()
+        assert first_work is not None
+    built.clear()
+    store.block_reads = True
+    build = threading.Thread(target=lambda: service._build_once(store, *first_work))
+    build.start()
+    assert store.read_entered.wait(1)
+    response, _binary = service.handle_with_binary(append_request(coverage_epochs=[{
+        "family": appended.family,
+        "source_id": appended.source_id,
+        "epoch_id": appended.epoch_id,
+        "started_at": appended.started_at,
+        "ended_at": appended.ended_at,
+        "native_cadence_seconds": appended.native_cadence_seconds,
+        "owner_generation": appended.owner_generation,
+    }]))
+    assert response["accepted"] == 1
+    store.release_read.set()
+    build.join(timeout=2)
+    assert build.is_alive() is False
+
+    assert built[-1] == ((2 if warm_cache else 0), (base,) if warm_cache else ())
+    later_work = service._take_work()
+    assert later_work is not None
+    store.block_reads = False
+    service._build_once(store, *later_work)
+    assert built[-1][0] == (3 if warm_cache else 1)
+    assert appended in built[-1][1]
+    assert appended in service._cached_coverage_epochs
+
+
 def test_coverage_only_append_schedules_empty_dirty_incremental_refresh(tmp_path):
     now = [100_000.0]
     store = FakeStore()
@@ -1826,6 +2831,73 @@ def test_coverage_only_append_schedules_empty_dirty_incremental_refresh(tmp_path
     assert store.coverage_reads[-1] is False, 'an accepted coverage append updates the retained model without a history rescan'
     assert service._cached_coverage_epochs[0].ended_at == 100_001.0
     assert service._full_builds == service._incremental_builds == 1
+
+
+def test_duplicate_historical_usage_does_not_amplify_accepted_dirty_work(tmp_path):
+    path = tmp_path / storage.DATABASE_FILENAME
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        path,
+        clock=lambda: 100_000.0,
+    )
+    usage_payload = {
+        "quantity": 1,
+        "provider": "test",
+        "model": "test",
+        "agent_id": "test-agent",
+        "telemetry_complete": True,
+    }
+    duplicates = tuple(
+        storage.UsageAtom(
+            f"duplicate:{index}",
+            "output",
+            "text",
+            "none",
+            "tokens",
+            10_000 + ((index // 3) * 54),
+            usage_payload,
+        )
+        for index in range(997)
+    )
+    expired = storage.UsageAtom(
+        "expired",
+        "output",
+        "text",
+        "none",
+        "tokens",
+        9_999.25,
+        usage_payload,
+    )
+    accepted = storage.UsageAtom(
+        "accepted",
+        "output",
+        "text",
+        "none",
+        "tokens",
+        100_000.25,
+        usage_payload,
+    )
+    coverage = storage.CoverageEpoch(
+        "cpu", "web", "coverage:1", 99_999, None, 1, 1,
+    )
+
+    with storage.Store.open(path) as writer:
+        writer.append_batch(usage_atoms=duplicates)
+        with storage.Store.open_reader(path) as reader:
+            service._build_once(reader, True, frozenset())
+        service.writer = writer
+        response = service._append_records(
+            atoms=(*duplicates, expired, accepted),
+            coverage=(coverage,),
+        )
+        service.writer = None
+
+    assert response["counts"]["usage_atoms_accepted"] == 2
+    assert response["counts"]["usage_atoms_duplicate"] == len(duplicates)
+    assert response["counts"]["coverage_changed"] == 1
+    assert len(service._pending_dirty) == len(stats_resolution.RESOLUTION_CHOICES)
+    assert service._pending_dirty == service._dirty_cells((), (accepted,))
+    assert service._pending_coverage_refresh is True
 
 
 def test_resolution_publication_follows_one_ten_and_sixty_second_boundaries(tmp_path):
@@ -1880,15 +2952,33 @@ def test_resolution_publication_follows_one_ten_and_sixty_second_boundaries(tmp_
     assert published_at[10][10] == 120_010.0
     assert published_at[59][60] == published_at[59][300] == 120_000.0
     assert published_at[60][60] == published_at[60][300] == 120_060.0
-    counts = {
+    def expected_counts(resolution):
+        publications = 60 // stats_resolution.live_cadence_seconds(resolution)
+        snapshot_keys = sum(
+            (resolution in stats_resolution.explicit_resolutions(range_seconds))
+            + (stats_resolution.auto_resolution(range_seconds) == resolution)
+            for range_seconds in stats_resolution.RANGE_SECONDS
+        )
+        delta_keys = sum(
+            resolution in stats_resolution.explicit_resolutions(range_seconds)
+            for range_seconds in stats_resolution.RANGE_SECONDS
+        )
+        return snapshot_keys * publications, delta_keys * publications
+
+    assert {
         resolution: encoded.count(("snapshot", resolution))
         for resolution in stats_resolution.RESOLUTION_CHOICES
+    } == {
+        resolution: expected_counts(resolution)[0]
+        for resolution in stats_resolution.RESOLUTION_CHOICES
     }
-    assert counts == {1: 120, 10: 42, 60: 9, 300: 8}
     assert {
         resolution: encoded.count(("delta", resolution))
         for resolution in stats_resolution.RESOLUTION_CHOICES
-    } == {1: 60, 10: 24, 60: 6, 300: 6}
+    } == {
+        resolution: expected_counts(resolution)[1]
+        for resolution in stats_resolution.RESOLUTION_CHOICES
+    }
 
 
 def test_stale_publish_is_rejected_without_replacing_current_cache(tmp_path):
@@ -2062,6 +3152,34 @@ def test_public_encode_is_demand_gated_and_recovers_on_next_request(tmp_path):
     assert service._has_public_demand() is True
     assert service._view_demanded(300, 1) is True
 
+    current, current_binary = service._delta({
+        **delta_request(after_cache_generation=stale_generation),
+        "client_id": "b" * 64,
+    })
+    assert current["not_modified"] is True
+    assert current["cache_generation"] == stale_generation
+    assert current_binary == b""
+
+    refreshed = materializer.build_generation(
+        storage.StoreSnapshot(storage.SchemaMetadata(5, 23, 3, 0), (), (), (), (), ()),
+        source_generation=3, cache_generation=3_000,
+        generated_at=100_002, observed_until=100_002,
+    )
+    encoded = service._encode_generation(
+        refreshed,
+        resolutions=frozenset({1}),
+        previous_generated_at=newer.generated_at,
+    )
+    service._publish(refreshed, encoded, resolutions=frozenset({1}))
+    advanced, advanced_binary = service._delta({
+        **delta_request(after_cache_generation=stale_generation),
+        "client_id": "b" * 64,
+    })
+    advanced_wire = protocol.validate_delta(json.loads(advanced_binary))
+    assert advanced["base_cache_generation"] == stale_generation
+    assert advanced_wire["base_cache_generation"] == stale_generation
+    assert advanced_wire["cache_generation"] == refreshed.cache_generation
+
 
 def test_first_build_warms_every_view_even_when_startup_exceeds_demand_grace(tmp_path):
     monotonic_now = [10_000.0]
@@ -2161,8 +3279,157 @@ def test_appends_are_accepted_while_startup_build_is_still_pending(tmp_path):
         writer.close()
 
 
+def test_browser_profiles_are_queried_from_durable_observations_in_statsd(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    writer = storage.Store.open(tmp_path / storage.DATABASE_FILENAME)
+    service.writer = writer
+    try:
+        records = (
+            storage.Observation(
+                "api-1", "browser", "browser-private", 100.0, "page-1", 0,
+                {
+                    "kind": "api", "endpoint": "/api/session-metadata", "method": "GET",
+                    "request_id": "r-web-1", "status": 200, "ttfb_ms": 8400,
+                    "latency_ms": 8553.6, "queue_ms": 3200,
+                    "journey_id": "j-1", "code_revision": "rev-1",
+                    "browser_family": "chromium", "connection_protocol": "h2",
+                },
+            ),
+            storage.Observation(
+                "sse-1", "browser", "browser-private", 101.0, "page-1", 0,
+                {"kind": "sse", "latency_ms": 2},
+            ),
+            storage.Observation(
+                "load-1", "browser", "browser-private", 102.0, "page-1", 0,
+                {"kind": "page_load", "endpoint": "/", "interactive_ms": 240, "fanout_count": 9},
+            ),
+            storage.Observation(
+                "api-2", "browser", "browser-private", 103.0, "page-1", 0,
+                {
+                    "kind": "api", "endpoint": "/api/ping", "method": "GET",
+                    "latency_ms": 4000, "queue_ms": 3600, "journey_id": "j-2",
+                    "code_revision": "rev-1", "browser_family": "chromium",
+                    "connection_protocol": "http/1.1",
+                },
+            ),
+        )
+        response = service._append({
+            "action": "append",
+            "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+            "schema_generation": storage.SCHEMA_VERSION,
+            **client_module._append_payload(records, (), (), ()),
+        })
+        profiles, binary = service.handle_with_binary({
+            **FENCE,
+            "action": "browser_profiles",
+        })
+    finally:
+        writer.close()
+
+    assert response["accepted"] == 4
+    assert binary == b""
+    assert profiles["ok"] is True
+    assert profiles["profiles"] == {
+        "retained": 3,
+        "maximum": service_module.MAX_BROWSER_PROFILES,
+        "items": (
+            {"observed_at": 103.0, "kind": "api", "endpoint": "/api/ping", "method": "GET", "latency_ms": 4000, "queue_ms": 3600, "journey_id": "j-2", "code_revision": "rev-1", "browser_family": "chromium", "connection_protocol": "http/1.1"},
+            {"observed_at": 102.0, "kind": "page_load", "endpoint": "/", "interactive_ms": 240, "fanout_count": 9},
+            {"observed_at": 100.0, "kind": "api", "endpoint": "/api/session-metadata", "method": "GET", "request_id": "r-web-1", "status": 200, "ttfb_ms": 8400, "latency_ms": 8553.6, "queue_ms": 3200, "journey_id": "j-1", "code_revision": "rev-1", "browser_family": "chromium", "connection_protocol": "h2"},
+        ),
+        "queue_ms": {
+            "count": 2, "average_ms": 3400.0, "p50_ms": 3200.0,
+            "p95_ms": 3600.0, "p99_ms": 3600.0, "maximum_ms": 3600.0,
+            "histogram": (
+                {"upper_bound_ms": 25, "count": 0},
+                {"upper_bound_ms": 100, "count": 0},
+                {"upper_bound_ms": 250, "count": 0},
+                {"upper_bound_ms": 1000, "count": 0},
+                {"upper_bound_ms": 3000, "count": 0},
+                {"upper_bound_ms": 10000, "count": 2},
+                {"upper_bound_ms": None, "count": 0},
+            ),
+            "dimensions": (
+                {"code_revision": "rev-1", "browser_family": "chromium", "count": 2, "average_ms": 3400.0, "maximum_ms": 3600.0},
+            ),
+            "slow_exemplars": (
+                {"observed_at": 103.0, "queue_ms": 3600.0, "latency_ms": 4000.0, "endpoint": "/api/ping", "journey_id": "j-2", "code_revision": "rev-1", "browser_family": "chromium", "connection_protocol": "http/1.1"},
+                {"observed_at": 100.0, "queue_ms": 3200.0, "latency_ms": 8553.6, "endpoint": "/api/session-metadata", "request_id": "r-web-1", "journey_id": "j-1", "code_revision": "rev-1", "browser_family": "chromium", "connection_protocol": "h2"},
+            ),
+        },
+    }
+    assert profiles["observation_status"]["retained_observations"] == 4
+
+
+def test_browser_observation_status_distinguishes_current_receipts_from_retained_failures(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME, clock=lambda: 150.0,
+    )
+    writer = storage.Store.open(tmp_path / storage.DATABASE_FILENAME)
+    service.writer = writer
+    try:
+        records = (
+            storage.Observation(
+                "heartbeat-1", "browser", "browser-private", 100.0, "page-1", 0,
+                {"kind": "heartbeat", "upload_queue_depth": 0, "upload_drops": 0, "upload_retries": 0},
+            ),
+            storage.Observation(
+                "error-1", "browser", "browser-private", 110.0, "page-1", 0,
+                {"kind": "error", "signature": "jsf-unknown", "message": "render failed", "source": "/static/yolomux.js", "code_revision": "old-revision"},
+            ),
+            storage.Observation(
+                "error-2", "browser", "browser-private", 120.0, "page-1", 0,
+                {"kind": "error", "signature": "jsf-probe", "message": "controlled throw", "source": "/static/yolomux.js", "code_revision": "old-revision", "provenance": "controlled_probe"},
+            ),
+            storage.Observation(
+                "rejection-1", "browser", "browser-private", 130.0, "page-1", 0,
+                {"kind": "unhandledrejection", "signature": "jsf-real", "message": "promise failed", "source": "/static/yolomux.js", "code_revision": "old-revision", "provenance": "confirmed_real"},
+            ),
+        )
+        service._append({
+            "action": "append",
+            "protocol_version": protocol.WIRE_PROTOCOL_VERSION,
+            "schema_generation": storage.SCHEMA_VERSION,
+            **client_module._append_payload(records, (), (), ()),
+        })
+        diagnostics, binary = service.handle_with_binary({
+            **FENCE,
+            "action": "browser_profiles",
+        })
+    finally:
+        writer.close()
+
+    assert binary == b""
+    assert diagnostics["observation_status"] == {
+        "receipt_scope": "statsd_process",
+        "receipt_scope_started_at": service.started_at,
+        "accepted_reports": 0,
+        "accepted_observations": 0,
+        "last_accepted_at": None,
+        "last_accepted_age_seconds": None,
+        "retained_observations": 4,
+        "retained_failures": 3,
+        "confirmed_real_failures": 1,
+        "probe_failures": 1,
+        "unknown_failures": 1,
+        "retained_errors": 2,
+        "retained_unhandled_rejections": 1,
+        "last_retained_observed_at": 130.0,
+        "last_retained_observed_age_seconds": 20.0,
+        "fingerprints": (
+            {"signature": "jsf-real", "kind": "unhandledrejection", "provenance": "confirmed_real", "count": 1, "first_observed_at": 130.0, "last_observed_at": 130.0, "code_revisions": ("old-revision",), "state": "open", "state_reason": "no durable closure or path-execution evidence"},
+            {"signature": "jsf-probe", "kind": "error", "provenance": "controlled_probe", "count": 1, "first_observed_at": 120.0, "last_observed_at": 120.0, "code_revisions": ("old-revision",), "state": "open", "state_reason": "no durable closure or path-execution evidence"},
+            {"signature": "jsf-unknown", "kind": "error", "provenance": "unknown", "count": 1, "first_observed_at": 110.0, "last_observed_at": 110.0, "code_revisions": ("old-revision",), "state": "open", "state_reason": "no durable closure or path-execution evidence"},
+        ),
+        "classification_counts": {"open": 3, "fixed": 0, "live_verified": 0},
+        "unprovable_states": ("fixed", "live_verified"),
+    }
+
+
 def test_encoding_targets_only_demanded_views_between_slow_refreshes(tmp_path):
-    """A single demanded view encodes at live cadence; the other sixteen views
+    """A demanded concrete view and its AUTO alias encode at live cadence; other views
     refresh together only when the 60s undemanded boundary advances, and their
     retained bodies keep serving in between (instant range switches)."""
     monotonic_now = [1_000.0]
@@ -2176,13 +3443,18 @@ def test_encoding_targets_only_demanded_views_between_slow_refreshes(tmp_path):
         generated_at=100_000, observed_until=100_000,
     )
 
-    # Demand exactly the 5m/1s view (as the browser would via snapshot+delta).
+    # Demand exactly the 5m/1s concrete view; its indistinguishable AUTO cursor
+    # must publish in the same generation for the shared delta key.
     service._record_view_demand(300, 1)
     entries = service._encode_generation(
         generation, resolutions=frozenset(stats_resolution.RESOLUTION_CHOICES),
         previous_generated_at=100_000 - 1,  # same 60s window: no slow refresh
     )
-    assert set(entries) == {(300, 1, None)}
+    assert set(entries) == {(300, 1, None), (300, stats_resolution.AUTO, None)}
+    assert (
+        entries[(300, 1, None)].metadata["cache_generation"]
+        == entries[(300, stats_resolution.AUTO, None)].metadata["cache_generation"]
+    )
 
     # The slow boundary advance refreshes every view in one build.
     full = service._encode_generation(
@@ -2266,3 +3538,45 @@ def test_four_browser_sources_still_encode_one_shared_view_set(tmp_path):
     assert accounting["entries"] == expected_entries
     assert len(entries) == expected_entries
     assert {key[2] for key in entries} == {None}
+
+
+def test_snapshot_wire_includes_only_the_latest_scanner_backfill_status(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    body = b'{"protocol_version":2}'
+
+    assert service._snapshot_body_with_backfill_status(body) == body
+    scan = {
+        "files_read": 1, "records_parsed": 2, "atoms_emitted": 3,
+        "atoms_accepted": 2, "atoms_rejected": 1,
+        "rejection_reasons": {"invalid model": 1},
+    }
+    service._usage_atom_backfill = {"state": "pending", "sources": 2, "missing": 1, "scan": scan}
+    assert json.loads(service._snapshot_body_with_backfill_status(body))["usage_atom_backfill"] == {
+        "state": "pending", "sources": 2, "missing": 1, "scan": scan,
+    }
+    service._usage_atom_backfill = {"state": "complete", "sources": 2, "missing": 0, "scan": scan}
+    assert json.loads(service._snapshot_body_with_backfill_status(body))["usage_atom_backfill"]["state"] == "complete"
+
+
+def test_usage_atom_backfill_control_publishes_scan_counters(tmp_path):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock", tmp_path / storage.DATABASE_FILENAME,
+    )
+    scan = {
+        "files_read": 3, "records_parsed": 12, "atoms_emitted": 4,
+        "atoms_accepted": 3, "atoms_rejected": 1,
+        "rejection_reasons": {"direction must be one of: input, output": 1},
+    }
+
+    response, binary = service.handle_with_binary({
+        **FENCE, "action": "usage_atom_backfill", "state": "pending",
+        "sources": 7, "missing": 4, "scan": scan,
+    })
+
+    assert response == {"ok": True}
+    assert binary == b""
+    assert service._usage_atom_backfill == {
+        "state": "pending", "sources": 7, "missing": 4, "scan": scan,
+    }

@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-RESOLUTION_CHOICES: tuple[int, ...] = (1, 10, 60, 300)
+RING_CAPACITIES: dict[int, int] = {1: 300, 10: 180, 60: 480, 300: 288}
+RESOLUTION_CHOICES: tuple[int, ...] = tuple(RING_CAPACITIES)
 RANGE_SECONDS: tuple[int, ...] = (
     5 * 60,
     15 * 60,
@@ -27,20 +28,23 @@ def explicit_resolutions(range_seconds: int) -> tuple[int, ...]:
         raise ValueError(f"range_seconds must be positive, got {range_seconds!r}")
     return tuple(
         resolution
-        for resolution in RESOLUTION_CHOICES
-        if MIN_BUCKETS <= range_seconds / resolution <= MAX_BUCKETS
+        for resolution, slot_count in RING_CAPACITIES.items()
+        if MIN_BUCKETS <= range_seconds / resolution <= slot_count
     )
 
 
 def auto_resolution(range_seconds: int) -> int:
     if range_seconds <= 0:
         raise ValueError(f"range_seconds must be positive, got {range_seconds!r}")
-    for resolution in RESOLUTION_CHOICES:
-        if range_seconds / resolution <= MAX_BUCKETS:
+    offered = explicit_resolutions(range_seconds)
+    if offered:
+        return offered[0]
+    for resolution, slot_count in RING_CAPACITIES.items():
+        if range_seconds / resolution <= slot_count:
             return resolution
     raise ValueError(
-        f"no resolution in {RESOLUTION_CHOICES} keeps {range_seconds}s within "
-        f"{MAX_BUCKETS} buckets"
+        f"no resolution in {RESOLUTION_CHOICES} retains range {range_seconds}s within "
+        "its ring capacity"
     )
 
 

@@ -1,0 +1,101 @@
+# Isolated test runner for YOLOmux.
+#
+# Each run owns its HOME and writable container layer. The host HOME is never mounted, so
+# tests cannot reach live YOLOmux, Claude, or Codex state through an overlooked call site.
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# Chromium drives browser tests. procps and strace support process/namespace assertions;
+# binutils supplies readelf for tmux build-id and coredump diagnostics.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git \
+      tmux \
+      procps \
+      strace \
+      binutils \
+      ca-certificates \
+      chromium \
+      chromium-driver \
+ && rm -rf /var/lib/apt/lists/*
+
+# Match the Node major used by the source gate instead of Debian's older package.
+COPY --from=node:22-trixie-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-trixie-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+
+RUN pip install --no-cache-dir \
+      pytest \
+      pytest-timeout \
+      pytest-xdist \
+      selenium \
+      pyyaml \
+      "watchfiles>=1.2.0"
+
+ENV CHROME_BIN=/usr/bin/chromium \
+    CHROMEDRIVER_BIN=/usr/bin/chromedriver
+
+# Keep the pinned npm artifacts as a test-only provenance fixture for the tracked vendor bytes.
+COPY package.json /opt/xterm/package.json
+RUN cd /opt/xterm && npm install --no-audit --no-fund --omit=dev \
+ && test -f /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
+ && test -f /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
+ && test -f /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+COPY static/vendor/xterm.js static/vendor/xterm.css static/vendor/xterm-addon-unicode11.js /opt/yolomux-xterm-vendor/
+RUN cmp /opt/yolomux-xterm-vendor/xterm.js /opt/xterm/node_modules/@xterm/xterm/lib/xterm.js \
+ && cmp /opt/yolomux-xterm-vendor/xterm.css /opt/xterm/node_modules/@xterm/xterm/css/xterm.css \
+ && cmp /opt/yolomux-xterm-vendor/xterm-addon-unicode11.js /opt/xterm/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+
+# Match host ownership for any explicit worktree writes made by tests.
+ARG RUNNER_UID=1000
+ARG RUNNER_GID=1000
+RUN groupadd -o -g "${RUNNER_GID}" runner \
+ && useradd -o -m -u "${RUNNER_UID}" -g "${RUNNER_GID}" -s /bin/bash runner
+
+# Do not mask /home/runner with tmpfs at runtime. Tests require this baked-in local bin.
+RUN mkdir -p /home/runner/.local/bin /home/runner/.config /home/runner/.cache \
+ && chown -R runner:runner /home/runner
+
+# The host Codex package is mounted read-only at runtime. Its launcher needs the whole
+# package, so keep the stable wrapper in the image rather than mounting only codex.js.
+RUN printf '#!/bin/sh\nexec node /opt/agent-pkg/codex/bin/codex.js "$@"\n' > /usr/local/bin/codex \
+ && chmod +x /usr/local/bin/codex
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      fontconfig fonts-dejavu-core fonts-liberation2 \
+ && rm -rf /var/lib/apt/lists/*
+
+USER runner
+ENV HOME=/home/runner
+# YOLOmux is a Pacific product: the client stamps generated upload names with pacificDateStamp(), and
+# yolomux_lib/workspace/uploads.py and the server_time field in yolomux_lib/app.py render ambient local
+# time. A UTC container runs those paths on tomorrow's calendar day for the last 7-8 hours of every
+# Pacific day, which made the generated-upload-filename assertion deterministically red after 5pm PT.
+# Pinning here rather than passing -e TZ from docker/run-tests.sh puts the timezone inside the image
+# fingerprint owned by tools/docker_image.py, so the tag changes and no stale UTC image is reused.
+ENV TZ=America/Los_Angeles
+WORKDIR /w
+
+# Fixture repositories need an identity; this config exists only in the throwaway HOME.
+RUN git config --global user.email "runner@yolomux.test" \
+ && git config --global user.name "YOLOmux Test Runner" \
+ && git config --global init.defaultBranch main
+
+# Fail the image build early when any required runtime dependency is absent, and when the container
+# clock is not the Pacific clock the product and the tests assert against.
+RUN python3 -c "import pytest, pytest_timeout, selenium, yaml, watchfiles, zoneinfo; zoneinfo.ZoneInfo('America/Los_Angeles')" \
+ && python3 -c "import time; assert time.tzname == ('PST', 'PDT'), time.tzname" \
+ && node -e "const assert = require('node:assert'); assert.equal(Intl.DateTimeFormat().resolvedOptions().timeZone, 'America/Los_Angeles'); assert.notEqual(new Date().getTimezoneOffset(), 0);" \
+ && tmux -V \
+ && readelf --version >/dev/null \
+ && node --version | grep -q '^v22\.' \
+ && chromium --version >/dev/null \
+ && chromedriver --version >/dev/null
+
+CMD ["bash", "-lc", "tmux -V; node --version; python3 -V; chromium --version; echo 'pass a command, e.g. python3 -m pytest tests/... -q'"]

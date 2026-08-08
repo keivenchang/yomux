@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+import uuid
 import zipfile
 from http import HTTPStatus
 from http.client import HTTPConnection
@@ -16,8 +17,11 @@ import pytest
 
 from yolomux_lib import common
 from yolomux_lib import filesystem
+from yolomux_lib import http_routes
 from yolomux_lib import server_auth
 from yolomux_lib import web
+from yolomux_lib.app import FilesystemOperationHttpResponse
+from yolomux_lib.infra import jobd
 from yolomux_lib.server import Handler
 from yolomux_lib.server import TmuxWebtermHTTPServer
 from tests.browser_helpers.share_test_helpers import verify_share_token as build_verify_share_token
@@ -63,6 +67,37 @@ def request_header_list(port, method, path, body=None, headers=None):
     return result
 
 
+def request_operation_terminal(server, method, path, body=None, headers=None):
+    """Follow one fixture-owned accepted filesystem operation to its terminal HTTP replay."""
+    status, _response_headers, response_body = request(
+        server.server_address[1],
+        method,
+        path,
+        body=body,
+        headers=headers,
+    )
+    assert status == HTTPStatus.ACCEPTED, (method, path, status, response_body)
+    receipt = json.loads(response_body)
+    assert receipt["state"] == "queued" and receipt.get("terminal") is not True, receipt
+    request_id = receipt["request"]["id"]
+    operation = receipt["operation"]
+    operation_id = operation["id"]
+    assert operation["status_url"] == f"/api/operations/{operation_id}", receipt
+    event = server.app._fixture_filesystem_operation_events[operation_id]
+    assert event.wait(5), f"filesystem operation did not terminalize: {operation_id}"
+    terminal_status, terminal_headers, terminal_body = request(
+        server.server_address[1],
+        "GET",
+        operation["status_url"],
+        headers=headers,
+    )
+    terminal = json.loads(terminal_body)
+    assert terminal_status != HTTPStatus.ACCEPTED, terminal
+    assert terminal["state"] in {"ready", "failed"}, terminal
+    assert terminal["request"]["id"] == request_id, terminal
+    return terminal_status, terminal_headers, terminal_body
+
+
 def auth_header(username, password):
     encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
     return {"Authorization": f"Basic {encoded}"}
@@ -78,6 +113,120 @@ def start_server(monkeypatch, tmp_path, app=None, tls_context=None):
     # name in server_auth's namespace, so patch it there; the yolomux_locale cookie branch stays live.
     monkeypatch.setattr(server_auth, "current_language_pref", lambda: "system")
     app = app or SimpleNamespace(sessions=[], dangerously_yolo=False)
+    if not hasattr(app, "filesystem_operation_http_payload"):
+        operation_lock = threading.Lock()
+        operation_receipts = {}
+        operation_terminals = {}
+        operation_events = {}
+
+        def accept_fixture_operation(*, route, kind, task, payload, context):
+            request_id = f"r-fixture-{uuid.uuid4().hex}"
+            operation_id = f"op-fixture-{uuid.uuid4().hex}"
+            receipt = {
+                "state": "queued",
+                "request": {"id": request_id},
+                "operation": {
+                    "id": operation_id,
+                    "kind": kind,
+                    "status_url": f"/api/operations/{operation_id}",
+                    "events_url": f"/api/client-events?operation_id={operation_id}",
+                    "context": context,
+                },
+                "quality": {"complete": False, "stale": False},
+                "warnings": [],
+            }
+            event = threading.Event()
+            with operation_lock:
+                operation_receipts[operation_id] = receipt
+                operation_events[operation_id] = event
+
+            def complete():
+                try:
+                    result = jobd.run_registered_task_result(
+                        task,
+                        json.dumps(payload).encode("utf-8"),
+                    )
+                    terminal = {
+                        "state": "ready",
+                        "request": {"id": request_id},
+                        "data": json.loads(result.body.decode("utf-8")),
+                        "quality": {"complete": True, "stale": False},
+                        "warnings": [],
+                    }
+                    terminal_status = HTTPStatus.OK
+                except jobd.JobdFilesystemOperationFailure as exc:
+                    terminal = {
+                        "state": "failed",
+                        "request": {"id": request_id},
+                        **exc.payload,
+                    }
+                    terminal_status = HTTPStatus(exc.status)
+                except filesystem.FilesystemError as exc:
+                    terminal = {
+                        "state": "failed",
+                        "request": {"id": request_id},
+                        **exc.payload(path=str(payload.get("path") or "")),
+                    }
+                    terminal_status = HTTPStatus(exc.status)
+                with operation_lock:
+                    operation_terminals[operation_id] = (terminal, terminal_status)
+                event.set()
+
+            threading.Thread(target=complete, daemon=True).start()
+            return receipt, HTTPStatus.ACCEPTED
+
+        def filesystem_operation_http_payload(*, route, operation, path, args=None, **_kwargs):
+            payload, status = accept_fixture_operation(
+                route=route,
+                kind="filesystem_operation",
+                task="filesystem_operation",
+                payload={"op": operation, "path": path, "args": args or {}},
+                context={"operation": operation, "path": path},
+            )
+            return FilesystemOperationHttpResponse(payload, status)
+
+        def fs_batch_http_payload(payload, **_kwargs):
+            return accept_fixture_operation(
+                route="POST /api/fs/batch",
+                kind="fs_batch",
+                task="filesystem_batch",
+                payload=payload,
+                context={"request_count": len(payload.get("requests", []))},
+            )
+
+        def operation_status_payload(operation_id):
+            with operation_lock:
+                terminal = operation_terminals.get(operation_id)
+                if terminal is not None:
+                    return terminal
+                receipt = operation_receipts.get(operation_id)
+            if receipt is not None:
+                return receipt, HTTPStatus.ACCEPTED
+            return {"state": "failed", "error": {"code": "operation_not_found"}}, HTTPStatus.NOT_FOUND
+
+        app.filesystem_operation_http_payload = filesystem_operation_http_payload
+        if not hasattr(app, "fs_batch_http_payload"):
+            app.fs_batch_http_payload = fs_batch_http_payload
+        if not hasattr(app, "operation_status_payload"):
+            app.operation_status_payload = operation_status_payload
+        if not hasattr(app, "operation_access_allowed"):
+            app.operation_access_allowed = lambda operation_id, _sessions: operation_id in operation_receipts
+        app._fixture_filesystem_operation_events = operation_events
+    if not hasattr(app, "filesystem_operation_relay"):
+        def filesystem_operation_relay(*, route, operation, path, args=None):
+            del route
+            try:
+                result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
+                    "op": operation,
+                    "path": path,
+                    "args": args or {},
+                }).encode("utf-8"))
+            except jobd.JobdFilesystemOperationFailure as exc:
+                return FilesystemOperationHttpResponse(exc.payload, HTTPStatus(exc.status))
+            except filesystem.FilesystemError as exc:
+                return FilesystemOperationHttpResponse(exc.payload(path=path), HTTPStatus(exc.status))
+            return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=result.body, product=result.product)
+        app.filesystem_operation_relay = filesystem_operation_relay
     server = TmuxWebtermHTTPServer(("127.0.0.1", 0), app, tls_context=tls_context)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -88,6 +237,43 @@ def stop_server(server, thread):
     server.shutdown()
     server.server_close()
     thread.join(timeout=2)
+
+
+def test_activity_summary_route_authenticates_then_returns_terminal_disabled_response(monkeypatch, tmp_path):
+    app = SimpleNamespace(
+        sessions=[],
+        dangerously_yolo=False,
+        activity_summary_bytes=lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("disabled authenticated route must not enter app activity work")
+        ),
+    )
+    server, thread = start_server(monkeypatch, tmp_path, app=app)
+    port = server.server_address[1]
+    try:
+        status, _headers, _body = request(port, "GET", "/api/activity-summary")
+        assert status == HTTPStatus.UNAUTHORIZED
+
+        status, headers, body = request(
+            port,
+            "GET",
+            "/api/activity-summary?force=1&locale=ja&scope=all&hours=336",
+            headers=auth_header("keivenc", "random-password"),
+        )
+        assert status == HTTPStatus.SERVICE_UNAVAILABLE
+        assert "Retry-After" not in headers
+        payload = json.loads(body)
+        assert payload["state"] == "failed"
+        assert payload["status"] == HTTPStatus.SERVICE_UNAVAILABLE
+        assert payload["ok"] is False and payload["terminal"] is True
+        assert payload["reason"] == "async_replacement_required"
+        assert payload["error"]["code"] == "feature_disabled"
+        assert payload["error"]["retryable"] is False
+        assert payload["error"]["details"] == {
+            "reason": "async_replacement_required",
+            "terminal": True,
+        }
+    finally:
+        stop_server(server, thread)
 
 
 def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
@@ -148,7 +334,7 @@ def test_login_page_sets_auth_cookie(monkeypatch, tmp_path):
         wrong_port_cookie = cookie.replace(f"{common.AUTH_COOKIE_NAME}_{port}=", f"{common.AUTH_COOKIE_NAME}_{port + 1}=")
         status, _headers, body = request(port, "GET", "/api/ping", headers={"Cookie": wrong_port_cookie})
         assert status == HTTPStatus.UNAUTHORIZED
-        assert json.loads(body)["error"] == "authentication required"
+        assert json.loads(body)["legacy_error"] == "authentication required"
 
         empty_layout_body = urlencode({"username": "keivenc", "password": "random-password", "next": "/?layout=empty"})
         status, headers, _body = request(
@@ -336,7 +522,7 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
     target.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
     written = {}
     handler = SimpleNamespace(
-        write_html=lambda body, status=HTTPStatus.OK: written.update({"html_status": status, "html": body}),
+        submit_filesystem_relay=lambda route, operation, path, args: written.update({"route": route, "operation": operation, "path": path, "args": args}),
         write_json=lambda value, status=HTTPStatus.OK: written.update({"json_status": status, "json": value}),
         request_locale_pref=lambda: "en",
         headers={},
@@ -344,10 +530,12 @@ def test_html_preview_route_runs_scripts_in_sandboxed_wrapper(monkeypatch, tmp_p
 
     Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
 
-    assert written["html_status"] == HTTPStatus.OK
-    assert 'sandbox="allow-scripts allow-forms allow-popups"' in written["html"]
-    assert "allow-same-origin" not in written["html"]
-    assert "&lt;script&gt;window.answer = 42;&lt;/script&gt;" in written["html"]
+    assert written == {
+        "route": "GET /api/fs/html-preview",
+        "operation": "html_preview",
+        "path": str(target),
+        "args": {"locale": "en"},
+    }
 
     Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(tmp_path / 'plain.txt')})}"))
 
@@ -404,9 +592,17 @@ def test_auxiliary_shells_resolve_system_accept_language(monkeypatch, tmp_path):
         request_locale_pref=lambda: "system",
         headers={"Accept-Language": "he-IL, en;q=0.5"},
     )
+    handler.submit_filesystem_relay = lambda route, operation, path, args: written.update({
+        "relay": (route, operation, path, args),
+    })
 
     Handler.handle_fs_html_preview(handler, urlparse(f"/api/fs/html-preview?{urlencode({'path': str(target)})}"))
-    assert '<html lang="he" dir="rtl">' in written["html"]
+    assert written["relay"] == (
+        "GET /api/fs/html-preview",
+        "html_preview",
+        str(target),
+        {"locale": "he"},
+    )
 
     Handler.handle_preview_popout_placeholder(
         handler,
@@ -457,15 +653,11 @@ def test_readonly_identity_cannot_call_mutating_post(monkeypatch, tmp_path):
         )
 
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body) == {
-            "error": "admin access required",
-            "user_message": {
-                "key": "auth.error.accessRequired",
-                "params": {"role": "admin"},
-                "fallback": "admin access required",
-            },
-            "role": "readonly",
-        }
+        payload = json.loads(body)
+        assert payload["state"] == "failed"
+        assert payload["error"]["code"] == "forbidden"
+        assert payload["legacy_error"] == "admin access required"
+        assert payload["role"] == "readonly"
     finally:
         stop_server(server, thread)
 
@@ -492,8 +684,8 @@ def test_pricing_catalog_routes_are_readonly_visible_admin_refresh_and_share_den
         assert refreshes == []
 
         status, _headers, body = request(port, "POST", "/api/pricing-catalog/refresh", headers=auth_header("keivenc", "random-password"))
-        assert status == HTTPStatus.ACCEPTED
-        assert json.loads(body)["status"] == "running"
+        assert status == HTTPStatus.OK
+        assert json.loads(body)["data"]["status"] == "running"
         assert refreshes == [True]
 
         status, _headers, body = request(port, "GET", "/api/pricing-catalog?token=valid-share-token")
@@ -504,11 +696,15 @@ def test_pricing_catalog_routes_are_readonly_visible_admin_refresh_and_share_den
 
 
 def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
+    forbidden_handler_calls = []
     app = SimpleNamespace(
         sessions=["6", "7"],
         dangerously_yolo=False,
         tmux_recency_ordered_sessions=lambda sessions: list(sessions),
         verify_share_token=lambda token: {"session": "6", "sessions": ["6", "7"]} if token == "valid-share-token" else None,
+        tmux_status_mode=lambda session: forbidden_handler_calls.append(("GET", "tmux-status", session)),
+        cycle_tmux_status_mode=lambda session: forbidden_handler_calls.append(("POST", "tmux-status", session)),
+        record_current_browser_observations=lambda *args, **kwargs: forbidden_handler_calls.append(("POST", "stats-observations")),
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app)
     port = server.server_address[1]
@@ -530,9 +726,21 @@ def test_share_token_is_limited_to_root_and_websocket(monkeypatch, tmp_path):
             "fallback": "share token is limited to the shared page and websocket",
         }
 
+        for method, path in (
+            ("GET", "/api/tmux-status?session=6&token=valid-share-token"),
+            ("POST", "/api/tmux-status?session=6&token=valid-share-token"),
+            ("POST", "/api/stats-observations?token=valid-share-token"),
+        ):
+            route = http_routes.route_for_request(method, path.split("?", 1)[0])
+            assert route is not None and route.share_access == http_routes.SHARE_ACCESS_NONE
+            status, _headers, body = request(port, method, path)
+            assert status == HTTPStatus.FORBIDDEN, (method, path, status, body)
+            assert json.loads(body)["user_message"]["key"] == "share.error.pageScope"
+        assert forbidden_handler_calls == []
+
         status, _headers, body = request(port, "GET", "/api/ping?token=wrong")
         assert status == HTTPStatus.UNAUTHORIZED
-        assert json.loads(body)["error"] == "authentication required"
+        assert json.loads(body)["legacy_error"] == "authentication required"
     finally:
         stop_server(server, thread)
 
@@ -553,21 +761,22 @@ def test_share_token_allows_only_shared_editor_file_reads(monkeypatch, tmp_path)
     server, thread = start_server(monkeypatch, tmp_path, app=app)
     port = server.server_address[1]
     try:
-        status, _headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': shared_path, 'token': 'valid-share-token'})}")
+        status, _headers, body = request_operation_terminal(
+            server,
+            "GET",
+            f"/api/fs/read?{urlencode({'path': shared_path})}",
+            headers={"X-Share-Token": "valid-share-token"},
+        )
         assert status == HTTPStatus.OK
-        assert json.loads(body)["content"] == "# Shared\n"
+        assert json.loads(body)["data"]["content"] == "# Shared\n"
 
         status, _headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': str(private_file), 'token': 'valid-share-token'})}")
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body) == {
-            "error": "admin access required",
-            "user_message": {
-                "key": "auth.error.accessRequired",
-                "params": {"role": "admin"},
-                "fallback": "admin access required",
-            },
-            "role": "readonly",
-        }
+        payload = json.loads(body)
+        assert payload["state"] == "failed"
+        assert payload["error"]["code"] == "forbidden"
+        assert payload["legacy_error"] == "admin access required"
+        assert payload["role"] == "readonly"
     finally:
         stop_server(server, thread)
 
@@ -716,26 +925,43 @@ def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tm
         share_record_allows_file_path=lambda share_record, raw_path: share_record == record and raw_path == shared_path,
         share_status_payload=lambda token, **kwargs: calls.append(("share", token, kwargs)) or ({"ok": True, "token": token}, HTTPStatus.OK),
         activity_payload=lambda **_kwargs: ({"activity": {"6:0": {"session": "6", "window": 0}}}, HTTPStatus.OK),
-        session_files_payload=lambda session, hours, **kwargs: ({"session": session, "loaded": True, "files": [], "repos": [], "errors": []}, HTTPStatus.OK),
+        session_files_http_payload=lambda session, hours, **kwargs: ({
+            "state": "ready",
+            "request": {"id": "r-fixture-session-files"},
+            "data": {"session": session, "loaded": True, "files": [], "repos": [], "errors": []},
+            "quality": {"complete": True, "stale": False},
+            "warnings": [],
+        }, HTTPStatus.OK),
     )
     server, thread = start_server(monkeypatch, tmp_path, app=app, tls_context=FakeTlsContext())
     port = server.server_address[1]
     headers = {"X-Share-Token": "valid-share-token"}
     try:
-        status, response_headers, body = request(port, "GET", f"/api/fs/list?{urlencode({'path': str(tmp_path)})}", headers=headers)
+        status, response_headers, body = request_operation_terminal(
+            server,
+            "GET",
+            f"/api/fs/list?{urlencode({'path': str(tmp_path)})}",
+            headers=headers,
+        )
         assert status == HTTPStatus.OK
         assert "Location" not in response_headers
-        assert "DONE.md" in {entry["name"] for entry in json.loads(body)["entries"]}
+        assert "DONE.md" in {entry["name"] for entry in json.loads(body)["data"]["entries"]}
 
-        status, response_headers, body = request(port, "GET", f"/api/fs/read?{urlencode({'path': shared_path})}", headers=headers)
+        status, response_headers, body = request_operation_terminal(
+            server,
+            "GET",
+            f"/api/fs/read?{urlencode({'path': shared_path})}",
+            headers=headers,
+        )
         assert status == HTTPStatus.OK
         assert "Location" not in response_headers
-        assert json.loads(body)["content"].startswith("# DONE")
+        assert json.loads(body)["data"]["content"].startswith("# DONE")
 
         status, response_headers, body = request(port, "GET", "/api/session-files?session=6&hours=24", headers=headers)
         assert status == HTTPStatus.OK
         assert "Location" not in response_headers
-        assert json.loads(body)["loaded"] is True
+        assert json.loads(body)["state"] == "ready"
+        assert json.loads(body)["data"]["loaded"] is True
 
         status, response_headers, body = request(port, "GET", "/api/activity", headers=headers)
         assert status == HTTPStatus.OK
@@ -743,8 +969,8 @@ def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tm
         assert json.loads(body)["activity"]["6:0"]["session"] == "6"
 
         batch_body = json.dumps({"requests": [{"id": "root", "type": "list", "path": str(tmp_path)}]})
-        status, response_headers, body = request(
-            port,
+        status, response_headers, body = request_operation_terminal(
+            server,
             "POST",
             "/api/fs/batch",
             body=batch_body,
@@ -752,7 +978,7 @@ def test_plaintext_on_tls_server_serves_http_share_readonly_apis(monkeypatch, tm
         )
         assert status == HTTPStatus.OK
         assert "Location" not in response_headers
-        assert json.loads(body)["responses"][0]["ok"] is True
+        assert json.loads(body)["data"]["responses"][0]["ok"] is True
 
         status, response_headers, body = request(port, "GET", "/api/share", headers=headers)
         assert status == HTTPStatus.OK
@@ -841,19 +1067,19 @@ def test_share_status_is_admin_or_share_scoped_and_stop_is_admin_only(monkeypatc
     try:
         status, _headers, body = request(port, "GET", "/api/share", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body)["error"] == "admin access required"
+        assert json.loads(body)["legacy_error"] == "admin access required"
 
         status, _headers, body = request(port, "GET", "/api/share", headers=auth_header("keivenc", "random-password"))
         assert status == HTTPStatus.OK
-        assert json.loads(body) == {"ok": True, "active": False}
+        assert json.loads(body)["data"] == {"ok": True, "active": False}
 
         status, _headers, body = request(port, "GET", "/api/share", headers={"X-Share-Token": "valid-share-token"})
         assert status == HTTPStatus.OK
-        assert json.loads(body) == {"ok": True, "active": True, "token": "valid-share-token"}
+        assert json.loads(body)["data"] == {"ok": True, "active": True, "token": "valid-share-token"}
 
         status, _headers, body = request(port, "POST", "/api/share/stop", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body)["error"] == "admin access required"
+        assert json.loads(body)["legacy_error"] == "admin access required"
 
         status, _headers, body = request(
             port,
@@ -863,7 +1089,7 @@ def test_share_status_is_admin_or_share_scoped_and_stop_is_admin_only(monkeypatc
             headers={**auth_header("keivenc", "random-password"), "Content-Type": "application/json"},
         )
         assert status == HTTPStatus.OK
-        assert json.loads(body) == {"ok": True, "active": False, "stopped": 1}
+        assert json.loads(body)["data"] == {"ok": True, "active": False, "stopped": 1}
         assert calls == [
             ("status", {"base_url": f"http://127.0.0.1:{port}"}),
             ("share-status", "valid-share-token", {"base_url": f"http://127.0.0.1:{port}"}),
@@ -936,7 +1162,7 @@ def test_share_host_websocket_is_admin_only_and_verifies_share(monkeypatch, tmp_
     try:
         status, _headers, body = request(port, "GET", "/ws/share-host?share=valid-share-token", headers=auth_header("guest", "guest"))
         assert status == HTTPStatus.FORBIDDEN
-        assert json.loads(body)["error"] == "admin access required"
+        assert json.loads(body)["legacy_error"] == "admin access required"
 
         status, _headers, body = request(port, "GET", "/ws/share-host?share=wrong", headers=auth_header("keivenc", "random-password"))
         assert status == HTTPStatus.NOT_FOUND
@@ -984,7 +1210,7 @@ def test_forged_auth_cookie_is_rejected(monkeypatch, tmp_path):
         status, _headers, body = request(port, "GET", "/api/ping", headers={"Cookie": forged_cookie})
 
         assert status == HTTPStatus.UNAUTHORIZED
-        assert json.loads(body)["error"] == "authentication required"
+        assert json.loads(body)["legacy_error"] == "authentication required"
     finally:
         stop_server(server, thread)
 
@@ -1103,7 +1329,7 @@ def test_logout_marker_blocks_cached_basic_auth_until_form_login(monkeypatch, tm
             headers={**auth_header("keivenc", "random-password"), "Cookie": logout_cookie},
         )
         assert status == HTTPStatus.UNAUTHORIZED
-        assert json.loads(body)["error"] == "authentication required"
+        assert json.loads(body)["legacy_error"] == "authentication required"
 
         body = urlencode({"username": "keivenc", "password": "random-password", "next": "/"})
         status, header_items, _body = request_header_list(
@@ -1192,8 +1418,8 @@ def test_fs_count_returns_recursive_file_count(monkeypatch, tmp_path):
     server, thread = start_server(monkeypatch, tmp_path)
     port = server.server_address[1]
     try:
-        status, headers, body = request(
-            port,
+        status, headers, body = request_operation_terminal(
+            server,
             "GET",
             f"/api/fs/count?{urlencode({'path': str(folder)})}",
             headers=auth_header("keivenc", "random-password"),
@@ -1202,7 +1428,7 @@ def test_fs_count_returns_recursive_file_count(monkeypatch, tmp_path):
 
         assert status == HTTPStatus.OK
         assert headers["Content-Type"] == "application/json; charset=utf-8"
-        assert payload == {"path": str(folder), "kind": "dir", "files": 2, "recursive": True}
+        assert payload["data"] == {"path": str(folder), "kind": "dir", "files": 2, "recursive": True}
     finally:
         stop_server(server, thread)
 
@@ -1225,9 +1451,9 @@ def test_fs_zip_download_rejects_large_folder_with_json_error(monkeypatch, tmp_p
 
         assert status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE
         assert headers["Content-Type"] == "application/json; charset=utf-8"
-        assert "4 bytes" in payload["error"]
-        assert "0.0 MB (3 bytes) file transfer size cap" in payload["error"]
-        assert "Please zip it yourself" in payload["error"]
+        assert "4 bytes" in payload["legacy_error"]
+        assert "0.0 MB (3 bytes) file transfer size cap" in payload["legacy_error"]
+        assert "Please zip it yourself" in payload["legacy_error"]
     finally:
         stop_server(server, thread)
 
@@ -1257,6 +1483,6 @@ def test_fs_zip_download_is_admin_only_and_uses_fs_roots(monkeypatch, tmp_path):
         )
         payload = json.loads(body.decode("utf-8"))
         assert status == HTTPStatus.FORBIDDEN
-        assert "outside configured filesystem roots" in payload["error"]
+        assert "outside configured filesystem roots" in payload["legacy_error"]
     finally:
         stop_server(server, thread)

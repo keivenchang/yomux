@@ -166,7 +166,7 @@ function createYoagentPanel() {
     controlsHtml: virtualPanelInnerControlsHtml(yoagentItemId),
     afterHeadHtml: `<div class="info-actions-bar">
         <div class="info-subtab-actions">
-          <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}">${esc(t('yoagent.refresh'))}</button>
+          <button type="button" class="info-refresh" data-action="yoagent-refresh" data-yoagent-refresh title="${esc(t('yoagent.refreshTitle'))}" ${activitySummaryEnabled ? '' : 'disabled aria-disabled="true"'}>${esc(t('yoagent.refresh'))}</button>
         </div>
       </div>`,
     bodyClass: 'info-pane',

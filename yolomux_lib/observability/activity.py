@@ -25,6 +25,8 @@ from typing import Callable
 
 from ..atomic_file import atomic_write_text, file_lock
 from ..filesystem.io_ops import read_json_file
+from ..infra.host_identity import HostIdentity
+from ..infra.host_partition import host_namespaced_path
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,10 @@ class ActivityRecord:
 
 def session_of(target: str) -> str:
     """The session part of a target key (``"6:1"`` -> ``"6"``)."""
-    return str(target).split(":", 1)[0]
+    value = str(target)
+    if value.startswith("activity:"):
+        return value.split(":", 3)[2]
+    return value.split(":", 1)[0]
 
 
 class ActivityLedger:
@@ -65,15 +70,21 @@ class ActivityLedger:
         idle_gap_seconds: float = 120.0,
         retention_days: float = 14.0,
         clock: Callable[[], float] = time.time,
+        host_identity: HostIdentity | None = None,
     ) -> None:
-        self.path = Path(path)
-        self.heartbeat_path = Path(heartbeat_path) if heartbeat_path else None
+        self.host_identity = host_identity
+        self.path = host_namespaced_path(path, self.host_identity)
+        legacy_heartbeat_path = Path(heartbeat_path) if heartbeat_path else None
+        self.heartbeat_path = host_namespaced_path(legacy_heartbeat_path, self.host_identity) if legacy_heartbeat_path else None
         self.idle_gap_ms = max(0.0, float(idle_gap_seconds) * 1000.0)
         self.retention_ms = max(0.0, float(retention_days) * 86_400_000.0)
         self._clock = clock
         self._records: dict[str, ActivityRecord] = {}
         self._lock = threading.RLock()
         self._heartbeat_replay_offset = 0
+
+    def _activity_key(self, target: str) -> str:
+        return self.host_identity.qualify_key("activity", target) if self.host_identity else target
 
     # ---- recording -------------------------------------------------------
 
@@ -116,9 +127,9 @@ class ActivityLedger:
         moment = self._clock() if ts is None else float(ts)
         with self._lock:
             self._sync_heartbeats_locked()
-            self._bump_input(str(session), moment, byte_count)
+            self._bump_input(self._activity_key(str(session)), moment, byte_count)
             if window not in (None, ""):
-                self._bump_input(f"{session}:{window}", moment, byte_count)
+                self._bump_input(self._activity_key(f"{session}:{window}"), moment, byte_count)
             self._append_heartbeat(session, window, moment, byte_count, source)
 
     def note_agent_active(self, session: str, window: str | None = None, ts: float | None = None) -> None:
@@ -126,23 +137,25 @@ class ActivityLedger:
             return
         moment = self._clock() if ts is None else float(ts)
         with self._lock:
-            self._bump_agent(str(session), moment)
+            self._bump_agent(self._activity_key(str(session)), moment)
             if window not in (None, ""):
-                self._bump_agent(f"{session}:{window}", moment)
+                self._bump_agent(self._activity_key(f"{session}:{window}"), moment)
 
     def note_output(self, target: str, ts: float | None = None) -> None:
         moment = self._clock() if ts is None else float(ts)
         with self._lock:
-            rec = self._records.get(str(target)) or ActivityRecord(created_ts=moment)
+            key = self._activity_key(str(target))
+            rec = self._records.get(key) or ActivityRecord(created_ts=moment)
             rec.last_output_ts = moment
-            self._records[str(target)] = rec
+            self._records[key] = rec
 
     def note_selected(self, target: str, ts: float | None = None) -> None:
         moment = self._clock() if ts is None else float(ts)
         with self._lock:
-            rec = self._records.get(str(target)) or ActivityRecord(created_ts=moment)
+            key = self._activity_key(str(target))
+            rec = self._records.get(key) or ActivityRecord(created_ts=moment)
             rec.last_selected_ts = moment
-            self._records[str(target)] = rec
+            self._records[key] = rec
 
     # ---- maintenance -----------------------------------------------------
 
@@ -157,7 +170,20 @@ class ActivityLedger:
     def snapshot(self) -> dict[str, dict]:
         with self._lock:
             self._sync_heartbeats_locked()
-            return {key: asdict(rec) for key, rec in self._records.items()}
+            return {
+                key: {
+                    **asdict(rec),
+                    **(
+                        {
+                            "stable_host_id": self.host_identity.stable_host_id,
+                            "hostname": self.host_identity.display_hostname,
+                        }
+                        if self.host_identity
+                        else {}
+                    ),
+                }
+                for key, rec in self._records.items()
+            }
 
     # ---- persistence -----------------------------------------------------
 
@@ -200,7 +226,7 @@ class ActivityLedger:
     def _append_heartbeat(self, session: str, window: str | None, ts: float, byte_count: int, source: str = "host") -> None:
         if not self.heartbeat_path:
             return
-        line = json.dumps({"ts": ts, "s": session, "w": window, "b": max(0, int(byte_count)), "src": str(source or "host")}, separators=(",", ":"))
+        line = json.dumps({"ts": ts, "s": session, "w": window, "b": max(0, int(byte_count)), "src": str(source or "host"), **({"stable_host_id": self.host_identity.stable_host_id, "hostname": self.host_identity.display_hostname} if self.host_identity else {})}, separators=(",", ":"))
         self.heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(self.heartbeat_path):
             with open(self.heartbeat_path, "a", encoding="utf-8") as handle:
@@ -234,10 +260,10 @@ class ActivityLedger:
             byte_count = int(item.get("b") or 0)
         except (TypeError, ValueError):
             byte_count = 0
-        self._bump_input_if_newer(session, ts, byte_count)
+        self._bump_input_if_newer(self._activity_key(session), ts, byte_count)
         window = item.get("w")
         if window not in (None, ""):
-            self._bump_input_if_newer(f"{session}:{window}", ts, byte_count)
+            self._bump_input_if_newer(self._activity_key(f"{session}:{window}"), ts, byte_count)
 
     def _sync_heartbeats_locked(self, full: bool = False) -> None:
         if not self.heartbeat_path or not self.heartbeat_path.exists():

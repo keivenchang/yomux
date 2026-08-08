@@ -20,7 +20,7 @@ EXPECTED_MATRIX = {
     5 * 60: (1, (1, 10)),
     15 * 60: (10, (10, 60)),
     30 * 60: (10, (10, 60)),
-    60 * 60: (10, (10, 60, 300)),
+    60 * 60: (60, (60, 300)),
     2 * 60 * 60: (60, (60, 300)),
     4 * 60 * 60: (60, (60, 300)),
     8 * 60 * 60: (60, (60, 300)),
@@ -57,18 +57,15 @@ def test_auto_is_always_in_the_explicit_set(range_seconds):
 
 
 @pytest.mark.parametrize("range_seconds", sr.RANGE_SECONDS)
-def test_auto_is_the_finest_within_budget(range_seconds):
+def test_auto_is_the_finest_offered_resolution(range_seconds):
     auto = sr.auto_resolution(range_seconds)
-    finer = [r for r in sr.RESOLUTION_CHOICES if r < auto]
-    for r in finer:
-        assert range_seconds / r > sr.MAX_BUCKETS, (
-            f"{range_seconds}s AUTO picked {auto}s but finer {r}s stays within budget"
-        )
+    assert auto == min(sr.explicit_resolutions(range_seconds))
 
 
 def test_retired_dense_cells_are_not_offered():
-    # 15m/1s (900 buckets) and 2h/10s (720 buckets) exceed the budget and must be absent.
+    # 15m/1s and 2h/10s exceed the bucket budget; 1h/10s is intentionally retired.
     assert 1 not in sr.explicit_resolutions(15 * 60)
+    assert 10 not in sr.explicit_resolutions(60 * 60)
     assert 10 not in sr.explicit_resolutions(2 * 60 * 60)
 
 

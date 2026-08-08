@@ -444,7 +444,7 @@ async function runTabberSuite() {
   });
 
   await testAsync('Tabber confirmed direct window target ignores fresh stale signal bounce', async () => {
-    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireAllTimeouts: true});
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {fireTimeoutDelays: [4000]});
     api.setFocusedPanelItem('1');
     api.setFileExplorerModeForTest('tabber');
     const staleInfo = {
@@ -687,11 +687,15 @@ async function runTabberSuite() {
     const layoutState = fs.readFileSync('static_src/js/yolomux/20_layout_state.js', 'utf8');
     assert.match(layoutState, /function requestLayoutRender[\s\S]*?dragState\.item != null \|\| pendingLayoutRenderFrame[\s\S]*?pendingLayoutRender = mergePendingLayoutRender/, 'a post-drag frame coalesces any immediate follow-up layout request instead of starting another full render');
     assert.match(layoutState, /function flushPendingLayoutRender[\s\S]*?pendingLayoutRenderFrame = requestAnimationFrame\(flush\);/, 'the expensive deferred layout render runs in the next animation frame, outside native dragend');
+    assert.match(layoutState, /function beginLayoutMutationCompletion[\s\S]*?pendingLayoutMutationGeneration = generation/, 'a user drop owns one pending product completion generation');
+    assert.match(layoutState, /const completionGeneration = Number\(options\.completionGeneration \|\| pendingLayoutMutationGeneration\)[\s\S]*?pendingLayoutMutationGeneration = 0/, 'the first resulting layout transaction consumes the pending user generation');
+    assert.match(layoutState, /function completeLayoutMutationGeneration[\s\S]*?layoutMutationCompletedGeneration = generation/, 'the shared scheduler publishes completed layout generations');
     assert.match(layoutState, /if \(renderRequest\.options\.sessionButtons !== false\) renderSessionButtons\(\);/, 'layout callers can preserve an unchanged global session roster during a pane-only render');
-    assert.match(layoutState, /sessionButtons: options\.sessionButtons,[\s\S]*?deferDockviewLoad: options\.deferDockviewLoad/, 'applyLayoutSlots carries pane-only render options through the shared scheduler');
-    assert.match(layoutState, /deferDockviewLoad: renderRequest\.options\.deferDockviewLoad/, 'the scheduler forwards the deferred Dockview-load option to the panel renderer');
+    assert.match(layoutState, /sessionButtons: options\.sessionButtons,[\s\S]*?deferDockviewLoad: options\.deferDockviewLoad,[\s\S]*?deferDockviewLoadAfterPaint: options\.deferDockviewLoadAfterPaint/, 'applyLayoutSlots carries pane-only render options through the shared scheduler');
+    assert.match(layoutState, /deferDockviewLoad: renderRequest\.options\.deferDockviewLoad,[\s\S]*?deferDockviewLoadAfterPaint: renderRequest\.options\.deferDockviewLoadAfterPaint/, 'the scheduler forwards deferred Dockview-load timing to the panel renderer');
     assert.match(dragSrc, /function swapPaneSlots[\s\S]*?sessionButtons: false,[\s\S]*?deferDockviewLoad: dockviewLayoutActive\(\),[\s\S]*?forceFull: dockviewLayoutActive\(\)/, 'Dockview pane swaps avoid unrelated global session-button work and defer only the safe topology load');
     const dockviewSource = fs.readFileSync('static_src/js/yolomux/75_dockview_layout.js', 'utf8');
+    assert.match(dockviewSource, /function dockviewTrackTabPointerDrag[\s\S]*?if \(Math\.max\(dx, dy\) < DRAG_HYSTERESIS_PX\) return;[\s\S]*?beginLayoutMutationCompletion\(state\)/, 'one completion generation begins when a tab pointer gesture becomes a drag, before either app or native topology commits');
     assert.match(dockviewSource, /function dockviewScheduleDeferredLoad[\s\S]*?requestAnimationFrame[\s\S]*?renderPanelsDockview\(deferredActive, deferredOptions\)/, 'a pane swap schedules the mandatory public Dockview reload in a coalesced follow-up frame');
     assert.match(dockviewSource, /if \(options\.deferDockviewLoad === true\)[\s\S]*?dockviewScheduleDeferredLoad\(previousActive, options\)/, 'only explicitly deferred callers split the Dockview load');
     assert.equal(/pendingPanelsRender/.test(endDragBody), false, '#endSessionDrag no longer uses the old boolean pendingPanelsRender flag');
@@ -702,8 +706,15 @@ async function runTabberSuite() {
     assert.match(source, /let layoutReloaded = false;[\s\S]*?if \(options\.deferDockviewLoad === true\)[\s\S]*?dockviewScheduleDeferredLoad\(previousActive, options\)[\s\S]*?dockviewLoadLayout\(layoutSlots, \{[\s\S]*?layoutReloaded = true;[\s\S]*?if \(!layoutReloaded && !layoutLoadDeferred\) \{[\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\{renderAttached: !activeOnlyChange\}\);/);
     const loadBody = source.slice(source.indexOf('function dockviewLoadLayout'), source.indexOf('function dockviewActivateLayoutTabs'));
     assert.match(loadBody, /clientPerfStart\('dockviewFromJson'\)[\s\S]*?api\.fromJSON\([\s\S]*?dockviewRefreshLoadedLayout\(items\);/);
+    assert.match(loadBody, /clientPerfStart\('dockviewLoadLayout'\)[\s\S]*?dockviewScheduleLoadedLayoutCompletion\([\s\S]*?dockviewRefreshLoadedLayout\(items\)[\s\S]*?clientPerfEnd\(/, 'the shared Dockview load owner measures both immediate and deferred completion');
+    assert.match(source, /function dockviewScheduleLoadedLayoutCompletion[\s\S]*?completeLayoutMutationGeneration\(completedOptions\.completionGeneration\)/, 'deferred Dockview reconciliation publishes the product completion generation only after it finishes');
     assert.match(source, /function dockviewRefreshLoadedLayout[\s\S]*?clientPerfStart\('dockviewRefreshTabs'\)[\s\S]*?dockviewRefreshTabs\(\);[\s\S]*?clientPerfStart\('dockviewSyncMountedPanels'\)[\s\S]*?dockviewSyncMountedPanels\(\);/, 'normal reloads retain the one-pass tab and mounted-panel reconciliation');
-    assert.match(loadBody, /if \(options\.deferPostLoad === true\) \{[\s\S]*?dockviewScheduleLoadedLayoutCompletion\(items, options\.previousActive, options\.renderOptions\);/, 'drag reloads may defer only post-load reconciliation');
+    assert.match(loadBody, /if \(options\.deferPostLoad === true\) \{[\s\S]*?dockviewScheduleLoadedLayoutCompletion\(items, options\.previousActive, options\.renderOptions, loadPerf\);/, 'drag reloads may defer only post-load reconciliation while retaining the shared load measurement');
+    assert.match(source, /function createDockviewPanelRenderer[\s\S]*?element\.replaceChildren\(panel\);[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) return;[\s\S]*?renderAttachedPanelContent\(item\);/, 'fromJSON panel reuse only reparents during the vendor load; the shared post-load owner renders content once');
+    assert.match(source, /function createDockviewHeaderActionsRenderer[\s\S]*?const render = \(\) => \{[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) return;/, 'fromJSON header callbacks defer their render to the shared post-load tab refresh');
+    assert.match(source, /function createDockviewTabRenderer[\s\S]*?const render = \(\) => \{[\s\S]*?if \(dockviewLayoutState\.applyingFromLayout\) return;/, 'fromJSON tab callbacks defer their render to the shared post-load tab refresh');
+    assert.match(source, /function dockviewRefreshLoadedLayout[\s\S]*?dockviewSyncMountedPanels\(\{restoreViewState: true, ensureMounted: true\}\);/, 'the shared post-load owner restores view state and terminal mounting exactly once after vendor reuse finishes');
+    assert.match(source, /function dockviewSyncMountedPanels\(options = \{\}\)[\s\S]*?options\.restoreViewState === true[\s\S]*?restorePaneViewState\(item, panel\);[\s\S]*?options\.ensureMounted === true[\s\S]*?dockviewEnsureMountedTerminal\(item, panel\);/, 'mounted-panel reconciliation owns the deferred restore and terminal ensure steps');
   });
 
   test('same-strip tab drops reorder in both directions', () => {
@@ -1410,7 +1421,7 @@ async function runTabberSuite() {
     assert.ok(/showTerminalContextMenu\(session, term, event\.clientX, event\.clientY, \{container, presetSelection: touchSelection\?\.text \|\| rightClickSelection\}\)/.test(source), 'N7: the context menu receives a touch selection when present and otherwise preserves the captured right-click selection');
     assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*presetSelection == null \? terminalSelectedText\(term, container\) : String\(presetSelection \|\| ''\)/.test(source), 'N7: an explicitly captured empty right-click selection is not replaced by a live under-cursor re-read');
     assert.ok(/function terminalContextMenuSelection\(session, term, container = null, presetSelection = null\)[\s\S]*recentTerminalAppClipboardText\(session\)/.test(source), 'N7: Claude/TUI OSC 52 clipboard text is the context-menu fallback when the app owns the visible selection');
-    assert.ok(/copyTerminalSelection\(session, term, \{action, dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text, not a stale live re-read');
+    assert.ok(/copyTerminalSelection\(session, term, \{action, button, dedent, selectionText: selected\}, container\)/.test(source), 'N7: menu Copy uses the captured selection text while passing the ephemeral control to shared feedback');
     assert.ok(/const selected = options\.selectionText != null \? options\.selectionText : terminalSelectedText\(term, container\)/.test(source), 'N7: copyTerminalSelection honors an explicit captured selection');
     const api = loadYolomux('', ['1']);
     const badLiveRead = {getSelection: () => 'under cursor'};

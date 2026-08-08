@@ -1,13 +1,59 @@
 import os
+import threading
 from pathlib import Path
+
+import pytest
 
 
 from tools import auto_approve_tmux
 from yolomux_lib import yolo_rules
+from yolomux_lib.infra.shared_config_lock import SharedConfigRevisionConflict
+from yolomux_lib.infra.shared_config_lock import read_shared_document
 
 
 def ruleset(data):
     return yolo_rules.validate_rules(data, path=Path("/tmp/yolo-rules-test.yaml"), source="test")
+
+
+def test_concurrent_rule_bootstrap_keeps_one_complete_parseable_file(tmp_path):
+    path = tmp_path / "yolo-rules.yaml"
+    barrier = threading.Barrier(8)
+
+    def create():
+        barrier.wait()
+        yolo_rules.ensure_rule_file(path)
+
+    workers = [threading.Thread(target=create) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    rules = yolo_rules.parse_rule_text(path.read_text(encoding="utf-8"), path=path)
+    assert rules.default_action == "ask"
+
+
+def test_yolo_rules_stale_document_write_is_refused(tmp_path):
+    path = yolo_rules.ensure_rule_file(tmp_path / "yolo-rules.yaml")
+    _text, revision = read_shared_document(path)
+    yolo_rules.write_rule_file(path, yolo_rules.default_rule_file_text("approve"))
+
+    with pytest.raises(SharedConfigRevisionConflict):
+        yolo_rules.write_rule_file(path, "# stale rule\n", expected_revision=revision)
+
+
+def test_rules_file_path_surfaces_resolution_failure(monkeypatch):
+    original_resolve = Path.resolve
+
+    def failing_resolve(self, *args, **kwargs):
+        if str(self) == "/blocked/yolo-rules.yaml":
+            raise OSError("rules path is unavailable")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(yolo_rules.Path, "resolve", failing_resolve)
+
+    with pytest.raises(OSError, match="rules path is unavailable"):
+        yolo_rules.is_rules_file_path("/blocked/yolo-rules.yaml")
 
 
 def action_for(cmd, rules):
@@ -264,12 +310,12 @@ def test_is_dangerous_uses_active_ruleset_and_flags_non_approve(monkeypatch):
 
 def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
     # --dangerously-yolo only opts out of the soft ruleset / ask-default — the catastrophic
-    # hard floor ALWAYS applies. rm -rf / is blocked under the flag; a non-catastrophic command the
-    # ruleset approves is still approved (so the flag's broad relaxation is preserved).
+    # hard floor ALWAYS applies. Its bypass must be observable against a soft block, not merely
+    # against a rule that already approves the command.
     rules = ruleset({
-        "default": "approve",
+        "default": "ask",
         "rules": [
-            {"name": "approve all", "type": "regex", "match": ".*", "action": "approve", "risk": "test"},
+            {"name": "soft delete block", "type": "command", "match": ["rm"], "action": "block", "risk": "delete"},
         ],
     })
     monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (rules, ""))
@@ -283,10 +329,22 @@ def test_dangerously_yolo_keeps_the_hard_floor(monkeypatch):
             assert catastrophic["action"] == "block", (cmd, flag)
             assert catastrophic["source"] == "hard-floor", (cmd, flag)
 
-    safe = yolo_rules.evaluate("ls -la", dangerously_yolo=True)
-    assert safe["action"] == "approve"
-    assert safe["rule_name"] == "approve all"
-    assert safe["source"] == "test"
+    assert yolo_rules.evaluate("rm -rf /tmp/project", dangerously_yolo=False)["action"] == "block"
+    bypassed = yolo_rules.evaluate("rm -rf /tmp/project", dangerously_yolo=True)
+    assert bypassed["action"] == "approve"
+    assert bypassed["rule_name"] == "dangerously-yolo bypass"
+    assert bypassed["source"] == "bypass"
+
+
+def test_dangerously_yolo_keeps_rules_failures_fail_closed(monkeypatch):
+    monkeypatch.setattr(yolo_rules, "cached_rules", lambda: (None, yolo_rules.RuleLoadError("bad rule file", "rules_file_invalid")))
+    monkeypatch.setattr(yolo_rules, "yolo_settings", lambda: {"dry_run": False, "rule_file_path": "/tmp/yolo-rules-test.yaml"})
+
+    decision = yolo_rules.evaluate("rm -rf /tmp/project", dangerously_yolo=True)
+
+    assert decision["action"] == "ask"
+    assert decision["source"] == "error"
+    assert decision["reason_code"] == "rules_file_invalid"
 
 
 def test_rule_file_text_validation_reports_yaml_errors():

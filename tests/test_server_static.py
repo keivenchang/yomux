@@ -5,6 +5,8 @@ from http import HTTPStatus
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from yolomux_lib import server as server_module
 from yolomux_lib import web
 from yolomux_lib.server import Handler
@@ -253,6 +255,30 @@ def test_write_json_bytes_preserves_json_response_semantics_without_reencoding(m
     assert head_headers["content-encoding"] == "gzip"
     assert int(head_headers["content-length"]) == len(get_handler.wfile.getvalue())
     assert head_handler.wfile.getvalue() == b""
+
+
+def test_final_product_writer_rejects_a_doubled_boundary_write():
+    class DoublingWriter(io.BytesIO):
+        def write(self, data):
+            super().write(data)
+            super().write(data)
+            return len(data) * 2
+
+    handler = static_handler("/api/product")
+    handler.wfile = DoublingWriter()
+    body = b"one retained product"
+
+    with pytest.raises(OSError, match=r"emitted 40 of 20 framed bytes"):
+        handler._write_product_representation(
+            body,
+            status=HTTPStatus.OK,
+            content_type="application/octet-stream",
+            disposition="inline",
+            filename="",
+        )
+
+    assert response_headers(handler)["content-length"] == str(len(body))
+    assert handler.wfile.getvalue() == body + body
 
 
 def test_response_writers_record_endpoint_response_bytes():

@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 import importlib.util
+import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +13,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATH = ROOT / "tools" / "yostats_active_browser_window.py"
 CONTENTION_TOOL_PATH = ROOT / "tools" / "yostats_contention_benchmark.py"
+FIXTURE_PORT = 41771
+FIXTURE_BASE_URL = f"https://localhost:{FIXTURE_PORT}"
 
 
 def test_capture_tools_share_proc_cpu_reader_and_positive_validators():
@@ -32,7 +36,7 @@ def load_tool_module():
     return module
 
 
-def test_active_browser_window_requires_normal_login_and_tmp_output():
+def test_active_browser_window_workload_source_contract():
     tool = load_tool_module()
 
     args = tool.parse_args(["--output", "/tmp/window.json"])
@@ -45,11 +49,6 @@ def test_active_browser_window_requires_normal_login_and_tmp_output():
     assert idle_args.workload == "idle-yostats"
     assert idle_args.duration == 60
     source = TOOL_PATH.read_text(encoding="utf-8")
-    assert "YOLOMUX_TEST_AUTH_BYPASS" not in source
-    assert 'parser.add_argument("--password",' not in source
-    assert "password-env" not in source
-    assert "auth_cookie_value" in source
-    assert "install_local_auth_cookie" in source
     assert "refreshFileExplorerPanelTree(finderPanel, {force: true})" in source
     assert "ensureDirectoryRowExpanded" in source
     assert "panelSelector" in source
@@ -74,6 +73,114 @@ def test_active_browser_window_requires_normal_login_and_tmp_output():
     assert "install_ticker_callback_counter" in source
     assert '"ticker_callbacks"' in source
     assert '"renderer"' in source
+
+
+@pytest.mark.parametrize("flag", [
+    "--password",
+    "--password-env",
+    "--token",
+    "--token-env",
+    "--auth-token",
+    "--cookie",
+    "--cookie-env",
+    "--api-key",
+    "--api-key-env",
+])
+def test_active_browser_window_rejects_credential_bearing_flags_before_any_browser_work(monkeypatch, flag):
+    tool = load_tool_module()
+    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+
+    with pytest.raises(SystemExit):
+        tool.parse_args(["--output", "/tmp/window.json", flag, "plaintext"])
+    assert set(vars(tool.parse_args(["--output", "/tmp/window.json"]))) == {
+        "duration",
+        "output",
+        "port",
+        "username",
+        "workload",
+    }
+
+
+def test_active_browser_window_bypass_environment_does_not_skip_configured_cookie_install(monkeypatch):
+    tool = load_tool_module()
+    monkeypatch.setenv("YOLOMUX_TEST_AUTH_BYPASS", "1")
+    user = tool.AuthUser(username="operator", password="stored-hash", role="admin")
+    selected = []
+    installed = []
+    app_waits = []
+    driver = SimpleNamespace(
+        current_url=f"{FIXTURE_BASE_URL}/",
+        get=lambda _url: None,
+        execute_script=lambda script: ["one", "two"] if "sessions.filter(isTmuxSession)" in script else None,
+    )
+
+    class ImmediateWait:
+        def until(self, predicate):
+            return predicate(driver)
+
+    monkeypatch.setattr(tool, "WebDriverWait", lambda *_args: ImmediateWait())
+    monkeypatch.setattr(tool, "capture_auth_user", lambda username: selected.append(username) or user)
+    monkeypatch.setattr(tool, "install_local_auth_cookie", lambda current, base_url, port, current_user: installed.append((current, base_url, port, current_user)))
+    monkeypatch.setattr(tool, "wait_for_app", lambda current, sessions, timeout: app_waits.append((current, sessions, timeout)))
+
+    assert tool.authenticate_and_open(driver, FIXTURE_BASE_URL, FIXTURE_PORT, None, timeout=20) == ["one", "two"]
+    assert selected == [None]
+    assert installed == [(driver, FIXTURE_BASE_URL, FIXTURE_PORT, user)]
+    assert app_waits == [(driver, ["one", "two"], 20)]
+
+
+@pytest.mark.parametrize("output", [Path("/outside/window.json"), Path("/tmp/../outside-window.json")])
+def test_active_browser_window_rejects_non_tmp_output_before_chrome_starts(monkeypatch, capsys, output):
+    tool = load_tool_module()
+    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=output, port=FIXTURE_PORT, duration=60, workload="active", username=None))
+    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr(tool, "listener_pid", lambda _port: 1)
+    monkeypatch.setattr(tool, "runtime_service_pids", lambda: {})
+    monkeypatch.setattr(tool, "ledger_snapshot", lambda: {})
+    monkeypatch.setattr(tool.webdriver, "Chrome", lambda **_kwargs: pytest.fail("Chrome must not start for an unsafe output path"))
+
+    assert tool.main() == 2
+    assert "output must be under /tmp" in capsys.readouterr().err
+
+
+def test_active_browser_window_sigterm_cleans_up_once(monkeypatch):
+    tool = load_tool_module()
+    signals = {}
+    cleanup_calls = []
+    driver = SimpleNamespace(
+        service=SimpleNamespace(process=SimpleNamespace(pid=4321)),
+        execute_cdp_cmd=lambda *_args: None,
+        set_page_load_timeout=lambda _seconds: None,
+        set_script_timeout=lambda _seconds: None,
+    )
+    monkeypatch.setattr(tool, "parse_args", lambda: SimpleNamespace(output=Path("/tmp/window.json"), port=FIXTURE_PORT, duration=60, workload="active", username=None))
+    monkeypatch.setattr(tool, "find_chrome", lambda: "/usr/bin/chrome")
+    monkeypatch.setattr(tool, "listener_pid", lambda _port: 1)
+    monkeypatch.setattr(tool, "runtime_service_pids", lambda: {})
+    monkeypatch.setattr(tool, "ledger_snapshot", lambda: {})
+    monkeypatch.setattr(tool.webdriver, "Chrome", lambda **_kwargs: driver)
+    monkeypatch.setattr(tool, "bounded_driver_quit", lambda candidate: cleanup_calls.append(candidate))
+    monkeypatch.setattr(tool.signal, "signal", lambda signum, callback: signals.__setitem__(signum, callback))
+    monkeypatch.setattr(tool.signal, "alarm", lambda _seconds: None)
+    monkeypatch.setattr(tool, "GroupOverloadWatchdog", lambda **_kwargs: SimpleNamespace(run=lambda _deadline: None))
+
+    class SignalThread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            for _attempt in range(2):
+                try:
+                    signals[tool.signal.SIGTERM](tool.signal.SIGTERM, None)
+                except SystemExit:
+                    pass
+            raise SystemExit(143)
+
+    monkeypatch.setattr(tool.threading, "Thread", SignalThread)
+
+    with pytest.raises(SystemExit, match="143"):
+        tool.main()
+    assert cleanup_calls == [driver]
 
 
 def test_active_browser_window_uses_configured_admin_without_plaintext_credentials(monkeypatch):

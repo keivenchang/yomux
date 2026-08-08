@@ -1075,7 +1075,17 @@ async function splitSessionAtLayoutBoundary(session, zone, sourceSlot = null, pc
     || (zone === 'right' || zone === 'bottom'
     ? splitNode(direction, root, newNode, splitPct)
     : splitNode(direction, newNode, root, splitPct));
-  applyLayoutSlots(next, {focusSession: session, prune: false});
+  const pointerReleaseMutation = dockviewLayoutActive() && pendingLayoutMutationGeneration > 0;
+  applyLayoutSlots(next, {
+    focusSession: session,
+    prune: false,
+    // Only a real pointer-release transaction may defer its Dockview reload. Programmatic callers
+    // await this shared mutation and must observe the realized topology before issuing the next one.
+    sessionButtons: false,
+    deferDockviewLoad: pointerReleaseMutation,
+    deferDockviewLoadAfterPaint: false,
+    forceFull: dockviewLayoutActive(),
+  });
   return true;
 }
 
@@ -1987,6 +1997,104 @@ async function tmuxSessionExistsForReconnect(session) {
   }
 }
 
+// One owner for the post-mutation convergence verdict. The mutation is already committed by the
+// time this runs, so a non-converged refresh must never roll it back -- but it must not be
+// invisible either. Before this, a forced refresh that timed out (or that answered from a
+// replacement server's pre-request cache) resolved exactly like one that observed the mutation, and
+// the only way to tell them apart was to read `transcriptMetadataState.lastApply` from a console.
+function noteTmuxSessionMutationMetadataConvergence(result) {
+  if (result?.ok === true) {
+    delete statusEl.dataset.metadataConvergence;
+    return result;
+  }
+  // Local state for the caller and for assertions.
+  statusEl.dataset.metadataConvergence = String(result?.reason || 'reconciliation_failed');
+  // The release-blocking signal goes to the structured diagnostic owner, not to console. A raw
+  // console warning is unowned: the strict browser gate treats every warning as a failure with no
+  // identity behind it, and it duplicates the typed verdict this function already returns. As a
+  // `client_failure` event the same fact is machine-readable, rendered in Logs, attributable to the
+  // observation epoch and receipt barrier, and still release-blocking through
+  // jsDebugFailureEvents(). A healthy mutation emits none of these.
+  recordJsDebugEvent('client_failure', {
+    failure: 'session_metadata_convergence',
+    message: 'post-mutation session metadata did not converge',
+    reason: String(result?.reason || 'reconciliation_failed'),
+    stage: String(result?.stage || ''),
+    epoch: String(result?.epoch || ''),
+    generation: Number(result?.generation || 0),
+    pendingGeneration: Number(result?.pendingGeneration || 0),
+    awaitedGeneration: Number(result?.awaitedGeneration || 0),
+    cause: String(result?.cause || ''),
+  });
+  return result;
+}
+
+function tmuxSessionMutationReconciliation(metadata, autoStatuses) {
+  if (metadata.status === 'rejected') {
+    return {
+      ok: false,
+      reason: 'reconciliation_failed',
+      stage: 'session_metadata',
+      cause: userMessageText(metadata.reason, String(metadata.reason?.message || metadata.reason || '')),
+    };
+  }
+  if (autoStatuses.status === 'rejected') {
+    return {
+      ...(metadata.value || {}),
+      ok: false,
+      reason: 'reconciliation_failed',
+      stage: 'auto_status',
+      metadataReason: String(metadata.value?.reason || ''),
+      cause: userMessageText(autoStatuses.reason, String(autoStatuses.reason?.message || autoStatuses.reason || '')),
+    };
+  }
+  return metadata.value || {ok: false, reason: 'reconciliation_failed', stage: 'session_metadata'};
+}
+
+// Reconciliation NEVER throws. It runs after the server mutation and the local commit, so a
+// rejection here is a stale view, not a failed mutation, and letting it propagate would put a
+// post-commit failure on a path whose only handler rolls the mutation back.
+async function refreshTmuxSessionMutationState() {
+  const [metadata, autoStatuses] = await Promise.allSettled([
+    refreshTranscripts({force: true, refreshActivity: false}),
+    refreshAutoStatuses({force: true, sessionFallback: false}),
+  ]);
+  return noteTmuxSessionMutationMetadataConvergence(tmuxSessionMutationReconciliation(metadata, autoStatuses));
+}
+
+async function runTmuxSessionMutation(kind, options, request, commit) {
+  const transaction = beginTmuxSessionLifecycleMutation(kind, options);
+  if (!await waitForTmuxSessionLifecycleMutationLeases(transaction)) {
+    return {committed: false, superseded: true, transaction, metadata: null};
+  }
+  let payload;
+  let committed = false;
+  let failure = null;
+  try {
+    payload = await request(transaction);
+    if (tmuxSessionLifecycleMutationIsCurrent(transaction)) {
+      commitTmuxSessionLifecycleMutation(transaction, {
+        session: payload?.session || options?.session,
+        newName: payload?.new_session || options?.newName,
+      });
+      await commit(payload, transaction);
+      committed = true;
+    }
+  } catch (error) {
+    // Only a PRE-commit failure may roll back. Past the commit there is a real session on the
+    // server and in this client's model, and discarding it because a follow-up read was slow
+    // would be a worse defect than the stale render it was trying to avoid.
+    if (tmuxSessionLifecycleMutationIsCurrent(transaction)) {
+      rollbackTmuxSessionLifecycleMutation(transaction);
+      throw error;
+    }
+    failure = error;
+  }
+  const metadata = await refreshTmuxSessionMutationState();
+  if (committed) return {committed: true, transaction, payload, metadata};
+  return {committed: false, superseded: true, transaction, payload, metadata, ...(failure ? {error: failure} : {})};
+}
+
 async function createNextSession(agent, options = {}) {
   if (readOnlyMode) {
     statusErr(localizedHtml('status.readOnlyCreateSessions'));
@@ -1998,15 +2106,28 @@ async function createNextSession(agent, options = {}) {
     const dangerouslyYolo = options.dangerouslyYolo === true;
     const terminal = agent === 'term' ? String(options.terminal || '').trim() : '';
     const terminalQuery = terminal ? `&terminal=${encodeURIComponent(terminal)}` : '';
-    const payload = await apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}${terminalQuery}`, {method: 'POST'});
-    markPendingTmuxSession(payload.session);
-    const previousActive = activeSessions.slice();
-    updateSessionList(payload.sessions || []);
-    renderSessionButtons();
-    renderPanels(previousActive);
-    await placeTmuxSession(payload.session);
-    await ensureTerminalRunning(payload.session);
-    refreshTranscripts({force: true});
+    const plan = await apiFetchJson('/api/create-session-plan', {cache: 'no-store'});
+    const reservedSession = String(plan?.session || '').trim();
+    const serverGeneration = Number(plan?.generation || 0);
+    if (!reservedSession || !Number.isSafeInteger(serverGeneration) || serverGeneration <= 0) {
+      throw new Error('create-session plan did not provide a bounded lifecycle identity');
+    }
+    const mutation = await runTmuxSessionMutation(
+      'create',
+      {session: reservedSession, serverGeneration},
+      () => apiFetchJson(`/api/create-session?agent=${encodeURIComponent(agent)}&dangerously_yolo=${dangerouslyYolo ? '1' : '0'}&session=${encodeURIComponent(reservedSession)}&generation=${encodeURIComponent(String(serverGeneration))}${terminalQuery}`, {method: 'POST'}),
+      async payload => {
+        markPendingTmuxSession(payload.session);
+        const previousActive = activeSessions.slice();
+        updateSessionList(payload.sessions || []);
+        renderSessionButtons();
+        renderPanels(previousActive);
+        await placeTmuxSession(payload.session);
+        await ensureTerminalRunning(payload.session);
+      },
+    );
+    if (!mutation.committed) return false;
+    const payload = mutation.payload;
     renderAutoApproveButtons();
     statusOk(localizedHtml('status.sessionCreated', {
       label: sessionLabel(payload.session),
@@ -2224,12 +2345,19 @@ async function renameTmuxSession(session, proposedName) {
   }
   statusEl.textContent = t('status.sessionRenaming', {session: sessionLabel(session)});
   try {
-    const payload = await apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST'});
-    const renamed = payload.new_session || newName;
-    replaceTmuxSessionInClient(session, renamed, payload.sessions);
+    const mutation = await runTmuxSessionMutation(
+      'rename',
+      {session, newName},
+      () => apiFetchJson(`/api/rename-session?session=${encodeURIComponent(session)}&new_name=${encodeURIComponent(newName)}`, {method: 'POST', lifecycleBypass: true}),
+      async payload => {
+        const renamed = payload.new_session || newName;
+        replaceTmuxSessionInClient(session, renamed, payload.sessions);
+        await ensureTerminalRunning(renamed);
+      },
+    );
+    if (!mutation.committed) return false;
+    const renamed = mutation.payload.new_session || newName;
     closeSessionRenameDialog();
-    await ensureTerminalRunning(renamed);
-    refreshTranscripts({force: true});
     renderAutoApproveButtons();
     statusOk(localizedHtml('common.renamed', {oldName: session, newName: renamed}));
     return true;
@@ -2251,16 +2379,22 @@ async function killTmuxSession(session) {
   if (!window.confirm(t('dialog.sessionKill', {session: sessionLabel(session)}))) return false;
   statusEl.textContent = t('status.sessionKilling', {session: sessionLabel(session)});
   try {
-    const payload = await apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST'});
-    const previousActive = activeSessions.slice();
-    clearPendingTmuxSession(session);
-    stopSessionUi(session);
-    const sessionsChanged = updateSessionList(payload.sessions || []);
-    updateDocumentTitle();
-    renderSessionButtons();
-    renderPanels(previousActive);
-    if (sessionsChanged) renderPaneTabStrips();
-    refreshTranscripts({force: true});
+    const mutation = await runTmuxSessionMutation(
+      'kill',
+      {session},
+      () => apiFetchJson(`/api/kill-session?session=${encodeURIComponent(session)}`, {method: 'POST', lifecycleBypass: true}),
+      async payload => {
+        const previousActive = activeSessions.slice();
+        clearPendingTmuxSession(session);
+        stopSessionUi(session);
+        const sessionsChanged = updateSessionList(payload.sessions || []);
+        updateDocumentTitle();
+        renderSessionButtons();
+        renderPanels(previousActive);
+        if (sessionsChanged) renderPaneTabStrips();
+      },
+    );
+    if (!mutation.committed) return false;
     renderAutoApproveButtons();
     statusOk(localizedHtml('status.sessionKilled', {session: sessionLabel(session)}));
     return true;
@@ -2433,16 +2567,23 @@ function sendRemoteResize(session, options = {}) {
 function scheduleRemoteResize(session, delay = remoteResizeDelayMs, options = {}) {
   const item = terminals.get(session);
   if (!item) return;
-  if (item.resizeTimer) clearTimeout(item.resizeTimer);
+  const lifecycleToken = item.sessionLifecycleToken;
+  if (item.resizeTimer) {
+    clearTimeout(item.resizeTimer);
+    tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.resizeTimer);
+  }
   if (!terminalCanPublishRemoteSize()) {
     item.remoteResizePending = true;
     item.resizeTimer = null;
     return;
   }
   item.resizeTimer = setTimeout(() => {
+    tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.resizeTimer);
     item.resizeTimer = null;
+    if (terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
     sendRemoteResize(session, options);
   }, delay);
+  tmuxSessionLifecycleOwnTimer(lifecycleToken, item.resizeTimer);
 }
 
 function forceRemoteResize(session) {
@@ -2981,10 +3122,11 @@ function refreshVisibleTerminalScreens(reason = 'manual-refresh') {
   }
 }
 
-function runTerminalBlankScreenRefresh(session) {
-  const item = terminals.get(session);
+function runTerminalBlankScreenRefresh(session, item = terminals.get(session), lifecycleToken = item?.sessionLifecycleToken) {
   if (!item) return;
+  tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.blankScreenRefreshTimer);
   item.blankScreenRefreshTimer = 0;
+  if (terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
   if (!terminalIsVisible(session, item.container)) return;
   if (terminalRenderedContentPresent(session, item)) {
     item.blankScreenRefreshAttempts = 0;
@@ -3013,11 +3155,16 @@ function scheduleTerminalBlankScreenRefresh(session, options = {}) {
   }
   const attempts = Math.max(0, Number(item.blankScreenRefreshAttempts || 0));
   if (attempts >= terminalBlankScreenRefreshDelaysMs.length) return;
-  if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  const lifecycleToken = item.sessionLifecycleToken;
+  if (item.blankScreenRefreshTimer) {
+    clearTimeout(item.blankScreenRefreshTimer);
+    tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.blankScreenRefreshTimer);
+  }
   const delayMs = Number.isFinite(Number(options.delayMs))
     ? Math.max(1, Number(options.delayMs))
     : terminalBlankScreenRefreshDelaysMs[attempts];
-  item.blankScreenRefreshTimer = setTimeout(() => runTerminalBlankScreenRefresh(session), delayMs);
+  item.blankScreenRefreshTimer = setTimeout(() => runTerminalBlankScreenRefresh(session, item, lifecycleToken), delayMs);
+  tmuxSessionLifecycleOwnTimer(lifecycleToken, item.blankScreenRefreshTimer);
 }
 
 function scheduleFit(session) {
@@ -3238,7 +3385,12 @@ function enableTerminalScroll(session, term, container) {
     if (!signedLines) return;
     event.preventDefault();
     event.stopPropagation();
-    routeTerminalScrollLines(session, term, container, signedLines, {source: 'wheel'});
+    routeTerminalScrollLines(session, term, container, signedLines, {
+      source: 'wheel',
+      discreteWheel: terminalWheelEventIsDiscrete(event),
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
   }, {capture: true, passive: false});
 }
 
@@ -3249,7 +3401,7 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
     // become wheel reports only for mouse-owning apps; other TUIs receive their native key event.
     if (options.source === 'keyboard' || (options.source === 'page-key' && !terminalHasMouseTracking(term))) return false;
     if (options.source !== 'touch' || terminalHasMouseTracking(term)) {
-      forwardAltScreenWheel(session, container, signedLines);
+      forwardAltScreenWheel(session, container, signedLines, options);
       return true;
     }
     const command = terminalTouchAlternateCommand(signedLines);
@@ -3261,7 +3413,7 @@ function routeTerminalScrollLines(session, term, container, signedLines, options
   altScreenWheelRemainder.delete(session);
   const item = terminals.get(session);
   if (!readOnlyMode && item?.socket?.readyState === WebSocket.OPEN) {
-    queueTmuxScroll(item, signedLines);
+    queueTmuxScroll(session, item, signedLines);
     return true;
   }
   queueLocalTerminalScroll(term, signedLines);
@@ -3275,24 +3427,44 @@ function terminalScrollPageLines(term) {
 // Re-emit `lines` worth of single-line wheel events at xterm's screen element. xterm encodes each
 // one into the app's negotiated mouse protocol and sends it over the data stream, so the alt-screen
 // app scrolls one line per synthetic event — i.e. our full computed line count, not xterm's capped one.
-function forwardAltScreenWheel(session, container, signedLines) {
+function forwardAltScreenWheel(session, container, signedLines, options = {}) {
   if (typeof WheelEvent !== 'function') return;
   const node = terminalScreenElement(container);
   if (!node?.dispatchEvent) return;
-  const accumulated = (altScreenWheelRemainder.get(session) || 0) + signedLines;
-  const whole = Math.trunc(accumulated);
-  altScreenWheelRemainder.set(session, accumulated - whole);
-  if (!whole) return;
-  const count = Math.min(terminalWheelMaxLinesPerEvent, Math.abs(whole));
-  const deltaY = whole < 0 ? -1 : 1;
+  let count;
+  if (options.discreteWheel === true) {
+    // A physical wheel notch must agree with the normal-screen destinations: it always reaches
+    // the app at least once. Do not carry a touchpad fraction into the next physical notch.
+    altScreenWheelRemainder.delete(session);
+    count = Math.max(1, Math.min(terminalWheelMaxLinesPerEvent, Math.ceil(Math.abs(signedLines))));
+  } else {
+    const accumulated = (altScreenWheelRemainder.get(session) || 0) + signedLines;
+    const whole = Math.trunc(accumulated);
+    altScreenWheelRemainder.set(session, accumulated - whole);
+    if (!whole) return;
+    count = Math.min(terminalWheelMaxLinesPerEvent, Math.abs(whole));
+  }
+  const deltaY = signedLines < 0 ? -1 : 1;
+  const {clientX, clientY} = options;
   dispatchingSyntheticWheel = true;
   try {
     for (let i = 0; i < count; i++) {
-      node.dispatchEvent(new WheelEvent('wheel', {deltaY, deltaMode: 1, bubbles: true, cancelable: true}));
+      node.dispatchEvent(new WheelEvent('wheel', {deltaY, deltaMode: 1, clientX, clientY, bubbles: true, cancelable: true}));
     }
   } finally {
     dispatchingSyntheticWheel = false;
   }
+}
+
+// Chromium's physical-wheel legacy delta is expected to stay on the 120-unit notch grid even when
+// deltaMode is pixels. This deliberately assumes trackpad wheelDeltaY values are off that grid;
+// confirm that hardware-specific assumption on a machine with a real trackpad before changing it.
+function terminalWheelEventIsDiscrete(event) {
+  if (event?.deltaMode === 1) return true;
+  const wheelDeltaY = Number(event?.wheelDeltaY);
+  return Number.isFinite(wheelDeltaY)
+    && wheelDeltaY !== 0
+    && Number.isInteger(Math.abs(wheelDeltaY) / 120);
 }
 
 function terminalWheelSignedLines(event, rows = 0) {
@@ -3309,18 +3481,22 @@ function terminalWheelSignedLines(event, rows = 0) {
   return direction * Math.min(terminalWheelMaxLinesPerEvent, lines);
 }
 
-function queueTmuxScroll(item, signedLines) {
+function queueTmuxScroll(session, item, signedLines) {
   item.pendingScrollLines = (item.pendingScrollLines || 0) + signedLines;
   if (item.scrollTimer) return;
+  const lifecycleToken = item.sessionLifecycleToken;
   item.scrollTimer = setTimeout(() => {
+    tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.scrollTimer);
     item.scrollTimer = null;
     const signed = item.pendingScrollLines || 0;
     item.pendingScrollLines = 0;
-    if (!signed || item.socket?.readyState !== WebSocket.OPEN) return;
+    if (!signed || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)
+        || item.socket?.readyState !== WebSocket.OPEN) return;
     const direction = signed < 0 ? 'up' : 'down';
     const lines = Math.max(1, Math.min(80, Math.ceil(Math.abs(signed))));
     item.socket.send(JSON.stringify({type: 'tmux-scroll', direction, lines}));
   }, 30);
+  tmuxSessionLifecycleOwnTimer(lifecycleToken, item.scrollTimer);
 }
 
 function queueLocalTerminalScroll(term, signedLines) {
@@ -3339,12 +3515,24 @@ function queueLocalTerminalScroll(term, signedLines) {
 
 function closeTerminalItem(session, item) {
   item.manualClose = true;
-  if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  if (item.resizeTimer) clearTimeout(item.resizeTimer);
-  if (item.scrollTimer) clearTimeout(item.scrollTimer);
+  if (item.reconnectTimer) {
+    clearTimeout(item.reconnectTimer);
+    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.reconnectTimer);
+  }
+  if (item.resizeTimer) {
+    clearTimeout(item.resizeTimer);
+    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.resizeTimer);
+  }
+  if (item.scrollTimer) {
+    clearTimeout(item.scrollTimer);
+    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.scrollTimer);
+  }
   if (item.fitFrame) cancelAnimationFrame(item.fitFrame);
   if (item.fitTimer) clearTimeout(item.fitTimer);
-  if (item.blankScreenRefreshTimer) clearTimeout(item.blankScreenRefreshTimer);
+  if (item.blankScreenRefreshTimer) {
+    clearTimeout(item.blankScreenRefreshTimer);
+    tmuxSessionLifecycleReleaseTimer(item.sessionLifecycleToken, item.blankScreenRefreshTimer);
+  }
   if (item.attentionHighlightFrame) cancelAnimationFrame(item.attentionHighlightFrame);
   item.fileUnderlineController?.dispose?.();
   item.fitFrame = 0;
@@ -3352,6 +3540,7 @@ function closeTerminalItem(session, item) {
   item.blankScreenRefreshTimer = 0;
   item.attentionHighlightFrame = 0;
   item.fileUnderlineController = null;
+  tmuxSessionLifecycleReleaseSource(item.socket?._tmuxSessionLifecycleToken, item.socket);
   const observer = resizeObservers.get(session);
   if (observer) {
     observer.disconnect();
@@ -3381,20 +3570,27 @@ function showTerminalConnectionToast(session, text, countdownMs = toastDurationM
   }
 }
 
-function scheduleTerminalReconnect(session, item) {
-  if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
+function scheduleTerminalReconnect(session, item, lifecycleToken = item?.sessionLifecycleToken) {
+  if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)
+      || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
   const seconds = Math.round(delay / 1000);
   item.reconnectAttempt += 1;
-  if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
+  if (item.reconnectTimer) {
+    clearTimeout(item.reconnectTimer);
+    tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.reconnectTimer);
+  }
   statusErr(localizedHtml('terminal.connection.reconnectingStatus', {session: sessionLabel(session), seconds}));
   showTerminalConnectionToast(session, t('terminal.connection.reconnectingToast', {seconds}), delay);
   showTerminalConnectionState(session, 'reconnecting', t('terminal.connection.reconnectingToast', {seconds}));
   item.reconnectTimer = setTimeout(() => {
-    if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
+    tmuxSessionLifecycleReleaseTimer(lifecycleToken, item.reconnectTimer);
+    if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)
+        || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
     item.reconnectTimer = null;
     connectTerminalSocket(session, item);
   }, delay);
+  tmuxSessionLifecycleOwnTimer(lifecycleToken, item.reconnectTimer);
 }
 
 // A tmux session that is absent from the live roster has been killed (vs a transient disconnect).
@@ -3424,8 +3620,8 @@ function pruneDeadSession(session) {
 
 // On a terminal WebSocket close, confirm via the roster whether the session is actually gone. If so,
 // prune it from the UI immediately instead of reconnecting and waiting for the next poll to notice.
-async function confirmSessionGoneOrReconnect(session, item, event = null) {
-  if (item.manualClose || terminals.get(session) !== item) return;
+async function confirmSessionGoneOrReconnect(session, item, event = null, lifecycleToken = item?.sessionLifecycleToken || tmuxSessionLifecycleToken(session)) {
+  if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
   const closeDetails = {
     origin: 'ws-close',
     closeCode: Number(event?.code || 0),
@@ -3444,16 +3640,16 @@ async function confirmSessionGoneOrReconnect(session, item, event = null) {
   item.confirmingGone = true;
   try {
     const exists = await tmuxSessionExistsForReconnect(session);
-    if (item.manualClose || terminals.get(session) !== item) return;
+    if (item.manualClose || terminals.get(session) !== item || !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return;
     if (exists === false) {
       pruneDeadSession(session);
       return;
     }
     if (exists === true) {
-      scheduleTerminalReconnect(session, item);
+      scheduleTerminalReconnect(session, item, lifecycleToken);
       return;
     }
-    scheduleTerminalReconnect(session, item);
+    scheduleTerminalReconnect(session, item, lifecycleToken);
   } finally {
     item.confirmingGone = false;
   }

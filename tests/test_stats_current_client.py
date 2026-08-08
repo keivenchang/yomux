@@ -46,14 +46,42 @@ def unavailable() -> storage.UnavailableSpan:
     )
 
 
+def test_current_transport_classifies_socket_timeout_as_transient(tmp_path, monkeypatch):
+    transport = client_module._CurrentTransport(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    monkeypatch.setattr(
+        client_module,
+        "_wire_rpc",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("timed out")),
+    )
+
+    response, body = transport.dispatch("snapshot", {"range_seconds": 86400})
+
+    assert body == b""
+    assert response["_transport_error"] == "timeout"
+    assert response["error"] == "timed out"
+
+
 def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_path, monkeypatch):
     monkeypatch.setattr(common, "STATE_DIR", tmp_path)
     client = client_module.StatsCurrentClient()
 
-    assert client.database_path == tmp_path / storage.DATABASE_FILENAME
-    assert client.database_path == tmp_path / "stats-v6.sqlite3"
-    assert client_module.default_socket_path() == tmp_path / "services" / "statsd.p24s6.sock"
-    assert client_module.default_socket_path().name == storage.SOCKET_FILENAME
+    # The filename must stay version-scoped and never revert to the legacy name.
+    # The directory is now the host partition rather than the state root, because a
+    # shared NFS home gives two machines the same absolute path and WAL cannot span
+    # hosts; the legacy database is left in place beside it, never moved.
+    assert client.database_path.name == storage.DATABASE_FILENAME
+    assert client.database_path.name == "stats-v7.sqlite3"
+    assert client.database_path == storage.default_database_path(tmp_path)
+    assert client.database_path.parent != tmp_path
+    # The socket name identifies both the protocol/schema and the database it
+    # owns; its directory stays host-local because a Unix socket cannot live on
+    # an NFS state root.
+    assert client_module.default_socket_path().name.startswith("statsd.p24s7.")
+    assert client_module.default_socket_path().name.endswith(".sock")
+    assert client_module.default_socket_path() == storage.default_socket_path()
     assert client._transport.socket_path == safe_socket_path(
         client_module.default_socket_path(), prefix="yolomux-statsd",
     )
@@ -61,18 +89,85 @@ def test_default_paths_are_version_scoped_and_never_use_the_legacy_filename(tmp_
     assert client._transport.registry.spec.protocol_version == storage.MIN_WRITER_PROTOCOL == 24
     assert client._transport.registry.spec.code_revision == revision.CURRENT_CODE_REVISION
     assert client._transport.registry.spec.extra_args == ("--database", str(client.database_path))
-    assert client._transport.registry.service_dir == tmp_path / "services"
-    assert client._transport.registry.lock_path.parent == tmp_path / "services"
+    # The registry must track wherever the socket actually lives, rather than a
+    # hardcoded root -- that is the property, and it is what kept the doubled
+    # "services/services" bug below detectable when the location moved.
+    assert client._transport.registry.service_dir == client_module.default_socket_path().parent
+    assert client._transport.registry.lock_path.parent == client_module.default_socket_path().parent
     assert "services/services" not in str(client._transport.registry.lock_path)
     source = Path(client_module.__file__).read_text(encoding="utf-8")
     assert "stats-history.sqlite3" not in source
+
+
+def test_unreadable_current_database_reaches_service_recovery_without_weakening_newer_writer_fence(
+    tmp_path,
+    monkeypatch,
+):
+    client = client_module.StatsCurrentClient(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    starts = []
+    monkeypatch.setattr(client._transport.registry, "recently_healthy", lambda: False)
+    monkeypatch.setattr(client._transport.registry, "healthy", lambda: False)
+    monkeypatch.setattr(client._transport.registry, "ensure_started", lambda: starts.append(True) or True)
+    monkeypatch.setattr(
+        storage,
+        "require_compatible_writer",
+        lambda _path: (_ for _ in ()).throw(storage.SchemaMismatchError("current stats schema cannot be read")),
+    )
+
+    assert client.ensure_started() is True
+    assert starts == [True]
+
+    too_new = storage.SchemaTooNewError(
+        found_schema=storage.SCHEMA_VERSION + 1,
+        supported_schema=storage.SCHEMA_VERSION,
+        minimum_writer_protocol=storage.MIN_WRITER_PROTOCOL + 1,
+        minimum_writer_build=storage.MIN_WRITER_BUILD + 1,
+    )
+    monkeypatch.setattr(
+        storage,
+        "require_compatible_writer",
+        lambda _path: (_ for _ in ()).throw(too_new),
+    )
+    client._upgrade_required = None
+    starts.clear()
+
+    assert client.ensure_started() is False
+    assert starts == []
+    assert client._upgrade_required["status"] == "upgrade_required"
+
+
+def test_runtime_status_uses_the_existing_registry_process_sampler(tmp_path, monkeypatch):
+    client = client_module.StatsCurrentClient(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+    )
+    sampled = []
+    monkeypatch.setattr(
+        client._transport.registry,
+        "resources",
+        lambda pid: sampled.append(pid) or {"cpu_percent": 2.5, "rss_bytes": 4096},
+    )
+
+    status = client.runtime_status({"ok": True, "pid": 4321, "started_at": 100.0})
+
+    assert sampled == [4321]
+    assert status == {
+        "ok": True,
+        "service": "statsd",
+        "pid": 4321,
+        "started_at": 100.0,
+        "resources": {"cpu_percent": 2.5, "rss_bytes": 4096},
+    }
 
 
 def test_mixed_protocol_schema_service_identities_cannot_share_a_socket_or_database(tmp_path):
     current_socket = tmp_path / "services" / storage.socket_filename(24, 6)
     older_socket = tmp_path / "services" / storage.socket_filename(23, 5)
 
-    assert storage.DATABASE_FILENAME == "stats-v6.sqlite3"
+    assert storage.DATABASE_FILENAME == "stats-v7.sqlite3"
     assert storage.socket_filename(23, 5) == "statsd.p23s5.sock"
     assert current_socket != older_socket
     assert safe_socket_path(current_socket, prefix="yolomux-statsd") != safe_socket_path(
@@ -131,9 +226,9 @@ def test_all_lifecycle_and_data_rpcs_carry_the_current_service_and_schema_fence(
     assert append_payload["coverage_epochs"][0]["epoch_id"] == "cpu:1"
     assert append_payload["unavailable_spans"][0]["reason"] == "legacy_aggregate_not_reconstructable"
     snapshot_payload = calls[-2][1]
-    assert snapshot_payload == {"range_seconds": 300, "resolution": "AUTO", "client_id": "browser-a", "since_generation": 7, "action": "snapshot", "protocol_version": 24, "schema_generation": 6}
+    assert snapshot_payload == {"range_seconds": 300, "resolution": "AUTO", "client_id": "browser-a", "since_generation": 7, "action": "snapshot", "protocol_version": 24, "schema_generation": 7}
     delta_payload = calls[-1][1]
-    assert delta_payload == {"range_seconds": 300, "resolution_seconds": 1, "client_id": "browser-a", "after_cache_generation": 7, "after_revision": 41, "action": "delta", "protocol_version": 24, "schema_generation": 6}
+    assert delta_payload == {"range_seconds": 300, "resolution_seconds": 1, "client_id": "browser-a", "after_cache_generation": 7, "after_revision": 41, "action": "delta", "protocol_version": 24, "schema_generation": 7}
 
 
 def test_snapshot_revalidates_typed_or_query_requests_before_rpc(tmp_path, monkeypatch):
@@ -394,7 +489,7 @@ def test_offline_future_writer_fence_stops_spawn_and_retry_before_transport(tmp_
     database = tmp_path / storage.DATABASE_FILENAME
     (tmp_path / storage.WRITER_FENCE_FILENAME).write_text(json.dumps({
         "application_id": storage.APPLICATION_ID,
-        "database_filename": "stats-v6.sqlite3",
+        "database_filename": f"stats-v{storage.SCHEMA_VERSION + 1}.sqlite3",
         "schema_version": storage.SCHEMA_VERSION + 1,
         "minimum_writer_protocol": storage.MIN_WRITER_PROTOCOL + 1,
         "minimum_writer_build": storage.MIN_WRITER_BUILD + 1,
@@ -410,12 +505,61 @@ def test_offline_future_writer_fence_stops_spawn_and_retry_before_transport(tmp_
     assert not database.exists()
 
 
-def test_public_surface_has_only_shared_lifecycle_one_write_snapshot_and_delta():
+def test_public_surface_has_only_shared_lifecycle_writes_snapshot_and_delta():
     public = {name for name, value in client_module.StatsCurrentClient.__dict__.items() if not name.startswith("_") and callable(value)}
     assert public == {
-        "ensure_started", "acquire_lease", "renew_lease", "release_lease",
-        "status", "retry", "append", "snapshot", "delta",
+        "ensure_started", "acquire_lease", "renew_lease", "release_lease", "register_collector_context",
+        "status", "runtime_status", "retry", "browser_diagnostics", "set_usage_atom_backfill_status", "append", "snapshot", "delta",
     }
     source = Path(client_module.__file__).read_text(encoding="utf-8")
     for retired in ("fallback_legacy", "materialized_snapshot", "query_buckets", "claim_agent_token", "merge_records"):
         assert retired not in source
+
+
+def test_append_batching_sizes_each_record_once_instead_of_re_encoding_probes(monkeypatch):
+    """One append must not serialize its payload once per bisection probe.
+
+    The batcher used to binary-search the split by re-encoding the whole
+    candidate batch on every probe.  On the live 7771 web process that sizing
+    search was 40% of the stats-current-agent-tokens thread's wall time: 4096
+    atoms cost 83 envelope encodes and 20.2 MB of JSON to ship 1.8 MB.
+    """
+
+    encodes = []
+    real_encode = client_module.encode_metadata
+
+    def counted(envelope, *, binary_length=0):
+        encoded = real_encode(envelope, binary_length=binary_length)
+        encodes.append(len(encoded))
+        return encoded
+
+    monkeypatch.setattr(client_module, "encode_metadata", counted)
+    atoms = tuple(usage(index) for index in range(4_096))
+
+    batches = tuple(client_module.iter_append_batches(usage_atoms=atoms))
+
+    assert tuple(item.event_id for batch in batches for item in batch[1]) == tuple(
+        item.event_id for item in atoms
+    )
+    # One empty baseline plus one exact guard per emitted batch.
+    assert len(encodes) == len(batches) + 1
+    assert sum(encodes) < 4 * client_module.LOCAL_RPC_MAX_METADATA_BYTES * len(batches)
+    for index, batch in enumerate(batches):
+        size = client_module.append_metadata_size(
+            observations=batch[0],
+            usage_atoms=batch[1],
+            usage_tombstones=batch[2],
+            coverage_epochs=batch[3],
+            unavailable_spans=batch[4],
+        )
+        assert size <= client_module.LOCAL_RPC_MAX_METADATA_BYTES
+        if index + 1 == len(batches):
+            continue
+        # Each batch must still be packed to the exact maximum: one more record
+        # has to breach the record limit or the encoded metadata limit.
+        emitted = sum(len(group) for group in batches[: index + 1])
+        overfull = client_module.append_metadata_size(usage_atoms=atoms[emitted - len(batch[1]): emitted + 1])
+        assert (
+            len(batch[1]) + 1 > protocol.MAX_APPEND_RECORDS
+            or overfull > client_module.LOCAL_RPC_MAX_METADATA_BYTES
+        )

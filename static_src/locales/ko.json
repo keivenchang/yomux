@@ -213,6 +213,7 @@
   "debug.cost.backfillPartial": "과거 데이터 채우기가 완료되지 않음",
   "debug.cost.backfillPending": "과거 데이터 채우기 대기 중",
   "debug.cost.backfillRunning": "과거 데이터 채우기 진행 중",
+  "debug.cost.backfillUnknown": "과거 데이터 채우기 상태를 알 수 없음",
   "debug.cost.byModel": "모델별",
   "debug.cost.bySource": "에이전트 및 소스 귀속",
   "debug.cost.byTmux": "tmux 창별 비용",

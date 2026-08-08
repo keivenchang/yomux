@@ -77,7 +77,6 @@ def _result(
 
 def _file_info(path: str) -> dict[str, Any]:
     info = filesystem.path_info(path)
-    file_path = Path(str(info["path"]))
     result = {
         "path": str(info["path"]),
         "kind": str(info["kind"]),
@@ -86,10 +85,9 @@ def _file_info(path: str) -> dict[str, Any]:
         "repo": str(info.get("repo_root") or ""),
         "relative": str(info.get("relative_path") or ""),
     }
-    if file_path.exists() and file_path.is_file():
-        stat = file_path.stat()
-        result["size_bytes"] = stat.st_size
-        result["modified"] = round(stat.st_mtime)
+    if info.get("kind") == "file":
+        result["size_bytes"] = info.get("size")
+        result["modified"] = round(float(info["mtime"])) if info.get("mtime") is not None else None
     return result
 
 
@@ -358,21 +356,23 @@ def _ocr_result(action: str, paths: list[str]) -> dict[str, Any]:
     blocks = []
     result_blocks = []
     for path in paths:
-        filesystem.read_raw(path)
+        image_data, _mime = filesystem.read_raw(path)
         completed = subprocess.run(
-            [tesseract, path, "stdout"],
+            [tesseract, "stdin", "stdout"],
+            input=image_data,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             timeout=20,
             check=False,
         )
+        stdout = completed.stdout.decode("utf-8", errors="replace")
+        stderr = completed.stderr.decode("utf-8", errors="replace")
         if completed.returncode == 0:
-            raw_text = completed.stdout.strip()
+            raw_text = stdout.strip()
             text = raw_text or "(no text detected)"
             item = _raw(raw_text[:12_000]) if raw_text else _message("drop.result.ocr.noText")
         else:
-            raw_text = cmd_error(completed, "")
+            raw_text = stderr.strip()
             text = raw_text or "OCR failed"
             item = _raw(raw_text[:12_000]) if raw_text else _message("drop.result.ocr.failed")
         blocks.append(f"## {path}\n\n{text[:12_000]}")

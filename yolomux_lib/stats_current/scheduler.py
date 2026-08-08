@@ -50,10 +50,23 @@ class CollectorAttempt:
 
 
 @dataclass(frozen=True, slots=True)
+class CollectorMiss:
+    """A wall-clock interval a collector skipped after overrunning its deadline."""
+
+    family: str
+    epoch_id: str
+    started_at: float
+    ended_at: float
+    cadence_seconds: float
+    owner_generation: int
+
+
+@dataclass(frozen=True, slots=True)
 class CollectorJob:
     family: str
     collect: Callable[[CollectorAttempt], None]
     cadence_seconds: Callable[[], float] | None = None
+    record_miss: Callable[[CollectorMiss], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +91,10 @@ class _Worker:
     job: CollectorJob
     wake: threading.Event
     thread: threading.Thread | None = None
+    # Minimum seconds a pending wake must leave between the previous attempt's
+    # start and this one.  Only a self-issued follow-up sets it; a viewer
+    # refresh keeps the default and still runs immediately.
+    wake_min_interval_seconds: float = 0.0
 
 
 class FamilyScheduler:
@@ -99,6 +116,8 @@ class FamilyScheduler:
             raise SchedulerError(f"unsupported scheduled families: {sorted(unknown)}")
         if any(not callable(job.collect) for job in jobs):
             raise SchedulerError("collector callbacks must be callable")
+        if any(job.record_miss is not None and not callable(job.record_miss) for job in jobs):
+            raise SchedulerError("collector missed-deadline callbacks must be callable")
         self._workers = {
             job.family: _Worker(job, threading.Event())
             for job in jobs
@@ -149,10 +168,29 @@ class FamilyScheduler:
             if thread is not None:
                 thread.join(timeout=max(0.0, deadline - self._monotonic()))
 
-    def wake(self, family: str) -> bool:
+    def wake(self, family: str, *, min_interval_seconds: float = 0.0) -> bool:
+        """Run a family ahead of its deadline, no sooner than ``min_interval_seconds``.
+
+        A collector that exhausted its scan budget wakes itself to drain the
+        rest of its backlog.  That wake carried no delay, so a backlog that
+        never empties made the worker free-run: the live ``agent_tokens``
+        worker ran 41 cycles in 30s against a 10s cadence.  A follow-up passes
+        its minimum interval here, which bounds wake-driven attempts to
+        ``1 / min_interval_seconds`` per second no matter how large the backlog
+        is.  A cadence deadline is never delayed by the floor.
+        """
+
+        if (
+            isinstance(min_interval_seconds, bool)
+            or not isinstance(min_interval_seconds, (int, float))
+            or not math.isfinite(min_interval_seconds)
+            or min_interval_seconds < 0
+        ):
+            raise SchedulerError("min_interval_seconds must be finite and non-negative")
         worker = self._workers.get(family)
         if worker is None or worker.thread is None or not worker.thread.is_alive():
             return False
+        worker.wake_min_interval_seconds = float(min_interval_seconds)
         worker.wake.set()
         return True
 
@@ -201,9 +239,24 @@ class FamilyScheduler:
         epoch = initial_epoch
         epoch_started_at = wall_anchor
         epoch_cadence: float | None = None
+        last_started = -math.inf
         while not self._stop.is_set() and self._owner_generation() == generation:
             before_wait = self._monotonic()
             woke = worker.wake.wait(max(0.0, next_deadline - before_wait))
+            while woke and not self._stop.is_set():
+                # Hold a rate-limited wake to its floor without ever pushing it
+                # past its own cadence deadline, so a saturated backlog cannot
+                # spin this worker while a refresh still runs immediately.
+                floor = min(
+                    last_started + worker.wake_min_interval_seconds,
+                    next_deadline,
+                )
+                remaining = floor - self._monotonic()
+                if remaining <= 0:
+                    break
+                worker.wake.clear()
+                worker.wake.wait(remaining)
+            worker.wake_min_interval_seconds = 0.0
             worker.wake.clear()
             if self._stop.is_set() or self._owner_generation() != generation:
                 break
@@ -252,6 +305,7 @@ class FamilyScheduler:
                 epoch=epoch,
             )
             started = self._monotonic()
+            last_started = started
             failure = ""
             try:
                 worker.job.collect(attempt)
@@ -273,8 +327,25 @@ class FamilyScheduler:
             next_deadline = attempt_deadline + cadence
             now = self._monotonic()
             if now >= next_deadline:
+                missed_deadline = next_deadline
                 skipped = int((now - next_deadline) // cadence) + 1
                 next_deadline += skipped * cadence
+                if worker.job.record_miss is not None:
+                    missed = CollectorMiss(
+                        family,
+                        attempt.epoch_id,
+                        wall_anchor + missed_deadline - monotonic_anchor,
+                        wall_anchor + next_deadline - monotonic_anchor,
+                        cadence,
+                        generation,
+                    )
+                    try:
+                        worker.job.record_miss(missed)
+                    except EXPECTED_COLLECTOR_ERRORS as error:
+                        LOGGER.warning("current stats %s missed-deadline record failed: %s", family, error)
+                    epoch = self._new_epoch(family)
+                    epoch_started_at = missed.ended_at
+                    epoch_cadence = cadence
                 current = self.status()[family]
                 self._update(
                     family,
