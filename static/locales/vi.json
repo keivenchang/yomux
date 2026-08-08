@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "Bổ sung dữ liệu cũ chưa hoàn tất",
   "debug.cost.backfillPending": "Đang chờ bổ sung dữ liệu cũ",
   "debug.cost.backfillRunning": "Đang bổ sung dữ liệu cũ",
+  "debug.cost.backfillUnknown": "Không rõ trạng thái bổ sung dữ liệu cũ",
   "debug.cost.byModel": "Theo mô hình",
   "debug.cost.bySource": "Phân bổ tác nhân và nguồn",
   "debug.cost.byTmux": "Chi phí theo cửa sổ tmux",

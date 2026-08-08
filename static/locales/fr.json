@@ -218,6 +218,7 @@
   "debug.cost.backfillPartial": "Remplissage historique incomplet",
   "debug.cost.backfillPending": "Remplissage historique en attente",
   "debug.cost.backfillRunning": "Remplissage historique en cours",
+  "debug.cost.backfillUnknown": "État du remplissage historique inconnu",
   "debug.cost.byModel": "Par modèle",
   "debug.cost.bySource": "Attribution par agent et source",
   "debug.cost.byTmux": "Coût par fenêtre tmux",

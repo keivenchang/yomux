@@ -3,13 +3,19 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from collections import deque
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from .diagnostic_redaction import redact_diagnostic_value
 
 
 SERVER_LOG_CAPACITY = 500
 SERVER_LOG_LEVELS = frozenset({"debug", "info", "warning", "error"})
 SERVER_LOG_MESSAGE_MAX_CHARS = 4096
+DIAGNOSTIC_PACIFIC_TIME_ZONE = ZoneInfo("America/Los_Angeles")
 
 
 class ServerLogRing:
@@ -19,7 +25,12 @@ class ServerLogRing:
         self.capacity = max(1, int(capacity))
         self._entries: deque[dict[str, Any]] = deque(maxlen=self.capacity)
         self._dedupe_until: dict[str, float] = {}
+        self._dropped_count = 0
+        self._first_dropped_id: int | None = None
+        self._last_dropped_id: int | None = None
+        self._dropped_by_level: dict[str, int] = {}
         self._sequence = 0
+        self._epoch = uuid.uuid4().hex
         self._lock = threading.Lock()
 
     def emit(
@@ -31,6 +42,10 @@ class ServerLogRing:
         category: str = "server",
         dedupe_key: str = "",
         dedupe_seconds: float = 0.0,
+        request_id: str = "",
+        route: str = "",
+        event: str = "",
+        delivery: str = "",
     ) -> dict[str, Any] | None:
         normalized_level = str(level or "info").strip().lower()
         if normalized_level not in SERVER_LOG_LEVELS:
@@ -48,14 +63,34 @@ class ServerLogRing:
                         key: expiry for key, expiry in self._dedupe_until.items() if expiry > monotonic_now
                     }
             self._sequence += 1
-            entry = {
+            entry: dict[str, Any] = {
                 "id": self._sequence,
                 "timestamp": now,
+                "wallTime": datetime.fromtimestamp(now, DIAGNOSTIC_PACIFIC_TIME_ZONE).strftime(
+                    "%Y-%m-%d %H:%M:%S %Z"
+                ),
                 "level": normalized_level,
                 "source": str(source or "server"),
                 "category": str(category or "server"),
                 "message": str(message),
             }
+            optional_fields = {
+                "requestId": request_id,
+                "route": route,
+                "event": event,
+                "delivery": delivery,
+            }
+            entry.update({name: str(value) for name, value in optional_fields.items() if value})
+            entry = redact_diagnostic_value(entry)
+            if len(self._entries) == self.capacity:
+                dropped = self._entries[0]
+                dropped_id = int(dropped["id"])
+                dropped_level = str(dropped["level"])
+                self._dropped_count += 1
+                if self._first_dropped_id is None:
+                    self._first_dropped_id = dropped_id
+                self._last_dropped_id = dropped_id
+                self._dropped_by_level[dropped_level] = self._dropped_by_level.get(dropped_level, 0) + 1
             self._entries.append(entry)
             return dict(entry)
 
@@ -63,16 +98,28 @@ class ServerLogRing:
         with self._lock:
             return {
                 "ok": True,
+                "epoch": self._epoch,
                 "logs": [dict(entry) for entry in self._entries],
                 "sequence": self._sequence,
                 "capacity": self.capacity,
+                "dropped": {
+                    "count": self._dropped_count,
+                    "first_id": self._first_dropped_id,
+                    "last_id": self._last_dropped_id,
+                    "by_level": dict(self._dropped_by_level),
+                },
             }
 
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
             self._dedupe_until.clear()
+            self._dropped_count = 0
+            self._first_dropped_id = None
+            self._last_dropped_id = None
+            self._dropped_by_level.clear()
             self._sequence = 0
+            self._epoch = uuid.uuid4().hex
 
 
 SERVER_LOGS = ServerLogRing()
@@ -115,6 +162,10 @@ def emit_server_log(
     category: str = "server",
     dedupe_key: str = "",
     dedupe_seconds: float = 0.0,
+    request_id: str = "",
+    route: str = "",
+    event: str = "",
+    delivery: str = "",
 ) -> dict[str, Any] | None:
     return SERVER_LOGS.emit(
         level,
@@ -123,6 +174,10 @@ def emit_server_log(
         category=category,
         dedupe_key=dedupe_key,
         dedupe_seconds=dedupe_seconds,
+        request_id=request_id,
+        route=route,
+        event=event,
+        delivery=delivery,
     )
 
 

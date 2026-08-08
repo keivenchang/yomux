@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "बैकफ़िल अधूरा है",
   "debug.cost.backfillPending": "बैकफ़िल लंबित है",
   "debug.cost.backfillRunning": "बैकफ़िल जारी है",
+  "debug.cost.backfillUnknown": "बैकफ़िल स्थिति अज्ञात है",
   "debug.cost.byModel": "मॉडल के अनुसार",
   "debug.cost.bySource": "एजेंट और स्रोत श्रेय",
   "debug.cost.byTmux": "tmux विंडो के अनुसार लागत",

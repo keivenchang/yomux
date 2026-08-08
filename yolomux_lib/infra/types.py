@@ -33,6 +33,7 @@ class SessionFileEntry(TypedDict, total=False):
 
 class RepoPayload(TypedDict, total=False):
     repo: str
+    branch: str
     count: int
     touched_count: int
     added: int

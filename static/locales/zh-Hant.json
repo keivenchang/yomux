@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "回填未完成",
   "debug.cost.backfillPending": "等待回填",
   "debug.cost.backfillRunning": "正在回填",
+  "debug.cost.backfillUnknown": "回填狀態未知",
   "debug.cost.byModel": "依模型",
   "debug.cost.bySource": "代理程式和來源歸因",
   "debug.cost.byTmux": "依 tmux 視窗統計成本",

@@ -21,13 +21,14 @@ host="${YOLOMUX_HOST:-0.0.0.0}"
 log_dir="${YOLOMUX_LOG_DIR:-/tmp}"
 dev_mode="auto"
 print_command=0
+check_assets=0
 ports=()
 python_bin="${PYTHON:-python3}"
 server_shell="${SHELL:-$(command -v bash)}"
 
 usage() {
   cat <<'EOF'
-Usage: boot.sh [--print-command] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
+Usage: boot.sh [--print-command|--check-assets] [--host HOST] [--log-dir DIR] [--dev|--no-dev] [--port PORT] [PORT ...]
 
 Restart this checkout's YOLOmux server. YOLOMUX_PORT selects the primary port; otherwise it defaults to 8880 on macOS and 7770 on Linux. Non-primary ports use --dev by default.
 
@@ -59,6 +60,10 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     --print-command)
       print_command=1
+      shift
+      ;;
+    --check-assets)
+      check_assets=1
       shift
       ;;
     --host)
@@ -139,6 +144,7 @@ fi
 
 extra_env=()
 extra_env+=("YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=${background_owner_primary_port}")
+extra_env+=("$(yolomux_default_server_optin)")
 if [[ -n "${YOLOMUX_TEST_AUTH_BYPASS:-}" ]]; then
   extra_env+=("YOLOMUX_TEST_AUTH_BYPASS=${YOLOMUX_TEST_AUTH_BYPASS}")
 fi
@@ -156,6 +162,9 @@ use_dev_mode() {
 server_args=()
 build_server_args() {
   local port="$1"
+  # Every non-default instance receives an independent state family, so its
+  # background owner must be itself rather than this launcher's primary port.
+  extra_env[0]="YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT=${port}"
   server_args=(--host "$host" --port "$port" --dang --self-signed)
   if use_dev_mode "$port"; then
     server_args+=(--dev)
@@ -170,6 +179,9 @@ log_path_for() {
 print_launch_command() {
   local port="$1"
   local log_path
+  local isolation_exports
+  isolation_exports="$("$python_bin" "$repo_root/tools/instance_isolation.py" --port "$port")" || die "port $port launch refused by instance-isolation preflight"
+  printf '%s\n' "$isolation_exports"
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
   if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -447,6 +459,10 @@ restart_port() {
   local port="$1"
   local log_path
   acquire_port_restart_lock "$port"
+  if ! yolomux_validate_instance_isolation "$repo_root" "$python_bin" "$port"; then
+    release_port_restart_lock "$port"
+    die "port $port launch refused by instance-isolation preflight"
+  fi
   log_path="$(log_path_for "$port")"
   build_server_args "$port"
 
@@ -479,47 +495,21 @@ restart_port() {
 }
 
 ensure_xterm_assets() {
-  local xterm_js="$repo_root/node_modules/@xterm/xterm/lib/xterm.js"
-  local xterm_css="$repo_root/node_modules/@xterm/xterm/css/xterm.css"
-  local unicode_addon="$repo_root/node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"
-  local packaged_js="$repo_root/static/xterm.js"
-  local packaged_css="$repo_root/static/xterm.css"
-  local packaged_addon="$repo_root/static/xterm-addon-unicode11.js"
-  # yolomux serves /static/{xterm.js,xterm.css,xterm-addon-unicode11.js} by resolving @xterm/*
-  # from node_modules (see yolomux_lib/common.py XTERM_ASSET_ROOTS). Require the complete runtime
-  # set. VDI boxes have no compatible npm, so they use the pinned UMD files in static/ instead.
-  [[ ( -f "$xterm_js" && -f "$xterm_css" && -f "$unicode_addon" ) \
-    || ( -f "$packaged_js" && -f "$packaged_css" && -f "$packaged_addon" ) ]] && return 0
-  if command -v npm >/dev/null 2>&1; then
-    printf 'boot.sh: installing web-terminal assets (npm install) in %s ...\n' "$repo_root" >&2
-    ( cd "$repo_root" && npm install --no-audit --no-fund --silent ) || true
-    [[ -f "$xterm_js" && -f "$xterm_css" && -f "$unicode_addon" ]] && return 0
-  fi
-  if ! command -v curl >/dev/null 2>&1; then
-    printf 'warn: curl unavailable and xterm runtime assets are missing; terminals cannot attach\n' >&2
-    return 0
-  fi
-  printf 'boot.sh: downloading static xterm assets for this host ...\n' >&2
-  mkdir -p "$repo_root/static"
-  fetch_xterm_asset() {
-    local url="$1"
-    local destination="$2"
-    local temporary="${destination}.$$"
-    rm -f "$temporary"
-    curl -fsSL --connect-timeout 10 --retry 2 "$url" -o "$temporary" \
-      && [[ -s "$temporary" ]] \
-      && mv -f "$temporary" "$destination"
-  }
-  fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js "$packaged_js" \
-    && fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css "$packaged_css" \
-    && fetch_xterm_asset https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.js "$packaged_addon" \
-    || printf 'warn: static xterm asset download failed; terminals cannot attach\n' >&2
+  local asset
+  for asset in xterm.js xterm.css xterm-addon-unicode11.js; do
+    [[ -s "$repo_root/static/vendor/$asset" ]] || die "tracked xterm vendor asset is missing: static/vendor/$asset"
+  done
 }
 
 if [[ "$print_command" -eq 1 ]]; then
   for port in "${ports[@]}"; do
     print_launch_command "$port"
   done
+  exit 0
+fi
+
+if [[ "$check_assets" -eq 1 ]]; then
+  ensure_xterm_assets
   exit 0
 fi
 

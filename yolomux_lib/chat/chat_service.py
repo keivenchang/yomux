@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-"""Server-authoritative API contract for the global YO!chat room."""
+"""Server-authoritative API contract for one host's YO!chat room."""
 
 from __future__ import annotations
 
@@ -30,8 +30,10 @@ from .chat_store import ChatMessage
 from .chat_store import ChatMessageContext
 from .chat_store import ChatStore
 from .chat_store import ChatStoreValidationError
+from .chat_store import default_chat_database_path
 
 
+CHAT_CURSOR_SECRET_NAME = "chat-cursor.key"
 CHAT_ID_MAX_LENGTH = 64
 CHAT_SEND_RATE_LIMIT = 20
 CHAT_QUERY_RATE_LIMIT = 120
@@ -39,6 +41,11 @@ CHAT_RATE_WINDOW_SECONDS = 60.0
 CHAT_YO_COMMAND_RE = re.compile(r"^/yo\s+(.+)$", re.DOTALL)
 CHAT_YOAGENT_USERNAME = "YO!agent"
 CHAT_YOAGENT_INSTANCE_ID = "yolomux-yoagent"
+
+
+def default_chat_cursor_secret_path(state_dir: Path | None = None) -> Path:
+    """Keep the cursor key beside this host's live chat database."""
+    return default_chat_database_path(state_dir).with_name(CHAT_CURSOR_SECRET_NAME)
 
 
 class ChatServiceError(ValueError):
@@ -276,10 +283,13 @@ class ChatService:
         source = context.target
         if source.username != username or source.sender_instance_id != instance:
             raise ChatServiceError("chat message does not belong to this sender", code="forbidden", status=403)
-        match = CHAT_YO_COMMAND_RE.fullmatch(source.body.strip())
-        if match is None or not match.group(1).strip():
-            raise ChatServiceError("chat message is not a /yo command", code="invalid_message")
-        return source, match.group(1).strip()
+        body = source.body.strip()
+        match = CHAT_YO_COMMAND_RE.fullmatch(body)
+        if match is not None and match.group(1).strip():
+            return source, match.group(1).strip()
+        if source.is_question:
+            return source, body
+        raise ChatServiceError("chat message is not a /yo command or question", code="invalid_message")
 
     def record_yoagent_reply(self, *, source: ChatMessage, answer: str) -> tuple[dict[str, Any], bool]:
         encoded = str(answer or "").encode("utf-8")

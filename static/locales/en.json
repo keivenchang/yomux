@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "Backfill incomplete",
   "debug.cost.backfillPending": "Backfill pending",
   "debug.cost.backfillRunning": "Backfill in progress",
+  "debug.cost.backfillUnknown": "Backfill status unknown",
   "debug.cost.byModel": "By model",
   "debug.cost.bySource": "Agent and source attribution",
   "debug.cost.byTmux": "Cost by tmux window",

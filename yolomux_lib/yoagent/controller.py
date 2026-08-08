@@ -28,6 +28,7 @@ from ..tmux.agent_tui import text_still_in_composer
 from ..tmux.agent_tui import visible_composer_source
 from ..tmux.agent_tui import visible_composer_text
 from ..observability.activity_summary import deterministic_yoagent_reply
+from ..observability.activity_summary import yoagent_capabilities_payload
 from ..observability.activity_summary import yoagent_context_lines
 from ..observability.activity_summary import yoagent_question_requests_session_list
 from ..observability.activity_summary import yoagent_question_requests_work_next
@@ -41,6 +42,8 @@ from ..locales import user_message_payload
 from ..session_files import classify_change
 from ..session_files import scan_claude_transcript
 from ..session_files import scan_codex_transcript
+from ..statusd_protocol import activity_summary_disabled_payload
+from ..statusd_protocol import activity_summary_enabled
 from ..approval.prompt_detector import selected_prompt_option
 from ..tmux.tmux_utils import cmd_error
 from ..tmux.tmux_utils import tmux_move_to_option
@@ -918,17 +921,25 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def yoagent_intent(self, payload: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        def intent_response(details: dict[str, Any], status: HTTPStatus, **fields: Any) -> tuple[dict[str, Any], HTTPStatus]:
+            response = {"ok": status == HTTPStatus.OK, "intent": intent, **fields}
+            # Keep previews intact while also preserving the API's top-level typed-error contract.
+            if status != HTTPStatus.OK:
+                response.update({key: details[key] for key in ("error", "user_message") if key in details})
+            return response, status
+
         intent = payload.get("intent") if isinstance(payload.get("intent"), dict) else payload
         intent_type = str(intent.get("type") or "")
         if intent_type in {"send_prompt", "wait_then_send", "session_handoff"}:
             preview, status = self.create_yoagent_action_preview(intent)
             risk = "mutating-send" if str(preview.get("status") or "") == "ready" else "waiting-target"
-            return {"ok": status == HTTPStatus.OK, "intent": intent, "preview": preview, "risk": risk, "confirmation_required": bool(preview.get("requires_confirmation"))}, status
+            return intent_response(preview, status, preview=preview, risk=risk, confirmation_required=bool(preview.get("requires_confirmation")))
         if intent_type == "cancel_session_jobs":
             response, status = self.cancel_yoagent_jobs_for_session(str(intent.get("session") or ""))
-            return {"ok": status == HTTPStatus.OK, "intent": intent, **response}, status
+            return intent_response(response, status, **response)
         job, status = self.yoagent_job_spec_from_payload(intent)
-        return {"ok": status == HTTPStatus.OK, "intent": intent, "job_preview": job, "risk": "mutating-job" if (job.get("action") or {}).get("type") == "send_prompt" else "notify-only"}, status
+        risk = "mutating-job" if (job.get("action") or {}).get("type") == "send_prompt" else "notify-only"
+        return intent_response(job, status, job_preview=job, risk=risk)
 
 
     def yoagent_roster_observed_state(self, roster: list[str], predicate_type: str, locale: str = "") -> dict[str, Any]:
@@ -1412,7 +1423,16 @@ class YoagentController(YoagentBackendsMixin, YoagentSessionSummariesMixin):
 
 
     def yoagent_activity_payload(self, force: bool = False) -> dict[str, Any]:
-        payload = dict(self.activity_summary_payload(session_scope="all", force=force))
+        if activity_summary_enabled():
+            payload = dict(self.activity_summary_payload(session_scope="all", force=force))
+        else:
+            payload = {
+                **activity_summary_disabled_payload(),
+                "capabilities": yoagent_capabilities_payload(),
+                "sessions": {},
+                "session_order": [],
+                "global": {"lines": []},
+            }
         payload["yoagent_skills"] = self.yoagent_skills_payload()
         return payload
 

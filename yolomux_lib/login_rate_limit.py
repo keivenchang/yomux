@@ -81,6 +81,8 @@ from .infra.atomic_file import begin_wal_migration
 from .infra.atomic_file import load_or_create_secret_key
 from .infra.atomic_file import open_wal_database
 from .infra.atomic_file import open_wal_session
+from .infra.common import STATE_DIR
+from .infra.host_partition import host_partitioned_state_dir
 
 
 # --- Centrally owned, validated policy defaults ---------------------------------
@@ -429,6 +431,11 @@ LOGIN_THROTTLE_IDLE_TTL_SECONDS = 6 * 3600
 # Absolute backstop on stored rows. When exceeded, the oldest idle rows are evicted
 # first; a locked-username row (an absolute account lock) is NEVER evicted this way.
 LOGIN_THROTTLE_ROW_CEILING = 50_000
+
+
+def default_login_throttle_database_path(state_dir: Path | None = None) -> Path:
+    """Keep this host's live login-throttle WAL separate from legacy state."""
+    return host_partitioned_state_dir(state_dir or STATE_DIR) / LOGIN_THROTTLE_DATABASE_NAME
 
 
 class LoginRateLimiterError(Exception):

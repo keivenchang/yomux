@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "履歴補完が未完了",
   "debug.cost.backfillPending": "履歴補完は保留中",
   "debug.cost.backfillRunning": "履歴補完を実行中",
+  "debug.cost.backfillUnknown": "履歴補完の状態は不明",
   "debug.cost.byModel": "モデル別",
   "debug.cost.bySource": "エージェントとソースの内訳",
   "debug.cost.byTmux": "tmux ウィンドウ別コスト",

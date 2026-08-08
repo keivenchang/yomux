@@ -11,19 +11,19 @@ help: ## List targets
 check-python: ## Verify the interpreter meets YOLOmux's Python floor
 	@$(PYTHON) tools/check_python.py
 
-setup: check-python ## Install runtime deps (+ yoagent), xterm.js assets, and build the static bundle
+setup: check-python ## Install runtime deps (+ yoagent) and build the static bundle
 	$(PYTHON) -m pip install -e ".[yoagent]"
-	$(MAKE) xterm
 	$(PYTHON) tools/static_build.py
 
 dev: check-python ## Like setup, plus dev/test deps (pytest-xdist)
 	$(PYTHON) -m pip install -e ".[yoagent,dev]"
-	$(MAKE) xterm
 	$(PYTHON) tools/static_build.py
 
-xterm: ## Install the xterm.js web-terminal assets (jsDelivr CDN is the runtime fallback)
-	@if command -v npm >/dev/null 2>&1; then npm install --no-audit --no-fund; \
-	else echo "npm not found — xterm.js will load from the jsDelivr CDN at runtime; install Node.js for a local copy"; fi
+xterm: ## Verify tracked xterm vendor assets against the pinned npm packages
+	npm install --no-audit --no-fund
+	cmp static/vendor/xterm.js node_modules/@xterm/xterm/lib/xterm.js
+	cmp static/vendor/xterm.css node_modules/@xterm/xterm/css/xterm.css
+	cmp static/vendor/xterm-addon-unicode11.js node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
 
 build: ## Rebuild the served static bundle (static/yolomux.{js,css})
 	$(PYTHON) tools/static_build.py

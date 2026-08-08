@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "การเติมข้อมูลย้อนหลังไม่สมบูรณ์",
   "debug.cost.backfillPending": "รอการเติมข้อมูลย้อนหลัง",
   "debug.cost.backfillRunning": "กำลังเติมข้อมูลย้อนหลัง",
+  "debug.cost.backfillUnknown": "ไม่ทราบสถานะการเติมข้อมูลย้อนหลัง",
   "debug.cost.byModel": "ตามโมเดล",
   "debug.cost.bySource": "การระบุเอเจนต์และแหล่งที่มา",
   "debug.cost.byTmux": "ค่าใช้จ่ายตามหน้าต่าง tmux",

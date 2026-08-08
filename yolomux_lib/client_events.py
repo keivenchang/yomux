@@ -30,6 +30,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "event_log_changed",
     "files_changed",
     "fs_changed",
+    "operation_terminal",
     "roots_changed",
     "session_files_ready",
     "settings_changed",
@@ -71,6 +72,7 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "event_log_changed": frozenset({"events"}),
     "files_changed": frozenset({"files"}),
     "fs_changed": frozenset({"files"}),
+    "operation_terminal": frozenset({"core", "files"}),
     "roots_changed": frozenset({"files"}),
     "session_files_ready": frozenset({"files"}),
     "settings_changed": frozenset({"core"}),
@@ -127,6 +129,10 @@ def client_event_resource(event_type: str, payload: dict[str, Any] | None = None
             scope_digest = hashlib.sha256(scope.encode("utf-8", errors="replace")).hexdigest()[:16]
             return f"background:{role}:{scope_digest}"
         return f"background:{role}"
+    if safe_type == "operation_terminal":
+        operation = data.get("operation")
+        operation_id = str(operation.get("id") if isinstance(operation, dict) else "")
+        return f"operation_terminal:{operation_id}" if operation_id else safe_type
     if safe_type in {"event_log_changed", "session_files_ready", "context_items_ready", "yoagent_conversation_changed", "yoagent_jobs_changed", "yoagent_stream_delta"}:
         request = data.get("request")
         session = str(data.get("session") or (request.get("session") if isinstance(request, dict) else "") or "")
@@ -214,6 +220,7 @@ class ClientEventBroker:
                 "payload": dict(payload or {}),
                 "epoch": self.epoch,
                 "resource": resource,
+                "base_resource_revision": resource_revision - 1,
                 "resource_revision": resource_revision,
             }
             self.next_event_id += 1
@@ -366,6 +373,12 @@ class ClientEventBroker:
         if pending is not None:
             # Keep the queued object in place so its queue position is stable, but replace its
             # contents atomically under the broker lock with the newest readable revision.
+            pending_payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+            event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if pending_payload.get("patch") is True or event_payload.get("patch") is True:
+                # A keyed patch is based on the resource revision immediately before it. Replacing
+                # a queued patch skips that base, so the browser must repair from the HTTP snapshot.
+                subscriber.pending_repair_resources.add(resource)
             pending.clear()
             pending.update(event)
             return "coalesced"

@@ -224,6 +224,7 @@
   "debug.cost.backfillPartial": "Uzupełnianie nieukończone",
   "debug.cost.backfillPending": "Uzupełnianie oczekuje",
   "debug.cost.backfillRunning": "Uzupełnianie w toku",
+  "debug.cost.backfillUnknown": "Stan uzupełniania nieznany",
   "debug.cost.byModel": "Według modelu",
   "debug.cost.bySource": "Przypisanie agenta i źródła",
   "debug.cost.byTmux": "Koszt według okna tmux",

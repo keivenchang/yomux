@@ -212,6 +212,7 @@
   "debug.cost.backfillPartial": "⟦Ɓáçķƒíłł íñçóɱƥłéťé········⟧",
   "debug.cost.backfillPending": "⟦Ɓáçķƒíłł ƥéñđíñǧ······⟧",
   "debug.cost.backfillRunning": "⟦Ɓáçķƒíłł íñ ƥřóǧřéšš········⟧",
+  "debug.cost.backfillUnknown": "⟦Ɓáçķƒíłł šťáťúš úñķñóŵñ·········⟧",
   "debug.cost.byModel": "⟦Ɓý ɱóđéł···⟧",
   "debug.cost.bySource": "⟦Áǧéñť áñđ šóúřçé áťťříƀúťíóñ···········⟧",
   "debug.cost.byTmux": "⟦Çóšť ƀý ťɱúẋ ŵíñđóŵ········⟧",
