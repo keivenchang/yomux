@@ -704,13 +704,24 @@ function agentWindowStoppedIsAcknowledged(key, stoppedAt) {
   return Boolean(key && stoppedAtNumber > 0 && acknowledged > 0 && Math.abs(acknowledged - stoppedAtNumber) < 0.001);
 }
 
+function retireAgentWindowAcknowledgementVisual(key, expectedUntilMs = null) {
+  const record = agentWindowActivityRecord(key);
+  const visual = record?.acknowledgementVisual;
+  if (!visual || (expectedUntilMs !== null && visual.untilMs !== expectedUntilMs)) return false;
+  if (visual.timer) clearTimeout(visual.timer);
+  record.acknowledgementVisual = null;
+  if (visual.acknowledgementKey && typeof recordAttentionAcknowledgementKey === 'function') {
+    recordAttentionAcknowledgementKey(visual.acknowledgementKey);
+  }
+  return true;
+}
+
 function agentWindowAcknowledgementVisualActive(key, nowMs = Date.now()) {
   const record = agentWindowActivityRecord(key);
   const visual = record?.acknowledgementVisual;
   if (!visual) return false;
   if (visual.untilMs > nowMs) return true;
-  if (visual.timer) clearTimeout(visual.timer);
-  record.acknowledgementVisual = null;
+  retireAgentWindowAcknowledgementVisual(key, visual.untilMs);
   return false;
 }
 
@@ -762,14 +773,9 @@ function showAgentWindowAcknowledgementVisual(key, options = {}) {
   const untilMs = startedAtMs + durationMs;
   clearAgentWindowAcknowledgementVisual(key);
   const timer = setTimeout(() => {
-    const currentRecord = agentWindowActivityRecord(key);
-    const visual = currentRecord?.acknowledgementVisual;
-    if (!visual || visual.untilMs !== untilMs) return;
-    currentRecord.acknowledgementVisual = null;
     // The browser must retire the gray marker at the promised time even if the acknowledgement
     // request is slow; a later explicit server false still re-arms a genuinely new prompt.
-    if (acknowledgementKey && typeof recordAttentionAcknowledgementKey === 'function') recordAttentionAcknowledgementKey(acknowledgementKey);
-    refreshAgentWindowActivityDisplays();
+    if (retireAgentWindowAcknowledgementVisual(key, untilMs)) refreshAgentWindowActivityDisplays();
   }, durationMs);
   const sourceAgent = options.agent && typeof options.agent === 'object' ? options.agent : null;
   const visualAgent = sourceAgent ? {

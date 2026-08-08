@@ -299,6 +299,9 @@ function activitySummaryGlobalDetailLines(summary) {
 }
 
 function globalActivitySummaryHtml() {
+  if (!activitySummaryEnabled) {
+    return `<section class="yoagent-global" data-activity-summary-disabled="true"><div class="yoagent-empty">${esc(t('summary.error.providerDisabled'))}</div></section>`;
+  }
   const summary = activitySummaryState.payload?.global || {};
   const lines = Array.isArray(summary.lines) ? summary.lines : [];
   const headline = summary.headline || lines[0] || '';
@@ -1192,7 +1195,8 @@ function yoagentChatHtml() {
   const placeholder = t('yoagent.chatPlaceholder');
   const isThinking = yoagentChatState.busy || yoagentStartupState.prewarming;
   const startupInfo = yoagentStartupState.infoVisible ? yoagentStartupInfoHtml() : '';
-  const hasConversation = Boolean(yoagentConversationState.messages.length || yoagentChatState.queue.length || yoagentConversationState.pendingWaits.length || yoagentJobsState.items.length || yoagentChatState.notice || isThinking || yoagentChatState.error || startupInfo || !chatEnabled);
+  const activityDisabled = activitySummaryEnabled ? '' : globalActivitySummaryHtml();
+  const hasConversation = Boolean(activityDisabled || yoagentConversationState.messages.length || yoagentChatState.queue.length || yoagentConversationState.pendingWaits.length || yoagentJobsState.items.length || yoagentChatState.notice || isThinking || yoagentChatState.error || startupInfo || !chatEnabled);
   const thinkingHtml = textWithMovingEllipsisHtml(t('yoagent.thinking'), 'yoagent-thinking-dots');
   const busy = isThinking
     ? `<div class="yoagent-chat-status"><span class="yoagent-thinking">${thinkingHtml}</span></div>`
@@ -1209,7 +1213,7 @@ function yoagentChatHtml() {
   const form = conversationComposerHtml({formClassName: 'yoagent-chat-form', formAttributes: 'data-yoagent-chat-form', inputHtml: `<input type="text" class="yoagent-chat-input conversation-composer-input" data-yoagent-chat-input value="${esc(yoagentChatState.draft)}" placeholder="${esc(placeholder)}"${disabled}>`, leadingControlsHtml: yoagentComposerControlsHtml(backendDisabled), trailingControlsHtml: `<button type="button" class="yoagent-chat-clear" data-action="yoagent-clear" data-yoagent-clear${clearDisabled}>${esc(t('common.clear'))}</button>`, sendHtml: submitButton});
   return `<section class="yoagent-chat ${hasConversation ? 'has-history' : 'empty'}" aria-label="${esc(t('yoagent.chatAria', {name: yoagentTabLabel()}))}">
     ${yoagentTranscriptPathHtml()}
-    <div class="yoagent-chat-history">${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>
+    <div class="yoagent-chat-history">${activityDisabled}${yoagentNoticeHtml()}${yoagentChatMessagesHtml()}${yoagentChatQueueHtml()}${yoagentPendingWaitsHtml()}${yoagentJobsHtml()}${busy}${error}${chatDisabled}</div>
     ${form}
   </section>`;
 }
@@ -1585,10 +1589,15 @@ function yoagentPanelIsActive() {
 }
 
 function activitySummaryIsVisible() {
-  return yoagentPanelIsActive();
+  return activitySummaryEnabled && yoagentPanelIsActive();
 }
 
 async function refreshActivitySummary(options = {}) {
+  if (!activitySummaryEnabled) {
+    activitySummaryState.refreshing = false;
+    return false;
+  }
+  if (shareViewMode) return false;
   if (options.silent === true && options.localeChange !== true) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     return;
@@ -1609,6 +1618,14 @@ async function refreshActivitySummary(options = {}) {
   } catch (error) {
     if (!requestIsCurrent()) return;
     const errorDescriptor = userMessageSnapshot(error, error?.message || String(error || '')).user_message;
+    recordJsDebugEvent('client_failure', {
+      ...jsDebugFailureDetails('client_failure', error, '/api/activity-summary'),
+      category: 'graph_activity',
+      requestId: String(error?.requestId || error?.request_id || error?.payload?.request?.id || '').slice(0, 128),
+      endpoint: '/api/activity-summary',
+      eventType: 'graph-refresh',
+      deliveryOutcome: 'failed',
+    });
     activitySummaryState.payload = {
       ...activitySummaryState.payload,
       errors: [String(error)],
@@ -1635,6 +1652,7 @@ async function refreshActivitySummary(options = {}) {
 }
 
 function applyActivitySummaryPayloadFromPush(payload = {}, options = {}) {
+  if (!activitySummaryEnabled) return false;
   if (!payload || typeof payload !== 'object') return false;
   if (options.source !== 'request') activitySummaryState.guard.invalidate();
   if (payload.session_file_hours != null) {

@@ -316,6 +316,22 @@
   min-width: var(--js-debug-system-local-services-service-width);
   vertical-align: top;
 }
+.js-debug-system-local-services-table--rows {
+  --js-debug-system-table-min-width: 58rem;
+  table-layout: auto;
+}
+.js-debug-system-local-services-table--rows th:first-child,
+.js-debug-system-local-services-table--rows td:first-child {
+  position: static;
+  width: auto;
+  min-width: 11rem;
+  white-space: normal;
+}
+.js-debug-system-local-services-table--rows td:last-child {
+  min-width: 16rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .js-debug-system-local-services-table thead th:not(:first-child) {
   text-align: end;
 }
@@ -759,6 +775,33 @@
 }
 .js-debug-history-retry {
   pointer-events: auto;
+}
+.yo-stats-current-recovery-banner {
+  margin: var(--space-8) 0;
+  padding: var(--space-12);
+  border: 2px solid var(--bad);
+  background: color-mix(in srgb, var(--bad) 14%, var(--panel));
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.45 var(--ui-font);
+}
+.js-debug-system-recovery-banner {
+  display: flex;
+  min-height: 80px;
+  margin: var(--space-12) 0;
+  padding: var(--space-12);
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-5);
+  border: 4px solid var(--bad);
+  border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--bad) 22%, var(--panel));
+  color: var(--text);
+  font: 700 1rem/1.4 var(--ui-font);
+  overflow-wrap: anywhere;
+}
+.js-debug-system-recovery-banner strong {
+  color: var(--bad);
+  font-size: 1.25em;
 }
 .js-debug-chart-shell > .js-debug-chart-grid {
   --js-debug-chart-min-height: 172px;

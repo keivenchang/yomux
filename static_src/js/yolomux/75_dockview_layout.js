@@ -688,9 +688,11 @@ function dockviewTrackTabPointerDrag(event) {
   const dx = Math.abs((Number(event.clientX) || 0) - state.x);
   const dy = Math.abs((Number(event.clientY) || 0) - state.y);
   if (Math.max(dx, dy) < DRAG_HYSTERESIS_PX) return;
+  beginLayoutMutationCompletion(state);
   const intent = dockviewTabPointerRootBoundaryIntentWithMemory(event, state);
-  if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) dockviewShowRootBoundaryPreview(intent);
-  else dockviewClearRootBoundaryPreview();
+  if (intent && !dockviewPinnedTabRootBoundaryViolation(intent)) {
+    dockviewShowRootBoundaryPreview(intent);
+  } else dockviewClearRootBoundaryPreview();
 }
 
 function dockviewFinishTabPointerDrag(event) {
@@ -720,6 +722,7 @@ function dockviewFinishTabPointerDrag(event) {
     // stamp can make the pointer fallback stand down without producing the requested root split.
     event.preventDefault?.();
     dockviewLayoutState.tabDropHandledAt = Date.now();
+    beginLayoutMutationCompletion(state);
     void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
     return;
   }
@@ -1010,8 +1013,16 @@ function dockviewScheduleDeferredLoad(previousActive = [], options = {}) {
   dockviewCancelPendingLoad();
   const deferredActive = [...previousActive];
   const deferredOptions = {...options, deferDockviewLoad: false, deferDockviewPostLoad: true};
+  const load = () => {
+    dockviewLayoutState.pendingLoadFrame = 0;
+    renderPanelsDockview(deferredActive, deferredOptions);
+  };
   if (typeof requestAnimationFrame !== 'function') {
     renderPanelsDockview(deferredActive, deferredOptions);
+    return;
+  }
+  if (options.deferDockviewLoadAfterPaint === false) {
+    dockviewLayoutState.pendingLoadFrame = window.setTimeout(load, 0);
     return;
   }
   // Let the host-layout/header-reservation frame queued by dockviewLayoutToHost
@@ -1020,10 +1031,7 @@ function dockviewScheduleDeferredLoad(previousActive = [], options = {}) {
   dockviewLayoutState.pendingLoadFrame = requestAnimationFrame(() => {
     // A timer task follows the host paint instead of becoming another part of
     // its rendering callback. The exact Dockview JSON reload remains unchanged.
-    dockviewLayoutState.pendingLoadFrame = window.setTimeout(() => {
-      dockviewLayoutState.pendingLoadFrame = 0;
-      renderPanelsDockview(deferredActive, deferredOptions);
-    }, 0);
+    dockviewLayoutState.pendingLoadFrame = window.setTimeout(load, 0);
   });
 }
 
@@ -1036,27 +1044,34 @@ function dockviewRefreshLoadedLayout(items = []) {
   }
   const mountedPerf = clientPerfStart('dockviewSyncMountedPanels');
   try {
-    dockviewSyncMountedPanels();
+    dockviewSyncMountedPanels({restoreViewState: true, ensureMounted: true});
   } finally {
     clientPerfEnd(mountedPerf, {nodes: items.length});
   }
 }
 
-function dockviewScheduleLoadedLayoutCompletion(items = [], previousActive = [], options = {}) {
+function dockviewScheduleLoadedLayoutCompletion(items = [], previousActive = [], options = {}, loadPerf = null) {
   if (dockviewLayoutState.pendingCompletionFrame) cancelAnimationFrame(dockviewLayoutState.pendingCompletionFrame);
   const completedItems = [...items];
   const completedActive = [...previousActive];
   const completedOptions = {...options, deferDockviewPostLoad: false};
   const complete = () => {
     dockviewLayoutState.pendingCompletionFrame = 0;
-    dockviewRefreshLoadedLayout(completedItems);
-    finishPanelLayoutRender(completedActive, completedOptions);
+    try {
+      dockviewRefreshLoadedLayout(completedItems);
+      finishPanelLayoutRender(completedActive, completedOptions);
+    } finally {
+      if (loadPerf) clientPerfEnd(loadPerf, {nodes: completedItems.length});
+      completeLayoutMutationGeneration(completedOptions.completionGeneration);
+    }
   };
-  if (typeof requestAnimationFrame !== 'function') {
+  if (typeof queueMicrotask !== 'function') {
     complete();
     return;
   }
-  dockviewLayoutState.pendingCompletionFrame = requestAnimationFrame(complete);
+  // Deferred topology loads already begin in a timer after the host-layout paint. A second frame
+  // here adds scheduler delay to the visible completion without buying another required paint.
+  queueMicrotask(complete);
 }
 
 function dockviewHostLayoutSize(host = dockviewLayoutState.host) {
@@ -1103,6 +1118,10 @@ function dockviewInstallTabPointerReorderFallback() {
   document.addEventListener('pointerup', finish, true);
   document.addEventListener('pointercancel', finish, true);
   document.addEventListener('mouseup', finish, true);
+  // iPad Safari can complete Dockview's touch transaction without emitting the matching pointerup.
+  // Reuse the remembered pointer intent so YOLOmux also commits and clears its drag state.
+  document.addEventListener('touchend', finish, {capture: true, passive: false});
+  document.addEventListener('touchcancel', finish, {capture: true, passive: false});
   document.addEventListener('pointermove', track, true);
   document.addEventListener('mousemove', track, true);
   return {
@@ -1110,6 +1129,8 @@ function dockviewInstallTabPointerReorderFallback() {
       document.removeEventListener('pointerup', finish, true);
       document.removeEventListener('pointercancel', finish, true);
       document.removeEventListener('mouseup', finish, true);
+      document.removeEventListener('touchend', finish, true);
+      document.removeEventListener('touchcancel', finish, true);
       document.removeEventListener('pointermove', track, true);
       document.removeEventListener('mousemove', track, true);
     },
@@ -1317,6 +1338,7 @@ function dockviewInit() {
         dockviewLayoutState.pendingRootBoundaryDrop = null;
         dockviewClearRootBoundaryPreview();
         event.preventDefault();
+        beginLayoutMutationCompletion(dockviewLayoutState.tabPointerDrag);
         queueMicrotask(() => {
           void splitSessionAtLayoutBoundary(rootIntent.item, rootIntent.zone, rootIntent.sourceSlot);
         });
@@ -1478,7 +1500,10 @@ function renderPanelsDockview(previousActive = [], options = {}) {
       clientPerfEnd(mountedPerf, {nodes: activePaneCount});
     }
   }
-  if (!layoutLoadDeferred && !layoutCompletionDeferred) finishPanelLayoutRender(previousActive, options);
+  if (!layoutLoadDeferred && !layoutCompletionDeferred) {
+    finishPanelLayoutRender(previousActive, options);
+    completeLayoutMutationGeneration(options.completionGeneration);
+  }
   return true;
 }
 
@@ -1490,6 +1515,8 @@ function dockviewLoadLayout(slots = layoutSlots, options = {}) {
   const api = dockviewLayoutState.api;
   if (!api) return;
   const items = paneItems(slots);
+  const loadPerf = clientPerfStart('dockviewLoadLayout');
+  let loadCompletionDeferred = false;
   dockviewLayoutState.applyingFromLayout = true;
   try {
     if (!items.length) {
@@ -1498,21 +1525,23 @@ function dockviewLoadLayout(slots = layoutSlots, options = {}) {
       dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
       return false;
     }
-    const loadPerf = clientPerfStart('dockviewFromJson');
+    const fromJsonPerf = clientPerfStart('dockviewFromJson');
     try {
       api.fromJSON(dockviewJsonFromLayoutSlots(slots), {reuseExistingPanels: true});
     } finally {
-      clientPerfEnd(loadPerf, {nodes: items.length});
+      clientPerfEnd(fromJsonPerf, {nodes: items.length});
     }
     dockviewLayoutState.lastAppliedLayoutSignature = layoutSlotsSignature(slots);
     dockviewLayoutState.lastAppliedActiveOnlySignature = dockviewLayoutActiveOnlySignature(slots);
     if (options.deferPostLoad === true) {
-      dockviewScheduleLoadedLayoutCompletion(items, options.previousActive, options.renderOptions);
+      loadCompletionDeferred = true;
+      dockviewScheduleLoadedLayoutCompletion(items, options.previousActive, options.renderOptions, loadPerf);
       return true;
     }
     dockviewRefreshLoadedLayout(items);
   } finally {
     dockviewLayoutState.applyingFromLayout = false;
+    if (!loadCompletionDeferred) clientPerfEnd(loadPerf, {nodes: items.length});
   }
   return false;
 }
@@ -1910,6 +1939,7 @@ function createDockviewPanelRenderer() {
     const slot = slotForItem(item) || dockviewSlotForGroupId(params?.api?.group?.id || '');
     updatePanelSlot(panel, item, slot);
     element.replaceChildren(panel);
+    if (dockviewLayoutState.applyingFromLayout) return;
     renderAttachedPanelContent(item);
     restorePaneViewState(item, panel);
     dockviewEnsureMountedTerminal(item, panel);
@@ -2041,6 +2071,7 @@ function createDockviewHeaderActionsRenderer() {
   let activeItem = '';
   let disposables = [];
   const render = () => {
+    if (dockviewLayoutState.applyingFromLayout) return;
     activeItem = resolveLayoutItem(group?.activePanel?.id || '');
     const slot = dockviewSlotForGroupId(group?.id || '') || slotForItem(activeItem);
     const html = dockviewHeaderActionsHtml(activeItem, slot);
@@ -2098,6 +2129,7 @@ function createDockviewTabRenderer() {
   let api = null;
   let disposables = [];
   const render = () => {
+    if (dockviewLayoutState.applyingFromLayout) return;
     if (!item) return;
     if (dockviewEmptyPaneSlot(item)) {
       element.hidden = true;
@@ -2254,6 +2286,8 @@ function dockviewSyncMountedPanels(options = {}) {
       syncPaneRoleDom(panel.closest?.('.dv-groupview'), slot);
     }
     if (options.renderAttached !== false) renderAttachedPanelContent(item);
+    if (options.restoreViewState === true) restorePaneViewState(item, panel);
+    if (options.ensureMounted === true) dockviewEnsureMountedTerminal(item, panel);
   }
   updatePanelInactiveOverlays();
 }

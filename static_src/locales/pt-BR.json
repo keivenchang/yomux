@@ -219,6 +219,7 @@
   "debug.cost.backfillPartial": "Preenchimento retroativo incompleto",
   "debug.cost.backfillPending": "Preenchimento retroativo pendente",
   "debug.cost.backfillRunning": "Preenchimento retroativo em andamento",
+  "debug.cost.backfillUnknown": "Status do preenchimento retroativo desconhecido",
   "debug.cost.byModel": "Por modelo",
   "debug.cost.bySource": "Atribuição de agente e fonte",
   "debug.cost.byTmux": "Custo por janela tmux",

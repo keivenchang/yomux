@@ -22,6 +22,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import datetime
@@ -44,15 +46,17 @@ from .common import DEFAULT_ROWS
 from .common import MAX_COMPACT_TRANSCRIPT_ITEMS
 from .common import PROJECT_ROOT
 from .common import PACIFIC_TIME
+from .common import ProductMetadata
 from .common import UPLOAD_MAX_BYTES
 from .common import WEBSOCKET_GUID
 from .common import codex_event_kind
 from .common import codex_exec_argv
 from .common import codex_runtime_env
 from .common import error_payload
+from .common import ready_response_envelope_bytes
 from .common import terminate_process_group
+from .common import validated_product_metadata
 from .common import yolomux_dev_bundle_revision
-from .filesystem import FilesystemError
 from .http_routes import dispatch_http_route
 from .http_routes import parse_query_float
 from .http_routes import parse_query_int
@@ -60,17 +64,25 @@ from .http_routes import parse_repo_refs_param  # noqa: F401 - compatibility re-
 from .http_routes import query_bool
 from .http_routes import query_one
 from .http_routes import route_for_request
+from .http_routes import RESPONSE_JSON
+from .http_routes import RESPONSE_JSON_BATCH
+from .http_routes import RESPONSE_BINARY
 from .http_routes import SHARE_ACCESS_NONE
+from .local_services.runtime import local_service_exception_cause
+from .local_services.client import local_service_failure_is_transient
 from .tmux.tmux_utils import tmux
 from .tmux.tmux_utils import tmux_command
 from .tmux.tmux_utils import tmux_session_client_rows
 from .tmux.tmux_utils import tmux_session_target
+from .tmux.process_group_ownership import record_owned_process_group
+from .tmux.process_group_ownership import signal_recorded_process_group
 from .observability.transcripts import codex_event_text
 from .observability.transcripts import strip_terminal_query_responses
 from .observability.transcripts import transcript_items_from_raw_line
 from .uploads import parse_multipart_upload
 from .server_auth import AuthMixin
 from .settings import SUMMARY_DEFAULT_CODEX_TIMEOUT_SECONDS
+from .server_logs import emit_server_log
 from .settings import SUMMARY_DEFAULT_LOOKBACK_SECONDS
 from .stats_current import http as stats_current_http
 from .stats_current import protocol as stats_current_protocol
@@ -84,6 +96,7 @@ from .web import static_content_type
 from .websocket import make_ws_frame
 from .websocket import read_ws_frame
 from .websocket import set_pty_size
+from .websocket import wait_for_ws_frame
 from .workdir import AGENT_LOGIN_COMMANDS
 from .workdir import agent_auth_status
 from .workdir import start_agent_auth_status_refresh
@@ -102,6 +115,8 @@ SHARE_VIEWER_OVERFLOW_WINDOW_SECONDS = 60.0
 SHARE_VIEWER_SEND_TIMEOUT_SECONDS = 5.0
 SHARE_REFRESH_CLIENT_MIN_SECONDS = 1.0
 DEV_RELOAD_POLL_SECONDS = 2.0
+CLIENT_EVENT_HEARTBEAT_SECONDS = 15.0
+CLIENT_EVENT_DISCONNECT_POLL_SECONDS = 1.0
 TMUX_ATTACH_REFRESH_DELAYS_SECONDS = (0.1, 0.5)
 SHARE_POINTER_MAX_WRITES_PER_SECOND = 1500
 SHARE_POINTER_MAX_HZ = 30
@@ -220,26 +235,12 @@ SHARE_MIRROR_DEBUG_NAMES = {
     SHARE_MIRROR_FRAME_TERMINAL_HOST_RESIZE: "terminal host resize",
 }
 SHARE_INPUT_INTENT_COMMAND_RE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")
-MAX_FS_BATCH_REQUESTS = 64
-FS_BATCH_TRIGGER_LEGACY = "legacy"
-FS_BATCH_ALLOWED_TRIGGERS = frozenset({
-    FS_BATCH_TRIGGER_LEGACY,
-    "tree-render",
-    "explicit-user",
-    "fresh-repair",
-    "watch-diff-fallback",
-    "deferred-interaction",
-    "sync-revalidation",
-})
-FS_BATCH_CLIENT_SCOPE_LEGACY = "legacy"
-FS_BATCH_ALLOWED_CLIENT_SCOPES = frozenset({"browser", "share"})
-FS_BATCH_PATH_FINGERPRINT_LIMIT = 8
-FS_BATCH_CLIENT_REVISION_MAX_LENGTH = 80
-FS_BATCH_TRIGGER_COUNT_LIMIT = MAX_FS_BATCH_REQUESTS
+MAX_FS_BATCH_REQUESTS = filesystem.MAX_BATCH_REQUESTS
 TOKEN_LOG_RE = re.compile(r"([?&](?:token|client_id)=)[^&\s\"]+")
 SHARE_URL_SECRET_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 STATIC_CACHE_CONTROL_VERSIONED = "public, max-age=31536000, immutable"
 STATIC_CACHE_CONTROL_UNVERSIONED = "no-store"
+HTTP_REQUEST_LINE_CAPTURE_LIMIT = 1024 * 1024
 RESPONSE_GZIP_MIN_BYTES = 1024
 STATIC_GZIP_CONTENT_TYPES = {
     "application/javascript",
@@ -372,10 +373,9 @@ def tmux_attach_command(readonly: bool = False) -> list[str]:
 def resize_pty_and_signal_process(fd: int, process: subprocess.Popen[Any] | None, rows: int, cols: int) -> None:
     set_pty_size(fd, rows, cols)
     if process is not None and process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGWINCH)
-        except OSError:
-            pass
+        outcome = signal_recorded_process_group(process, signal.SIGWINCH)
+        if not outcome["signalled"] and outcome["reason"] != "nothing_to_kill":
+            logger.warning("refused SIGWINCH for process group %s: %s", process.pid, outcome["reason"])
 
 
 def tmux_client_name_for_fd(fd: int) -> str:
@@ -839,6 +839,7 @@ class ShareTerminalUpstream:
                 env=env,
                 start_new_session=True,
             )
+            record_owned_process_group(process)
             refresh_tmux_session_clients_after_attach(self.session)
             self.process = process
             self.reader_thread = threading.Thread(target=self.reader_loop, name=f"share-terminal-{self.session}", daemon=True)
@@ -970,6 +971,9 @@ class ShareTerminalUpstream:
 class Handler(AuthMixin, BaseHTTPRequestHandler):
     server: "TmuxWebtermHTTPServer"
     protocol_version = "HTTP/1.1"
+    _route_response: Any = None
+    _route_response_written = False
+    _api_request_id = ""
 
     def handle_one_request(self) -> None:
         # BaseHTTPRequestHandler reuses this instance for HTTP/1.1 keep-alive requests. Route
@@ -978,8 +982,54 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self._http_response_compute_ms = None
         self._http_response_performance_details = None
         self._http_request_started_at = time.perf_counter()
+        self._http_request_line_read_at = None
+        self._http_request_parse_completed_at = None
         self._http_request_dispatch_started_at = None
+        self._route_response = None
+        self._route_response_written = False
+        self._api_request_id = ""
         super().handle_one_request()
+
+    def dispatch_route_response(self, route: Any, operation: Callable[[], None]) -> None:
+        """Run one registered route under the response boundary declared by its registry entry."""
+        self._route_response = route
+        self._route_response_written = False
+        try:
+            operation()
+        except Exception as error:
+            if self._route_response_written or route.protocol not in {RESPONSE_JSON, RESPONSE_JSON_BATCH}:
+                raise
+            cause = local_service_exception_cause(error)
+            root = {
+                "component": "server.http",
+                "operation": f"{route.method} {route.path}",
+                "code": "internal_error",
+                **cause,
+            }
+            self.write_api_response(
+                error_payload(
+                    "request failed",
+                    message_key="common.requestFailed",
+                    canonical=True,
+                    code="internal_error",
+                    origin="server.http",
+                    retryable=False,
+                    details={"exception_type": type(error).__name__},
+                    stack=[root],
+                    request_id=self.api_request_id(),
+                ),
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            self._route_response = None
+
+    def parse_request(self) -> bool:
+        """Mark BaseHTTPRequestHandler's request-line and header boundary for timing."""
+        self._http_request_line_read_at = time.perf_counter()
+        try:
+            return super().parse_request()
+        finally:
+            self._http_request_parse_completed_at = time.perf_counter()
 
     def setup(self) -> None:
         preparer = getattr(self.server, "prepare_request_socket", None)
@@ -992,6 +1042,84 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         message = TOKEN_LOG_RE.sub(r"\1[redacted]", fmt % args)
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), message))
 
+    def request_line_capture(self) -> tuple[bytes, bool]:
+        """Return the raw request line and whether the complete line was already buffered.
+
+        BaseHTTPRequestHandler reads 65,537 bytes before it emits a 414.  The remainder is
+        usually already buffered for a browser request, so consume through its newline only when
+        it is immediately available.  Never wait for more client input just to diagnose an error.
+        """
+        captured = bytearray(bytes(getattr(self, "raw_requestline", b"") or b""))
+        if captured.endswith(b"\n"):
+            return bytes(captured), True
+        request_file = getattr(self, "rfile", None)
+        peek = getattr(request_file, "peek", None)
+        readline = getattr(request_file, "readline", None)
+        if not callable(peek) or not callable(readline) or len(captured) >= HTTP_REQUEST_LINE_CAPTURE_LIMIT:
+            return bytes(captured), False
+        connection = getattr(self, "connection", None)
+        gettimeout = getattr(connection, "gettimeout", None)
+        setblocking = getattr(connection, "setblocking", None)
+        settimeout = getattr(connection, "settimeout", None)
+        timeout = gettimeout() if callable(gettimeout) else None
+        try:
+            if callable(setblocking):
+                setblocking(False)
+            buffered = bytes(peek(HTTP_REQUEST_LINE_CAPTURE_LIMIT - len(captured)))
+        except (BlockingIOError, OSError, ValueError):
+            return bytes(captured), False
+        finally:
+            if callable(settimeout):
+                settimeout(timeout)
+        newline = buffered.find(b"\n")
+        if newline < 0:
+            return bytes(captured), False
+        try:
+            captured.extend(readline(newline + 1))
+        except (OSError, ValueError):
+            return bytes(captured), False
+        return bytes(captured), captured.endswith(b"\n")
+
+    def log_request_uri_too_long(self) -> None:
+        """Write the framing evidence for a 414 without changing its HTTP outcome."""
+        raw_line, complete = self.request_line_capture()
+        line = raw_line.rstrip(b"\r\n").decode("latin-1")
+        candidate_method = line.split(" ", 1)[0]
+        method = candidate_method if re.fullmatch(r"[A-Z]+", candidate_method) else "invalid"
+        address = self.client_address if isinstance(self.client_address, tuple) else ()
+        client = f"{address[0]}:{address[1]}" if len(address) > 1 else str(address[0]) if address else "unknown"
+        connection = getattr(self, "connection", None)
+        try:
+            local = connection.getsockname() if connection is not None else None
+        except OSError:
+            local = None
+        try:
+            descriptor = connection.fileno() if connection is not None else None
+        except OSError:
+            descriptor = None
+        self.log_error(
+            "request-line-capture %s",
+            json.dumps({
+                "status": HTTPStatus.REQUEST_URI_TOO_LONG.value,
+                "client": client,
+                "connection": {"local": local, "fd": descriptor},
+                "method": method,
+                "request_line": line,
+                "request_line_complete": complete,
+                "request_line_bytes": len(raw_line),
+            }, ensure_ascii=True, separators=(",", ":")),
+        )
+
+    def send_error(self, code: int | HTTPStatus, message: str | None = None, explain: str | None = None) -> None:
+        if int(code) == HTTPStatus.REQUEST_URI_TOO_LONG:
+            self.log_request_uri_too_long()
+        super().send_error(code, message, explain)
+
+    def send_response(self, code: int | HTTPStatus, message: str | None = None) -> None:
+        """Mark the response committed for every JSON and non-JSON protocol family."""
+        self._route_response_written = True
+        super().send_response(code, message)
+
     def http_endpoint_metric_key(self) -> str:
         method = str(getattr(self, "command", "") or "GET").upper()
         try:
@@ -1000,13 +1128,31 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             path = str(getattr(self, "path", "") or "/").split("?", 1)[0] or "/"
         return f"{method} {path}"[:120]
 
-    def measurement_scope(self) -> str:
-        """Return a generic in-memory scope without retaining a browser marker."""
+    def measurement_marker(self) -> str:
+        """Return only a validated capture marker; callers must not retain it verbatim."""
         headers = getattr(self, "headers", {})
         marker = str(headers.get("X-YOLOmux-Measurement") or "") if hasattr(headers, "get") else ""
         if marker.startswith("capture-") and len(marker) == 40 and all(char in "0123456789abcdef" for char in marker[8:]):
-            return "capture"
+            return marker
         return ""
+
+    def measurement_scope(self) -> str:
+        """Return a generic in-memory scope without retaining a browser marker."""
+        return "capture" if self.measurement_marker() else ""
+
+    def measurement_request_id(self) -> str:
+        """Return an opaque, bounded join key for one validated capture request."""
+        marker = self.measurement_marker()
+        return hashlib.sha256(marker.encode("ascii")).hexdigest()[:16] if marker else ""
+
+    def measurement_connection_id(self) -> str:
+        """Return a capture-scoped opaque join key for this request's TCP peer."""
+        marker = self.measurement_marker()
+        address = self.client_address if isinstance(self.client_address, tuple) else ()
+        peer_port = address[1] if len(address) > 1 else None
+        if not marker or not isinstance(peer_port, int):
+            return ""
+        return hashlib.sha256(f"{marker}:{peer_port}".encode("ascii")).hexdigest()[:16]
 
     def record_http_response_bytes(
         self,
@@ -1027,17 +1173,33 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "path": endpoint.split(" ", 1)[1] if " " in endpoint else "",
             "content_type": content_type_base(content_type),
         }
+        if str(details["path"]).startswith("/api/"):
+            details["request_id"] = self.api_request_id()
         measurement_scope = self.measurement_scope()
         if measurement_scope:
             details["measurement_scope"] = measurement_scope
+            # The browser keeps the raw capture marker; metrics retain only this opaque digest so
+            # a slow request can be joined to that click without exposing a browser identifier.
+            details["measurement_request_id"] = self.measurement_request_id()
+            details["measurement_connection_id"] = self.measurement_connection_id()
         request_started = getattr(self, "_http_request_started_at", None)
+        request_line_read_at = getattr(self, "_http_request_line_read_at", None)
+        request_parse_completed_at = getattr(self, "_http_request_parse_completed_at", None)
         dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
         response_started = time.perf_counter()
         if isinstance(request_started, (int, float)):
             details["request_total_ms"] = round(max(0.0, (response_started - request_started) * 1000), 3)
+        if isinstance(request_started, (int, float)) and isinstance(request_line_read_at, (int, float)):
+            # For HTTP/1.1 keep-alives this includes the idle wait before the browser sends the
+            # next request line. It is deliberately separate from server-side parsing or routing.
+            details["request_line_wait_ms"] = round(max(0.0, (request_line_read_at - request_started) * 1000), 3)
+        if isinstance(request_line_read_at, (int, float)) and isinstance(request_parse_completed_at, (int, float)):
+            details["request_header_parse_ms"] = round(max(0.0, (request_parse_completed_at - request_line_read_at) * 1000), 3)
+        if isinstance(request_parse_completed_at, (int, float)) and isinstance(dispatch_started, (int, float)):
+            details["request_parse_to_route_ms"] = round(max(0.0, (dispatch_started - request_parse_completed_at) * 1000), 3)
         if isinstance(request_started, (int, float)) and isinstance(dispatch_started, (int, float)):
-            # ThreadingHTTPServer accepts the socket before Handler.handle_one_request.  This is
-            # therefore the observable accept-to-route delay, rather than a made-up queue time.
+            # Keep the aggregate for existing consumers. The stage fields above distinguish an
+            # HTTP/1.1 request-line wait from parsing and actual route entry.
             details["accept_to_route_ms"] = round(max(0.0, (dispatch_started - request_started) * 1000), 3)
         extra_details = getattr(self, "_http_response_performance_details", None)
         if isinstance(extra_details, dict):
@@ -1226,7 +1388,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
     def handle_fs_list(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "/") or "/")
-        self.write_filesystem_json(raw_path, lambda: filesystem.list_directory(raw_path))
+        self.submit_filesystem_operation("GET /api/fs/list", "list", raw_path)
 
     def handle_fs_search(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1234,98 +1396,90 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         query = str(query_one(qs, "query", "") or "")
         limit = str(query_one(qs, "limit", "400") or "400")
         recursive = query_bool(qs, "recursive")
-        self.write_filesystem_json(raw_root, lambda: filesystem.search_files(raw_root, query, limit, recursive=recursive))
+        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive})
 
     def handle_fs_index_status(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_root = str(query_one(qs, "root", query_one(qs, "path", "/")) or "/")
-        self.write_filesystem_json(raw_root, lambda: filesystem.index_status(raw_root))
+        self.submit_filesystem_operation("GET /api/fs/index-status", "index_status", raw_root)
 
     def handle_fs_read(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.write_filesystem_json(raw_path, lambda: filesystem.read_file(raw_path))
+        self.submit_filesystem_operation("GET /api/fs/read", "read", raw_path)
 
     def handle_fs_info(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.write_filesystem_json(raw_path, lambda: filesystem.path_info(raw_path))
+        self.submit_filesystem_operation("GET /api/fs/info", "info", raw_path)
 
     def handle_fs_diff(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         from_ref = query_one(qs, "from", None)
         to_ref = query_one(qs, "to", None)
-        self.write_filesystem_json(raw_path, lambda: filesystem.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref))
+        self.submit_filesystem_operation("GET /api/fs/diff", "diff", raw_path, {"from_ref": from_ref, "to_ref": to_ref})
 
     def handle_blame(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         ref = query_one(qs, "ref", None)
-        self.write_filesystem_json(raw_path, lambda: filesystem.blame_file(raw_path, ref=ref))
+        self.submit_filesystem_operation("GET /api/blame", "blame", raw_path, {"ref": ref})
 
-    def write_filesystem_json(self, raw_path: str, build_payload: Any) -> None:
-        try:
-            payload = build_payload()
-        except FilesystemError as exc:
-            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
+    def submit_filesystem_operation(
+        self,
+        route: str,
+        operation: str,
+        raw_path: str,
+        args: dict[str, Any] | None = None,
+        *,
+        reload_yolo_rules: bool = False,
+    ) -> None:
+        """Accept one serializable filesystem descriptor without invoking it in the web thread."""
+        share_token = self.share_token()
+        if share_token:
+            scope = f"share:{share_token}"
+        else:
+            identity = self.auth_identity()
+            scope = f"user:{identity.role}:{identity.username}"
+        response = self.server.app.filesystem_operation_http_payload(
+            route=route,
+            operation=operation,
+            path=raw_path,
+            args=args,
+            reload_yolo_rules=reload_yolo_rules,
+            scope=scope,
+        )
+        if response.product is not None:
+            self.write_product_bytes(response.body, response.product)
             return
-        self.write_json(payload)
+        self.write_json(response.payload, status=response.status)
 
     def handle_fs_raw(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
         download = query_bool(qs, "download")
-        try:
-            data, mime = filesystem.read_raw(raw_path, max_bytes=self.file_transfer_max_bytes())
-        except FilesystemError as exc:
-            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
-            return
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        if download:
-            self.send_header("Content-Disposition", content_disposition_attachment(raw_path))
-        self.send_auth_cookie_if_needed()
-        if getattr(self, "close_connection", False):
-            self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(data)
-        self.record_http_response_bytes(HTTPStatus.OK, len(data), mime)
+        self.submit_filesystem_relay(
+            "GET /api/fs/raw",
+            "raw",
+            raw_path,
+            {"download": download, "max_bytes": self.file_transfer_max_bytes()},
+        )
 
     def handle_fs_zip(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        try:
-            archive_file, archive_size = filesystem.zip_directory(raw_path, max_bytes=self.file_transfer_max_bytes())
-        except FilesystemError as exc:
-            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
-            return
-        mime = "application/zip"
-        try:
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(archive_size))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Disposition", content_disposition_attachment(fs_zip_attachment_filename(raw_path)))
-            self.send_auth_cookie_if_needed()
-            if self.close_connection:
-                self.send_header("Connection", "close")
-            self.end_headers()
-            while True:
-                chunk = archive_file.read(1024 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-            self.record_http_response_bytes(HTTPStatus.OK, archive_size, mime)
-        finally:
-            archive_file.close()
+        self.submit_filesystem_relay(
+            "GET /api/fs/zip",
+            "zip",
+            raw_path,
+            {"filename": fs_zip_attachment_filename(raw_path), "max_bytes": self.file_transfer_max_bytes()},
+        )
 
     def handle_fs_count(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
         raw_path = str(query_one(qs, "path", "") or "")
-        self.write_filesystem_json(raw_path, lambda: filesystem.count_directory_files(raw_path))
+        self.submit_filesystem_operation("GET /api/fs/count", "count", raw_path)
 
     def handle_fs_html_preview(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1342,29 +1496,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        try:
-            payload = filesystem.read_file(raw_path)
-        except FilesystemError as exc:
-            self.write_json(exc.payload(path=raw_path), status=HTTPStatus(exc.status))
-            return
-        source = html.escape(str(payload.get("content", "")), quote=True)
         locale = resolve_locale_preference(self.request_locale_pref(), self.headers.get("Accept-Language", ""))
-        title = html.escape(Path(raw_path).name or server_string(locale, "preview.htmlTitle"))
-        body = f"""<!doctype html>
-<html {html_lang_dir_attrs(locale)}>
-<head>
-  <meta charset="utf-8">
-  <title>{title}</title>
-  <style>
-    html, body, iframe {{ width: 100%; height: 100%; margin: 0; border: 0; background: #fff; }}
-    iframe {{ display: block; }}
-  </style>
-</head>
-<body>
-  <iframe title="{title}" sandbox="allow-scripts allow-forms allow-popups" srcdoc="{source}"></iframe>
-</body>
-</html>"""
-        self.write_html(body)
+        self.submit_filesystem_relay("GET /api/fs/html-preview", "html_preview", raw_path, {"locale": locale})
+
+    def submit_filesystem_relay(self, route: str, operation: str, raw_path: str, args: dict[str, Any]) -> None:
+        """Forward browser-owned filesystem bytes through the shared product writer."""
+        response = self.server.app.filesystem_operation_relay(
+            route=route,
+            operation=operation,
+            path=raw_path,
+            args=args,
+        )
+        if response.product is not None:
+            self.write_product_bytes(response.body, response.product)
+            return
+        self.write_json(response.payload, status=response.status)
 
     def handle_preview_popout_placeholder(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -1522,7 +1668,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     status=HTTPStatus.BAD_REQUEST,
                 )
                 return
-        if yolo_rules.is_rules_file_path(raw_path):
+        try:
+            rules_file_path = yolo_rules.is_rules_file_path(raw_path)
+        except OSError as exc:
+            self.write_json(
+                error_payload(
+                    "YOLO rules path is unavailable",
+                    message_key="yolo.error.invalidRules",
+                    diagnostic=exc,
+                    path=raw_path,
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                ),
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        if rules_file_path:
             try:
                 yolo_rules.validate_rule_file_text(str(content), path=yolo_rules.active_rule_path())
             except (ValueError, yaml.YAMLError) as exc:
@@ -1537,29 +1697,34 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     status=HTTPStatus.BAD_REQUEST,
                 )
                 return
-            self.write_filesystem_json(
+            self.submit_filesystem_operation(
+                "POST /api/fs/write",
+                "write",
                 raw_path,
-                lambda: {
-                    **filesystem.write_file(raw_path, content, expected_mtime=expected_mtime),
-                    "yolo_rules": yolo_rules.reload_rules(),
-                },
+                {"content": content, "expected_mtime": expected_mtime},
+                reload_yolo_rules=True,
             )
             return
-        self.write_filesystem_json(raw_path, lambda: filesystem.write_file(raw_path, content, expected_mtime=expected_mtime))
+        self.submit_filesystem_operation(
+            "POST /api/fs/write",
+            "write",
+            raw_path,
+            {"content": content, "expected_mtime": expected_mtime},
+        )
 
     def handle_fs_delete(self, parsed: Any) -> None:
         payload = self.read_json_body(4096)
         if payload is None:
             return
         raw_path = payload.get("path", "")
-        self.write_filesystem_json(raw_path, lambda: filesystem.delete_path(raw_path))
+        self.submit_filesystem_operation("POST /api/fs/delete", "delete", raw_path)
 
     def handle_fs_unindex(self, parsed: Any) -> None:
         payload = self.read_json_body(4096)
         if payload is None:
             return
         raw_path = payload.get("path", payload.get("root", ""))
-        self.write_filesystem_json(raw_path, lambda: filesystem.unindex_root(raw_path))
+        self.submit_filesystem_operation("POST /api/fs/unindex", "unindex", raw_path)
 
     def handle_fs_rename(self, parsed: Any) -> None:
         payload = self.read_json_body(4096)
@@ -1567,14 +1732,14 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             return
         raw_path = payload.get("path", "")
         new_name = payload.get("new_name", "")
-        self.write_filesystem_json(raw_path, lambda: filesystem.rename_path(raw_path, new_name))
+        self.submit_filesystem_operation("POST /api/fs/rename", "rename", raw_path, {"new_name": new_name})
 
     def handle_fs_mkdir(self, parsed: Any) -> None:
         payload = self.read_json_body(4096)
         if payload is None:
             return
         raw_path = payload.get("path", "")
-        self.write_filesystem_json(raw_path, lambda: filesystem.create_directory(raw_path))
+        self.submit_filesystem_operation("POST /api/fs/mkdir", "mkdir", raw_path)
 
     def do_POST(self) -> None:
         dispatch_http_route(self, "POST")
@@ -1648,8 +1813,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         )
 
     def handle_fs_batch(self, parsed: Any) -> None:
+        del parsed
         started = time.perf_counter()
         payload = self.read_json_body(64 * 1024)
+        body_read_ms = (time.perf_counter() - started) * 1000
         if payload is None:
             return
         requests = payload.get("requests", [])
@@ -1664,128 +1831,40 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        if len(requests) > MAX_FS_BATCH_REQUESTS:
+        if len(requests) > filesystem.MAX_BATCH_REQUESTS:
             self.write_json(
                 error_payload(
-                    f"requests must contain at most {MAX_FS_BATCH_REQUESTS} items",
+                    f"requests must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
                     message_key="request.error.tooManyItems",
-                    message_params={"field": "requests", "max": MAX_FS_BATCH_REQUESTS},
+                    message_params={"field": "requests", "max": filesystem.MAX_BATCH_REQUESTS},
                     status=HTTPStatus.BAD_REQUEST,
                 ),
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        raw_client_revision = payload.get("client_revision", "")
-        client_revision = str(raw_client_revision or "")
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,%d}" % FS_BATCH_CLIENT_REVISION_MAX_LENGTH, client_revision):
-            client_revision = ""
-        raw_client_scope = payload.get("client_scope", "")
-        client_scope = str(raw_client_scope or "")
-        if client_scope not in FS_BATCH_ALLOWED_CLIENT_SCOPES:
-            client_scope = FS_BATCH_CLIENT_SCOPE_LEGACY
-        responses = []
-        op_counts: dict[str, int] = {}
-        trigger_counts: dict[str, int] = {}
-        path_fingerprints: list[str] = []
-        for index, item in enumerate(requests):
-            request_id = item.get("id", index) if isinstance(item, dict) else index
-            if not isinstance(item, dict):
-                responses.append(error_payload(
-                    "request must be an object",
-                    message_key="request.error.object",
-                    message_params={"field": "request"},
-                    id=request_id,
-                    ok=False,
-                    status=HTTPStatus.BAD_REQUEST,
-                ))
-                continue
-            op = str(item.get("type", item.get("op", "")) or "")
-            raw_path = str(item.get("path", "") or "")
-            safe_op = op if op in {"list", "info"} else "invalid"
-            op_counts[safe_op] = op_counts.get(safe_op, 0) + 1
-            raw_trigger_counts = item.get("trigger_counts")
-            if raw_trigger_counts is None:
-                raw_trigger_counts = {str(item.get("trigger", FS_BATCH_TRIGGER_LEGACY) or FS_BATCH_TRIGGER_LEGACY): 1}
-            if not isinstance(raw_trigger_counts, dict) or not raw_trigger_counts:
-                trigger_counts["invalid"] = trigger_counts.get("invalid", 0) + 1
-                responses.append(error_payload(
-                    "invalid fs batch trigger",
-                    message_key="request.error.unsupportedFsBatchOperation",
-                    message_params={"operation": "trigger"},
-                    id=request_id,
-                    ok=False,
-                    status=HTTPStatus.BAD_REQUEST,
-                    path=raw_path,
-                ))
-                continue
-            item_trigger_counts: dict[str, int] = {}
-            for raw_trigger, raw_count in raw_trigger_counts.items():
-                trigger = str(raw_trigger or "")
-                if trigger not in FS_BATCH_ALLOWED_TRIGGERS or isinstance(raw_count, bool):
-                    item_trigger_counts = {}
-                    break
-                try:
-                    count = int(raw_count)
-                except (TypeError, ValueError):
-                    item_trigger_counts = {}
-                    break
-                if count < 1 or count > FS_BATCH_TRIGGER_COUNT_LIMIT:
-                    item_trigger_counts = {}
-                    break
-                item_trigger_counts[trigger] = count
-            if not item_trigger_counts:
-                trigger_counts["invalid"] = trigger_counts.get("invalid", 0) + 1
-                responses.append(error_payload(
-                    "invalid fs batch trigger",
-                    message_key="request.error.unsupportedFsBatchOperation",
-                    message_params={"operation": "trigger"},
-                    id=request_id,
-                    ok=False,
-                    status=HTTPStatus.BAD_REQUEST,
-                    path=raw_path,
-                ))
-                continue
-            for trigger, count in item_trigger_counts.items():
-                trigger_counts[trigger] = trigger_counts.get(trigger, 0) + count
-            if raw_path and len(path_fingerprints) < FS_BATCH_PATH_FINGERPRINT_LIMIT:
-                try:
-                    normalized_path = str(Path(raw_path).expanduser().resolve(strict=False))
-                except OSError:
-                    normalized_path = raw_path
-                fingerprint = hashlib.sha256(normalized_path.encode("utf-8", errors="replace")).hexdigest()[:16]
-                if fingerprint not in path_fingerprints:
-                    path_fingerprints.append(fingerprint)
-            if op not in {"list", "info"}:
-                responses.append(error_payload(
-                    "unsupported fs batch operation",
-                    message_key="request.error.unsupportedFsBatchOperation",
-                    message_params={"operation": op},
-                    id=request_id,
-                    ok=False,
-                    status=HTTPStatus.BAD_REQUEST,
-                    path=raw_path,
-                ))
-                continue
-            try:
-                result = filesystem.list_directory(raw_path) if op == "list" else filesystem.path_info(raw_path)
-            except FilesystemError as exc:
-                responses.append(exc.payload(id=request_id, ok=False, path=raw_path))
-                continue
-            responses.append({"id": request_id, "ok": True, "status": 200, "payload": result})
-        response_payload = {"responses": responses}
-        # The shared HTTP response recorder owns one sample per request. Its diagnostics must
-        # never retain raw paths or request bodies; hashes identify repeated normalized paths.
-        self._http_response_compute_ms = (time.perf_counter() - started) * 1000
+        summary = filesystem.filesystem_batch_request_summary(payload)
+        operation_started = time.perf_counter()
+        response, status = self.server.app.fs_batch_http_payload(
+            payload,
+            shared_sessions=self.share_sessions(),
+        )
+        operation_ms = max(0.0, (time.perf_counter() - operation_started) * 1000)
+        self._http_response_compute_ms = max(0.0, (time.perf_counter() - started) * 1000)
         self._http_response_performance_details = {
             "fs_batch": True,
-            "fs_batch_size": len(requests),
-            "fs_batch_operations": json.dumps(op_counts, sort_keys=True),
-            "fs_batch_path_hashes": json.dumps(path_fingerprints),
-            "fs_batch_triggers": json.dumps(trigger_counts, sort_keys=True),
-            "fs_batch_client_revision": client_revision or "unknown",
-            "fs_batch_client_scope": client_scope,
+            "fs_batch_offloaded": True,
+            "fs_batch_size": summary["batch_size"],
+            "fs_batch_body_read_ms": round(body_read_ms, 3),
+            "fs_batch_operation_ms": round(operation_ms, 3),
+            "fs_batch_list_ms": 0.0,
+            "fs_batch_info_ms": 0.0,
+            "fs_batch_operations": json.dumps(summary["operations"], sort_keys=True),
+            "fs_batch_path_hashes": json.dumps(summary["path_fingerprints"]),
+            "fs_batch_triggers": json.dumps(summary["triggers"], sort_keys=True),
+            "fs_batch_client_revision": summary["client_revision"],
+            "fs_batch_client_scope": summary["client_scope"],
         }
-        self.write_json(response_payload)
+        self.write_json(response, status=status)
 
     def read_urlencoded_form(self) -> dict[str, list[str]]:
         body, error, _status = Handler.read_request_body(self, 16 * 1024, allow_empty=True, allow_missing=True)
@@ -1913,7 +1992,39 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         except OSError:
             return
 
-    def stream_client_events(self, channels: str = "", client_id: str = "") -> None:
+    def client_event_peer_disconnected(self) -> bool:
+        """Detect a client read-side close even while SSE writes still succeed."""
+        connection = self.connection
+        try:
+            readable, _, exceptional = select.select([connection], [], [connection], 0)
+        except (OSError, ValueError):
+            return True
+        if exceptional:
+            return True
+        if not readable:
+            return False
+        previous_timeout = connection.gettimeout()
+        try:
+            connection.setblocking(False)
+            flags = 0 if isinstance(connection, ssl.SSLSocket) else socket.MSG_PEEK
+            return connection.recv(1, flags) == b""
+        except (BlockingIOError, InterruptedError, ssl.SSLWantReadError):
+            return False
+        except OSError:
+            return True
+        finally:
+            try:
+                connection.settimeout(previous_timeout)
+            except OSError:
+                pass
+
+    def stream_client_events(
+        self,
+        channels: str = "",
+        client_id: str = "",
+        operation_id: str = "",
+        replay_operation_ids: tuple[str, ...] = (),
+    ) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1929,6 +2040,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.server.app.start_client_event_watcher()
         if hasattr(self.server.app, "wake_client_event_watcher"):
             self.server.app.wake_client_event_watcher()
+        demanded_operation_ids = {value for value in (operation_id, *replay_operation_ids) if value}
+
+        def write_operation_terminal(event_payload: dict[str, Any]) -> None:
+            self.write_sse_json("operation_terminal", {
+                "type": "operation_terminal",
+                "time": time.time(),
+                "payload": event_payload,
+            })
+
         try:
             client_event_snapshot = self.server.app.client_events.ready_snapshot(subscriber_id)
             self.write_sse_json("ready", {
@@ -1936,14 +2056,47 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 "epoch": client_event_snapshot["epoch"],
                 "resource_revisions": client_event_snapshot["resource_revisions"],
             })
+            if operation_id and hasattr(self.server.app, "operation_replay_payload"):
+                replay = self.server.app.operation_replay_payload(operation_id)
+                if isinstance(replay, dict):
+                    write_operation_terminal(replay)
+            if hasattr(self.server.app, "operation_replay_payload"):
+                for replay_operation_id in replay_operation_ids:
+                    if replay_operation_id == operation_id:
+                        continue
+                    replay = self.server.app.operation_replay_payload(replay_operation_id)
+                    if isinstance(replay, dict):
+                        write_operation_terminal(replay)
+            next_heartbeat_at = time.monotonic() + CLIENT_EVENT_HEARTBEAT_SECONDS
             while True:
                 try:
-                    event = self.server.app.client_events.next_event(subscriber_id, timeout=15.0)
+                    event = self.server.app.client_events.next_event(
+                        subscriber_id,
+                        timeout=min(
+                            CLIENT_EVENT_DISCONNECT_POLL_SECONDS,
+                            max(0.0, next_heartbeat_at - time.monotonic()),
+                        ),
+                    )
                 except queue.Empty:
+                    event = None
+                if self.client_event_peer_disconnected():
+                    return
+                if time.monotonic() >= next_heartbeat_at:
                     if hasattr(self.server.app, "touch_client_watch_descriptor"):
                         self.server.app.touch_client_watch_descriptor(client_id)
                     self.write_sse_json("ping", {"time": time.time()})
                     self.server.app.client_events.record_heartbeat()
+                    next_heartbeat_at = time.monotonic() + CLIENT_EVENT_HEARTBEAT_SECONDS
+                if event is None:
+                    continue
+                if str(event.get("type") or "") == "operation_terminal":
+                    event_payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    event_operation = event_payload.get("operation") if isinstance(event_payload.get("operation"), dict) else {}
+                    if str(event_operation.get("id") or "") not in demanded_operation_ids:
+                        continue
+                    write_operation_terminal(event_payload)
+                    continue
+                if operation_id:
                     continue
                 self.write_sse_json(str(event.get("type") or "event"), event)
         except OSError:
@@ -1972,6 +2125,21 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             raw_query,
             authenticated_username=authenticated_username,
         )
+        # EventSource does not expose a non-200 response body to its listeners.
+        # A stale initial cursor is a normal repair terminal, so carry it over the
+        # established SSE channel just as we do for a cursor that goes stale after
+        # the stream is open. Otherwise the browser receives only a generic error
+        # and cannot discharge the pending range selection with the typed reason.
+        if result.status == HTTPStatus.CONFLICT:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_auth_cookie_if_needed()
+            self.end_headers()
+            self.write_sse_json("repair", result.metadata)
+            return
         if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
             self.write_json(
                 result.metadata,
@@ -1990,7 +2158,6 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         cadence_seconds = stats_current_protocol.live_cadence_seconds(
             cursor.resolution_seconds
         )
-        waiter = threading.Event()
         next_deadline = time.monotonic() + cadence_seconds
         try:
             while True:
@@ -1998,7 +2165,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                     self.write_sse_bytes("delta", result.body)
                     cache_generation = int(result.metadata["cache_generation"])
                     revision_number = int(result.metadata["revision"])
-                else:
+                elif result.status == HTTPStatus.NOT_MODIFIED:
                     payload = result.metadata
                     cache_generation = int(
                         payload.get("cache_generation") or cache_generation
@@ -2007,7 +2174,10 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                         "cache_generation": cache_generation,
                         "revision": revision_number,
                     })
-                waiter.wait(max(0.0, next_deadline - time.monotonic()))
+                if self.server.persistent_request_stop.wait(
+                    max(0.0, next_deadline - time.monotonic())
+                ):
+                    return
                 now = time.monotonic()
                 while next_deadline <= now:
                     next_deadline += cadence_seconds
@@ -2025,7 +2195,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 if result.status == HTTPStatus.CONFLICT:
                     self.write_sse_json("repair", result.metadata)
                     return
-                if result.status not in {HTTPStatus.OK, HTTPStatus.NOT_MODIFIED}:
+                if result.status not in {
+                    HTTPStatus.OK,
+                    HTTPStatus.NOT_MODIFIED,
+                    HTTPStatus.ACCEPTED,
+                }:
                     self.write_sse_json("unavailable", result.metadata)
                     return
         except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
@@ -2039,7 +2213,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
             return
         message_limit = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
-        payload, status = self.server.app.context_items(session, message_limit)
+        payload, status = self.server.app.context_items(session, message_limit, accept_pending=False)
         if status != HTTPStatus.OK:
             self.write_json(payload, status=status)
             return
@@ -2087,6 +2261,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         lookback_seconds, error = parse_query_int(qs, "lookback", default_lookback, max_value=24 * 3600)
         if error:
             self.write_json(error.payload(), status=HTTPStatus.BAD_REQUEST)
+            return
+        unknown = self.server.app.require_known_session(session)
+        if unknown:
+            payload, status = unknown
+            self.write_json(payload, status=status)
             return
         availability_error = self.codex_summary_availability_error(summary_settings)
         if availability_error:
@@ -2199,6 +2378,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 env=env,
                 start_new_session=True,
             )
+            record_owned_process_group(process)
             if process.stdin is None or process.stdout is None:
                 diagnostic = "failed to open Codex pipes"
                 self.write_sse_json("summary_error", user_message_payload("summary.error.openPipes", diagnostic))
@@ -2453,21 +2633,456 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
         self.record_http_response_bytes(HTTPStatus.OK, 0, content_type)
 
+    def api_request_id(self) -> str:
+        """Return one validated browser correlation ID or a server-minted replacement."""
+        if self._api_request_id:
+            return self._api_request_id
+        headers = getattr(self, "headers", {})
+        proposed = str(headers.get("X-YOLOmux-Request-ID") or "").strip()
+        if re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", proposed):
+            self._api_request_id = proposed
+        else:
+            self._api_request_id = f"r-{uuid.uuid4().hex}"
+        return self._api_request_id
+
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        encode_started = time.perf_counter()
-        data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        json_encode_ms = (time.perf_counter() - encode_started) * 1000
-        self.write_json_bytes(data, status=status, json_encode_ms=json_encode_ms)
+        self.write_api_response(value, status=status)
 
     def write_json_bytes(self, data: bytes, status: HTTPStatus = HTTPStatus.OK, *, json_encode_ms: float = 0.0) -> None:
+        self.write_api_response(data, status=status, json_bytes=True, json_encode_ms=json_encode_ms)
+
+    def write_product_bytes(
+        self,
+        data: bytes,
+        product: ProductMetadata,
+        *,
+        promise: tuple[str, int] | None = None,
+    ) -> None:
+        """Frame or forward one trusted producer's opaque product bytes."""
+
+        self.write_api_response(data, product_metadata=product, product_promise=promise)
+
+    def write_api_response(
+        self,
+        value: Any,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        json_bytes: bool = False,
+        product_metadata: ProductMetadata | None = None,
+        product_promise: tuple[str, int] | None = None,
+        json_encode_ms: float = 0.0,
+    ) -> None:
+        """Own the canonical API envelope, causal failure record, and correlated log line."""
+        route = self._route_response
+        status_code = int(status)
+        if status_code in {HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED}:
+            if value is not None and value != "" and value != b"":
+                raise ValueError(f"bodyless API response {status_code} cannot carry a payload")
+            self._route_response_written = True
+            self._write_bodyless_api_response(HTTPStatus(status_code))
+            return
+        if product_metadata is not None:
+            if not isinstance(value, bytes):
+                raise ValueError("opaque product body must be bytes")
+            product = validated_product_metadata(product_metadata, body_length=len(value))
+            expected_protocols = (
+                {RESPONSE_JSON, RESPONSE_JSON_BATCH}
+                if product["format"] == "json"
+                else {RESPONSE_BINARY}
+            )
+            if route is None or route.protocol not in expected_protocols or status_code != HTTPStatus.OK:
+                raise ValueError("opaque product has invalid status, format, or route")
+            if product_promise is not None:
+                if (
+                    not isinstance(product_promise, tuple)
+                    or len(product_promise) != 2
+                    or not isinstance(product_promise[0], str)
+                    or not product_promise[0].strip()
+                    or isinstance(product_promise[1], bool)
+                    or not isinstance(product_promise[1], int)
+                    or product_promise[1] < 0
+                ):
+                    raise ValueError("product promise must be a non-empty key and non-negative epoch")
+                self.server.app.observe_http_product_delivery(product_promise[0], product_promise[1])
+            self._route_response_written = True
+            if product["format"] == "json":
+                framed = ready_response_envelope_bytes(value, self.api_request_id())
+                self._write_json_representation(
+                    framed,
+                    status=HTTPStatus.OK,
+                    json_encode_ms=0.0,
+                    product_metadata=product,
+                )
+            else:
+                self._write_product_representation(
+                    value,
+                    status=HTTPStatus.OK,
+                    content_type=product["content_type"],
+                    disposition=product["disposition"],
+                    filename=product["filename"],
+                    product_metadata=product,
+                )
+            return
+        if route is None:
+            if json_bytes:
+                self._write_json_representation(value, status=status, json_encode_ms=json_encode_ms)
+                return
+            encode_started = time.perf_counter()
+            data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self._write_json_representation(
+                data,
+                status=status,
+                json_encode_ms=(time.perf_counter() - encode_started) * 1000,
+            )
+            if hasattr(self.server.app, "observe_http_delivery"):
+                self.server.app.observe_http_delivery(value, status)
+            return
+
+        if json_bytes:
+            try:
+                payload = json.loads(value)
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError("cached JSON response is invalid") from error
+        else:
+            payload = value
+
+        request_id = self.api_request_id()
+        canonical = (
+            isinstance(payload, dict)
+            and payload.get("state") in {"ready", "queued", "failed"}
+            and isinstance(payload.get("request"), dict)
+        )
+        transient_read_failure = (
+            not canonical
+            and route.method == "GET"
+            and status_code >= HTTPStatus.BAD_REQUEST
+            and isinstance(payload, dict)
+            and (
+                local_service_failure_is_transient(payload)
+                or (
+                    status_code == HTTPStatus.FAILED_DEPENDENCY
+                    and payload.get("terminal") is not True
+                )
+            )
+        )
+        if transient_read_failure:
+            status_code = HTTPStatus.ACCEPTED
+            payload = {
+                "status": "pending",
+                "retry_after_seconds": 1,
+                "reason": "upstream service is refreshing",
+            }
+        if canonical:
+            envelope = copy.deepcopy(payload)
+            existing_request_id = str(envelope["request"].get("id") or "").strip()
+            envelope["request"]["id"] = (
+                existing_request_id
+                if re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", existing_request_id)
+                else request_id
+            )
+            self._api_request_id = envelope["request"]["id"]
+        elif status_code == HTTPStatus.ACCEPTED:
+            legacy = payload if isinstance(payload, dict) else {}
+            legacy_state = str(legacy.get("state") or legacy.get("status") or "").strip().lower()
+            operation_id = str(legacy.get("key") or legacy.get("operation_id") or "").strip()
+            if legacy_state in {"queued", "pending"} and operation_id:
+                envelope = {
+                    "state": "queued",
+                    "request": {"id": request_id},
+                    "operation": {
+                        "id": operation_id,
+                        "progress": {
+                            "phase": "accepted",
+                            "legacy": copy.deepcopy(legacy),
+                        },
+                    },
+                    "ok": True,
+                    "terminal": False,
+                }
+                reserved = {"data", "error", "operation", "request", "state"}
+                for key, item in legacy.items():
+                    if key not in reserved and key not in envelope:
+                        envelope[key] = copy.deepcopy(item)
+            elif legacy_state == "pending" and route.method == "GET":
+                try:
+                    retry_after_seconds = int(legacy.get("retry_after_seconds") or 0)
+                except (TypeError, ValueError):
+                    retry_after_seconds = 0
+                if not 1 <= retry_after_seconds <= 60:
+                    raise ValueError("pending read response requires a bounded retry interval")
+                envelope = {
+                    "state": "queued",
+                    "request": {"id": request_id},
+                    "ok": True,
+                    "terminal": False,
+                }
+                reserved = {"data", "error", "operation", "request", "state"}
+                for key, item in legacy.items():
+                    if key not in reserved and key not in envelope:
+                        envelope[key] = copy.deepcopy(item)
+            elif legacy_state in {"queued", "pending"}:
+                status_code = HTTPStatus.CONFLICT
+                envelope = error_payload(
+                    "operation was not accepted by a durable owner",
+                    message_key="common.requestFailed",
+                    canonical=True,
+                    code="operation_not_accepted",
+                    origin="server.http",
+                    retryable=True,
+                    details={"legacy": copy.deepcopy(legacy)},
+                    stack=[{
+                        "component": "server.http",
+                        "operation": f"{route.method} {route.path}",
+                        "code": "operation_not_accepted",
+                    }],
+                    request_id=request_id,
+                )
+            else:
+                status_code = HTTPStatus.OK
+                envelope = {
+                    "state": "ready",
+                    "request": {"id": request_id},
+                    "data": copy.deepcopy(payload),
+                    "ok": True,
+                    "terminal": True,
+                }
+        elif status_code >= HTTPStatus.BAD_REQUEST:
+            legacy = payload if isinstance(payload, dict) else {}
+            raw_error = legacy.get("error") or legacy.get("reason") or legacy.get("message") or f"HTTP {status_code}"
+            descriptor = legacy.get("user_message") if isinstance(legacy.get("user_message"), dict) else {}
+            legacy_code = str(legacy.get("reason_code") or legacy.get("error_code") or legacy.get("code") or "").strip().lower()
+            normalized_code = re.sub(r"[^a-z0-9_]+", "_", legacy_code).strip("_")
+            status_codes = {
+                HTTPStatus.BAD_REQUEST: "invalid_request",
+                HTTPStatus.UNAUTHORIZED: "authentication_required",
+                HTTPStatus.FORBIDDEN: "forbidden",
+                HTTPStatus.NOT_FOUND: "not_found",
+                HTTPStatus.CONFLICT: "conflict",
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "request_too_large",
+                HTTPStatus.TOO_MANY_REQUESTS: "rate_limited",
+                HTTPStatus.FAILED_DEPENDENCY: "dependency_failed",
+                HTTPStatus.SERVICE_UNAVAILABLE: "service_unavailable",
+                HTTPStatus.GATEWAY_TIMEOUT: "deadline_expired",
+            }
+            code = normalized_code or status_codes.get(status_code, "request_failed")
+            cause = legacy.get("cause") if isinstance(legacy.get("cause"), dict) else None
+            root = {
+                "component": "server.http",
+                "operation": f"{route.method} {route.path}",
+                "code": code,
+            }
+            if cause is not None:
+                root.update(copy.deepcopy(cause))
+            excluded = {"cause", "code", "diagnostic", "error", "error_code", "origin", "reason_code", "retryable", "status", "user_message"}
+            details = {key: copy.deepcopy(item) for key, item in legacy.items() if key not in excluded}
+            if legacy.get("diagnostic"):
+                details["diagnostic"] = str(legacy["diagnostic"])
+            envelope = error_payload(
+                raw_error,
+                message_key=str(descriptor.get("key") or "common.requestFailed"),
+                message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
+                canonical=True,
+                code=code,
+                origin=str(legacy.get("origin") or "server.http"),
+                retryable=(
+                    legacy["retryable"]
+                    if isinstance(legacy.get("retryable"), bool)
+                    else status_code in {
+                        HTTPStatus.REQUEST_TIMEOUT,
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        HTTPStatus.BAD_GATEWAY,
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        HTTPStatus.GATEWAY_TIMEOUT,
+                    }
+                ),
+                details=details,
+                stack=[root],
+                request_id=request_id,
+            )
+            envelope["user_message"] = copy.deepcopy(envelope["error"]["message"])
+            envelope["legacy_error"] = str(raw_error)
+            if legacy.get("reason"):
+                envelope["error"]["reason"] = str(legacy["reason"])
+            if legacy.get("diagnostic"):
+                envelope["diagnostic"] = str(legacy["diagnostic"])
+            if legacy.get("reason_code"):
+                envelope["reason_code"] = str(legacy["reason_code"])
+            envelope["status"] = status_code
+            envelope["ok"] = False
+            envelope["terminal"] = True
+        else:
+            envelope = {
+                "state": "ready",
+                "request": {"id": request_id},
+                "data": copy.deepcopy(payload),
+                "ok": True,
+                "terminal": True,
+            }
+
+        state = str(envelope.get("state") or "")
+        if state == "ready":
+            if not canonical:
+                data_record = envelope.get("data")
+                if isinstance(data_record, dict):
+                    reserved = {"data", "error", "operation", "request", "state"}
+                    for key, item in data_record.items():
+                        if key not in reserved and key not in envelope:
+                            envelope[key] = copy.deepcopy(item)
+                envelope["ok"] = True
+                envelope["terminal"] = True
+        elif state == "queued":
+            if not canonical:
+                envelope["ok"] = True
+                envelope["terminal"] = False
+        elif state == "failed":
+            error_record = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
+            if not canonical:
+                message_record = error_record.get("message") if isinstance(error_record.get("message"), dict) else {}
+                details_record = error_record.get("details") if isinstance(error_record.get("details"), dict) else {}
+                reserved = {"data", "error", "operation", "request", "state"}
+                for key, item in details_record.items():
+                    if key not in reserved and key not in envelope:
+                        envelope[key] = copy.deepcopy(item)
+                envelope.setdefault("user_message", copy.deepcopy(message_record))
+                envelope.setdefault("legacy_error", str(message_record.get("fallback") or "request failed"))
+                envelope["status"] = status_code
+                envelope["ok"] = False
+                envelope["terminal"] = True
+
+        request_record = envelope.get("request") if isinstance(envelope.get("request"), dict) else {}
+        if not re.fullmatch(r"r-[A-Za-z0-9._-]{1,120}", str(request_record.get("id") or "")):
+            raise ValueError("API response requires a validated request.id")
+        if state == "ready" and (
+            not (HTTPStatus.OK <= status_code < HTTPStatus.MULTIPLE_CHOICES)
+            or status_code == HTTPStatus.ACCEPTED
+            or "data" not in envelope
+            or "error" in envelope
+            or "operation" in envelope
+        ):
+            raise ValueError(f"ready API response has invalid HTTP status {status_code}")
+        bounded_read_pending = (
+            state == "queued"
+            and route.method == "GET"
+            and str(envelope.get("status") or "").strip().lower() == "pending"
+            and isinstance(envelope.get("retry_after_seconds"), int)
+            and 1 <= envelope["retry_after_seconds"] <= 60
+            and "operation" not in envelope
+        )
+        if state == "queued" and (
+            status_code != HTTPStatus.ACCEPTED
+            or (
+                not bounded_read_pending
+                and (
+                    not isinstance(envelope.get("operation"), dict)
+                    or not str(envelope["operation"].get("id") or "")
+                )
+            )
+            or "data" in envelope
+            or "error" in envelope
+        ):
+            raise ValueError("queued API response requires HTTP 202 and operation.id or bounded read pending state")
+        if state == "failed":
+            error_record = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
+            message_record = error_record.get("message") if isinstance(error_record.get("message"), dict) else {}
+            stack_record = error_record.get("stack") if isinstance(error_record.get("stack"), list) else []
+            valid_stack = bool(stack_record) and all(
+                isinstance(frame, dict)
+                and bool(str(frame.get("component") or ""))
+                and bool(str(frame.get("operation") or ""))
+                and bool(str(frame.get("code") or ""))
+                for frame in stack_record
+            )
+            valid_error = (
+                HTTPStatus.BAD_REQUEST <= status_code <= 599
+                and bool(str(error_record.get("code") or ""))
+                and bool(str(error_record.get("origin") or ""))
+                and isinstance(error_record.get("retryable"), bool)
+                and isinstance(error_record.get("details"), dict)
+                and bool(str(message_record.get("key") or ""))
+                and isinstance(message_record.get("params"), dict)
+                and isinstance(message_record.get("fallback"), str)
+                and valid_stack
+                and "data" not in envelope
+                and "operation" not in envelope
+            )
+            if not valid_error:
+                raise ValueError(f"failed API response has invalid HTTP status or error shape {status_code}")
+
+        if state == "failed":
+            error_record = envelope["error"]
+            emit_server_log(
+                "error",
+                "api-response",
+                json.dumps({
+                    "request": envelope["request"],
+                    "operation": envelope.get("operation"),
+                    "code": error_record.get("code"),
+                    "origin": error_record.get("origin"),
+                    "stack": error_record.get("stack"),
+                }, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                category="api",
+            )
+
+        encode_started = time.perf_counter()
+        data = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        self._route_response_written = True
+        self._write_json_representation(
+            data,
+            status=HTTPStatus(status_code),
+            json_encode_ms=(time.perf_counter() - encode_started) * 1000,
+        )
+        if hasattr(self.server.app, "observe_http_delivery"):
+            self.server.app.observe_http_delivery(envelope, HTTPStatus(status_code))
+
+    def _write_bodyless_api_response(self, status: HTTPStatus) -> None:
+        """Write an established bodyless protocol result from the shared response parent."""
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+        self.record_http_response_bytes(status, 0)
+
+    def _write_json_representation(
+        self,
+        data: bytes,
+        status: HTTPStatus = HTTPStatus.OK,
+        *,
+        json_encode_ms: float = 0.0,
+        product_metadata: ProductMetadata | None = None,
+    ) -> None:
         """Write already-validated JSON bytes without decoding/re-encoding them.
 
-        Local services use this for bounded cached representations; ordinary
-        routes continue through ``write_json`` so response semantics stay one
-        owner (gzip, HEAD, Vary, response metrics, and auth cookies).
+        Only ``write_api_response`` calls this representation writer. Local
+        services may supply cached bytes to the parent without bypassing the
+        envelope, metrics, compression, or auth-cookie owners.
         """
+        self._write_product_representation(
+            data,
+            status=status,
+            content_type="application/json; charset=utf-8",
+            disposition="inline",
+            filename="",
+            json_encode_ms=json_encode_ms,
+            product_metadata=product_metadata,
+        )
+
+    def _write_product_representation(
+        self,
+        data: bytes,
+        *,
+        status: HTTPStatus,
+        content_type: str,
+        disposition: str,
+        filename: str,
+        json_encode_ms: float = 0.0,
+        product_metadata: ProductMetadata | None = None,
+    ) -> None:
+        """Write one final representation and verify the actual boundary byte count."""
+
         compression_started = time.perf_counter()
-        content_type = "application/json; charset=utf-8"
         headers = getattr(self, "headers", {})
         accept_encoding = headers.get("Accept-Encoding") if hasattr(headers, "get") else None
         body, content_encoding = gzip_response_body(data, content_type, accept_encoding)
@@ -2478,6 +3093,8 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Vary", "Accept-Encoding")
+        if disposition == "attachment":
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         if content_encoding:
             self.send_header("Content-Encoding", content_encoding)
         self.send_auth_cookie_if_needed()
@@ -2486,23 +3103,31 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         self.end_headers()
         write_started = time.perf_counter()
         if not head_only:
-            self.wfile.write(body)
+            written = self.wfile.write(body)
+            if written != len(body):
+                raise OSError(f"response writer emitted {written} of {len(body)} framed bytes")
         write_ms = (time.perf_counter() - write_started) * 1000
         wire_bytes = 0 if head_only else len(body)
+        details = {
+            "uncompressed_bytes": len(data),
+            "wire_bytes": wire_bytes,
+            "representation_bytes": len(body),
+            "content_encoding": content_encoding or "identity",
+            "json_encode_ms": round(json_encode_ms, 3),
+            "compression_ms": round(compression_ms, 3),
+            "write_ms": round(write_ms, 3),
+            "head_only": head_only,
+        }
+        if product_metadata is not None:
+            details["product_format"] = product_metadata["format"]
+            details["product_bytes"] = product_metadata["length"]
+            details["product_sha256"] = product_metadata["sha256"]
+            details["product_disposition"] = product_metadata["disposition"]
         self.record_http_response_bytes(
             status,
             wire_bytes,
             content_type,
-            {
-                "uncompressed_bytes": len(data),
-                "wire_bytes": wire_bytes,
-                "representation_bytes": len(body),
-                "content_encoding": content_encoding or "identity",
-                "json_encode_ms": round(json_encode_ms, 3),
-                "compression_ms": round(compression_ms, 3),
-                "write_ms": round(write_ms, 3),
-                "head_only": head_only,
-            },
+            details,
         )
 
     def write_app_result(self, result: tuple[Any, HTTPStatus]) -> None:
@@ -2573,6 +3198,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             self.write_text("invalid Sec-WebSocket-Key\n", status=HTTPStatus.BAD_REQUEST)
             return False
         accept = base64.b64encode(hashlib.sha1(accept_source).digest()).decode("ascii")
+        # A successful upgrade owns this connection until the WebSocket bridge returns.
+        # Never let BaseHTTPRequestHandler parse subsequent masked frame bytes as HTTP.
+        self.close_connection = True
         self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -2641,6 +3269,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 env=env,
                 start_new_session=True,
             )
+            record_owned_process_group(attached)
             refresh_tmux_session_clients_after_attach(session)
             return attached
 
@@ -2671,13 +3300,15 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             connected = True
             while connected:
                 while process.poll() is None:
-                    readable, _, _ = select.select([master_fd, self.connection], [], [], 0.1)
+                    connection_ready = wait_for_ws_frame(self.connection, self.rfile, 0)
+                    readers = [master_fd] if connection_ready else [master_fd, self.connection]
+                    readable, _, _ = select.select(readers, [], [], 0.1)
                     if master_fd in readable:
                         data = os.read(master_fd, 65536)
                         if not data:
                             break
                         self.connection.sendall(make_ws_frame(data, opcode=2))
-                    if self.connection in readable:
+                    if connection_ready or self.connection in readable:
                         opcode, payload = self.read_ws_frame_with_timeout()
                         if opcode == 8:
                             connected = False
@@ -2730,8 +3361,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 record = self.server.app.verify_share_token(token)
                 if record is None:
                     break
-                readable, _, _ = select.select([self.connection], [], [], 0.5)
-                if self.connection not in readable:
+                if not wait_for_ws_frame(self.connection, self.rfile, 0.5):
                     continue
                 opcode, payload = self.read_ws_frame_with_timeout()
                 if opcode == 8:
@@ -2857,8 +3487,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         writer.start()
         try:
             while self.server.app.verify_share_token(token) is not None:
-                readable, _, _ = select.select([self.connection], [], [], 0.5)
-                if self.connection not in readable:
+                if not wait_for_ws_frame(self.connection, self.rfile, 0.5):
                     continue
                 opcode, payload = self.read_ws_frame_with_timeout()
                 if opcode == 8:
@@ -2893,8 +3522,7 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         deadline = time.monotonic() + 0.75
         while time.monotonic() < deadline:
             timeout = max(0.0, deadline - time.monotonic())
-            readable, _, _ = select.select([self.connection], [], [], timeout)
-            if self.connection not in readable:
+            if not wait_for_ws_frame(self.connection, self.rfile, timeout):
                 break
             opcode, payload = self.read_ws_frame_with_timeout()
             if opcode == 8:
@@ -3065,6 +3693,7 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
         self.share_pointer_lock = threading.Lock()
         self.share_pointer_records: dict[str, SharePointerRecord] = {}
         self.share_pointer_stop = threading.Event()
+        self.persistent_request_stop = threading.Event()
         if hasattr(self.app, "start_input_heartbeat_worker"):
             self.app.start_input_heartbeat_worker()
         if hasattr(self.app, "start_tabber_activity_cache_warmer"):
@@ -3073,9 +3702,17 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.start_update_check_thread()
         start_agent_auth_status_refresh(force=True)
 
+    def shutdown(self) -> None:
+        self.persistent_request_stop.set()
+        super().shutdown()
+
     def server_close(self) -> None:
+        if hasattr(self, "persistent_request_stop"):
+            self.persistent_request_stop.set()
         if hasattr(self, "share_pointer_stop"):
             self.share_pointer_stop.set()
+        if hasattr(self, "app") and hasattr(self.app, "stop_jobd_operation_service"):
+            self.app.stop_jobd_operation_service()
         if hasattr(self, "app") and hasattr(self.app, "stop_client_event_watcher"):
             self.app.stop_client_event_watcher()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):

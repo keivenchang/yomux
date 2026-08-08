@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -20,6 +21,7 @@ from dataclasses import field
 from dataclasses import fields
 from datetime import datetime
 from datetime import timezone
+from enum import Enum
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -36,9 +38,14 @@ from ..infra.common import git_ahead_behind_counts
 from ..infra.common import is_generated_upload_name
 from ..infra.common import positive_finite_number
 from ..infra.common import path_mtime_or_zero
+from ..infra.filesystem_preflight import FilesystemClassification
+from ..infra.filesystem_preflight import classify_filesystem
+from ..infra.host_partition import host_partitioned_state_dir
+from ..filesystem import FilesystemError
 from ..filesystem import git_root_for_path
 from ..filesystem.io_ops import read_json_file
 from ..filesystem.git_ops import diff_refs
+from ..filesystem.git_ops import git_branch_name
 from ..filesystem.git_ops import git_ref_exists
 from ..filesystem.git_ops import normal_ref  # noqa: F401 - compatibility export for session-file consumers
 from ..filesystem.git_ops import refs_requested
@@ -79,16 +86,214 @@ _TRANSCRIPT_SCAN_STORE_VERSION = 2
 _TRANSCRIPT_SCAN_STORE_MAX_BYTES = 64 * 1024 * 1024
 _TRANSCRIPT_SCAN_STORE_PRUNE_SECONDS = 60.0
 _TRANSCRIPT_SCAN_MESSAGE_ID_MAX = 4096
+TRANSCRIPT_CHANGE_PATH_LIMIT = 256
 _TRANSCRIPT_SCAN_PERSIST_MIN_BYTES = 64 * 1024
 _TRANSCRIPT_SCAN_PERSIST_APPEND_BYTES = 256 * 1024
 _TRANSCRIPT_SCAN_PERSIST_INTERVAL_SECONDS = 30.0
-_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION = 1
+REMOTE_TRANSCRIPT_POLL_INTERVAL_SECONDS = 5.0
+_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION = 2
 _REPOSITORY_SNAPSHOT_CACHE_MAX_AGE_SECONDS = 60.0
 _REPOSITORY_SNAPSHOT_CACHE_DIRNAME = "session-files-repository-snapshots"
 _REPOSITORY_SNAPSHOT_CACHE_PRUNE_INTERVAL_SECONDS = 300.0
 _REPOSITORY_SNAPSHOT_CACHE_PRUNE_MAX_AGE_SECONDS = 3600.0
 _repository_snapshot_cache_prune_lock = threading.Lock()
 _repository_snapshot_cache_last_pruned_at = 0.0
+
+
+def disk_cache_index_path(cache_dir: Path) -> Path:
+    return Path(cache_dir) / "cache-index.json"
+
+
+def disk_cache_manifest_path(cache_dir: Path, signature: str) -> Path:
+    return Path(cache_dir) / f"{signature}.manifest.json"
+
+
+def _read_disk_cache_index_unlocked(index_path: Path) -> dict[str, Any]:
+    payload = read_json_file(index_path, None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
+    source_entries = payload.get("entries") if isinstance(payload, dict) else None
+    entries = {
+        str(signature): value
+        for signature, value in source_entries.items()
+        if isinstance(value, dict)
+    } if isinstance(source_entries, dict) else {}
+    journal_path = index_path.with_name(index_path.name + ".journal")
+    try:
+        journal_lines = journal_path.read_text(encoding="utf-8").splitlines()
+    except (FileNotFoundError, OSError):
+        journal_lines = []
+    for line in journal_lines:
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(record, dict) and isinstance(record.get("signature"), str):
+            entries[record["signature"]] = {
+                "size": max(0, int(record.get("size") or 0)),
+                "mtime": max(0.0, float(record.get("mtime") or 0.0)),
+            }
+    return {"version": 1, "entries": entries, "recovery_cursor": ""}
+
+
+def _write_disk_cache_index_unlocked(index_path: Path, index: dict[str, Any]) -> None:
+    atomic_write_text(index_path, json.dumps(index, sort_keys=True, separators=(",", ":")), mode=0o600)
+    try:
+        index_path.with_name(index_path.name + ".journal").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def update_disk_cache_index(cache_dir: Path, signature: str, *, size: int, mtime: float) -> None:
+    """Append one cache entry and periodically fold its journal into the shared index."""
+    index_path = disk_cache_index_path(cache_dir)
+    try:
+        with file_lock(index_path, dir_mode=0o700):
+            journal_path = index_path.with_name(index_path.name + ".journal")
+            line = json.dumps(
+                {"signature": str(signature), "size": max(0, int(size)), "mtime": max(0.0, float(mtime))},
+                sort_keys=True,
+                separators=(",", ":"),
+            ) + "\n"
+            with open(journal_path, "a", encoding="utf-8") as journal:
+                journal.write(line)
+            try:
+                journal_bytes = journal_path.stat().st_size
+            except OSError:
+                journal_bytes = 0
+            if journal_bytes > 512 * 1024:
+                _write_disk_cache_index_unlocked(index_path, _read_disk_cache_index_unlocked(index_path))
+    except OSError as exc:
+        logger.debug("failed to update session-files cache index: %s", exc)
+
+
+def prune_disk_cache(
+    cache_dir: Path,
+    *,
+    max_age_seconds: float,
+    max_bytes: int,
+    batch_size: int,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Prune the durable session-files cache in jobd, never in the web process."""
+
+    cache_dir = Path(cache_dir)
+    index_path = disk_cache_index_path(cache_dir)
+    max_age = max(0.0, float(max_age_seconds))
+    byte_cap = max(0, int(max_bytes))
+    limit = max(1, int(batch_size))
+    current_time = time.time() if now is None else float(now)
+
+    try:
+        with file_lock(index_path, dir_mode=0o700):
+            index = _read_disk_cache_index_unlocked(index_path)
+            recovered_entries = 0
+            try:
+                paths = cache_dir.iterdir()
+            except OSError:
+                paths = ()
+            for path in paths:
+                if not path.name.endswith(".json") or path.name.endswith(".manifest.json") or path.name == index_path.name:
+                    continue
+                signature = path.stem
+                if signature in index["entries"]:
+                    continue
+                try:
+                    payload_stat = path.stat()
+                except OSError:
+                    continue
+                manifest_path = disk_cache_manifest_path(cache_dir, signature)
+                size = int(payload_stat.st_size)
+                mtime = float(payload_stat.st_mtime)
+                try:
+                    manifest_stat = manifest_path.stat()
+                    size += int(manifest_stat.st_size)
+                    mtime = max(mtime, float(manifest_stat.st_mtime))
+                except OSError:
+                    pass
+                index["entries"][signature] = {"size": size, "mtime": mtime}
+                recovered_entries += 1
+                if recovered_entries >= limit:
+                    break
+            entries = [
+                {
+                    "path": cache_dir / f"{signature}.json",
+                    "manifest_path": cache_dir / f"{signature}.manifest.json",
+                    "signature": signature,
+                    "size": max(0, int(metadata.get("size") or 0)),
+                    "mtime": max(0.0, float(metadata.get("mtime") or 0.0)),
+                }
+                for signature, metadata in index["entries"].items()
+            ]
+            _write_disk_cache_index_unlocked(index_path, index)
+    except OSError:
+        entries = []
+        recovered_entries = 0
+        try:
+            paths = cache_dir.glob("*.json")
+        except OSError:
+            paths = ()
+        for path in paths:
+            if path.name.endswith(".manifest.json") or path.name == index_path.name:
+                continue
+            try:
+                payload_stat = path.stat()
+            except OSError:
+                continue
+            manifest_path = disk_cache_manifest_path(cache_dir, path.stem)
+            size = int(payload_stat.st_size)
+            mtime = float(payload_stat.st_mtime)
+            try:
+                manifest_stat = manifest_path.stat()
+                size += int(manifest_stat.st_size)
+                mtime = max(mtime, float(manifest_stat.st_mtime))
+            except OSError:
+                pass
+            entries.append({"path": path, "manifest_path": manifest_path, "signature": path.stem, "size": size, "mtime": mtime})
+
+    total_indexed_bytes = sum(entry["size"] for entry in entries)
+    kept = [entry for entry in entries if not max_age or max(0.0, current_time - entry["mtime"]) <= max_age]
+    to_remove = [entry for entry in entries if entry not in kept]
+    total_bytes = sum(entry["size"] for entry in kept)
+    for entry in sorted(kept, key=lambda item: (item["mtime"], str(item["path"]))):
+        if total_bytes <= byte_cap:
+            break
+        to_remove.append(entry)
+        total_bytes -= entry["size"]
+    removed_files = 0
+    removed_bytes = 0
+    removed_signatures: set[str] = set()
+    for entry in to_remove[:limit]:
+        signature = entry["signature"]
+        if signature in removed_signatures:
+            continue
+        removed_signatures.add(signature)
+        removed_bytes += entry["size"]
+        for path in (entry["path"], entry["manifest_path"]):
+            try:
+                path.unlink()
+                removed_files += 1
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+    if removed_signatures:
+        try:
+            with file_lock(index_path, dir_mode=0o700):
+                index = _read_disk_cache_index_unlocked(index_path)
+                for signature in removed_signatures:
+                    index["entries"].pop(signature, None)
+                _write_disk_cache_index_unlocked(index_path, index)
+        except OSError:
+            pass
+    return {
+        "entries": len(entries),
+        "recovered_entries": recovered_entries,
+        "removed_entries": len(removed_signatures),
+        "removed_files": removed_files,
+        "removed_bytes": removed_bytes,
+        "kept_bytes": max(0, total_indexed_bytes - removed_bytes),
+        "max_age_seconds": max_age,
+        "max_bytes": byte_cap,
+    }
 
 
 @dataclass
@@ -98,6 +303,221 @@ class TranscriptScanRecord:
     lock: threading.RLock = field(default_factory=threading.RLock)
     persisted_offset: int = 0
     persisted_at: float = 0.0
+
+
+class TranscriptReadReason(str, Enum):
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    STALE_HANDLE = "stale_handle"
+    IO_ERROR = "io_error"
+    OS_ERROR = "os_error"
+
+
+@dataclass(frozen=True)
+class TranscriptAddress:
+    shared_root_id: str
+    relative_path: str
+    absolute_path: Path
+    source_host_id: str
+    source_hostname: str
+
+    @property
+    def identity_key(self) -> str:
+        return "transcript:" + json.dumps(
+            [self.shared_root_id, self.relative_path],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+
+@dataclass(frozen=True)
+class SharedTranscriptRoot:
+    shared_root_id: str
+    mount_path: Path
+    source_host_id: str
+    source_hostname: str
+
+    def __post_init__(self) -> None:
+        root_id = str(self.shared_root_id or "").strip()
+        if not root_id:
+            raise ValueError("shared transcript root ID must not be empty")
+        source_host_id = str(self.source_host_id or "").strip()
+        if not source_host_id:
+            raise ValueError("transcript source host ID must not be empty")
+        source_hostname = str(self.source_hostname or "").strip()
+        if not source_hostname:
+            raise ValueError("transcript source hostname must not be empty")
+        object.__setattr__(self, "shared_root_id", root_id)
+        object.__setattr__(self, "mount_path", Path(self.mount_path).expanduser().resolve(strict=False))
+        object.__setattr__(self, "source_host_id", source_host_id)
+        object.__setattr__(self, "source_hostname", source_hostname)
+
+    def transcript(self, relative_path: str) -> TranscriptAddress:
+        text = str(relative_path or "").strip()
+        candidate = Path(text)
+        if not text or candidate.is_absolute() or ".." in candidate.parts:
+            raise ValueError("transcript relative path must stay below its shared root")
+        normalized = candidate.as_posix()
+        absolute_path = (self.mount_path / candidate).resolve(strict=False)
+        if absolute_path != self.mount_path and not absolute_path.is_relative_to(self.mount_path):
+            raise ValueError("transcript relative path escapes its shared root")
+        return TranscriptAddress(
+            shared_root_id=self.shared_root_id,
+            relative_path=normalized,
+            absolute_path=absolute_path,
+            source_host_id=self.source_host_id,
+            source_hostname=self.source_hostname,
+        )
+
+
+@dataclass(frozen=True)
+class SharedTranscriptReadResult:
+    records: tuple[dict[str, Any], ...]
+    source_host_id: str
+    source_hostname: str
+    available: bool = True
+    deleted: bool = False
+    reason_code: str = ""
+
+
+@dataclass
+class SharedTranscriptReadState:
+    result: SharedTranscriptReadResult
+    file_identity: tuple[int, int] | None = None
+    offset: int = 0
+    last_poll_at: float = 0.0
+    invalidated: bool = False
+
+
+class SharedTranscriptReader:
+    """Read logical transcript roots without polling local/native-watch files."""
+
+    def __init__(
+        self,
+        *,
+        roots: list[SharedTranscriptRoot],
+        state_dir: Path,
+        poll_interval_seconds: float = REMOTE_TRANSCRIPT_POLL_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        filesystem_classifier: Callable[[Path], FilesystemClassification] = classify_filesystem,
+    ) -> None:
+        self.state_dir = Path(state_dir)
+        self.poll_interval_seconds = max(0.1, float(poll_interval_seconds))
+        self._clock = clock
+        self._roots: dict[str, tuple[SharedTranscriptRoot, FilesystemClassification]] = {}
+        for root in roots:
+            if root.shared_root_id in self._roots:
+                raise ValueError(f"duplicate shared transcript root ID: {root.shared_root_id}")
+            self._roots[root.shared_root_id] = (root, filesystem_classifier(root.mount_path))
+        self._states: dict[str, SharedTranscriptReadState] = {}
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _state_key(address: TranscriptAddress) -> str:
+        return address.identity_key
+
+    def _root(self, address: TranscriptAddress) -> tuple[SharedTranscriptRoot, FilesystemClassification]:
+        registered = self._roots.get(address.shared_root_id)
+        if registered is None:
+            raise KeyError(f"unknown shared transcript root ID: {address.shared_root_id}")
+        root, classification = registered
+        expected = root.transcript(address.relative_path)
+        if expected.absolute_path != address.absolute_path:
+            raise ValueError("transcript address mount does not match its registered shared root")
+        return root, classification
+
+    @staticmethod
+    def _read_complete_records(path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
+        records: list[dict[str, Any]] = []
+        consumed = 0
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            while raw_line := handle.readline():
+                if not (raw_line.endswith(b"\n") or raw_line.endswith(b"\r")):
+                    break
+                record = transcript_json_record(raw_line.rstrip(b"\r\n"))
+                if record is not None:
+                    records.append(record)
+                consumed += len(raw_line)
+        return records, consumed
+
+    def _ready_result(
+        self,
+        address: TranscriptAddress,
+        records: tuple[dict[str, Any], ...],
+    ) -> SharedTranscriptReadResult:
+        return SharedTranscriptReadResult(
+            records=records,
+            source_host_id=address.source_host_id,
+            source_hostname=address.source_hostname,
+        )
+
+    def _poll(
+        self,
+        address: TranscriptAddress,
+        classification: FilesystemClassification,
+        state: SharedTranscriptReadState | None,
+        now: float,
+    ) -> SharedTranscriptReadState:
+        prior_records = state.result.records if state is not None else ()
+        try:
+            before = address.absolute_path.stat()
+            file_identity = (int(before.st_dev), int(before.st_ino))
+            reset = state is None or state.file_identity != file_identity or int(before.st_size) < state.offset
+            base_records = () if reset else state.result.records
+            offset = 0 if reset else state.offset
+            appended, consumed = self._read_complete_records(address.absolute_path, offset)
+            after = address.absolute_path.stat()
+            after_identity = (int(after.st_dev), int(after.st_ino))
+            if after_identity != file_identity:
+                file_identity = after_identity
+                base_records = ()
+                offset = 0
+                appended, consumed = self._read_complete_records(address.absolute_path, 0)
+            records = (*base_records, *appended)
+            return SharedTranscriptReadState(
+                result=self._ready_result(address, records),
+                file_identity=file_identity,
+                offset=offset + consumed,
+                last_poll_at=now,
+            )
+        except OSError as exc:
+            deleted = not classification.is_network and exc.errno == errno.ENOENT
+            result = SharedTranscriptReadResult(
+                records=() if deleted else prior_records,
+                source_host_id=address.source_host_id,
+                source_hostname=address.source_hostname,
+                available=False,
+                deleted=deleted,
+                reason_code=transcript_read_reason(exc, deleted=deleted).value,
+            )
+            return SharedTranscriptReadState(
+                result=result,
+                file_identity=None if deleted else (state.file_identity if state is not None else None),
+                offset=0 if deleted else (state.offset if state is not None else 0),
+                last_poll_at=now,
+            )
+
+    def read_jsonl(self, address: TranscriptAddress) -> SharedTranscriptReadResult:
+        _root, classification = self._root(address)
+        key = self._state_key(address)
+        now = self._clock()
+        with self._lock:
+            state = self._states.get(key)
+            due = state is None or state.invalidated
+            if classification.is_network and state is not None:
+                due = due or now - state.last_poll_at >= self.poll_interval_seconds
+            if due:
+                state = self._poll(address, classification, state, now)
+                self._states[key] = state
+            return state.result
+
+    def invalidate(self, address: TranscriptAddress) -> None:
+        self._root(address)
+        with self._lock:
+            state = self._states.get(self._state_key(address))
+            if state is not None:
+                state.invalidated = True
 
 
 @dataclass(frozen=True)
@@ -338,7 +758,13 @@ def new_claude_transcript_scan_state() -> dict[str, Any]:
 
 
 def transcript_scan_store_dir() -> Path:
-    return common.STATE_DIR / f"transcript-scan-cache-v{_TRANSCRIPT_SCAN_STORE_VERSION}"
+    """Keep cursors with the host-local derived data they acknowledge.
+
+    An unpartitioned cursor can describe atoms committed to a retired database.
+    Leave that legacy cache in place; a fresh host partition must start with a
+    fresh cursor and replay its shared read-only transcripts.
+    """
+    return host_partitioned_state_dir(common.STATE_DIR) / f"transcript-scan-cache-v{_TRANSCRIPT_SCAN_STORE_VERSION}"
 
 
 def transcript_scan_store_path(cache_key: tuple[Any, ...]) -> Path:
@@ -347,22 +773,43 @@ def transcript_scan_store_path(cache_key: tuple[Any, ...]) -> Path:
     return transcript_scan_store_dir() / f"{digest}.json"
 
 
+def read_transcript_scan_prefix_digest(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.sha256(handle.readline(_TRANSCRIPT_SCAN_PREFIX_BYTES)).hexdigest()
+
+
 def transcript_scan_prefix_digest(path: Path) -> str:
     try:
-        with path.open("rb") as handle:
-            return hashlib.sha256(handle.readline(_TRANSCRIPT_SCAN_PREFIX_BYTES)).hexdigest()
+        return read_transcript_scan_prefix_digest(path)
     except OSError:
         return ""
+
+
+def record_transcript_change(
+    changes: dict[str, set[str]],
+    path: str,
+    markers: set[str] | list[str] | tuple[str, ...],
+) -> None:
+    """Retain the newest changed paths for one transcript evidence channel."""
+
+    path_text = str(path or "").strip()
+    normalized_markers = {str(marker) for marker in markers if str(marker) in {"A", "M", "D"}}
+    if not path_text or not normalized_markers:
+        return
+    existing = changes.pop(path_text, set())
+    changes[path_text] = (existing if isinstance(existing, set) else set()) | normalized_markers
+    while len(changes) > TRANSCRIPT_CHANGE_PATH_LIMIT:
+        changes.pop(next(iter(changes)))
 
 
 def serialized_transcript_marker_map(value: Any) -> dict[str, list[str]]:
     if not isinstance(value, dict):
         return {}
-    return {
-        str(path): sorted({str(marker) for marker in markers if str(marker) in {"A", "M", "D"}})
-        for path, markers in value.items()
-        if isinstance(markers, (set, list, tuple))
-    }
+    bounded: dict[str, set[str]] = {}
+    for path, markers in value.items():
+        if isinstance(markers, (set, list, tuple)):
+            record_transcript_change(bounded, str(path), markers)
+    return {path: sorted(markers) for path, markers in bounded.items()}
 
 
 def serialized_usage_components(value: Any) -> list[list[Any]]:
@@ -566,6 +1013,32 @@ def load_transcript_scan_state(cache_key: tuple[Any, ...], path: Path, new_state
         return None
 
 
+def _is_incomplete_stats_current_cursor(path: Path) -> bool:
+    """Keep acknowledged backfill progress until the scanner reaches EOF."""
+
+    try:
+        record = read_json_file(path, {}, exceptions=())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(record, dict):
+        return False
+    identity = record.get("identity")
+    state = record.get("state")
+    kind = identity[0] if isinstance(identity, list) and identity else ""
+    if (
+        not isinstance(identity, list)
+        or not identity
+        or not isinstance(kind, str)
+        or kind not in {"stats-current-claude", "stats-current-codex"}
+        or not isinstance(state, dict)
+    ):
+        return False
+    try:
+        return max(0, int(state.get("offset") or 0)) < max(0, int(state.get("size") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
 def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, max_bytes: int = _TRANSCRIPT_SCAN_STORE_MAX_BYTES) -> None:
     store_dir = transcript_scan_store_dir()
     try:
@@ -573,8 +1046,20 @@ def prune_transcript_scan_store(max_entries: int = _TRANSCRIPT_SCAN_CACHE_MAX, m
     except OSError as exc:
         logger.warning("failed to inspect transcript scan cache: %s", exc)
         return
+    protected = [path for path in paths if _is_incomplete_stats_current_cursor(path)]
+    protected_set = set(protected)
+    ordinary = [path for path in paths if path not in protected_set]
     retained_bytes = 0
-    for index, path in enumerate(paths):
+    for path in protected:
+        try:
+            size = path.stat().st_size
+            if retained_bytes + size <= max_bytes:
+                retained_bytes += size
+                continue
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("failed to prune transcript scan cache %s: %s", path.name, exc)
+    for index, path in enumerate(ordinary):
         try:
             size = path.stat().st_size
             if index < max_entries and retained_bytes + size <= max_bytes:
@@ -705,52 +1190,79 @@ def incremental_transcript_scan_details(
 ) -> dict[str, Any]:
     try:
         current_size = path.stat().st_size
-    except OSError:
-        return details(new_state())
+    except OSError as exc:
+        return transcript_scan_failure_details(
+            details,
+            new_state(),
+            exc,
+            deleted=exc.errno == errno.ENOENT,
+        )
     if cache_key is None:
         state = new_state()
         try:
             scan_transcript_append(path, 0, lambda line: update(state, line), state)
-        except OSError:
-            pass
+        except OSError as exc:
+            return transcript_scan_failure_details(details, state, exc)
         return details(state)
     record = transcript_scan_memory_record(cache_key, path, new_state)
     with record.lock:
         try:
             current_size = path.stat().st_size
-        except OSError:
-            return details(record.state)
-        reset = transcript_scan_state_needs_reset(path, current_size, record.state)
+            prefix_digest = read_transcript_scan_prefix_digest(path)
+            reset = transcript_scan_state_needs_reset(
+                path,
+                current_size,
+                record.state,
+                prefix_digest=prefix_digest,
+                propagate_read_error=True,
+            )
+        except OSError as exc:
+            return transcript_scan_failure_details(details, record.state, exc)
+        state = new_state() if reset else record.state
         if reset:
-            record.state = new_state()
-            record.state["_allow_offset_rewind"] = True
-        state = record.state
-        prefix_digest = transcript_scan_prefix_digest(path)
+            state["_allow_offset_rewind"] = True
         if not state.get("prefix_digest"):
             state["prefix_digest"] = prefix_digest
         offset = int(state.get("offset") or 0)
         if offset >= current_size:
             state["size"] = current_size
             if reset:
+                record.state = state
                 maybe_persist_transcript_scan_record(record, force=True)
             return details(state)
         try:
             consumed = scan_transcript_append(path, offset, lambda line: update(state, line), state)
             state["offset"] = offset + consumed
             state["size"] = current_size
+            if reset:
+                record.state = state
             maybe_persist_transcript_scan_record(record, force=reset)
-        except OSError:
-            return details(state)
+        except OSError as exc:
+            return transcript_scan_failure_details(details, record.state, exc)
         return details(state)
 
 
-def transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict[str, Any]) -> bool:
+def transcript_scan_state_needs_reset(
+    path: Path,
+    current_size: int,
+    state: dict[str, Any],
+    *,
+    prefix_digest: str | None = None,
+    propagate_read_error: bool = False,
+) -> bool:
     offset = int(state.get("offset") or 0)
     if current_size < offset:
         return True
-    prefix_digest = str(state.get("prefix_digest") or "")
-    if prefix_digest and transcript_scan_prefix_digest(path) != prefix_digest:
-        return True
+    prior_prefix_digest = str(state.get("prefix_digest") or "")
+    if prior_prefix_digest:
+        try:
+            current_prefix_digest = read_transcript_scan_prefix_digest(path) if prefix_digest is None else prefix_digest
+        except OSError:
+            if propagate_read_error:
+                raise
+            return True
+        if current_prefix_digest != prior_prefix_digest:
+            return True
     parsed_tail = state.get("parsed_tail")
     if offset <= 0 or not isinstance(parsed_tail, bytes) or not parsed_tail:
         return False
@@ -760,8 +1272,38 @@ def transcript_scan_state_needs_reset(path: Path, current_size: int, state: dict
             handle.seek(start)
             current_tail = handle.read(offset - start)
     except OSError:
+        if propagate_read_error:
+            raise
         return True
     return current_tail != parsed_tail[-len(current_tail):]
+
+
+def transcript_read_reason(error: OSError, *, deleted: bool = False) -> TranscriptReadReason:
+    if deleted:
+        return TranscriptReadReason.DELETED
+    if error.errno == errno.ENOENT:
+        return TranscriptReadReason.NOT_FOUND
+    if error.errno == getattr(errno, "ESTALE", 116):
+        return TranscriptReadReason.STALE_HANDLE
+    if error.errno == errno.EIO:
+        return TranscriptReadReason.IO_ERROR
+    return TranscriptReadReason.OS_ERROR
+
+
+def transcript_scan_failure_details(
+    details: Callable[[dict[str, Any]], dict[str, Any]],
+    state: dict[str, Any],
+    error: OSError,
+    *,
+    deleted: bool = False,
+) -> dict[str, Any]:
+    payload = details(state)
+    payload["read_status"] = {
+        "available": False,
+        "deleted": deleted,
+        "reason_code": transcript_read_reason(error, deleted=deleted).value,
+    }
+    return payload
 
 
 def scan_transcript_append(path: Path, offset: int, update: Callable[[str], None], state: dict[str, Any]) -> int:
@@ -837,7 +1379,7 @@ def update_claude_transcript_scan_state(state: dict[str, Any], line: str) -> Non
         file_path = payload.get("file_path") if isinstance(payload, dict) else None
         raw_path = str(file_path or "").strip()
         if raw_path:
-            raw_changes.setdefault(raw_path, set()).add("A" if tool == "Write" else "M")
+            record_transcript_change(raw_changes, raw_path, {"A" if tool == "Write" else "M"})
 
 
 def claude_transcript_scan_state_details(state: dict[str, Any], cwd: str | None) -> dict[str, Any]:
@@ -864,7 +1406,7 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, _cwd: s
     for verb, raw_path in CODEX_PATCH_RE.findall(line):
         resolved = resolved_change_path(raw_path, _CODEX_RELATIVE_CWD_SENTINEL)
         if resolved is not None:
-            patch_changes.setdefault(str(resolved), set()).add(CODEX_PATCH_STATUS[verb])
+            record_transcript_change(patch_changes, str(resolved), {CODEX_PATCH_STATUS[verb]})
     has_model_context = '"turn_context"' in line and '"model"' in line
     if has_model_context:
         try:
@@ -910,7 +1452,7 @@ def update_codex_transcript_scan_state(state: dict[str, Any], line: str, _cwd: s
         shell_changes = {}
         state["shell_changes"] = shell_changes
     for path_text, markers in scan_codex_tool_call_changes_from_record(record, _CODEX_RELATIVE_CWD_SENTINEL).items():
-        shell_changes.setdefault(path_text, set()).update(markers)
+        record_transcript_change(shell_changes, path_text, markers)
 
 
 def codex_line_usage_generated_tokens(line: str) -> tuple[float | None, float | None]:
@@ -2414,7 +2956,7 @@ def repository_snapshot_cache_path(repo: Path, from_ref: str | None, to_ref: str
     """Return the private cross-worker cache path for one watcher-owned Git state."""
     key = json.dumps([_REPOSITORY_SNAPSHOT_CACHE_SCHEMA_VERSION, canonical_repository_path(repo), from_ref or "", to_ref or "", generation], separators=(",", ":"))
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return common.STATE_DIR / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME / f"{digest}.json"
+    return host_partitioned_state_dir(common.STATE_DIR) / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME / f"{digest}.json"
 
 
 def prune_repository_snapshot_cache(now: float | None = None) -> int:
@@ -2428,7 +2970,7 @@ def prune_repository_snapshot_cache(now: float | None = None) -> int:
     try:
         if current - _repository_snapshot_cache_last_pruned_at < _REPOSITORY_SNAPSHOT_CACHE_PRUNE_INTERVAL_SECONDS:
             return 0
-        directory = common.STATE_DIR / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME
+        directory = host_partitioned_state_dir(common.STATE_DIR) / _REPOSITORY_SNAPSHOT_CACHE_DIRNAME
         removed = 0
         try:
             for path in directory.glob("*.json"):
@@ -2510,6 +3052,7 @@ def build_git_snapshot(repo: Path, from_ref: str | None = None, to_ref: str | No
     else:
         numstat = git_numstat(repo, diff_base or None, selected_from or None, selected_to or None)
     return {
+        "branch": git_branch_name(repo),
         "statuses": statuses,
         "numstat": numstat,
         "selected_from": selected_from,
@@ -2618,6 +3161,24 @@ def repo_relative_path(path: Path, repo: Path) -> str | None:
         return None
 
 
+def session_git_root(path: Path, warnings: list[str | dict[str, Any]] | None = None) -> str:
+    """Resolve a session path's repository without letting a retired root kill the whole view."""
+    try:
+        return git_root_for_path(path)
+    except FilesystemError as error:
+        if error.status != 404:
+            raise
+        if warnings is not None:
+            warning = message_descriptor(
+                "common.pathNotFound",
+                f"root gone: {path}",
+                {"path": str(path), "reason_code": "root_gone"},
+            )
+            if warning not in warnings:
+                warnings.append(warning)
+        return ""
+
+
 def configured_session_repo_candidate(info: SessionInfo) -> str | None:
     configured = session_workdir(info.session)
     if not configured.is_dir():
@@ -2630,7 +3191,7 @@ def configured_session_repo_candidate(info: SessionInfo) -> str | None:
     return str(configured)
 
 
-def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
+def session_candidate_repo_roots(info: SessionInfo, warnings: list[str | dict[str, Any]] | None = None) -> list[str]:
     roots: list[str] = []
     candidates: list[str] = []
     candidates.extend(str(agent.cwd) for agent in info.agents if agent.cwd)
@@ -2641,13 +3202,13 @@ def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
     if configured:
         candidates.append(configured)
     for value in candidates:
-        repo = git_root_for_path(Path(value).expanduser())
+        repo = session_git_root(Path(value).expanduser(), warnings)
         if repo and repo not in roots:
             roots.append(repo)
     return roots
 
 
-def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
+def session_live_pane_repo_roots(info: SessionInfo, warnings: list[str | dict[str, Any]] | None = None) -> list[str]:
     roots: list[str] = []
     candidates: list[str] = []
     if info.selected_pane is not None and info.selected_pane.current_path:
@@ -2657,7 +3218,7 @@ def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
     if configured:
         candidates.append(configured)
     for value in candidates:
-        repo = git_root_for_path(Path(value).expanduser())
+        repo = session_git_root(Path(value).expanduser(), warnings)
         if repo and repo not in roots:
             roots.append(repo)
     return roots
@@ -2880,9 +3441,8 @@ def historical_codex_transcript_for_cwd(cwd: str, cutoff: float) -> Path | None:
     if direct is not None:
         candidates.append(direct)
     candidates.extend(recent_codex_transcript_candidates())
-    for record in historical_codex_transcript_index(candidates):
-        if record.mtime < cutoff:
-            continue
+    recent_candidates = [candidate for candidate in candidates if file_mtime(candidate) >= cutoff]
+    for record in historical_codex_transcript_index(recent_candidates):
         changes = resolved_codex_raw_changes(record.raw_shell_changes, cwd)
         if any(path_is_under_text(path_text, cwd) for path_text in changes):
             return record.path
@@ -2995,15 +3555,15 @@ def session_files_payload_for_info(
     outside_repo_paths: set[str] = set()
     for path_text, metadata in touched.items():
         path = Path(path_text)
-        repo_text = git_root_for_path(path)
+        repo_text = session_git_root(path, warnings)
         if repo_text:
             repos.setdefault(repo_text, set()).add(path_text)
         else:
             outside_repo_paths.add(path_text)
-    candidate_repo_roots = set(session_candidate_repo_roots(info))
+    candidate_repo_roots = set(session_candidate_repo_roots(info, warnings))
     for repo_text in candidate_repo_roots:
         repos.setdefault(repo_text, set())
-    live_pane_repo_roots = set(session_live_pane_repo_roots(info))
+    live_pane_repo_roots = set(session_live_pane_repo_roots(info, warnings))
     record_session_files_phase(phase_recorder, "repository-discovery", phase_started, {"session": info.session, "repos": len(repos)})
 
     phase_started = time.perf_counter()
@@ -3094,6 +3654,7 @@ def session_files_payload_for_info(
         refs_by_repo[str(repo)] = copy.deepcopy(snapshot.get("recent_refs", []))
         repo_payload: RepoPayload = {
             "repo": str(repo),
+            "branch": str(snapshot.get("branch") or ""),
             "count": len(rendered_entries),
             "touched_count": len(repos[repo_text]),
             "added": line_total(rendered_entries, "added"),
@@ -3225,7 +3786,8 @@ def session_files_payload(
             existing["touched_count"] += repo["touched_count"]
             existing["added"] += repo.get("added", 0)
             existing["removed"] += repo.get("removed", 0)
-            # C6: carry the per-repo effective comparison refs/error from the first session that touched it.
+            # Repository identity and comparison metadata are shared across sessions for this snapshot.
+            existing.setdefault("branch", repo.get("branch", ""))
             existing.setdefault("from_ref", repo.get("from_ref", "default"))
             existing.setdefault("to_ref", repo.get("to_ref", "base"))
             existing.setdefault("error", repo.get("error", ""))

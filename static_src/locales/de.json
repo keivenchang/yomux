@@ -213,6 +213,7 @@
   "debug.cost.backfillPartial": "Nachfüllung unvollständig",
   "debug.cost.backfillPending": "Nachfüllung ausstehend",
   "debug.cost.backfillRunning": "Nachfüllung läuft",
+  "debug.cost.backfillUnknown": "Status der Nachfüllung unbekannt",
   "debug.cost.byModel": "Nach Modell",
   "debug.cost.bySource": "Agenten- und Quellenzuordnung",
   "debug.cost.byTmux": "Kosten nach tmux-Fenster",

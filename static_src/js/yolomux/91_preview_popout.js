@@ -11,6 +11,7 @@ function filePreviewPopoutsForPath(path) {
 
 function closeFilePreviewPopout(path) {
   const record = filePreviewPopouts.get(path);
+  retireFilePreviewPopoutNavigationWrite(record);
   filePreviewPopouts.delete(path);
   const previewWindow = record?.window;
   if (!previewWindow || previewWindow.closed) return false;
@@ -21,6 +22,7 @@ function closeFilePreviewPopout(path) {
 function bumpFilePreviewPopoutGeneration(path) {
   const record = filePreviewPopouts.get(path);
   if (!record) return 0;
+  retireFilePreviewPopoutNavigationWrite(record);
   record.previewGeneration = Number(record.previewGeneration || 0) + 1;
   return record.previewGeneration;
 }
@@ -75,11 +77,133 @@ function syncScrollPositionByRatio(from, to) {
   return true;
 }
 
-function scrollElementAtVerticalEdge(element) {
+function filePreviewPopoutScrollEdge(element) {
   const maxTop = Math.max(0, Number(element?.scrollHeight || 0) - Number(element?.clientHeight || 0));
   const current = Math.max(0, Number(element?.scrollTop || 0));
   const edgeSnap = Math.max(2, Math.ceil(Number(element?.clientHeight || 0) * 0.01));
-  return current <= edgeSnap || current >= maxTop - edgeSnap;
+  if (current <= edgeSnap) return 'top';
+  return maxTop > 0 && current >= maxTop - edgeSnap ? 'bottom' : '';
+}
+
+function filePreviewPopoutScrollCoordinates(scroller) {
+  return {
+    top: Number(scroller?.scrollTop || 0),
+    left: Number(scroller?.scrollLeft || 0),
+  };
+}
+
+function beginFilePreviewPopoutScrollOwner(record, owner) {
+  const generation = Number(record?.scrollSyncGeneration || 0) + 1;
+  record.scrollSyncGeneration = generation;
+  record.scrollSyncOwner = {...owner, generation};
+  record.scrollConvergence = null;
+  record.scrollConvergenceCompletedGeneration = 0;
+  record.scrollConvergenceStableSnapshots = 0;
+  if (owner.kind === 'panel') record.popupScrollInputUntil = 0;
+  return generation;
+}
+
+function rememberFilePreviewPopoutReflectedScroll(record, scroller, generation) {
+  if (!record || !scroller) return false;
+  record.scrollReflection = {generation, ...filePreviewPopoutScrollCoordinates(scroller)};
+  return true;
+}
+
+function filePreviewPopoutReflectedScrollMatches(record, scroller) {
+  const reflected = record?.scrollReflection;
+  if (!reflected || reflected.generation !== Number(record?.scrollSyncGeneration || 0)) return false;
+  const current = filePreviewPopoutScrollCoordinates(scroller);
+  return current.top === reflected.top && current.left === reflected.left;
+}
+
+function rememberFilePreviewPopoutPanelReflection(record, panel, source, element) {
+  if (!record || !panel || !source || !element) return false;
+  if (!record.panelScrollReflections) record.panelScrollReflections = new WeakMap();
+  const reflections = record.panelScrollReflections.get(panel) || Object.create(null);
+  reflections[source] = {
+    generation: Number(record.scrollSyncGeneration || 0),
+    ...filePreviewPopoutScrollCoordinates(element),
+  };
+  record.panelScrollReflections.set(panel, reflections);
+  return true;
+}
+
+function filePreviewPopoutPanelReflectionMatches(record, panel, source, element) {
+  const reflections = record?.panelScrollReflections?.get?.(panel);
+  const reflected = reflections?.[source];
+  if (!reflected || reflected.generation !== Number(record?.scrollSyncGeneration || 0)) return false;
+  const current = filePreviewPopoutScrollCoordinates(element);
+  if (current.top === reflected.top && current.left === reflected.left) return true;
+  delete reflections[source];
+  return false;
+}
+
+function filePreviewPopoutScrollSyncReady(record) {
+  return !record?.scrollSyncFrame
+    && !record?.scrollConvergenceFrame
+    && !record?.scrollConvergence
+    && !record?.previewAsync
+    && !record?.navigationWrite;
+}
+
+function markFilePreviewPopoutScrollInput(record) {
+  if (!record) return false;
+  record.popupScrollInputUntil = nowMs() + 500;
+  return true;
+}
+
+function filePreviewPopoutScrollInputActive(record) {
+  return Number(record?.popupScrollInputUntil || 0) >= nowMs();
+}
+
+function requestFilePreviewPopoutFrame(previewWindow, callback) {
+  if (typeof previewWindow?.requestAnimationFrame === 'function') return previewWindow.requestAnimationFrame(callback);
+  if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
+  return setTimeout(callback, 0);
+}
+
+function scheduleFilePreviewPopoutEdgeConvergence(path, record) {
+  const owner = record?.scrollSyncOwner;
+  if (!owner || owner.kind !== 'panel' || !owner.edge || record.scrollConvergenceFrame) return false;
+  const state = record.scrollConvergence?.generation === owner.generation
+    ? record.scrollConvergence
+    : {generation: owner.generation, lastTop: null, lastMax: null, stableSnapshots: 0};
+  record.scrollConvergence = state;
+  const run = () => {
+    record.scrollConvergenceFrame = 0;
+    const current = filePreviewPopouts.get(path);
+    if (current !== record) return;
+    if (record.scrollSyncOwner?.generation !== state.generation || record.scrollConvergence !== state) {
+      scheduleFilePreviewPopoutEdgeConvergence(path, record);
+      return;
+    }
+    const previewWindow = record.window;
+    const scroller = filePreviewPopoutScrollElement(previewWindow);
+    if (!scroller || previewWindow?.closed) {
+      record.scrollConvergence = null;
+      return;
+    }
+    const maxTop = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
+    scroller.scrollTop = owner.edge === 'bottom' ? maxTop : 0;
+    const top = Number(scroller.scrollTop || 0);
+    const measuredMax = Math.max(0, Number(scroller.scrollHeight || 0) - Number(scroller.clientHeight || 0));
+    rememberFilePreviewPopoutReflectedScroll(record, scroller, state.generation);
+    state.stableSnapshots = state.lastTop === top && state.lastMax === measuredMax
+      ? state.stableSnapshots + 1
+      : 1;
+    state.lastTop = top;
+    state.lastMax = measuredMax;
+    if (state.stableSnapshots >= 2) {
+      if (record.previewAsync) return;
+      record.scrollConvergenceCompletedGeneration = state.generation;
+      record.scrollConvergenceStableSnapshots = state.stableSnapshots;
+      record.scrollConvergence = null;
+      return;
+    }
+    record.scrollConvergenceFrame = requestFilePreviewPopoutFrame(previewWindow, run);
+  };
+  record.scrollConvergenceFrame = requestFilePreviewPopoutFrame(record.window, run);
+  return true;
 }
 
 function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
@@ -89,8 +213,15 @@ function syncFilePreviewPopoutFromPanel(path, record, panel, source) {
   const root = filePreviewPopoutPreviewRoot(previewWindow);
   const from = fileEditorSourceElement(panel, source);
   if (!scroller || !root || !from || !elementCanScroll(scroller)) return false;
+  if (record.scrollSyncOwner?.kind === 'popout' && filePreviewPopoutPanelReflectionMatches(record, panel, source, from)) return false;
+  const edge = filePreviewPopoutScrollEdge(from);
+  const generation = beginFilePreviewPopoutScrollOwner(record, {kind: 'panel', panel, source, edge});
   setFileEditorScrollSyncGuard(record);
-  return syncScrollPositionByRatio(from, scroller);
+  const synced = syncScrollPositionByRatio(from, scroller);
+  if (!synced) return false;
+  rememberFilePreviewPopoutReflectedScroll(record, scroller, generation);
+  if (edge) scheduleFilePreviewPopoutEdgeConvergence(path, record);
+  return true;
 }
 
 function syncFilePreviewPopoutsFromPanel(panel, source) {
@@ -107,16 +238,30 @@ function syncFilePreviewPopoutScroll(path, previewWindow, options = {}) {
   const record = filePreviewPopouts.get(path);
   if (!record || !filePreviewPopoutCanDrive(previewWindow)) return false;
   const scroller = filePreviewPopoutScrollElement(previewWindow);
-  const forceEdge = options.forceEdges === true && scrollElementAtVerticalEdge(scroller);
-  if (!forceEdge && fileEditorScrollSyncBlocked(record)) return false;
+  if (filePreviewPopoutReflectedScrollMatches(record, scroller)) return false;
+  const coordinates = filePreviewPopoutScrollCoordinates(scroller);
+  const owner = record.scrollSyncOwner;
+  if (owner?.kind !== 'popout' && options.userIntent !== true) return false;
+  if (owner?.kind !== 'popout' || owner.top !== coordinates.top || owner.left !== coordinates.left) {
+    beginFilePreviewPopoutScrollOwner(record, {kind: 'popout', ...coordinates});
+  }
   let synced = false;
   for (const panel of fileEditorPanelsForPath(path)) {
     setFileEditorScrollSyncGuard(panel);
     const mode = fileEditorPanelMode(panel);
     const previewPane = fileEditorPanelPreviewPane(panel);
     const editorScroller = fileEditorPanelScroller(panel);
-    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller)) synced = syncScrollPositionByRatio(scroller, editorScroller) || synced;
-    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane)) synced = syncScrollPositionByRatio(scroller, previewPane) || synced;
+    const panelGeneration = Number(panel._splitScrollGeneration || 0);
+    if (mode !== 'diff' && editorScroller && elementCanScroll(editorScroller) && syncScrollPositionByRatio(scroller, editorScroller)) {
+      rememberFileEditorReflectedScroll(panel, 'editor', 'popout', panelGeneration);
+      rememberFilePreviewPopoutPanelReflection(record, panel, 'editor', editorScroller);
+      synced = true;
+    }
+    if ((mode === 'preview' || mode === 'split') && previewPane && elementCanScroll(previewPane) && syncScrollPositionByRatio(scroller, previewPane)) {
+      rememberFileEditorReflectedScroll(panel, 'preview', 'popout', panelGeneration);
+      rememberFilePreviewPopoutPanelReflection(record, panel, 'preview', previewPane);
+      synced = true;
+    }
   }
   return synced;
 }
@@ -125,13 +270,13 @@ function scheduleFilePreviewPopoutScrollSync(path, previewWindow, options = {}) 
   const record = filePreviewPopouts.get(path);
   if (!record) return false;
   if (record.scrollSyncFrame) return true;
+  const generation = Number(record.scrollSyncGeneration || 0);
   const run = () => {
     record.scrollSyncFrame = 0;
+    if (Number(record.scrollSyncGeneration || 0) !== generation) return;
     syncFilePreviewPopoutScroll(path, previewWindow, options);
   };
-  if (typeof previewWindow?.requestAnimationFrame === 'function') record.scrollSyncFrame = previewWindow.requestAnimationFrame(run);
-  else if (typeof requestAnimationFrame === 'function') record.scrollSyncFrame = requestAnimationFrame(run);
-  else record.scrollSyncFrame = setTimeout(run, 0);
+  record.scrollSyncFrame = requestFilePreviewPopoutFrame(previewWindow, run);
   return true;
 }
 
@@ -247,6 +392,25 @@ async function renderedPreviewSnapshotAsync(path, text) {
     await scratch._previewAsync;
   }
   return snapshotRenderedPreviewContainer(scratch);
+}
+
+function applyFilePreviewPopoutAsync(path, previewWindow, previewGeneration, promise, apply) {
+  const record = filePreviewPopouts.get(path);
+  if (!record) return false;
+  const pending = {previewGeneration, promise: null};
+  record.previewAsync = pending;
+  const completion = promise.then(snapshot => {
+    if (!filePreviewPopoutGenerationMatches(path, previewWindow, previewGeneration) || previewWindow.closed) return false;
+    return apply(snapshot);
+  }).catch(() => false);
+  pending.promise = completion;
+  const finish = () => {
+    if (record.previewAsync !== pending) return;
+    record.previewAsync = null;
+    scheduleFilePreviewPopoutEdgeConvergence(path, record);
+  };
+  completion.then(finish, finish);
+  return true;
 }
 
 function filePreviewPopoutDocumentStyle() {
@@ -716,18 +880,29 @@ function bindFilePreviewPopoutControls(path, previewWindow) {
     event.preventDefault();
     setEditorPreviewFontSize(editorPreviewFontSize + Number(button.dataset.editorPreviewFontStep || 0));
   });
+  const record = filePreviewPopouts.get(path);
   const syncScroll = () => {
-    syncFilePreviewPopoutScroll(path, previewWindow, {forceEdges: true});
-    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
+    const userIntent = filePreviewPopoutScrollInputActive(record);
+    syncFilePreviewPopoutScroll(path, previewWindow, {forceEdges: true, userIntent});
+    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true, userIntent});
   };
-  const scheduleScrollSync = () => scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true});
+  const scheduleUserScrollSync = () => {
+    markFilePreviewPopoutScrollInput(record);
+    scheduleFilePreviewPopoutScrollSync(path, previewWindow, {forceEdges: true, userIntent: true});
+  };
   const scroller = filePreviewPopoutScrollElement(previewWindow);
   bind(previewWindow, 'scroll', syncScroll);
-  bind(previewWindow, 'wheel', scheduleScrollSync);
+  bind(previewWindow, 'wheel', scheduleUserScrollSync);
+  bind(previewWindow, 'pointerdown', scheduleUserScrollSync);
+  bind(previewWindow, 'touchstart', scheduleUserScrollSync);
+  bind(previewWindow, 'keydown', scheduleUserScrollSync);
   bind(doc, 'scroll', syncScroll);
-  bind(doc, 'wheel', scheduleScrollSync);
+  bind(doc, 'wheel', scheduleUserScrollSync);
+  bind(doc, 'pointerdown', scheduleUserScrollSync);
+  bind(doc, 'touchstart', scheduleUserScrollSync);
+  bind(doc, 'keydown', scheduleUserScrollSync);
   bind(scroller, 'scroll', syncScroll);
-  bind(scroller, 'wheel', scheduleScrollSync);
+  bind(scroller, 'wheel', scheduleUserScrollSync);
   updateFilePreviewPopoutControls(path, previewWindow);
 }
 
@@ -753,13 +928,14 @@ function updateFilePreviewPopout(path, text) {
     updateFilePreviewPopoutControls(path, previewWindow);
     doc.title = t('preview.popout.title', {name: basenameOf(path)});
     restoreElementScrollPosition(scroller, scrollTop, scrollLeft);
-    renderedPreviewSnapshotAsync(path, text).then(asyncSnapshot => {
-      if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
+    scheduleFilePreviewPopoutEdgeConvergence(path, record);
+    applyFilePreviewPopoutAsync(path, previewWindow, generation, renderedPreviewSnapshotAsync(path, text), asyncSnapshot => {
       const currentRoot = previewWindow.document?.querySelector?.('[data-preview-root]');
       if (!currentRoot) return;
       applyPreviewSnapshotRoot(currentRoot, asyncSnapshot);
       updateFilePreviewPopoutControls(path, previewWindow);
-    }).catch(() => {});
+      scheduleFilePreviewPopoutEdgeConvergence(path, record);
+    });
     return true;
   } catch (_) {
     filePreviewPopouts.delete(path);
@@ -775,33 +951,64 @@ function refreshFilePreviewPopouts() {
   }
 }
 
-function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot) {
-  let written = false;
+function settleFilePreviewPopoutNavigationWrite(record, job, written) {
+  if (!job || job.settled) return false;
+  job.settled = true;
+  if (record?.navigationWrite === job) record.navigationWrite = null;
+  job.resolve(Boolean(written));
+  return true;
+}
+
+function retireFilePreviewPopoutNavigationWrite(record) {
+  const job = record?.navigationWrite;
+  return job ? settleFilePreviewPopoutNavigationWrite(record, job, false) : false;
+}
+
+function writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, previewGeneration) {
+  const record = filePreviewPopouts.get(path);
+  if (!record || !filePreviewPopoutGenerationMatches(path, previewWindow, previewGeneration)) return Promise.resolve(false);
+  retireFilePreviewPopoutNavigationWrite(record);
+  let resolveCompletion;
+  const completion = new Promise(resolve => { resolveCompletion = resolve; });
+  const job = {
+    previewWindow,
+    previewGeneration,
+    resolve: resolveCompletion,
+    settled: false,
+  };
+  record.navigationWrite = job;
   const write = () => {
-    if (written || !previewWindow || previewWindow.closed) return;
-    written = true;
-    writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
-    previewWindow.focus?.();
+    if (job.settled) return;
+    if (record.navigationWrite !== job || !filePreviewPopoutGenerationMatches(path, previewWindow, previewGeneration) || previewWindow.closed) {
+      settleFilePreviewPopoutNavigationWrite(record, job, false);
+      return;
+    }
+    const written = writeFilePreviewPopoutDocument(path, previewWindow, snapshot);
+    if (written) previewWindow.focus?.();
+    settleFilePreviewPopoutNavigationWrite(record, job, written);
   };
   try {
     if (previewWindow.location?.pathname === '/preview-popout' && previewWindow.document?.readyState === 'complete') {
       write();
-      return;
+      return completion;
     }
     previewWindow.addEventListener?.('load', write, {once: true});
-    window.setTimeout(write, 1000);
+    const schedule = typeof previewWindow.setTimeout === 'function'
+      ? previewWindow.setTimeout.bind(previewWindow)
+      : window.setTimeout.bind(window);
+    schedule(write, 1000);
   } catch (_) {
     write();
   }
+  return completion;
 }
 
 function writeFilePreviewPopoutWhenReady(path, previewWindow, text) {
   const generation = bumpFilePreviewPopoutGeneration(path);
-  writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, text));
-  renderedPreviewSnapshotAsync(path, text).then(snapshot => {
-    if (!filePreviewPopoutGenerationMatches(path, previewWindow, generation) || previewWindow.closed) return;
-    writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot);
-  }).catch(() => {});
+  writeFilePreviewPopoutAfterNavigation(path, previewWindow, renderedPreviewSnapshot(path, text), generation);
+  applyFilePreviewPopoutAsync(path, previewWindow, generation, renderedPreviewSnapshotAsync(path, text), snapshot => {
+    return writeFilePreviewPopoutAfterNavigation(path, previewWindow, snapshot, generation);
+  });
 }
 
 function openFilePreviewPopout(path, panel = null) {

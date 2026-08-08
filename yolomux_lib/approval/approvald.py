@@ -38,7 +38,7 @@ APPROVALD_STATUS_TARGET_LIMIT = 256
 
 
 def default_socket_path() -> Path:
-    return safe_socket_path(common.STATE_DIR / "services" / APPROVALD_SOCKET_NAME, prefix="yolomux-approvald")
+    return safe_socket_path(common.RUNTIME_DIR / "services" / APPROVALD_SOCKET_NAME, prefix="yolomux-approvald")
 
 
 def approval_interval_seconds() -> float:
@@ -302,7 +302,7 @@ class ApprovalClient(LocalServiceClient):
             socket_path or default_socket_path(),
             APPROVALD_PROTOCOL_VERSION,
             idle_seconds=APPROVALD_DEFAULT_IDLE_SECONDS,
-            service_dir=Path(socket_path).parent if socket_path is not None else common.STATE_DIR / "services",
+            service_dir=Path(socket_path).parent if socket_path is not None else common.RUNTIME_DIR / "services",
         )
 
     def start_worker(self, *, session: str, target: str, owner_extra: dict[str, Any], dangerously_yolo: bool) -> tuple[ApprovalWorkerHandle | None, dict[str, Any]]:

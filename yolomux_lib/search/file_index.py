@@ -11,6 +11,8 @@ an index is still building or on any error, so search never depends on it.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -23,13 +25,21 @@ from pathlib import Path
 from typing import Any
 
 from yolomux_lib.filesystem.io_ops import read_json_file
+from yolomux_lib.filesystem import paths as filesystem_paths
 from typing import Callable
 
 from ..common import STATE_DIR
 from ..common import start_thread_with_rollback
+from ..infra.filesystem_preflight import preflight_mutable_roots
+from ..infra.host_partition import host_partitioned_state_dir
 
 
-INDEX_DIR = STATE_DIR / "search_index"
+def default_index_dir(state_dir: Path | None = None) -> Path:
+    """Return the host-private root for reconstructible search WAL indexes."""
+    return host_partitioned_state_dir(state_dir or STATE_DIR) / "search_index"
+
+
+INDEX_DIR = default_index_dir()
 
 
 def _bounded_env_int(name: str, default: int, lower: int, upper: int) -> int:
@@ -106,6 +116,7 @@ IndexEntry = tuple[str, str, str, int, int]
 class RootIndex:
     def __init__(self, root: Path):
         self.root = root
+        self.root_fd: int | None = None
         self.entries: list[IndexEntry] = []
         # The list is the in-memory search snapshot.  The map makes a normal
         # file save O(log n) list maintenance instead of a full filter/sort of
@@ -140,6 +151,12 @@ class RootIndex:
         self.exclude_path: Callable[[Path], bool] | None = None
         self.exclude_signature = ""
         self.dirty_paths: set[Path] = set()
+        self.dirty_mark_batches = 0
+        self.dirty_mark_paths = 0
+        self.last_dirty_batch_paths = 0
+        self.last_dirty_before_coalesce = 0
+        self.last_dirty_after_coalesce = 0
+        self.max_dirty_before_coalesce = 0
         self.build_count = 0
         self.full_build_count = 0
         self.incremental_build_count = 0
@@ -153,14 +170,78 @@ class RootIndex:
         self.thread: threading.Thread | None = None
         self.lock = threading.Lock()
 
+    def replace_root_fd(self, descriptor: int) -> None:
+        replacement = os.dup(descriptor)
+        with self.lock:
+            previous = self.root_fd
+            self.root_fd = replacement
+        if previous is not None:
+            os.close(previous)
+
+    def duplicate_root_fd(self) -> int:
+        with self.lock:
+            if self.root_fd is None:
+                raise RuntimeError(f"search index root is not pinned: {self.root}")
+            return os.dup(self.root_fd)
+
+    def close_root_fd(self) -> None:
+        with self.lock:
+            descriptor = self.root_fd
+            self.root_fd = None
+        if descriptor is not None:
+            os.close(descriptor)
+
 
 _REGISTRY: dict[str, RootIndex] = {}
 _REGISTRY_LOCK = threading.Lock()
 
 
+def _descriptor_path(descriptor: int) -> Path:
+    for root in (Path("/proc/self/fd"), Path("/dev/fd")):
+        candidate = root / str(descriptor)
+        if candidate.exists():
+            return candidate
+    raise RuntimeError("this platform cannot expose the pinned search-index descriptor")
+
+
+def _nofollow_flag() -> int:
+    flag = getattr(os, "O_NOFOLLOW", 0)
+    if not flag:
+        raise RuntimeError("safe no-follow search-index opens are unsupported on this platform")
+    return flag
+
+
+def _open_relative_path(root_descriptor: int, relative: Path) -> int:
+    """Open one relative path component-by-component without following symlinks."""
+
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"index path must stay relative to its root: {relative}")
+    current_fd = os.dup(root_descriptor)
+    try:
+        parts = [part for part in relative.parts if part not in {"", "."}]
+        if not parts:
+            return os.dup(current_fd)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+        nofollow = _nofollow_flag()
+        for component in parts[:-1]:
+            next_fd = os.open(component, directory_flags | nofollow, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return os.open(
+            parts[-1],
+            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=current_fd,
+        )
+    finally:
+        os.close(current_fd)
+
+
 def clear_memory_indexes() -> None:
     with _REGISTRY_LOCK:
+        indexes = list(_REGISTRY.values())
         _REGISTRY.clear()
+    for index in indexes:
+        index.close_root_fd()
 
 
 def set_background_owner_checker(checker: Callable[[str], bool] | None) -> None:
@@ -294,6 +375,7 @@ def walk_root(
     exclude_path: Callable[[Path], bool] | None = None,
     max_files: int | None = None,
     relative_root: Path | None = None,
+    operation: str = "",
 ) -> tuple[list[IndexEntry], bool]:
     """Collect every regular file under root, skipping skip_dirs. Cancellable."""
     entries, truncated, _ignored = _walk_root_with_metrics(
@@ -303,6 +385,7 @@ def walk_root(
         exclude_path,
         max_files=max_files,
         relative_root=relative_root,
+        operation=operation,
     )
     return entries, truncated
 
@@ -315,43 +398,59 @@ def _walk_root_with_metrics(
     *,
     max_files: int | None = None,
     relative_root: Path | None = None,
+    entry_root: Path | None = None,
+    root_fd: int | None = None,
+    operation: str = "",
 ) -> tuple[list[IndexEntry], bool, int]:
     entries: list[IndexEntry] = []
     ignored = 0
     limit = max(1, int(max_files if max_files is not None else MAX_INDEX_FILES))
-    rel_root = relative_root or root
+    result_root = entry_root or (relative_root or root)
+    relative_prefix = Path(".")
+    if root_fd is None and relative_root is not None:
+        try:
+            relative_prefix = root.relative_to(relative_root)
+        except ValueError:
+            relative_prefix = Path(".")
     truncated = False
-    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
-        if stop_event is not None and stop_event.is_set():
-            return entries, True, ignored
-        current_path = Path(current)
-        kept_dirs = [name for name in dirs if name not in skip_dirs]
-        ignored += len(dirs) - len(kept_dirs)
-        dirs[:] = sorted(kept_dirs, key=str.lower)
-        if exclude_path is not None:
-            kept_dirs = [name for name in dirs if not exclude_path(current_path / name)]
-            ignored += len(dirs) - len(kept_dirs)
-            dirs[:] = kept_dirs
-        for name in files:
-            if len(entries) >= limit:
-                return entries, True, ignored
-            path = current_path / name
-            if exclude_path is not None and exclude_path(path):
-                ignored += 1
-                continue
-            try:
-                st = path.lstat()
-            except OSError:
-                ignored += 1
-                continue
-            if not stat.S_ISREG(st.st_mode):
-                ignored += 1
-                continue
-            try:
-                rel = path.relative_to(rel_root).as_posix()
-            except ValueError:
-                rel = name
-            entries.append((str(path), name, rel, int(st.st_size), int(st.st_mtime)))
+    owned_root_fd = None
+    if root_fd is None:
+        owned_root_fd = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        root_fd = owned_root_fd
+
+    def include_directory(relative: Path) -> bool:
+        nonlocal ignored
+        result_path = result_root / relative_prefix / relative
+        included = relative.name not in skip_dirs and (exclude_path is None or not exclude_path(result_path))
+        if not included:
+            ignored += 1
+        return included
+
+    try:
+        walker = filesystem_paths.walk_directory(
+            root_fd,
+            include_directory=include_directory,
+            operation=operation,
+            requested_root=result_root / relative_prefix,
+        )
+        with contextlib.closing(walker):
+            for relative_directory, _directory_fd, _dirnames, file_rows in walker:
+                if stop_event is not None and stop_event.is_set():
+                    return entries, True, ignored
+                logical_directory = relative_prefix / relative_directory
+                result_current = result_root / logical_directory
+                for name, st in file_rows:
+                    if len(entries) >= limit:
+                        return entries, True, ignored
+                    result_path = result_current / name
+                    if exclude_path is not None and exclude_path(result_path):
+                        ignored += 1
+                        continue
+                    rel = (logical_directory / name).as_posix()
+                    entries.append((str(result_root / rel), name, rel, int(st.st_size), int(st.st_mtime)))
+    finally:
+        if owned_root_fd is not None:
+            os.close(owned_root_fd)
     return entries, truncated, ignored
 
 
@@ -404,6 +503,7 @@ def _drop_persisted_index(root: Path) -> None:
 
 
 def _connect_sqlite_index(root: Path) -> sqlite3.Connection:
+    preflight_mutable_roots(wal_databases=[_index_disk_path(root)])
     conn = sqlite3.connect(_index_disk_path(root), timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
@@ -779,7 +879,8 @@ def _path_is_within(path: Path, parent: Path) -> bool:
 def _coalesced_paths(paths: set[Path]) -> list[Path]:
     result: list[Path] = []
     for path in sorted(paths, key=lambda item: (len(item.parts), str(item))):
-        if any(_path_is_within(path, parent) for parent in result):
+        path_text = str(path)
+        if any(filesystem_paths._normalized_absolute_text_is_within(path_text, str(parent)) for parent in result):
             continue
         result.append(path)
     return result
@@ -799,6 +900,8 @@ def _refresh_dirty_subtrees(
     dirty_paths: list[Path],
     skip_dirs: set[str],
     exclude_path: Callable[[Path], bool] | None,
+    access_descriptor: int,
+    operation: str,
 ) -> tuple[list[IndexEntry], bool, int, int]:
     with ri.lock:
         previous = list(ri.entries)
@@ -819,113 +922,158 @@ def _refresh_dirty_subtrees(
         # re-sort every retained row merely to ignore a .git/cache event.
         return previous, previously_truncated, 0, ignored
 
-    # Native backends overwhelmingly report a regular file rather than its
-    # parent directory.  Do not turn that into an 80k-row comprehension and
-    # sort: update the one list slot and preserve the existing sorted snapshot.
-    if all(
-        not dirty.is_dir() and (dirty.exists() or str(dirty) in previous_by_path)
-        for dirty in usable_dirty_paths
-    ):
-        entries = previous
-        entry_by_path = previous_by_path
-        refreshed = 0
+    with contextlib.ExitStack() as descriptors:
+        opened: dict[Path, tuple[int | None, os.stat_result | None]] = {}
         for dirty in usable_dirty_paths:
-            path = str(dirty)
-            old = entry_by_path.pop(path, None)
-            if old is not None:
-                try:
-                    entries.remove(old)
-                except ValueError:
-                    pass
             try:
-                st = dirty.lstat()
+                descriptor = _open_relative_path(access_descriptor, dirty.relative_to(ri.root))
             except OSError:
+                opened[dirty] = (None, None)
                 continue
-            if not stat.S_ISREG(st.st_mode):
-                ignored += 1
-                continue
-            entry = (path, dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime))
-            key = entry[2].lower()
-            left, right = 0, len(entries)
-            while left < right:
-                midpoint = (left + right) // 2
-                if entries[midpoint][2].lower() < key:
-                    left = midpoint + 1
-                else:
-                    right = midpoint
-            entries.insert(left, entry)
-            entry_by_path[path] = entry
-            refreshed += 1
-        return entries, previously_truncated, refreshed, ignored
+            descriptors.callback(os.close, descriptor)
+            opened[dirty] = (descriptor, os.fstat(descriptor))
 
-    retained = [
-        entry
-        for entry in previous
-        if not any(_path_is_within(Path(entry[0]), dirty) for dirty in usable_dirty_paths)
-    ]
-    refreshed: list[IndexEntry] = []
-    truncated = previously_truncated
-    for dirty in usable_dirty_paths:
-        remaining = ri.max_files - len(retained) - len(refreshed)
-        if remaining <= 0:
+        # Native backends overwhelmingly report a regular file rather than its
+        # parent directory.  Do not turn that into an 80k-row comprehension and
+        # sort: update the one list slot and preserve the existing sorted snapshot.
+        if all(
+            (st is None or not stat.S_ISDIR(st.st_mode))
+            and (st is not None or str(dirty) in previous_by_path)
+            for dirty, (_descriptor, st) in opened.items()
+        ):
+            entries = previous
+            entry_by_path = previous_by_path
+            refreshed_count = 0
+            for dirty, (_descriptor, st) in opened.items():
+                path = str(dirty)
+                old = entry_by_path.pop(path, None)
+                if old is not None:
+                    try:
+                        entries.remove(old)
+                    except ValueError:
+                        pass
+                if st is None:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    ignored += 1
+                    continue
+                entry = (path, dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime))
+                key = entry[2].lower()
+                left, right = 0, len(entries)
+                while left < right:
+                    midpoint = (left + right) // 2
+                    if entries[midpoint][2].lower() < key:
+                        left = midpoint + 1
+                    else:
+                        right = midpoint
+                entries.insert(left, entry)
+                entry_by_path[path] = entry
+                refreshed_count += 1
+            return entries, previously_truncated, refreshed_count, ignored
+
+        retained = [
+            entry
+            for entry in previous
+            if not any(_path_is_within(Path(entry[0]), dirty) for dirty in usable_dirty_paths)
+        ]
+        refreshed: list[IndexEntry] = []
+        truncated = previously_truncated
+        for dirty, (descriptor, st) in opened.items():
+            remaining = ri.max_files - len(retained) - len(refreshed)
+            if remaining <= 0:
+                truncated = True
+                break
+            if descriptor is not None and st is not None and stat.S_ISDIR(st.st_mode):
+                access_dirty = _descriptor_path(descriptor)
+                entries, subtree_truncated, subtree_ignored = _walk_root_with_metrics(
+                    access_dirty,
+                    skip_dirs,
+                    ri.stop_event,
+                    exclude_path,
+                    max_files=remaining,
+                    relative_root=access_dirty,
+                    entry_root=dirty,
+                    root_fd=descriptor,
+                    operation=operation,
+                )
+                relative_prefix = dirty.relative_to(ri.root)
+                entries = [
+                    (path, name, (relative_prefix / relative).as_posix(), size, mtime)
+                    for path, name, relative, size, mtime in entries
+                ]
+                refreshed.extend(entries)
+                truncated = truncated or subtree_truncated
+                ignored += subtree_ignored
+                continue
+            if st is None:
+                continue
+            if stat.S_ISREG(st.st_mode):
+                refreshed.append((str(dirty), dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime)))
+            else:
+                ignored += 1
+        entries = sorted([*retained, *refreshed], key=lambda entry: entry[2].lower())
+        if len(entries) > ri.max_files:
+            entries = entries[:ri.max_files]
             truncated = True
-            break
-        if dirty.is_dir():
-            entries, subtree_truncated, subtree_ignored = _walk_root_with_metrics(
-                dirty,
-                skip_dirs,
-                ri.stop_event,
-                exclude_path,
-                max_files=remaining,
-                relative_root=ri.root,
-            )
-            refreshed.extend(entries)
-            truncated = truncated or subtree_truncated
-            ignored += subtree_ignored
-            continue
-        try:
-            st = dirty.lstat()
-        except OSError:
-            continue
-        if stat.S_ISREG(st.st_mode):
-            refreshed.append((str(dirty), dirty.name, dirty.relative_to(ri.root).as_posix(), int(st.st_size), int(st.st_mtime)))
-        else:
-            ignored += 1
-    entries = sorted([*retained, *refreshed], key=lambda entry: entry[2].lower())
-    if len(entries) > ri.max_files:
-        entries = entries[:ri.max_files]
-        truncated = True
-    return entries, truncated, len(refreshed), ignored
+        return entries, truncated, len(refreshed), ignored
+
+
+def mark_paths_dirty(
+    paths: list[Path],
+    include_root: Callable[[Path, Path], bool] | None = None,
+    prepare_root: Callable[[Path], None] | None = None,
+) -> dict[Path, set[Path]]:
+    """Group invalidations by index and coalesce each dirty set once per batch."""
+    targets = sorted({path.expanduser().resolve(strict=False) for path in paths}, key=str)
+    paths_by_root: dict[Path, set[Path]] = {}
+    for target in targets:
+        for root in indexed_ancestor_roots(target):
+            # A root-level filesystem notification has no bounded incremental
+            # subtree. Native backends can emit it while merely registering or
+            # reconciling a watch, so let the normal safety refresh handle it
+            # rather than immediately rewalking the entire index.
+            if target == root:
+                continue
+            if include_root is not None and not include_root(root, target):
+                continue
+            paths_by_root.setdefault(root, set()).add(target)
+
+    def mark_indexes(indexes: dict[Path, RootIndex | None], already_marked: dict[Path, RootIndex]) -> None:
+        for root, targets_for_root in paths_by_root.items():
+            ri = indexes[root]
+            if ri is None or ri is already_marked.get(root):
+                continue
+            with ri.lock:
+                ri.dirty_paths.update(targets_for_root)
+                before_coalesce = len(ri.dirty_paths)
+                ri.dirty_paths = set(_coalesced_paths(ri.dirty_paths))
+                ri.dirty_mark_batches += 1
+                ri.dirty_mark_paths += len(targets_for_root)
+                ri.last_dirty_batch_paths = len(targets_for_root)
+                ri.last_dirty_before_coalesce = before_coalesce
+                ri.last_dirty_after_coalesce = len(ri.dirty_paths)
+                ri.max_dirty_before_coalesce = max(ri.max_dirty_before_coalesce, before_coalesce)
+            already_marked[root] = ri
+
+    with _REGISTRY_LOCK:
+        indexes = {root: _REGISTRY.get(str(root)) for root in paths_by_root}
+    marked_indexes: dict[Path, RootIndex] = {}
+    mark_indexes(indexes, marked_indexes)
+    if prepare_root is not None:
+        for root in paths_by_root:
+            prepare_root(root)
+        with _REGISTRY_LOCK:
+            prepared_indexes = {root: _REGISTRY.get(str(root)) for root in paths_by_root}
+        mark_indexes(prepared_indexes, marked_indexes)
+    return paths_by_root
 
 
 def mark_path_dirty(
     path: Path,
     include_root: Callable[[Path, Path], bool] | None = None,
 ) -> list[Path]:
-    """Coalesce one filesystem invalidation into every containing active index."""
-    target = path.expanduser().resolve(strict=False)
-    roots = indexed_ancestor_roots(target)
-    with _REGISTRY_LOCK:
-        indexes = [_REGISTRY.get(str(root)) for root in roots]
-    for ri in indexes:
-        if ri is None:
-            continue
-        # A root-level filesystem notification has no bounded incremental
-        # subtree. Native backends can emit it while merely registering or
-        # reconciling a watch, so let the normal safety refresh handle it
-        # rather than immediately rewalking the entire index.
-        if target == ri.root:
-            continue
-        if include_root is not None and not include_root(ri.root, target):
-            continue
-        with ri.lock:
-            ri.dirty_paths.add(target)
-            ri.dirty_paths = set(_coalesced_paths(ri.dirty_paths))
-    return [
-        root
-        for root in roots
-        if root != target and (include_root is None or include_root(root, target))
-    ]
+    """Compatibility wrapper for a one-path dirty batch."""
+    return sorted(mark_paths_dirty([path], include_root=include_root), key=lambda root: (len(root.parts), str(root)))
 
 
 def schedule_refreshes(now: float | None = None) -> int:
@@ -973,6 +1121,12 @@ def runtime_diagnostics() -> dict[str, Any]:
                 "truncated": ri.truncated,
                 "too_large": ri.too_large,
                 "dirty_subtrees": len(ri.dirty_paths),
+                "dirty_mark_batches": ri.dirty_mark_batches,
+                "dirty_mark_paths": ri.dirty_mark_paths,
+                "last_dirty_batch_paths": ri.last_dirty_batch_paths,
+                "last_dirty_before_coalesce": ri.last_dirty_before_coalesce,
+                "last_dirty_after_coalesce": ri.last_dirty_after_coalesce,
+                "max_dirty_before_coalesce": ri.max_dirty_before_coalesce,
                 "cache_bytes": ri.cache_bytes,
                 "write_bytes": ri.write_bytes,
                 "persisted": ri.persisted,
@@ -1003,6 +1157,7 @@ def _run_build(
     exclude_path: Callable[[Path], bool] | None = None,
     exclude_signature: str = "",
     generation: int | None = None,
+    operation: str = "",
 ) -> None:
     # C11: take a cross-process lock so a second server process does not duplicate the walk. If another
     # process holds it, leave whatever stale-but-ready disk copy we already loaded in place and bail.
@@ -1016,6 +1171,7 @@ def _run_build(
         with ri.lock:
             return generation is None or ri.active_generation == generation
     lock_fd = None
+    access_fd = None
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
         lock_fd = os.open(str(_build_lock_path(ri.root)), os.O_CREAT | os.O_RDWR, 0o644)
@@ -1044,15 +1200,30 @@ def _run_build(
                 ri.building = False
             return
         if dirty_paths:
-            entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(ri, dirty_paths, skip_dirs, effective_exclude_path)
+            access_fd = ri.duplicate_root_fd()
+            access_root = _descriptor_path(access_fd)
+            entries, truncated, scanned_entries, ignored_entries = _refresh_dirty_subtrees(
+                ri,
+                dirty_paths,
+                skip_dirs,
+                effective_exclude_path,
+                access_fd,
+                operation,
+            )
             build_kind = "incremental"
         else:
+            access_fd = ri.duplicate_root_fd()
+            access_root = _descriptor_path(access_fd)
             entries, truncated, ignored_entries = _walk_root_with_metrics(
-                ri.root,
+                access_root,
                 skip_dirs,
                 ri.stop_event,
                 effective_exclude_path,
                 max_files=ri.max_files,
+                relative_root=access_root,
+                entry_root=ri.root,
+                root_fd=access_fd,
+                operation=operation,
             )
             entries.sort(key=lambda entry: (entry[2].lower(), entry[0]))
             scanned_entries = len(entries)
@@ -1131,6 +1302,8 @@ def _run_build(
             except OSError:
                 pass
             os.close(lock_fd)
+        if access_fd is not None:
+            os.close(access_fd)
 
 
 def _start_build(
@@ -1138,6 +1311,7 @@ def _start_build(
     skip_dirs: set[str],
     exclude_path: Callable[[Path], bool] | None = None,
     exclude_signature: str = "",
+    operation: str = "",
 ) -> None:
     with ri.lock:
         if ri.building:
@@ -1148,9 +1322,10 @@ def _start_build(
         ri.active_generation = generation
         ri.last_error = ""
         ri.stop_event = threading.Event()
+        build_context = contextvars.copy_context()
         thread = threading.Thread(
-            target=_run_build,
-            args=(ri, set(skip_dirs), exclude_path, exclude_signature, generation),
+            target=build_context.run,
+            args=(_run_build, ri, set(skip_dirs), exclude_path, exclude_signature, generation, operation),
             name=f"file-index-{ri.root.name}",
             daemon=True,
         )
@@ -1180,6 +1355,8 @@ def ensure_index(
     persist_enabled: bool = True,
     persist_max_files: int = MAX_PERSISTED_INDEX_FILES,
     persist_max_bytes: int = MAX_PERSISTED_INDEX_BYTES,
+    root_fd: int | None = None,
+    operation: str = "",
 ) -> RootIndex:
     """Return the RootIndex for root, seeding from disk and kicking off a
     background (re)build when missing or stale. May return a not-yet-ready index."""
@@ -1248,6 +1425,15 @@ def ensure_index(
                 ri.skip_dirs = set(skip_dirs)
                 ri.exclude_path = exclude_path
                 ri.exclude_signature = exclude_signature
+    if root_fd is None:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _nofollow_flag()
+        opened_root_fd = os.open(root, directory_flags)
+        try:
+            ri.replace_root_fd(opened_root_fd)
+        finally:
+            os.close(opened_root_fd)
+    else:
+        ri.replace_root_fd(root_fd)
     with ri.lock:
         ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
         ri.refresh_seconds = max(0.0, float(refresh_seconds))
@@ -1283,7 +1469,13 @@ def ensure_index(
             ri.disk_metadata_ready = False
             ri.disk_entry_count = 0
     if background_owner_can_build() and not ri.ready:
-        _start_build(ri, skip_dirs, exclude_path=exclude_path, exclude_signature=exclude_signature)
+        _start_build(
+            ri,
+            skip_dirs,
+            exclude_path=exclude_path,
+            exclude_signature=exclude_signature,
+            operation=operation,
+        )
     return ri
 
 
@@ -1298,6 +1490,8 @@ def build_now(
     persist_enabled: bool = True,
     persist_max_files: int = MAX_PERSISTED_INDEX_FILES,
     persist_max_bytes: int = MAX_PERSISTED_INDEX_BYTES,
+    root_fd: int | None = None,
+    operation: str = "",
 ) -> RootIndex:
     """Synchronously build (or rebuild) the index for root. Used at warm-up and in tests."""
     key = str(root)
@@ -1306,6 +1500,15 @@ def build_now(
         if ri is None:
             ri = RootIndex(root)
             _REGISTRY[key] = ri
+    if root_fd is None:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _nofollow_flag()
+        opened_root_fd = os.open(root, directory_flags)
+        try:
+            ri.replace_root_fd(opened_root_fd)
+        finally:
+            os.close(opened_root_fd)
+    else:
+        ri.replace_root_fd(root_fd)
     with ri.lock:
         ri.max_files = max(1, int(MAX_INDEX_FILES if max_files is None else max_files))
         ri.refresh_seconds = max(0.0, float(refresh_seconds))
@@ -1316,7 +1519,13 @@ def build_now(
         ri.exclude_path = exclude_path
         ri.exclude_signature = exclude_signature
     ri.stop_event = threading.Event()
-    _run_build(ri, set(skip_dirs), exclude_path=exclude_path, exclude_signature=exclude_signature)
+    _run_build(
+        ri,
+        set(skip_dirs),
+        exclude_path=exclude_path,
+        exclude_signature=exclude_signature,
+        operation=operation,
+    )
     return ri
 
 
@@ -1371,6 +1580,7 @@ def unindex(root: Path) -> None:
             ri.active_generation = ri.build_generation
             ri.building = False
             ri.stop_event.set()
+        ri.close_root_fd()
     _drop_persisted_index(root)
     try:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)

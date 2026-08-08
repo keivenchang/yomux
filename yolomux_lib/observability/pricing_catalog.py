@@ -36,7 +36,8 @@ from typing import Iterator
 
 from ..atomic_file import file_lock
 from ..common import MODEL_PRICING_CACHE_DIR
-from ..common import MODEL_PRICING_DATABASE_PATH
+from ..infra.filesystem_preflight import preflight_mutable_roots
+from ..infra.host_partition import host_partitioned_state_dir
 
 
 PRICING_SCHEMA_VERSION = 1
@@ -66,6 +67,11 @@ class PricingRefreshError(PricingCatalogError):
     pass
 
 
+def default_pricing_cache_dir(cache_dir: Path | None = None) -> Path:
+    """Return the host-private root for reconstructible model-pricing WAL data."""
+    return host_partitioned_state_dir(cache_dir or MODEL_PRICING_CACHE_DIR) / "model-pricing"
+
+
 @dataclass(frozen=True)
 class PricingPaths:
     root: Path
@@ -75,8 +81,8 @@ class PricingPaths:
 
     @classmethod
     def from_root(cls, root: Path | None = None) -> "PricingPaths":
-        directory = Path(root or MODEL_PRICING_CACHE_DIR).expanduser()
-        database = MODEL_PRICING_DATABASE_PATH if root is None else directory / "pricing.sqlite3"
+        directory = Path(root or default_pricing_cache_dir()).expanduser()
+        database = directory / "pricing.sqlite3"
         return cls(directory, database, directory / "sources", directory / "catalog.lock")
 
 
@@ -289,6 +295,7 @@ class PricingCatalog:
         self._opened = False
 
     def _connect(self) -> sqlite3.Connection:
+        preflight_mutable_roots(wal_databases=[self.paths.database])
         self.paths.root.mkdir(parents=True, exist_ok=True)
         self.paths.root.chmod(0o700)
         connection = sqlite3.connect(self.paths.database, timeout=15.0, isolation_level=None)
@@ -896,6 +903,7 @@ class PricingRefreshCoordinator:
         self._timer: Any = None
         self._periodic = False
         self._failure_count = 0
+        self._epoch = 0
         self._state: dict[str, Any] = {"status": "idle"}
 
     def status(self) -> dict[str, Any]:
@@ -906,7 +914,15 @@ class PricingRefreshCoordinator:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return {"ok": True, "coalesced": True, **self._state}
-            self._state = {"status": "running", "started_at": self.clock(), "reason": reason}
+            self._epoch += 1
+            self._state = {
+                "status": "running",
+                "started_at": self.clock(),
+                "reason": reason,
+                "key": "pricing-refresh",
+                "epoch": self._epoch,
+                "ticket": f"pricing-refresh-{self._epoch}",
+            }
             self._thread = threading.Thread(target=self._run, name="yolomux-pricing-refresh", daemon=True)
             self._thread.start()
             return {"ok": True, "coalesced": False, **self._state}
@@ -949,7 +965,8 @@ class PricingRefreshCoordinator:
             result = self.catalog.refresh(list(self.adapters))
             with self._lock:
                 self._failure_count = 0
-                self._state = {"status": "done", "finished_at": self.clock(), "refresh_status": result.get("status", ""), **{key: value for key, value in result.items() if key != "status"}}
+                identity = {key: self._state[key] for key in ("key", "epoch", "ticket")}
+                self._state = {"status": "done", "finished_at": self.clock(), **identity, "refresh_status": result.get("status", ""), **{key: value for key, value in result.items() if key != "status"}}
                 state = dict(self._state)
             self.publish("pricing_catalog_changed", state)
             self._schedule(PRICING_REFRESH_INTERVAL_SECONDS + self.random_source() * PRICING_REFRESH_JITTER_SECONDS)
@@ -957,7 +974,8 @@ class PricingRefreshCoordinator:
             with self._lock:
                 self._failure_count += 1
                 backoff = min(PRICING_REFRESH_BACKOFF_MAX_SECONDS, PRICING_REFRESH_BACKOFF_INITIAL_SECONDS * (2 ** (self._failure_count - 1)))
-                self._state = {"status": "failed", "finished_at": self.clock(), "error": str(exc), "failure_count": self._failure_count, "backoff_seconds": backoff}
+                identity = {key: self._state[key] for key in ("key", "epoch", "ticket")}
+                self._state = {"status": "failed", "finished_at": self.clock(), **identity, "error": str(exc), "failure_count": self._failure_count, "backoff_seconds": backoff}
                 state = dict(self._state)
             logger.warning("Pricing catalog refresh failed; retrying in %.0f seconds: %s", backoff, exc)
             self.publish("pricing_catalog_changed", state)

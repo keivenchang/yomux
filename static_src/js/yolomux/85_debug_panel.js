@@ -99,6 +99,8 @@ const jsDebugCurrentStatsClientState = {
   client: null,
   selectionKey: '',
   startPromise: null,
+  failureLatched: false,
+  paintedGenerationKey: '',
 };
 // Background prefetch of the full retention window into the shared bucket cache so a
 // range/zoom switch renders cached (stale) content instantly while the normal poll
@@ -118,16 +120,22 @@ const jsDebugStatsUploadState = {
   generation: 0,
 };
 const jsDebugCurrentObservationBatchDelayMs = 10_000;
+const jsDebugCurrentObservationHeartbeatMs = 10_000;
 const jsDebugCurrentObservationRetryMaxMs = 5 * 60_000;
 const jsDebugCurrentObservationState = {
   queue: [],
   keys: new Set(),
   nextHealthId: 1,
   timer: null,
+  livenessTimer: null,
   inFlight: false,
   retryMs: 10_000,
-  stopped: statsWriterFence === null,
   epoch: globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+  highWaterDepth: 0,
+  drops: 0,
+  retries: 0,
+  instrumentationCostMs: 0,
+  receipts: new Map(),
 };
 let jsDebugStatsServerSequence = 0;
 let jsDebugStatsServerUptimeSeconds = null;
@@ -159,7 +167,7 @@ let jsDebugGraphHiddenCharts = null;
 let jsDebugGraphVisibleCharts = null;
 let jsDebugStatsUiPreferencesLoaded = false;
 const jsDebugPricingRefreshState = {inFlight: false, error: '', status: '', timer: null, lastRequestedAtMs: 0};
-const jsDebugUsageAtomBackfill = {state: 'pending', sources: 0, missing: 0};
+const jsDebugUsageAtomBackfill = {state: 'unknown', sources: 0, missing: 0};
 const jsDebugGraphRangeOptions = Object.freeze([
   {seconds: 5 * 60, label: '5m'},
   {seconds: 15 * 60, label: '15m'},
@@ -181,7 +189,7 @@ const jsDebugGraphDisplayBucketMs = Object.freeze([1000, 2000, 5000, 10_000, 30_
 // pick pass through unchanged; finer newer buckets group up to it at serve time.
 // AUTO/effective clamping may still RENDER coarser values (e.g. 600s for the oldest
 // retention windows) — that honest retained resolution is shown in the label, not the
-// picker. Persisted/deeplinked out-of-set overrides normalize into this set.
+// picker. Persisted/deeplinked out-of-set overrides normalize back to AUTO.
 const jsDebugGraphResolutionChoices = Object.freeze([1, 10, 60, 300]);
 // Rendered-point cap for EXPLICIT overrides. AUTO is already bounded by
 // jsDebugGraphMaxDisplayPoints; an explicit override that would render more than this
@@ -385,7 +393,7 @@ const jsDebugGraphSeries = Object.freeze([
   ...jsDebugGraphClientMetrics.map(metric => debugGraphClientSeriesDef(metric, {labelKey: 'debug.graph.series.thisClient', clientId: jsDebugGraphThisClientId, clientAggregate: jsDebugGraphThisClientAggregate, clientLinePattern: jsDebugGraphThisClientLinePattern})),
   ...jsDebugAgentStatusSeriesKeys.map(debugGraphAgentStatusSeriesDef),
   {key: 'tokensPerAgent', labelKey: 'debug.graph.series.tokensPerAgent', unit: 'tokensPerMinute', value: bucket => bucket.agentTokenSamples ? bucket.tokensPerAgentTotal / bucket.agentTokenSamples : 0, hasData: bucket => Number(bucket?.agentTokenSamples || 0) > 0},
-  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? Math.min(100, bucket.systemCpuTotalPercent / bucket.systemCpuCount) : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
+  {key: 'systemCpu', labelKey: 'debug.graph.series.systemCpu', unit: 'percent', linePattern: 'solid', value: bucket => bucket.systemCpuCount ? bucket.systemCpuTotalPercent / bucket.systemCpuCount : 0, hasData: bucket => Number(bucket?.systemCpuCount || 0) > 0},
   {
     key: 'systemMemory', labelKey: 'debug.graph.series.systemMemory', unit: 'bytes', linePattern: 'solid',
     value: bucket => bucket.hostMetrics?.systemMemoryCount ? bucket.hostMetrics.systemMemoryUsedTotalBytes / bucket.hostMetrics.systemMemoryCount : 0,
@@ -422,7 +430,7 @@ const jsDebugStatsFamilyManifest = Object.freeze({
 const jsDebugStatsFamilyByChartGroup = Object.freeze(Object.fromEntries(Object.entries(jsDebugStatsFamilyManifest)
   .flatMap(([family, entry]) => entry.chartGroups.map(group => [group, family]))));
 const jsDebugGraphChartGroups = Object.freeze([
-  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', fixedMax: 100, hostMetric: 'cpu'},
+  {key: 'cpu', labelKey: 'debug.graph.chart.cpu', descKey: 'debug.graph.chart.cpu.desc', series: ['systemCpu'], unit: 'percent', hostMetric: 'cpu'},
   {key: 'serversLoad', labelKey: 'debug.graph.chart.serversLoad', descKey: 'debug.graph.chart.serversLoad.desc', series: [], unit: 'percent', serviceLoad: true, bucketSeconds: jsDebugStatsFamilyManifest.service_load.cadenceSeconds},
   {key: 'memory', labelKey: 'debug.graph.chart.memory', descKey: 'debug.graph.chart.memory.desc', series: ['systemMemory'], unit: 'bytes', kind: 'area', stacked: true, hostMetric: 'memory', capacityMetric: 'systemMemory'},
   {key: 'activity', labelKey: 'debug.graph.chart.agentStatus', descKey: 'debug.graph.chart.agentStatus.desc', series: jsDebugAgentStatusSeriesKeys, legendSeries: jsDebugAgentStatusLegendSeriesKeys, unit: 'count', kind: 'bar', stacked: true, integerAxis: true, integerGridLines: true, exactIntegerAxisMax: true, minimumAxisMax: 4, bucketSeconds: jsDebugStatsFamilyManifest.agent_status.cadenceSeconds, statusNoDataOverlay: true},
@@ -1154,37 +1162,83 @@ function debugEventDetailText(event) {
     debugFilesystemEventSummaryText(event),
     event.key ? `key=${event.key}` : '',
   ].filter(Boolean).join(' ');
-  return event.message || event.reason || event.source || '';
+  return event.message || event.reason || event.error || event.source || '';
 }
 
 function debugClientLogLevel(event) {
   if (event?.type === 'stats_history' && jsDebugLogLevels.includes(String(event?.level || ''))) return String(event.level);
-  if (event?.type === 'error' || event?.type === 'unhandledrejection' || event?.error || Number(event?.status || 0) >= 500) return 'error';
+  if (event?.type === 'error' || event?.type === 'unhandledrejection' || event?.type === 'client_failure' || event?.error || Number(event?.status || 0) >= 500) return 'error';
   if (Number(event?.status || 0) >= 400 || event?.ok === false) return 'warning';
   if (event?.type === 'sse') return 'debug';
   return 'info';
 }
 
-function recordJsDebugStatsDiagnostic(level, message) {
-  recordJsDebugEvent('stats_history', {level, message: `YO!stats: ${message}`});
+function recordJsDebugStatsDiagnostic(level, message, details = {}) {
+  const text = String(message || '').replace(/\s+/g, ' ').trim();
+  const displayMessage = /^YO!stats(?::|\s)/.test(text) ? text : `YO!stats: ${text}`;
+  const normalizedLevel = String(level || '').toLowerCase();
+  const source = jsDebugFailureSource(details.route || details.source || '/');
+  recordJsDebugEvent('stats_history', {
+    ...details,
+    level: normalizedLevel,
+    message: displayMessage,
+    signature: jsDebugFailureSignature(normalizedLevel, displayMessage, '', source, 0, 0),
+  });
 }
 
 function debugClientLogRecord(event, index = 0) {
-  const timestampMs = Date.parse(event?.ts || '');
+  const redacted = shareRedactDiagnosticValue(event);
+  const timestampMs = Date.parse(redacted?.ts || '');
   return {
-    id: `client:${event?.id ?? index}`,
+    id: `client:${redacted?.id ?? index}`,
+    owner: 'client',
     timestamp: Number.isFinite(timestampMs) ? timestampMs / 1000 : 0,
-    level: debugClientLogLevel(event),
+    wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(timestampMs)),
+    level: debugClientLogLevel(redacted),
     source: 'browser',
-    category: String(event?.type || 'client'),
-    message: [debugEventDetailText(event), debugEventStatusText(event), debugPhaseTimingText(event)].filter(Boolean).join(' | '),
+    category: String(redacted?.category || redacted?.type || 'client'),
+    message: [debugEventDetailText(redacted), debugEventStatusText(redacted), debugPhaseTimingText(redacted)].filter(Boolean).join(' | '),
+    requestId: String(redacted?.requestId || redacted?.request_id || redacted?.request?.id || ''),
+    route: String(redacted?.route || redacted?.endpoint || redacted?.source || ''),
+    event: String(redacted?.event || redacted?.eventType || redacted?.event_type || ''),
+    delivery: String(redacted?.delivery || redacted?.deliveryOutcome || redacted?.delivery_outcome || ''),
+  };
+}
+
+function debugServerLogRecord(entry, index = 0) {
+  const redacted = shareRedactDiagnosticValue(entry);
+  const timestampMs = Date.parse(redacted?.ts || '');
+  const timestamp = Number(redacted?.timestamp);
+  return {
+    id: `server:${redacted?.id ?? index}`,
+    owner: 'server',
+    timestamp: Number.isFinite(timestamp) ? timestamp : (Number.isFinite(timestampMs) ? timestampMs / 1000 : 0),
+    wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(
+      Number.isFinite(timestamp) ? timestamp * 1000 : timestampMs,
+    )),
+    level: jsDebugLogLevels.includes(String(redacted?.level || '')) ? String(redacted.level) : 'info',
+    source: String(redacted?.source || 'server'),
+    category: String(redacted?.category || 'server'),
+    message: String(redacted?.message || ''),
+    requestId: String(redacted?.requestId || redacted?.request_id || redacted?.request?.id || ''),
+    route: String(redacted?.route || redacted?.endpoint || ''),
+    event: String(redacted?.event || redacted?.eventType || redacted?.event_type || ''),
+    delivery: String(redacted?.delivery || redacted?.deliveryOutcome || redacted?.delivery_outcome || ''),
   };
 }
 
 function debugMergedLogRecords() {
-  const server = jsDebugLogsState.payload.filter(entry => entry && typeof entry === 'object');
+  const server = jsDebugLogsState.payload
+    .filter(entry => entry && typeof entry === 'object')
+    .map(debugServerLogRecord);
   const client = jsDebugEvents.map(debugClientLogRecord);
+  const seen = new Set();
   return [...server, ...client]
+    .filter(entry => {
+      if (seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    })
     .filter(entry => Number(entry.timestamp || 0) * 1000 > jsDebugLogsState.clearedAt)
     .sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)) || String(b.id || '').localeCompare(String(a.id || '')))
     .slice(0, 500);
@@ -1195,8 +1249,7 @@ function debugVisibleLogRecords() {
 }
 
 function debugLogTimeText(timestamp) {
-  const date = new Date(Number(timestamp || 0) * 1000);
-  return Number.isFinite(date.getTime()) ? date.toLocaleTimeString() : '';
+  return diagnosticPacificWallTime(Number(timestamp || 0) * 1000);
 }
 
 function debugLogsTextForClipboard() {
@@ -1205,26 +1258,43 @@ function debugLogsTextForClipboard() {
     String(entry.level || 'info').toUpperCase().padEnd(7),
     `[${entry.source || 'server'}${entry.category ? `/${entry.category}` : ''}]`,
     entry.message || '',
+    entry.requestId ? `request=${entry.requestId}` : '',
+    entry.route ? `route=${entry.route}` : '',
+    entry.event ? `event=${entry.event}` : '',
+    entry.delivery ? `delivery=${entry.delivery}` : '',
   ].filter(Boolean).join(' ')).join('\n');
+}
+
+function debugLogsCopyButtonLabel(nowMs = Date.now()) {
+  return copyFeedbackLabel('debug-logs', t('common.copy'), nowMs);
+}
+
+function debugApiCopyButtonLabel(nowMs = Date.now()) {
+  return copyFeedbackLabel('debug-api', t('common.copy'), nowMs);
+}
+
+function runDebugCopy(text, options = {}) {
+  return copyTextWithFeedback(text, {statusText: t('debug.copied'), ...options});
 }
 
 function debugLogsInnerHtml() {
   const records = debugVisibleLogRecords();
+  const copyLabel = debugLogsCopyButtonLabel();
   return `<div class="js-debug-logs-toolbar">
     <div class="js-debug-log-levels" role="group" aria-label="${esc(t('debug.logs.levels'))}">${jsDebugLogLevels.map(level => {
       const active = jsDebugLogsState.levels.has(level);
       return `<button type="button" class="preferences-inline-action js-debug-log-level js-debug-log-level--${esc(level)}${active ? ' active' : ''}" data-js-debug-log-level="${esc(level)}" aria-pressed="${active ? 'true' : 'false'}">${esc(t(`debug.logs.level.${level}`))}</button>`;
     }).join('')}</div>
     <div class="js-debug-actions">
-      <button type="button" class="preferences-inline-action" data-js-debug-logs-copy>${esc(t('common.copy'))}</button>
+      <button type="button" class="preferences-inline-action" data-js-debug-logs-copy data-copy-feedback-key="debug-logs" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(copyLabel)}">${esc(copyLabel)}</button>
       <button type="button" class="preferences-inline-action" data-js-debug-logs-clear>${esc(t('common.clear'))}</button>
     </div>
   </div>
   ${jsDebugLogsState.error ? `<div class="js-debug-logs-error" role="status">${esc(t('debug.logs.loadFailed', {error: jsDebugLogsState.error}))}</div>` : ''}
   <div class="js-debug-log-list" data-js-debug-log-list aria-label="${esc(t('debug.logs.recent'))}" aria-busy="${jsDebugLogsState.inFlight ? 'true' : 'false'}">${records.length ? records.map(entry => {
     const level = jsDebugLogLevels.includes(entry.level) ? entry.level : 'info';
-    return `<article class="js-debug-log-row js-debug-log-row--${esc(level)}" data-js-debug-log-entry data-level="${esc(level)}">
-      <div class="js-debug-log-meta"><time>${esc(debugLogTimeText(entry.timestamp))}</time><span class="js-debug-log-chip">${esc(t(`debug.logs.level.${level}`))}</span><span>${esc(entry.source || 'server')}</span>${entry.category ? `<span>${esc(entry.category)}</span>` : ''}</div>
+    return `<article class="js-debug-log-row js-debug-log-row--${esc(level)}" data-js-debug-log-entry data-js-debug-log-id="${esc(entry.id || '')}" data-js-debug-log-owner="${esc(entry.owner || '')}" data-level="${esc(level)}">
+      <div class="js-debug-log-meta"><time>${esc(debugLogTimeText(entry.timestamp))}</time><span class="js-debug-log-chip">${esc(t(`debug.logs.level.${level}`))}</span><span data-js-debug-log-source>${esc(entry.source || 'server')}</span>${entry.category ? `<span data-js-debug-log-category>${esc(entry.category)}</span>` : ''}${entry.requestId ? `<span data-js-debug-log-request-id>${esc(entry.requestId)}</span>` : ''}${entry.route ? `<span data-js-debug-log-route>${esc(entry.route)}</span>` : ''}${entry.event ? `<span data-js-debug-log-event>${esc(entry.event)}</span>` : ''}${entry.delivery ? `<span data-js-debug-log-delivery>${esc(entry.delivery)}</span>` : ''}</div>
       <div class="js-debug-log-message">${esc(entry.message || '')}</div>
     </article>`;
   }).join('') : `<div class="js-debug-log-empty">${esc(t('debug.logs.empty'))}</div>`}</div>`;
@@ -1870,52 +1940,695 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
 
 function recordJsDebugEventForGraph(event) {
   if (!event || typeof event !== 'object') return;
-  if (event.type !== 'api' && event.type !== 'sse') return;
+  if (![
+    'api', 'sse', 'page_load', 'finder_usable', 'interaction', 'operation_wait',
+    'long_task', 'error', 'unhandledrejection', 'client_failure', 'stats_history',
+  ].includes(event.type)) return;
+  if (event.type === 'stats_history' && !['warning', 'error'].includes(String(event.level || '').toLowerCase())) return;
   const id = Number(event.id);
-  if (!Number.isSafeInteger(id) || id < 0 || jsDebugCurrentObservationState.stopped) return;
+  if (!Number.isSafeInteger(id) || id < 0) return;
   const key = `${jsDebugCurrentObservationState.epoch}:${id}`;
   queueJsDebugCurrentObservation(key, event);
 }
 
-function queueJsDebugCurrentObservation(key, event) {
-  if (jsDebugCurrentObservationState.keys.has(key) || jsDebugCurrentObservationState.queue.length >= 1000) return;
-  jsDebugCurrentObservationState.keys.add(key);
-  jsDebugCurrentObservationState.queue.push({key, event});
-  scheduleJsDebugCurrentObservationFlush();
+function jsDebugCurrentObservationEventSnapshot(event) {
+  const snapshot = {
+    ...(event || {}),
+    journeyId: String(event?.journeyId || reloadClientJourneyId).slice(0, 96),
+    observationCodeRevision: jsDebugCodeRevision(),
+    observationBrowserFamily: jsDebugBrowserFamily(),
+  };
+  if (event?.phaseTimings && typeof event.phaseTimings === 'object') {
+    snapshot.phaseTimings = {...event.phaseTimings};
+  }
+  return snapshot;
 }
+
+function queueJsDebugCurrentObservation(key, event) {
+  if (!clientCanUseUnscopedHostRequests()) return;
+  if (jsDebugCurrentObservationState.keys.has(key)) return;
+  const observationEvent = jsDebugCurrentObservationEventSnapshot(event);
+  const releaseBlocking = jsDebugCurrentObservationReleaseBlocking(observationEvent);
+  if (jsDebugCurrentObservationState.queue.length >= 1000 && !releaseBlocking) {
+    jsDebugCurrentObservationState.drops += 1;
+    return;
+  }
+  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, releaseBlocking};
+  jsDebugCurrentObservationState.keys.add(entry.key);
+  jsDebugCurrentObservationState.queue.push(entry);
+  if (releaseBlocking) {
+    jsDebugCurrentObservationState.receipts.set(entry.key, {
+      key: entry.key,
+      epoch: entry.epoch,
+      eventId: observationEvent.id,
+      ...jsDebugCurrentFailureCorrelation(observationEvent),
+      status: 'pending',
+    });
+    trimJsDebugCurrentObservationReceipts();
+    persistJsDebugCurrentObservationReceipts();
+  }
+  jsDebugCurrentObservationState.highWaterDepth = Math.max(
+    jsDebugCurrentObservationState.highWaterDepth,
+    jsDebugCurrentObservationState.queue.length,
+  );
+  scheduleJsDebugCurrentObservationFlush(releaseBlocking ? 0 : jsDebugCurrentObservationBatchDelayMs);
+}
+
+function jsDebugCurrentObservationReleaseBlocking(event) {
+  return jsDebugFailureClassification(event).releaseBlocking;
+}
+
+function jsDebugCurrentFailureCorrelation(event) {
+  const redacted = typeof shareRedactDiagnosticValue === 'function'
+    ? shareRedactDiagnosticValue(event || {})
+    : (event || {});
+  const route = jsDebugFailureSource(redacted.route || redacted.endpoint || redacted.url || redacted.source || '/');
+  const source = jsDebugFailureSource(redacted.source || route);
+  const eventType = String(redacted.eventType || redacted.event || redacted.type || '').replace(/[^A-Za-z0-9._/-]/g, '').slice(0, 64);
+  const deliveryOutcome = String(redacted.deliveryOutcome || redacted.delivery || (
+    /(?:stalled|missing)/i.test(String(redacted.message || redacted.error || '')) ? 'stalled' : 'failed'
+  )).replace(/[^A-Za-z0-9._/-]/g, '').slice(0, 32);
+  const status = Number(redacted.status);
+  return {
+    requestId: String(redacted.requestId || redacted.request_id || '').slice(0, 128),
+    source,
+    route,
+    event: eventType,
+    wallTime: String(redacted.wallTime || '').slice(0, 64),
+    deliveryOutcome,
+    httpStatus: Number.isSafeInteger(status) && status >= 100 && status <= 599 ? status : null,
+  };
+}
+
+function jsDebugCurrentObservationReceiptBarrier(epoch = null) {
+  const selectedEpoch = epoch === null || epoch === undefined ? null : String(epoch || '');
+  const result = {
+    epoch: selectedEpoch === null ? 'all' : selectedEpoch,
+    accepted: 0, pending: 0, retrying: 0, rejected: 0, dropped: 0,
+    quiescent: true, blocking: [],
+  };
+  for (const receipt of jsDebugCurrentObservationState.receipts.values()) {
+    if (selectedEpoch !== null && receipt.epoch !== selectedEpoch && receipt.globalBlocker !== true) continue;
+    if (receipt.status === 'accepted') result.accepted += 1;
+    else if (receipt.status === 'pending') result.pending += 1;
+    else if (receipt.status === 'retrying') result.retrying += 1;
+    else if (receipt.status === 'rejected') result.rejected += 1;
+    else if (receipt.status === 'dropped') result.dropped += 1;
+    if (receipt.status !== 'accepted') {
+      result.quiescent = false;
+      result.blocking.push({...receipt});
+    }
+  }
+  return result;
+}
+
+function jsDebugCurrentObservationReceiptProjection(epoch = null) {
+  const receipts = jsDebugCurrentObservationReceiptJournal().map(receipt => ({...receipt}));
+  const barrier = jsDebugCurrentObservationReceiptBarrier(epoch);
+  if (receipts.length > jsDebugCurrentObservationReceiptStorageLimit
+      || receipts.some(receipt => !jsDebugCurrentObservationReceiptValid(receipt))) return null;
+  const selectedEpoch = epoch === null || epoch === undefined ? null : String(epoch || '');
+  const selected = receipts.filter(receipt => selectedEpoch === null || receipt.epoch === selectedEpoch || receipt.globalBlocker === true);
+  const counts = {accepted: 0, pending: 0, retrying: 0, rejected: 0, dropped: 0};
+  for (const receipt of selected) counts[receipt.status] += 1;
+  if (Object.keys(counts).some(status => counts[status] !== barrier[status])) return null;
+  return {receipts, barrier};
+}
+
+const jsDebugCurrentObservationReceiptStorageKey = 'yolomux.current-observation-receipts.v1';
+const jsDebugCurrentObservationReceiptFallbackKey = `${jsDebugCurrentObservationReceiptStorageKey}.fallback`;
+const jsDebugCurrentObservationReceiptFailureKey = `${jsDebugCurrentObservationReceiptStorageKey}.failure`;
+const jsDebugCurrentObservationReceiptProbeKey = `${jsDebugCurrentObservationReceiptStorageKey}.probe`;
+const jsDebugCurrentObservationReceiptFailureReceiptKey = '__yolomux_receipt_storage_failure__';
+const jsDebugCurrentObservationReceiptOverflowKey = '__yolomux_receipt_journal_overflow__';
+const jsDebugCurrentObservationReceiptStorageLimit = 500;
+const jsDebugCurrentObservationReceiptStatuses = new Set(['accepted', 'pending', 'retrying', 'rejected', 'dropped']);
+const jsDebugCurrentObservationReceiptFields = new Set([
+  'key', 'epoch', 'eventId', 'requestId', 'source', 'route', 'event', 'wallTime',
+  'deliveryOutcome', 'httpStatus', 'status',
+]);
+const jsDebugCurrentObservationReceiptOverflowFields = new Set([
+  ...jsDebugCurrentObservationReceiptFields, 'globalBlocker', 'journalOverflow', 'omitted',
+]);
+
+function jsDebugCurrentObservationReceiptStorages() {
+  const stores = [];
+  for (const storage of [globalThis.sessionStorage, globalThis.localStorage]) {
+    if (!storage || stores.includes(storage)) continue;
+    stores.push(storage);
+  }
+  return stores;
+}
+
+function jsDebugCurrentObservationStorageFailureReceipt(reason) {
+  return {
+    key: jsDebugCurrentObservationReceiptFailureReceiptKey,
+    epoch: '*',
+    eventId: null,
+    requestId: '',
+    source: '/',
+    route: '/',
+    event: 'receipt_storage_failure',
+    wallTime: '',
+    deliveryOutcome: 'failed',
+    httpStatus: null,
+    status: 'dropped',
+    globalBlocker: true,
+    storageFailure: String(reason || 'unknown').replace(/[^A-Za-z0-9._/-]/g, '').slice(0, 64) || 'unknown',
+  };
+}
+
+function markJsDebugCurrentObservationStorageFailure(reason, {corrupt = false} = {}) {
+  const state = jsDebugCurrentObservationState;
+  state.receiptStorageFailure = String(reason || 'unknown');
+  state.receiptStorageCorrupt = state.receiptStorageCorrupt === true || corrupt === true;
+  state.receipts.set(
+    jsDebugCurrentObservationReceiptFailureReceiptKey,
+    jsDebugCurrentObservationStorageFailureReceipt(state.receiptStorageFailure),
+  );
+  const marker = JSON.stringify({schema: 1, reason: state.receiptStorageFailure});
+  for (const storage of jsDebugCurrentObservationReceiptStorages()) {
+    try {
+      storage.setItem(jsDebugCurrentObservationReceiptFailureKey, marker);
+    } catch (_error) {
+      // Every reload probes both stores and recreates the global blocker while a store remains unwritable.
+    }
+  }
+}
+
+function jsDebugCurrentObservationReceiptStorageHealthy() {
+  const stores = jsDebugCurrentObservationReceiptStorages();
+  if (!stores.length) return false;
+  let healthy = true;
+  for (const storage of stores) {
+    try {
+      storage.setItem(jsDebugCurrentObservationReceiptProbeKey, '1');
+      if (storage.getItem(jsDebugCurrentObservationReceiptProbeKey) !== '1') healthy = false;
+      storage.removeItem(jsDebugCurrentObservationReceiptProbeKey);
+    } catch (_error) {
+      healthy = false;
+    }
+  }
+  return healthy;
+}
+
+function jsDebugCurrentObservationReceiptHasExactFields(receipt, fields) {
+  const keys = Object.keys(receipt);
+  return keys.length === fields.size && keys.every(key => fields.has(key));
+}
+
+function jsDebugCurrentObservationReceiptBoundedText(value, maximum, {empty = true, token = false} = {}) {
+  if (typeof value !== 'string' || value.length > maximum || (!empty && !value)) return false;
+  if (/[\u0000-\u001f\u007f]/.test(value)) return false;
+  return !token || /^[A-Za-z0-9._/-]+$/.test(value);
+}
+
+function jsDebugCurrentObservationReceiptIdValid(value, maximum) {
+  return typeof value === 'string' && value.length >= 1 && value.length <= maximum
+    && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
+function jsDebugCurrentObservationReceiptCorrelationValid(receipt) {
+  return Number.isSafeInteger(receipt.eventId) && receipt.eventId >= 0
+    && jsDebugCurrentObservationReceiptBoundedText(receipt.requestId, 128)
+    && jsDebugCurrentObservationReceiptBoundedText(receipt.source, 240, {empty: false})
+    && jsDebugCurrentObservationReceiptBoundedText(receipt.route, 240, {empty: false})
+    && jsDebugCurrentObservationReceiptBoundedText(receipt.event, 64, {empty: false, token: true})
+    && jsDebugCurrentObservationReceiptBoundedText(receipt.wallTime, 64)
+    && jsDebugCurrentObservationReceiptBoundedText(receipt.deliveryOutcome, 32, {empty: false, token: true})
+    && (receipt.httpStatus === null || (
+      Number.isSafeInteger(receipt.httpStatus) && receipt.httpStatus >= 100 && receipt.httpStatus <= 599
+    ));
+}
+
+function jsDebugCurrentObservationNormalReceiptValid(receipt) {
+  if (!jsDebugCurrentObservationReceiptHasExactFields(receipt, jsDebugCurrentObservationReceiptFields)
+    || !jsDebugCurrentObservationReceiptIdValid(receipt.epoch, 128)
+    || receipt.epoch === '*'
+    || receipt.key !== `${receipt.epoch}:${receipt.eventId}`
+    || !jsDebugCurrentObservationReceiptStatuses.has(receipt.status)) return false;
+  return jsDebugCurrentObservationReceiptCorrelationValid(receipt);
+}
+
+function jsDebugCurrentObservationOverflowReceiptValid(receipt) {
+  return jsDebugCurrentObservationReceiptHasExactFields(receipt, jsDebugCurrentObservationReceiptOverflowFields)
+    && receipt.key === jsDebugCurrentObservationReceiptOverflowKey
+    && receipt.epoch === '*'
+    && receipt.eventId === null
+    && receipt.requestId === ''
+    && receipt.source === '/'
+    && receipt.route === '/'
+    && receipt.event === 'receipt_journal_overflow'
+    && receipt.wallTime === ''
+    && receipt.deliveryOutcome === 'dropped'
+    && receipt.httpStatus === null
+    && receipt.status === 'dropped'
+    && receipt.globalBlocker === true
+    && receipt.journalOverflow === true
+    && Number.isSafeInteger(receipt.omitted)
+    && receipt.omitted >= 1;
+}
+
+function jsDebugCurrentObservationReceiptValid(receipt) {
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return false;
+  return receipt.key === jsDebugCurrentObservationReceiptOverflowKey
+    ? jsDebugCurrentObservationOverflowReceiptValid(receipt)
+    : jsDebugCurrentObservationNormalReceiptValid(receipt);
+}
+
+function jsDebugCurrentObservationReceiptJournalValid(saved) {
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)
+    || !Array.isArray(saved.entries) || !Array.isArray(saved.receipts)
+    || saved.entries.length > jsDebugCurrentObservationReceiptStorageLimit
+    || saved.receipts.length > jsDebugCurrentObservationReceiptStorageLimit) return false;
+  const receiptKeys = new Set();
+  const receiptsByKey = new Map();
+  for (const receipt of saved.receipts) {
+    if (!jsDebugCurrentObservationReceiptValid(receipt) || receiptKeys.has(receipt.key)) return false;
+    receiptKeys.add(receipt.key);
+    receiptsByKey.set(receipt.key, receipt);
+  }
+  const entryKeys = new Set();
+  for (const entry of saved.entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || typeof entry.key !== 'string' || !entry.key
+      || typeof entry.epoch !== 'string' || !entry.epoch
+      || !entry.event || typeof entry.event !== 'object' || Array.isArray(entry.event)
+      || entry.releaseBlocking !== true || entryKeys.has(entry.key) || !receiptKeys.has(entry.key)
+      || receiptsByKey.get(entry.key)?.epoch !== entry.epoch
+      || !['pending', 'retrying'].includes(receiptsByKey.get(entry.key)?.status)) return false;
+    entryKeys.add(entry.key);
+  }
+  return true;
+}
+
+function jsDebugCurrentObservationReceiptRecordCanonical(value) {
+  if (Array.isArray(value)) return value.map(jsDebugCurrentObservationReceiptRecordCanonical);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [
+    key, jsDebugCurrentObservationReceiptRecordCanonical(value[key]),
+  ]));
+}
+
+function jsDebugCurrentObservationReceiptRecordsEqual(left, right) {
+  return JSON.stringify(jsDebugCurrentObservationReceiptRecordCanonical(left))
+    === JSON.stringify(jsDebugCurrentObservationReceiptRecordCanonical(right));
+}
+
+function trimJsDebugCurrentObservationReceipts() {
+  const receipts = jsDebugCurrentObservationState.receipts;
+  const acceptedKeys = [...receipts]
+    .filter(([_key, receipt]) => receipt?.status === 'accepted')
+    .map(([key]) => key);
+  while (acceptedKeys.length > jsDebugCurrentObservationReceiptStorageLimit) {
+    receipts.delete(acceptedKeys.shift());
+  }
+}
+
+function jsDebugCurrentObservationReceiptJournal() {
+  const values = [...jsDebugCurrentObservationState.receipts.values()]
+    .filter(receipt => receipt?.key !== jsDebugCurrentObservationReceiptFailureReceiptKey);
+  const blocking = values.filter(receipt => receipt?.status !== 'accepted');
+  const accepted = values.filter(receipt => receipt?.status === 'accepted');
+  if (blocking.length > jsDebugCurrentObservationReceiptStorageLimit) {
+    const retained = blocking.slice(0, jsDebugCurrentObservationReceiptStorageLimit - 1);
+    retained.push({
+      key: jsDebugCurrentObservationReceiptOverflowKey,
+      epoch: '*',
+      eventId: null,
+      requestId: '',
+      source: '/',
+      route: '/',
+      event: 'receipt_journal_overflow',
+      wallTime: '',
+      deliveryOutcome: 'dropped',
+      httpStatus: null,
+      status: 'dropped',
+      journalOverflow: true,
+      globalBlocker: true,
+      omitted: blocking.length - retained.length,
+    });
+    return retained;
+  }
+  const acceptedCapacity = jsDebugCurrentObservationReceiptStorageLimit - blocking.length;
+  return [...blocking, ...(acceptedCapacity > 0 ? accepted.slice(-acceptedCapacity) : [])];
+}
+
+function jsDebugCurrentObservationReceiptJournalPayload() {
+  const receipts = jsDebugCurrentObservationReceiptJournal();
+  const persistedKeys = new Set(receipts.map(receipt => receipt.key));
+  const entries = jsDebugCurrentObservationState.queue
+    .filter(entry => entry.releaseBlocking && persistedKeys.has(entry.key))
+    .map(entry => ({key: entry.key, epoch: entry.epoch, event: entry.event, releaseBlocking: true}));
+  return {entries, receipts};
+}
+
+function persistJsDebugCurrentObservationReceipts() {
+  const state = jsDebugCurrentObservationState;
+  if (state.receiptStorageCorrupt === true) {
+    markJsDebugCurrentObservationStorageFailure(state.receiptStorageFailure || 'corrupt', {corrupt: true});
+    return false;
+  }
+  const {entries, receipts} = jsDebugCurrentObservationReceiptJournalPayload();
+  const encoded = JSON.stringify({entries, receipts});
+  let primaryWritten = false;
+  try {
+    if (!globalThis.sessionStorage) throw new Error('session storage unavailable');
+    if (!entries.length && !receipts.length) sessionStorage.removeItem(jsDebugCurrentObservationReceiptStorageKey);
+    else sessionStorage.setItem(jsDebugCurrentObservationReceiptStorageKey, encoded);
+    primaryWritten = true;
+  } catch (_error) {
+    try {
+      if (!globalThis.localStorage) throw new Error('local storage unavailable');
+      localStorage.setItem(jsDebugCurrentObservationReceiptFallbackKey, encoded);
+    } catch (_fallbackError) {
+      // The storage capability probe recreates the blocker on every reload while both stores remain unwritable.
+    }
+    markJsDebugCurrentObservationStorageFailure('write_failed');
+    return false;
+  }
+  if (!jsDebugCurrentObservationReceiptStorageHealthy()) {
+    markJsDebugCurrentObservationStorageFailure('storage_unwritable');
+    return false;
+  }
+  if (state.receiptStorageFailure) {
+    try {
+      for (const storage of jsDebugCurrentObservationReceiptStorages()) {
+        storage.removeItem(jsDebugCurrentObservationReceiptFailureKey);
+        storage.removeItem(jsDebugCurrentObservationReceiptFallbackKey);
+      }
+    } catch (_error) {
+      markJsDebugCurrentObservationStorageFailure('recovery_cleanup_failed');
+      return false;
+    }
+    state.receipts.delete(jsDebugCurrentObservationReceiptFailureReceiptKey);
+    state.receiptStorageFailure = '';
+  }
+  return primaryWritten;
+}
+
+function restoreJsDebugCurrentObservationReceipts() {
+  if (!clientCanUseUnscopedHostRequests()) return;
+  const state = jsDebugCurrentObservationState;
+  const savedJournals = [];
+  const seenRaw = new Set();
+  const restoredEntries = new Map();
+  for (const storage of jsDebugCurrentObservationReceiptStorages()) {
+    try {
+      if (storage.getItem(jsDebugCurrentObservationReceiptFailureKey) !== null) {
+        markJsDebugCurrentObservationStorageFailure('restored_failure_marker');
+      }
+    } catch (_error) {
+      markJsDebugCurrentObservationStorageFailure('marker_read_failed');
+    }
+  }
+  for (const [storage, key] of [
+    [globalThis.sessionStorage, jsDebugCurrentObservationReceiptStorageKey],
+    [globalThis.localStorage, jsDebugCurrentObservationReceiptFallbackKey],
+  ]) {
+    if (!storage) continue;
+    let raw;
+    try {
+      raw = storage.getItem(key);
+    } catch (_error) {
+      markJsDebugCurrentObservationStorageFailure('journal_read_failed');
+      continue;
+    }
+    if (raw === null || raw === undefined || raw === '' || seenRaw.has(raw)) continue;
+    seenRaw.add(raw);
+    let saved;
+    try {
+      saved = JSON.parse(raw);
+    } catch (_error) {
+      markJsDebugCurrentObservationStorageFailure('journal_parse_failed', {corrupt: true});
+      continue;
+    }
+    if (!jsDebugCurrentObservationReceiptJournalValid(saved)) {
+      markJsDebugCurrentObservationStorageFailure('journal_schema_failed', {corrupt: true});
+      continue;
+    }
+    savedJournals.push(saved);
+  }
+  for (const saved of savedJournals) {
+    for (const receipt of saved.receipts) {
+      const existing = state.receipts.get(receipt.key);
+      if (existing && !jsDebugCurrentObservationReceiptRecordsEqual(existing, receipt)) {
+        markJsDebugCurrentObservationStorageFailure('journal_conflict', {corrupt: true});
+        continue;
+      }
+      state.receipts.set(receipt.key, {...receipt});
+    }
+    trimJsDebugCurrentObservationReceipts();
+    for (const entry of saved.entries) {
+      const existing = restoredEntries.get(entry.key);
+      if (existing) {
+        if (!jsDebugCurrentObservationReceiptRecordsEqual(existing, entry)) {
+          markJsDebugCurrentObservationStorageFailure('journal_conflict', {corrupt: true});
+        }
+        continue;
+      }
+      restoredEntries.set(entry.key, entry);
+      state.keys.add(entry.key);
+      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, releaseBlocking: true});
+    }
+  }
+  if (!jsDebugCurrentObservationReceiptStorageHealthy()) {
+    markJsDebugCurrentObservationStorageFailure('storage_unwritable');
+  }
+  if (state.queue.length) scheduleJsDebugCurrentObservationFlush(0);
+}
+
+function setJsDebugCurrentObservationReceipt(entries, status) {
+  for (const entry of entries) {
+    const receipt = jsDebugCurrentObservationState.receipts.get(entry.key);
+    if (receipt) receipt.status = status;
+  }
+  persistJsDebugCurrentObservationReceipts();
+}
+
+restoreJsDebugCurrentObservationReceipts();
+
+for (const event of jsDebugEvents) recordJsDebugEventForGraph(event);
 
 function recordJsDebugClientHealthObservation(latencyMs, bandwidthBytes, sampleTimeMs = Date.now()) {
   const id = jsDebugCurrentObservationState.nextHealthId++;
   queueJsDebugCurrentObservation(
     `${jsDebugCurrentObservationState.epoch}:health:${id}`,
-    {type: 'heartbeat', ts: new Date(sampleTimeMs).toISOString(), durationMs: latencyMs, bytes: bandwidthBytes},
+    {
+      type: 'heartbeat',
+      ts: new Date(sampleTimeMs).toISOString(),
+      journeyId: reloadClientJourneyId,
+      durationMs: latencyMs,
+      bytes: bandwidthBytes,
+      uploadQueueDepth: jsDebugCurrentObservationState.queue.length,
+      uploadDrops: jsDebugCurrentObservationState.drops,
+      uploadRetries: jsDebugCurrentObservationState.retries,
+      instrumentationCostMs: jsDebugRoundedMs(jsDebugCurrentObservationState.instrumentationCostMs),
+    },
   );
 }
 
+function installJsDebugCurrentObservationLiveness() {
+  const state = jsDebugCurrentObservationState;
+  if (!clientCanUseUnscopedHostRequests() || state.livenessTimer !== null || typeof setInterval !== 'function') return;
+  recordJsDebugClientHealthObservation(0, 0);
+  state.livenessTimer = setInterval(() => {
+    recordJsDebugClientHealthObservation(0, 0);
+  }, jsDebugCurrentObservationHeartbeatMs);
+}
+
+installJsDebugCurrentObservationLiveness();
+
+function jsDebugBrowserFamily() {
+  const userAgent = String(navigator.userAgent || '').toLowerCase();
+  if (userAgent.includes('firefox/')) return 'firefox';
+  if (userAgent.includes('safari/') && !userAgent.includes('chrome/') && !userAgent.includes('chromium/')) return 'safari';
+  if (userAgent.includes('chrome/') || userAgent.includes('chromium/') || userAgent.includes('edg/')) return 'chromium';
+  return 'other';
+}
+
+function jsDebugCodeRevision() {
+  const revision = String(bootstrap.clientRevision || bootstrap.devBundleRevision || bootstrap.version || 'unknown');
+  return /^[A-Za-z0-9._-]{1,80}$/.test(revision) ? revision : 'unknown';
+}
+
+function jsDebugBoundedToken(value, maximum = 64) {
+  const text = String(value || '').trim();
+  return /^[A-Za-z0-9._/-]+$/.test(text) ? text.slice(0, maximum) : '';
+}
+
 function jsDebugCurrentObservationFromEvent(entry) {
+  const instrumentationStartedAt = performanceNow();
   const event = entry.event;
+  const failure = jsDebugFailureClassification(event);
   const observedAt = Date.parse(event.ts) / 1000;
   if (!Number.isFinite(observedAt) || observedAt < 0) return null;
-  const payload = {kind: event.type};
-  const latency = Number(event.type === 'api' || event.type === 'heartbeat' ? event.durationMs : event.receiveLatencyMs);
+  const payload = {
+    kind: event.type,
+    journey_id: String(event.journeyId || reloadClientJourneyId).slice(0, 96),
+    code_revision: String(event.observationCodeRevision || jsDebugCodeRevision()),
+    browser_family: String(event.observationBrowserFamily || jsDebugBrowserFamily()),
+  };
+  const latency = Number(event.type === 'sse' ? event.receiveLatencyMs : event.durationMs);
   if (Number.isFinite(latency) && latency >= 0) payload.latency_ms = latency;
   const bytes = event.type === 'api'
     ? Number(event.requestBytes || 0) + Number(event.responseBytes || 0)
     : Number(event.type === 'heartbeat' ? event.bytes : (event.frameBytes === undefined ? event.bytes : event.frameBytes));
   if (Number.isFinite(bytes) && bytes >= 0) payload.bytes = bytes;
+  if (event.type === 'api') {
+    payload.endpoint = jsDebugEndpointText(event.endpoint || event.url);
+    payload.method = String(event.method || 'GET').toUpperCase().slice(0, 16);
+    if (event.requestId) payload.request_id = String(event.requestId).slice(0, 128);
+    const connectionProtocol = jsDebugBoundedToken(event.connectionProtocol, 24);
+    if (connectionProtocol) payload.connection_protocol = connectionProtocol;
+    const status = Number(event.status);
+    if (Number.isSafeInteger(status) && status >= 100 && status <= 599) payload.status = status;
+  } else if (event.type === 'page_load') {
+    payload.endpoint = jsDebugEndpointText(event.url || window.location.pathname);
+    const fanoutCount = Number(event.fanoutCount);
+    if (Number.isSafeInteger(fanoutCount) && fanoutCount >= 0) payload.fanout_count = fanoutCount;
+    const maxConcurrency = Number(event.maxConcurrency);
+    if (Number.isSafeInteger(maxConcurrency) && maxConcurrency >= 0) payload.max_concurrency = maxConcurrency;
+  } else if (event.type === 'finder_usable') {
+    const entryCount = Number(event.entryCount);
+    if (Number.isSafeInteger(entryCount) && entryCount >= 0) payload.entry_count = entryCount;
+  } else if (event.type === 'interaction') {
+    const interactionType = jsDebugBoundedToken(event.interactionType, 32);
+    if (interactionType) payload.interaction_type = interactionType;
+  } else if (event.type === 'operation_wait') {
+    const operationKind = jsDebugBoundedToken(event.operationKind, 64);
+    const outcome = jsDebugBoundedToken(event.outcome, 16);
+    if (operationKind) payload.operation_kind = operationKind;
+    if (outcome) payload.outcome = outcome;
+    if (event.requestId) payload.request_id = String(event.requestId).slice(0, 128);
+  } else if (event.type === 'stats_history' && !failure.releaseBlocking) {
+    return null;
+  }
+  if (failure.releaseBlocking) {
+    const failureKind = failure.observationKind;
+    const correlation = jsDebugCurrentFailureCorrelation(event);
+    const line = Math.max(0, Math.trunc(Number(event.line) || 0));
+    const column = Math.max(0, Math.trunc(Number(event.column) || 0));
+    payload.kind = failureKind;
+    const producerSignature = String(event.signature || '');
+    payload.signature = event.type === 'stats_history' && /^jsf-[0-9a-f]{8}$/.test(producerSignature)
+      ? producerSignature
+      : jsDebugFailureSignature(
+        failureKind, event.message || event.error, event.stack, correlation.source, line, column,
+      );
+    payload.message = jsDebugFailureText(event.message || event.error || `HTTP ${correlation.httpStatus || 'failure'}`);
+    const stack = jsDebugFailureStack({stack: event.stack});
+    if (stack) payload.stack = stack;
+    payload.source = correlation.source;
+    if (correlation.requestId) payload.request_id = correlation.requestId;
+    if (correlation.route) payload.route = correlation.route;
+    if (correlation.event) payload.event_type = correlation.event;
+    if (correlation.wallTime) payload.wall_time = correlation.wallTime;
+    if (correlation.deliveryOutcome) payload.delivery_outcome = correlation.deliveryOutcome;
+    if (correlation.httpStatus !== null) payload.status = correlation.httpStatus;
+    const provenance = event.provenance === 'controlled_probe' || event.provenance === 'confirmed_real'
+      ? event.provenance
+      : '';
+    if (provenance) payload.provenance = provenance;
+    if (line) payload.line = line;
+    if (column) payload.column = column;
+  }
+  const phaseFields = {
+    queueMs: 'queue_ms',
+    connectMs: 'connect_ms',
+    tlsMs: 'tls_ms',
+    ttfbMs: 'ttfb_ms',
+    downloadMs: 'download_ms',
+    applyRenderMs: 'apply_render_ms',
+    navigationMs: 'navigation_ms',
+    bundleParseEvalMs: 'bundle_parse_eval_ms',
+    firstApiMs: 'first_api_ms',
+    fanoutMs: 'fanout_ms',
+    interactiveMs: 'interactive_ms',
+    firstPaintMs: 'first_paint_ms',
+    firstContentfulPaintMs: 'first_contentful_paint_ms',
+    appReadyMs: 'app_ready_ms',
+  };
+  for (const [source, target] of Object.entries(phaseFields)) {
+    const rawValue = event.phaseTimings?.[source];
+    if (rawValue === null || rawValue === undefined) continue;
+    const value = Number(rawValue);
+    if (Number.isFinite(value) && value >= 0) payload[target] = value;
+  }
+  const perceptualFields = {
+    inputDelayMs: 'input_delay_ms',
+    processingMs: 'processing_ms',
+    presentationDelayMs: 'presentation_delay_ms',
+  };
+  for (const [source, target] of Object.entries(perceptualFields)) {
+    const rawValue = event[source];
+    if (rawValue === null || rawValue === undefined) continue;
+    const value = Number(rawValue);
+    if (Number.isFinite(value) && value >= 0) payload[target] = value;
+  }
+  const healthFields = {
+    uploadQueueDepth: 'upload_queue_depth',
+    uploadDrops: 'upload_drops',
+    uploadRetries: 'upload_retries',
+    instrumentationCostMs: 'instrumentation_cost_ms',
+  };
+  for (const [source, target] of Object.entries(healthFields)) {
+    const rawValue = event[source];
+    if (rawValue === null || rawValue === undefined) continue;
+    const value = Number(rawValue);
+    if (Number.isFinite(value) && value >= 0) payload[target] = value;
+  }
+  if (failure.releaseBlocking) {
+    const failureFields = new Set([
+      'kind', 'journey_id', 'code_revision', 'browser_family', 'signature', 'message', 'stack',
+      'source', 'line', 'column', 'provenance', 'request_id', 'route', 'event_type',
+      'wall_time', 'delivery_outcome', 'status',
+    ]);
+    for (const key of Object.keys(payload)) {
+      if (!failureFields.has(key)) delete payload[key];
+    }
+  }
+  jsDebugCurrentObservationState.instrumentationCostMs += Math.max(0, performanceNow() - instrumentationStartedAt);
   return {
     event_id: entry.key,
     family: 'browser',
     source_id: jsDebugStatsClientIdForRequest(),
     observed_at: observedAt,
-    epoch_id: jsDebugCurrentObservationState.epoch,
+    epoch_id: entry.epoch || jsDebugCurrentObservationState.epoch,
     payload,
   };
 }
 
+const jsDebugObservationUploadMaxBytes = 120 * 1024;
+const jsDebugObservationUploadMaxItems = 100;
+
+function jsDebugObservationBatchForEntries(entries, fence = statsWriterFence) {
+  const root = {
+    protocol_version: fence.protocolVersion,
+    schema_generation: fence.schemaGeneration,
+    client_id: jsDebugStatsClientIdForRequest(),
+    observations: [],
+  };
+  let encodedBytes = utf8ByteLength(JSON.stringify(root));
+  for (const entry of entries.slice(0, jsDebugObservationUploadMaxItems)) {
+    const observation = jsDebugCurrentObservationFromEvent(entry);
+    if (!observation) continue;
+    const observationBytes = utf8ByteLength(JSON.stringify(observation)) + (root.observations.length ? 1 : 0);
+    if (encodedBytes + observationBytes > jsDebugObservationUploadMaxBytes) break;
+    root.observations.push(observation);
+    encodedBytes += observationBytes;
+  }
+  return root;
+}
+
 function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservationBatchDelayMs) {
   const state = jsDebugCurrentObservationState;
-  if (state.stopped || state.inFlight || state.timer !== null || !state.queue.length) return;
+  if (!clientCanUseUnscopedHostRequests() || state.inFlight || !state.queue.length) return;
+  if (state.timer !== null) {
+    if (delay !== 0) return;
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
   state.timer = setTimeout(() => {
     state.timer = null;
     void flushJsDebugCurrentObservations();
@@ -1924,49 +2637,100 @@ function scheduleJsDebugCurrentObservationFlush(delay = jsDebugCurrentObservatio
 
 async function flushJsDebugCurrentObservations() {
   const state = jsDebugCurrentObservationState;
+  if (!clientCanUseUnscopedHostRequests()) return;
   if (statsWriterFence === null) {
-    state.stopped = true;
-    state.queue.length = 0;
-    state.keys.clear();
+    state.retries += 1;
+    const delay = state.retryMs;
+    state.retryMs = Math.min(jsDebugCurrentObservationRetryMaxMs, state.retryMs * 2);
+    scheduleJsDebugCurrentObservationFlush(delay);
     return;
   }
-  if (state.stopped || state.inFlight || !state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
-  const entries = state.queue.slice(0, 100);
+  if (state.inFlight) return state.inFlight;
+  if (!state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  const entries = [...state.queue.filter(entry => entry.releaseBlocking), ...state.queue.filter(entry => !entry.releaseBlocking)]
+    .slice(0, jsDebugObservationUploadMaxItems);
   const prepared = entries.map(entry => ({entry, observation: jsDebugCurrentObservationFromEvent(entry)}));
-  const validEntries = prepared.filter(item => item.observation);
-  const observations = validEntries.map(item => item.observation);
+  let validEntries = prepared.filter(item => item.observation);
   for (const {entry} of prepared.filter(item => !item.observation)) {
     state.queue.splice(state.queue.indexOf(entry), 1);
     state.keys.delete(entry.key);
   }
-  if (!observations.length) return;
-  state.inFlight = true;
-  try {
-    await apiFetchJsonQuiet('/api/stats-observations', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({protocol_version: statsWriterFence.protocolVersion, schema_generation: statsWriterFence.schemaGeneration, client_id: jsDebugStatsClientIdForRequest(), observations}),
-    });
-    for (const {entry} of validEntries) {
-      const index = state.queue.indexOf(entry);
-      if (index >= 0) state.queue.splice(index, 1);
-      state.keys.delete(entry.key);
+  const batch = jsDebugObservationBatchForEntries(validEntries.map(item => item.entry), statsWriterFence);
+  validEntries = validEntries.slice(0, batch.observations.length);
+  if (!batch.observations.length) return;
+  const inFlight = (async () => {
+    let batchRetired = false;
+    try {
+      const receipt = await apiFetchJsonQuiet('/api/stats-observations', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(batch),
+      });
+      const accepted = receipt?.accepted;
+      const duplicates = receipt?.duplicates;
+      const observationReceipts = receipt?.observation_receipts;
+      if (!receipt || receipt.ok !== true || !Number.isSafeInteger(accepted) || !Number.isSafeInteger(duplicates)
+        || accepted < 0 || duplicates < 0 || accepted + duplicates !== validEntries.length
+        || !Array.isArray(observationReceipts) || observationReceipts.length !== validEntries.length) {
+        throw new Error('browser observation receipt did not acknowledge the batch');
+      }
+      const expectedEventIds = batch.observations.map(observation => observation.event_id);
+      const seenEventIds = new Set();
+      let acceptedRows = 0;
+      let duplicateRows = 0;
+      for (let index = 0; index < observationReceipts.length; index += 1) {
+        const row = observationReceipts[index];
+        if (!row || typeof row !== 'object' || Array.isArray(row)
+            || Object.keys(row).sort().join(',') !== 'disposition,event_id'
+            || row.event_id !== expectedEventIds[index]
+            || seenEventIds.has(row.event_id)
+            || !['accepted', 'duplicate'].includes(row.disposition)) {
+          throw new Error('browser observation receipt mapping is malformed');
+        }
+        seenEventIds.add(row.event_id);
+        if (row.disposition === 'accepted') acceptedRows += 1;
+        else duplicateRows += 1;
+      }
+      if (acceptedRows !== accepted || duplicateRows !== duplicates) {
+        throw new Error('browser observation receipt mapping disagrees with aggregate counts');
+      }
+      for (const {entry} of validEntries) {
+        const index = state.queue.indexOf(entry);
+        if (index >= 0) state.queue.splice(index, 1);
+        state.keys.delete(entry.key);
+      }
+      setJsDebugCurrentObservationReceipt(validEntries.map(item => item.entry), 'accepted');
+      state.retryMs = jsDebugCurrentObservationBatchDelayMs;
+      batchRetired = true;
+    } catch (error) {
+      if ([400, 404, 405, 410, 413, 422, 426].includes(Number(error?.status))) {
+        for (const {entry} of validEntries) {
+          const index = state.queue.indexOf(entry);
+          if (index >= 0) state.queue.splice(index, 1);
+          state.keys.delete(entry.key);
+        }
+        setJsDebugCurrentObservationReceipt(validEntries.map(item => item.entry), 'rejected');
+        state.drops += validEntries.length;
+        state.retryMs = jsDebugCurrentObservationBatchDelayMs;
+        batchRetired = true;
+      } else {
+        state.retries += 1;
+        setJsDebugCurrentObservationReceipt(validEntries.map(item => item.entry), 'retrying');
+      }
+    } finally {
+      state.inFlight = null;
+      if (state.queue.length) {
+        const releaseBlockingPending = state.queue.some(entry => entry.releaseBlocking);
+        const delay = releaseBlockingPending && batchRetired ? 0 : state.retryMs;
+        if (!(releaseBlockingPending && batchRetired)) {
+          state.retryMs = Math.min(jsDebugCurrentObservationRetryMaxMs, state.retryMs * 2);
+        }
+        scheduleJsDebugCurrentObservationFlush(delay);
+      }
     }
-    state.retryMs = jsDebugCurrentObservationBatchDelayMs;
-  } catch (error) {
-    if ([400, 401, 403, 404, 405, 410, 413, 422, 426].includes(Number(error?.status))) {
-      state.stopped = true;
-      state.queue.length = 0;
-      state.keys.clear();
-    }
-  } finally {
-    state.inFlight = false;
-  }
-  if (state.queue.length && !state.stopped) {
-    const delay = state.retryMs;
-    state.retryMs = Math.min(jsDebugCurrentObservationRetryMaxMs, state.retryMs * 2);
-    scheduleJsDebugCurrentObservationFlush(delay);
-  }
+  })();
+  state.inFlight = inFlight;
+  return inFlight;
 }
 
 function recordApiDebugResponseBytesForGraph(event, responseBytes) {
@@ -2165,6 +2929,10 @@ function debugGraphApplyServerRecord(record) {
 function debugGraphCostInteger(value) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function debugGraphCostOptionalInteger(value) {
+  return value === null || value === undefined ? null : debugGraphCostInteger(value);
 }
 
 function debugGraphCostRows(value) {
@@ -2442,16 +3210,23 @@ function debugGraphApplyServerHistory(history = {}, {advanceLiveCursor = true, r
   compactJsDebugGraphBuckets();
   const sequence = Number(history.latest_sequence ?? history.sequence);
   if (advanceLiveCursor && Number.isFinite(sequence)) jsDebugStatsServerSequence = Math.max(0, sequence);
-  const backfill = history.usage_atom_backfill;
-  if (backfill && typeof backfill === 'object' && !Array.isArray(backfill)) {
-    const state = String(backfill.state || '').toLowerCase();
-    jsDebugUsageAtomBackfill.state = ['pending', 'running', 'partial', 'complete'].includes(state) ? state : 'pending';
-    jsDebugUsageAtomBackfill.sources = Math.max(0, Number(backfill.sources) || 0);
-    jsDebugUsageAtomBackfill.missing = Math.max(0, Number(backfill.missing) || 0);
-  }
+  debugGraphApplyUsageAtomBackfill(history.usage_atom_backfill);
   const records = Array.isArray(history.records) ? history.records : [];
   records.forEach(debugGraphApplyServerRecord);
   compactJsDebugGraphBuckets();
+}
+
+function debugGraphApplyUsageAtomBackfill(backfill) {
+  if (!backfill || typeof backfill !== 'object' || Array.isArray(backfill)) {
+    jsDebugUsageAtomBackfill.state = 'unknown';
+    jsDebugUsageAtomBackfill.sources = 0;
+    jsDebugUsageAtomBackfill.missing = 0;
+    return;
+  }
+  const state = String(backfill.state || '').toLowerCase();
+  jsDebugUsageAtomBackfill.state = ['pending', 'running', 'partial', 'complete'].includes(state) ? state : 'unknown';
+  jsDebugUsageAtomBackfill.sources = Math.max(0, Number(backfill.sources) || 0);
+  jsDebugUsageAtomBackfill.missing = Math.max(0, Number(backfill.missing) || 0);
 }
 
 // The compact token side-stream is gone (ONE history stream since 2026-07):
@@ -2496,7 +3271,10 @@ function debugGraphExactResolutionChoices(rangeSeconds) {
   const range = Math.max(1, Number(rangeSeconds) || 0);
   return jsDebugGraphResolutionChoices.filter(resolution => {
     const bucketCount = range / resolution;
-    return Number.isInteger(bucketCount) && bucketCount >= 12 && bucketCount <= jsDebugGraphOverridePointCap;
+    return Number.isInteger(bucketCount)
+      && bucketCount >= 12
+      && bucketCount <= jsDebugGraphOverridePointCap
+      && !(range === 3600 && resolution === 10);
   });
 }
 
@@ -2522,12 +3300,10 @@ function normalizedDebugGraphResolutionOverrideSeconds(value, domain = debugGrap
   const choices = debugGraphAvailableResolutionChoices(domain, nowMs);
   if (!choices.length) return 0;
   if (choices.includes(requested)) return requested;
-  // Normalize an out-of-set persisted/deeplinked value (e.g. a legacy 30/120/600s
-  // override) or a now-invalid prior-range value by rounding UP to the nearest coarser
-  // valid choice — never render finer than the request implied. If nothing coarser is
-  // available for this range (the request was coarser than the whole menu), fall back to
-  // the coarsest offered choice.
-  return choices.find(candidate => candidate >= requested) ?? choices[choices.length - 1];
+  // An explicit choice belongs to the range that offered it. Persisting a different
+  // explicit value while changing ranges prevents AUTO from returning to the finest
+  // supported interval when the user comes back to a short range.
+  return 0;
 }
 
 function syncDebugGraphResolutionOverride(nowMs = Date.now(), {persist = false, domain = debugGraphDomain(nowMs)} = {}) {
@@ -2803,7 +3579,7 @@ function debugGraphClientSeriesDef(metric, {key = metric.key, labelKey, clientId
 function debugGraphProcessCpuBucketValue(bucket, processId) {
   const process = bucket?.servers instanceof Map ? bucket.servers.get(processId) : null;
   return Number(process?.cpuCount || 0) > 0
-    ? Math.min(100, Number(process.cpuTotalPercent || 0) / Number(process.cpuCount || 1))
+    ? Number(process.cpuTotalPercent || 0) / Number(process.cpuCount || 1)
     : 0;
 }
 
@@ -3297,7 +4073,7 @@ function debugGraphProcessCpuSeriesDefs(buckets) {
   const currentProcessId = `port:${currentPort}`;
   const fallbackSelf = {
     key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
-    value: bucket => bucket.cpuCount ? Math.min(100, bucket.cpuTotalPercent / bucket.cpuCount) : 0,
+    value: bucket => bucket.cpuCount ? bucket.cpuTotalPercent / bucket.cpuCount : 0,
     hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
   };
   if (!processes.size) return [fallbackSelf];
@@ -4658,9 +5434,11 @@ function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
     .map(row => String(row.session)))]
     .sort((left, right) => left.localeCompare(right))
     .map(session => ({session, revision: Number(sessionRevisions.get(session)) || 0}));
-  const sessions = new Set(currentRows.map(row => row.session));
-  const summary = `${currentRows.length} agent windows across ${sessions.size} sessions`;
-  const details = currentRows.map(({session, agent, kind}) => {
+  // A stale revision means these rows may be old, not that the known roster is empty.
+  // Keep the count and breakdown honest while the per-session stale text explains freshness.
+  const sessions = new Set(rows.map(row => row.session));
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  const details = rows.map(({session, agent, kind}) => {
     const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
     const state = agentWindowStateKey(agent?.state);
     return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
@@ -4978,7 +5756,7 @@ function debugGraphCostTokenTotals(summary) {
 }
 
 const DEBUG_GRAPH_COST_SUBTOTAL_FIELDS = Object.freeze(['micro_usd', 'api_list_micro_usd', 'lower_micro_usd', 'upper_micro_usd', 'input_micro_usd', 'cache_micro_usd', 'cache_read_micro_usd', 'cache_write_micro_usd', 'cache_write_5m_micro_usd', 'cache_write_1h_micro_usd', 'output_micro_usd', 'other_micro_usd', 'input_api_list_micro_usd', 'cache_api_list_micro_usd', 'cache_read_api_list_micro_usd', 'cache_write_api_list_micro_usd', 'cache_write_5m_api_list_micro_usd', 'cache_write_1h_api_list_micro_usd', 'output_api_list_micro_usd', 'other_api_list_micro_usd', 'input_lower_micro_usd', 'cache_lower_micro_usd', 'cache_read_lower_micro_usd', 'cache_write_lower_micro_usd', 'cache_write_5m_lower_micro_usd', 'cache_write_1h_lower_micro_usd', 'output_lower_micro_usd', 'other_lower_micro_usd', 'input_upper_micro_usd', 'cache_upper_micro_usd', 'cache_read_upper_micro_usd', 'cache_write_upper_micro_usd', 'cache_write_5m_upper_micro_usd', 'cache_write_1h_upper_micro_usd', 'output_upper_micro_usd', 'other_upper_micro_usd']);
-const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens', 'other_tokens']);
+const DEBUG_GRAPH_COST_TOKEN_FIELDS = Object.freeze(['quantity', 'token_quantity', 'priced_token_quantity', 'unpriced_token_quantity', 'input_tokens', 'cache_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cache_write_5m_tokens', 'cache_write_1h_tokens', 'output_tokens', 'other_tokens']);
 const DEBUG_GRAPH_COST_COMPONENT_KEY_FIELDS = Object.freeze(['key', 'kind', 'provider', 'model', 'effort', 'pricing_profile', 'service_tier', 'direction', 'modality', 'cache_role', 'unit', 'catalog_revision', 'source_url', 'effective_from', 'rate_usd', 'rate_scale']);
 const DEBUG_GRAPH_COST_MODEL_KEY_FIELDS = Object.freeze(['provider', 'model', 'effort']);
 const DEBUG_GRAPH_COST_SOURCE_KEY_FIELDS = Object.freeze(['tmux_key', 'tmux_label', 'tmux_session', 'tmux_window', 'tmux_window_label', 'agent_kind', 'root_thread_id', 'agent_thread_id', 'parent_thread_id', 'endpoint', 'tool_name', 'source']);
@@ -5158,11 +5936,29 @@ function debugGraphCostUsageTokensText(tokens) {
   return value > 0 ? debugGraphTokensText(value) : '0';
 }
 
-function debugGraphCostUsageUsdText(microUsd, tokens = 1) {
-  const value = debugGraphCostInteger(microUsd);
+function debugGraphCostUsageUsdText(microUsd, tokens = 1, {pricedTokens = tokens, unpricedTokens = 0} = {}) {
+  const unknownTokens = Math.max(0, Number(unpricedTokens) || 0);
+  if (unknownTokens > 0) {
+    if (Math.max(0, Number(pricedTokens) || 0) <= 0) return 'Unpriced';
+    return `Known ${debugGraphCostUsdText(microUsd)} + Unpriced`;
+  }
+  const value = debugGraphCostOptionalInteger(microUsd);
+  if (value === null) return 'Unpriced';
   if (value > 0) return debugGraphCostUsdText(value);
   if (Math.max(0, Number(tokens) || 0) <= 0) return '$0';
   return '$0';
+}
+
+function debugGraphCostUsagePriceText(microUsd, apiListMicroUsd, tokens, row, {basis = 'omit'} = {}) {
+  const pricedTokens = Math.max(0, Number(row?.priced_token_quantity) || 0);
+  const unpricedTokens = Math.max(0, Number(row?.unpriced_token_quantity) || 0);
+  if (unpricedTokens > 0) {
+    if (pricedTokens <= 0) return debugGraphCostUsageUsdText(microUsd, tokens, {pricedTokens, unpricedTokens});
+    return `Known ${debugGraphCostPricePairText(microUsd, apiListMicroUsd, {basis})} + Unpriced`;
+  }
+  return apiListMicroUsd === null || apiListMicroUsd === undefined
+    ? debugGraphCostUsageUsdText(microUsd, tokens)
+    : debugGraphCostPricePairText(microUsd, apiListMicroUsd, {basis});
 }
 
 function debugGraphCostPricePairText(microUsd, apiListMicroUsd = null, {basis = 'omit'} = {}) {
@@ -5262,21 +6058,28 @@ function debugGraphCostAllPricingSourcesHtml(components) {
 function debugGraphCostUsageTableCellHtml(tokens, microUsd, {total = false, row = null, apiListMicroUsd = null, unreported = false, notApplicable = false} = {}) {
   if (notApplicable) return '<span class="js-debug-cost-not-applicable" aria-label="Not applicable">—</span>';
   if (unreported) return `<span class="js-debug-cost-unreported" title="${esc('OpenAI/Codex telemetry does not report cache-write tokens; this total is a lower bound.')}" aria-label="Unreported cache write; total is a lower bound">unreported</span>`;
+  const unpricedTokens = Math.max(0, Number(row?.unpriced_token_quantity) || 0);
   const hasRange = row && (debugGraphCostInteger(row?.lower_micro_usd) > 0 || debugGraphCostInteger(row?.upper_micro_usd) > 0);
-  const cost = total && hasRange ? debugGraphCostRowRangeUsdText(row) : debugGraphCostUsageUsdText(microUsd, tokens);
+  const cost = total && hasRange && unpricedTokens === 0
+    ? debugGraphCostRowRangeUsdText(row)
+    : debugGraphCostUsagePriceText(microUsd, total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd, tokens, row);
   const rowApiListMicroUsd = total && row ? debugGraphCostApiListMicroUsd(row) : apiListMicroUsd;
   const exactTokens = `${Math.max(0, Number(tokens) || 0).toLocaleString()} tokens`;
-  const price = rowApiListMicroUsd === null
+  const coverageUnknown = unpricedTokens > 0;
+  const price = coverageUnknown || rowApiListMicroUsd === null
     ? `<small>${esc(cost)}</small>`
     : debugGraphCostPricePairHtml(microUsd, rowApiListMicroUsd);
-  return `<span class="js-debug-cost-table-metric js-debug-cost-table-metric--inline" title="${esc(`${exactTokens}; ${debugGraphCostPricePairText(microUsd, rowApiListMicroUsd, {basis: 'inline'})}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><span aria-hidden="true"> · </span>${price}</span>`;
+  const priceText = coverageUnknown ? debugGraphCostUsagePriceText(microUsd, rowApiListMicroUsd, tokens, row, {basis: 'inline'}) : debugGraphCostPricePairText(microUsd, rowApiListMicroUsd, {basis: 'inline'});
+  return `<span class="js-debug-cost-table-metric js-debug-cost-table-metric--inline" title="${esc(`${exactTokens}; ${priceText}`)}"><strong>${esc(debugGraphTokenNumberText(tokens))}</strong><span aria-hidden="true"> · </span>${price}</span>`;
 }
 
 function debugGraphCostExactTotalRow(summary) {
   if (!summary?.dimensionTotals) return null;
   return {
     token_quantity: Math.max(0, Number(summary.totalTokenQuantity) || 0),
-    micro_usd: debugGraphCostInteger(summary.totalMicroUsd),
+    priced_token_quantity: Math.max(0, Number(summary.totalTokenQuantity) || 0) - Math.max(0, Number(summary.unpricedTokenQuantity) || 0),
+    unpriced_token_quantity: Math.max(0, Number(summary.unpricedTokenQuantity) || 0),
+    micro_usd: debugGraphCostOptionalInteger(summary.totalMicroUsd),
     api_list_micro_usd: debugGraphCostApiListMicroUsd(summary),
     ...summary.dimensionTotals,
   };
@@ -5291,13 +6094,14 @@ function debugGraphCostUsageTableHtml(rows, {kind, heading, labelHeading, labelF
     const breakdown = debugGraphCostBreakdownItems(row, {kind});
     const totalTokens = Math.max(0, Number(row?.token_quantity) || 0);
     const pricingLinks = kind === 'model' ? debugGraphCostPricingLinksHtml(components, row, {compact: true}) : '';
-    const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostPricePairText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row))}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostPricePairText(item.microUsd, item.apiListMicroUsd)}`).join('; ')}`;
+    const accessible = `${labelFor(row)}: ${debugGraphCostText('debug.cost.total', 'Total')} ${debugGraphCostUsageTokensText(totalTokens)} ${debugGraphCostUsagePriceText(debugGraphCostMicroUsd(row), debugGraphCostApiListMicroUsd(row), totalTokens, row)}; ${breakdown.map(item => `${usageLabels[item.key]} ${debugGraphCostUsageTokensText(item.tokens)} ${debugGraphCostUsagePriceText(item.microUsd, item.apiListMicroUsd, item.tokens, row)}`).join('; ')}`;
     const label = labelFor(row);
     const fullLabel = String(row?.full_label || row?.agent_label || label);
     const identity = kind === 'model' ? debugGraphCostModelIdentityHtml(row, {secondaryHtml: pricingLinks}) : `<strong title="${esc(fullLabel)}" aria-label="${esc(fullLabel)}">${debugGraphCostAgentLabelHtml(label)}</strong>`;
     const usageCellHtml = item => {
       const formula = kind === 'model' ? debugGraphCostModelFormulaCellHtml(components, row, item) : '';
       return formula || debugGraphCostUsageTableCellHtml(item.tokens, item.microUsd, {
+        row,
         apiListMicroUsd: item.apiListMicroUsd,
         unreported: kind === 'model' && item.key === 'cache_write' && String(row?.provider || '').toLowerCase() === 'openai' && item.tokens === 0,
       });
@@ -5557,10 +6361,11 @@ function debugGraphCostCatalogDetailsHtml(summary) {
 }
 
 function debugGraphCostBackfillText(summary) {
-  const state = String(summary?.backfill?.state || 'pending');
+  const state = String(summary?.backfill?.state || 'unknown');
   if (state === 'complete') return '';
   if (state === 'partial') return debugGraphCostText('debug.cost.backfillPartial', 'Backfill incomplete');
   if (state === 'running') return debugGraphCostText('debug.cost.backfillRunning', 'Backfill in progress');
+  if (state === 'unknown') return debugGraphCostText('debug.cost.backfillUnknown', 'Backfill status unknown');
   return debugGraphCostText('debug.cost.backfillPending', 'Backfill pending');
 }
 
@@ -5851,11 +6656,53 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
   };
 }
 
+function recordJsDebugCurrentStatsFailure(failure) {
+  if (jsDebugCurrentStatsClientState.failureLatched) return false;
+  jsDebugCurrentStatsClientState.failureLatched = true;
+  const message = String(failure?.message || 'YO!stats stream unavailable').replace(/\s+/g, ' ').trim().slice(0, 160);
+  const source = String(failure?.source || '/api/stats-stream').slice(0, 160);
+  recordJsDebugStatsDiagnostic('warning', message, {
+    category: 'stats_stream',
+    requestId: String(failure?.requestId || failure?.request_id || '').slice(0, 128),
+    route: source,
+    eventType: 'stats-generation',
+    deliveryOutcome: /(?:stalled|missing)/i.test(message) ? 'stalled' : 'failed',
+  });
+  return true;
+}
+
+// The page tearing its own stream down is an expected outcome, not a defect, so it is
+// recorded at `info`: `jsDebugFailureClassification` only treats a `stats_history` event
+// as release-blocking at `warning`/`error`, so this creates no durable receipt and no
+// browser failure. It is still recorded, with a machine-readable `reason` naming the
+// lifecycle event that caused it, so the close is never silently discarded. It does not
+// touch `failureLatched`: a genuine failure after a surviving unload must still report.
+function recordJsDebugCurrentStatsRetirement(retirement) {
+  const reason = String(retirement?.reason || 'page_unload').slice(0, 32);
+  const source = String(retirement?.source || '/api/stats-stream').slice(0, 160);
+  recordJsDebugStatsDiagnostic('info', `stream closed by page retirement (${reason})`, {
+    category: 'stats_stream',
+    route: source,
+    eventType: 'stats-generation',
+    deliveryOutcome: 'retired',
+    reason,
+  });
+  return true;
+}
+
+function acceptJsDebugCurrentStatsPushProof() {
+  jsDebugCurrentStatsClientState.failureLatched = false;
+}
+
 function jsDebugStatsPanelVisible() {
   return debugModeEnabled === true
     && document.visibilityState !== 'hidden'
     && typeof itemIsActivePaneTab === 'function'
     && (itemIsActivePaneTab(debugPaneItemId) || itemIsActivePaneTab(yocostItemId));
+}
+
+function jsDebugStatsDocumentVisible() {
+  return document.visibilityState !== 'hidden';
 }
 
 function jsDebugStatsLayoutItemsVisible(items) {
@@ -5869,14 +6716,55 @@ function jsDebugCurrentStatsSelection() {
   };
 }
 
+function jsDebugCurrentStatsGenerationKey(snapshot) {
+  if (!snapshot) return '';
+  // AUTO and its explicit twin may share one transport cursor, but each
+  // requested selection still owns a distinct readiness transition and paint.
+  return [snapshot.range_seconds, snapshot.requested_resolution, snapshot.resolution_seconds, snapshot.source_generation, snapshot.cache_generation].join(':');
+}
+
+function jsDebugCurrentStatsStreamEvidence() {
+  const client = jsDebugCurrentStatsClientState.client;
+  const controller = client?.controller?.() || null;
+  const generation = controller?.generation?.() || null;
+  const stream = typeof client?.streamEvidence === 'function' ? client.streamEvidence() : null;
+  return {
+    moduleReady: typeof globalThis.YOLOmuxStatsCurrent?.createBrowserClient === 'function',
+    clientReady: client !== null,
+    controllerReady: controller !== null,
+    generationReady: generation !== null,
+    panelVisible: jsDebugStatsPanelVisible(),
+    paintedGenerationKey: String(jsDebugCurrentStatsClientState.paintedGenerationKey || ''),
+    stream,
+  };
+}
+
+function paintJsDebugCurrentStatsGeneration(snapshot, {forceGraphRefresh = true} = {}) {
+  if (!snapshot || !jsDebugStatsPanelVisible()) return false;
+  const key = jsDebugCurrentStatsGenerationKey(snapshot);
+  if (key && key === jsDebugCurrentStatsClientState.paintedGenerationKey) return false;
+  applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh});
+  jsDebugCurrentStatsClientState.paintedGenerationKey = key;
+  return true;
+}
+
 function ensureJsDebugCurrentStatsClient() {
   if (jsDebugCurrentStatsClientState.client) return jsDebugCurrentStatsClientState.client;
   if (typeof globalThis.YOLOmuxStatsCurrent?.createBrowserClient !== 'function') return null;
+  loadJsDebugStatsUiPreferences();
   const selection = jsDebugCurrentStatsSelection();
   const client = globalThis.YOLOmuxStatsCurrent.createBrowserClient({
     clientId: jsDebugStatsClientIdForRequest(),
     savedRange: selection.rangeSeconds,
     savedResolution: selection.resolution,
+    controllerOptions: {
+      onFailure: recordJsDebugCurrentStatsFailure,
+      onRetirement: recordJsDebugCurrentStatsRetirement,
+      onPushProof: acceptJsDebugCurrentStatsPushProof,
+      onGeneration(snapshot) {
+        paintJsDebugCurrentStatsGeneration(snapshot);
+      },
+    },
     onState(state, error) {
       if (state !== 'error') return;
       const liveSelection = jsDebugCurrentStatsSelection();
@@ -5894,11 +6782,6 @@ function ensureJsDebugCurrentStatsClient() {
         nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs,
       });
     },
-    controllerOptions: {
-      onGeneration(snapshot) {
-        applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh: true});
-      },
-    },
   });
   jsDebugCurrentStatsClientState.client = client;
   jsDebugCurrentStatsClientState.selectionKey = `${selection.rangeSeconds}:${selection.resolution}`;
@@ -5906,11 +6789,21 @@ function ensureJsDebugCurrentStatsClient() {
 }
 
 function syncJsDebugCurrentStatsClient({select = false} = {}) {
-  const client = ensureJsDebugCurrentStatsClient();
+  loadJsDebugStatsUiPreferences();
+  let client;
+  try {
+    client = ensureJsDebugCurrentStatsClient();
+  } catch (error) {
+    recordJsDebugCurrentStatsFailure({
+      message: `YO!stats stream initialization unavailable: ${jsDebugErrorText(error)}`,
+      source: '/api/stats-stream',
+    });
+    return true;
+  }
   if (!client) return false;
-  const visible = jsDebugStatsPanelVisible();
-  client.setVisible(visible);
-  if (!visible) return true;
+  const documentVisible = jsDebugStatsDocumentVisible();
+  client.setVisible(documentVisible);
+  if (!documentVisible) return true;
   const selection = jsDebugCurrentStatsSelection();
   const key = `${selection.rangeSeconds}:${selection.resolution}`;
   const controller = client.controller?.();
@@ -5922,12 +6815,23 @@ function syncJsDebugCurrentStatsClient({select = false} = {}) {
     jsDebugCurrentStatsClientState.selectionKey = key;
     if (!cachedSelection) client.select(selection.rangeSeconds, selection.resolution);
   }
+  paintJsDebugCurrentStatsGeneration(controller?.generation?.());
   if (!jsDebugCurrentStatsClientState.startPromise) {
-    jsDebugCurrentStatsClientState.startPromise = client.start()
-      .catch(error => {
-        recordJsDebugStatsDiagnostic('warning', `current stats stream failed: ${jsDebugErrorText(error)}`);
-      })
-      .finally(() => { jsDebugCurrentStatsClientState.startPromise = null; });
+    try {
+      jsDebugCurrentStatsClientState.startPromise = Promise.resolve(client.start())
+        .catch(error => {
+          recordJsDebugCurrentStatsFailure({
+            message: `YO!stats stream initialization unavailable: ${jsDebugErrorText(error)}`,
+            source: '/api/stats-stream',
+          });
+        })
+        .finally(() => { jsDebugCurrentStatsClientState.startPromise = null; });
+    } catch (error) {
+      recordJsDebugCurrentStatsFailure({
+        message: `YO!stats stream initialization unavailable: ${jsDebugErrorText(error)}`,
+        source: '/api/stats-stream',
+      });
+    }
   }
   return true;
 }
@@ -5938,7 +6842,9 @@ function jsDebugStatsTokenConsumerEnabled() {
 
 function stopJsDebugStatsPolling() {
   clearRuntimeInterval('debug-stats');
-  if (jsDebugCurrentStatsClientState.client) jsDebugCurrentStatsClientState.client.setVisible(false);
+  if (jsDebugCurrentStatsClientState.client) {
+    jsDebugCurrentStatsClientState.client.setVisible(jsDebugStatsDocumentVisible());
+  }
 }
 
 function jsDebugStatsLivePushEnabled() {
@@ -6006,43 +6912,6 @@ async function prefetchJsDebugHistoryFullRetention() {
   // The current server pre-materializes every supported Range/Resolution cell.
   // A hidden full-retention prefetch only duplicates work and can starve unrelated requests.
   return false;
-}
-
-// THE one owner of the /api/stats-sample request shape. Every runtime fetch, test
-// fixture, and diagnostic probe must build its query through this function or its
-// contract-tested python mirror (tests/browser_helpers/stats_request_shapes.py):
-// the 2026-07-14 host-metrics outage escaped because a diagnosis probe hand-rolled
-// a request that validated the wrong serve path. The shared goldens live in
-// tests/fixtures/stats_request_shapes.json. There are NO token_* params anymore:
-// token rates and cost ride every history record of the one history stream (the
-// server still accepts the legacy params from old clients; this client never
-// sends them).
-function jsDebugStatsSampleQuery(params = {}) {
-  const {
-    since = 0,
-    clientId = '',
-    tokenConsumer = '0',
-    historyStart = 0,
-    historyEnd = 0,
-    historyResolution = 1,
-    historyMaxPoints = jsDebugStatsHistoryMaxPoints,
-    history = true,
-    exactResolution = false,
-  } = params;
-  const parts = [
-    `since=${encodeURIComponent(String(since))}`,
-    `client_id=${encodeURIComponent(String(clientId))}`,
-    `token_consumer=${encodeURIComponent(String(tokenConsumer))}`,
-    `history_start=${encodeURIComponent(String(historyStart))}`,
-    `history_end=${encodeURIComponent(String(historyEnd))}`,
-    `history_resolution=${encodeURIComponent(String(historyResolution))}`,
-    `history_max_points=${encodeURIComponent(String(historyMaxPoints))}`,
-  ];
-  // Opt-in exact-resolution serve (DOIT.1 cutover). Additive: omitted by default,
-  // so the request shape and its goldens are unchanged until the renderer flips.
-  if (exactResolution) parts.push('exact_resolution=1');
-  if (!history) parts.push('history=0');
-  return `/api/stats-sample?${parts.join('&')}`;
 }
 
 function jsDebugStatsHistoryTimeoutMs(rangeSeconds = 0) {
@@ -6150,6 +7019,10 @@ function jsDebugCurrentCostSummary(report = {}) {
     lower_micro_usd: Number(row.total_micro_usd) || 0,
     upper_micro_usd: Number(row.total_micro_usd) || 0,
     ...jsDebugCurrentCostDimensionRows(row.dimensions),
+    priced_count: Math.max(0, Number(row.priced?.atoms) || 0),
+    priced_token_quantity: Math.max(0, Number(row.priced?.tokens) || 0),
+    unpriced_count: Math.max(0, Number(row.unpriced?.atoms) || 0),
+    unpriced_token_quantity: Math.max(0, Number(row.unpriced?.tokens) || 0),
   })) : [];
   const sourceRows = Array.isArray(report.agents) ? report.agents.map(row => ({
     tmux_key: row.key,
@@ -6165,6 +7038,10 @@ function jsDebugCurrentCostSummary(report = {}) {
     lower_micro_usd: Number(row.total_micro_usd) || 0,
     upper_micro_usd: Number(row.total_micro_usd) || 0,
     ...jsDebugCurrentCostDimensionRows(row.dimensions),
+    priced_count: Math.max(0, Number(row.priced?.atoms) || 0),
+    priced_token_quantity: Math.max(0, Number(row.priced?.tokens) || 0),
+    unpriced_count: Math.max(0, Number(row.unpriced?.atoms) || 0),
+    unpriced_token_quantity: Math.max(0, Number(row.unpriced?.tokens) || 0),
   })) : [];
   const components = Array.isArray(report.evidence) ? report.evidence.map(row => ({
     ...row,
@@ -6421,6 +7298,7 @@ function applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh = false} = {})
   jsDebugHistoryReadiness.loadedEndSeconds = snapshot.window_end;
   jsDebugHistoryReadiness.resolutionSeconds = snapshot.resolution_seconds;
   jsDebugStatsServerSequence = Number(snapshot.cache_generation) || 0;
+  debugGraphApplyUsageAtomBackfill(snapshot.usage_atom_backfill);
   jsDebugStatsPollState.agentWindowSnapshotRevision = jsDebugCurrentSnapshotAgentWindowRevision(snapshot);
   const firstSample = !jsDebugStatsPollState.firstSampleReceived;
   jsDebugStatsPollState.lastSampleAtMs = Date.now();
@@ -6435,35 +7313,10 @@ async function pollJsDebugStatsSample({forceGraphRefresh = false} = {}) {
     stopJsDebugStatsPolling();
     return;
   }
-  if (jsDebugStatsPollState.inFlight) {
-    jsDebugStatsPollState.pending = true;
-    jsDebugStatsPollState.pendingForceGraphRefresh ||= forceGraphRefresh;
-    return;
-  }
-  if (typeof apiFetchJsonQuiet !== 'function') return;
-  jsDebugStatsPollState.pending = false;
-  jsDebugStatsPollState.inFlight = true;
-  try {
-    const rangeSeconds = normalizedJsDebugGraphRange(jsDebugGraphRangeSeconds);
-    const requestedResolution = normalizedDebugGraphResolutionOverrideSeconds(jsDebugGraphResolutionOverrideSeconds) || 'AUTO';
-    const url = `/api/stats-snapshot?range_seconds=${encodeURIComponent(rangeSeconds)}&resolution=${encodeURIComponent(requestedResolution)}&client_id=${encodeURIComponent(jsDebugStatsClientIdForRequest())}&since_generation=0`;
-    const snapshot = await fetchJsDebugStatsJson(url, {
-      cache: 'no-store',
-      timeoutMs: jsDebugStatsHistoryTimeoutMs(rangeSeconds),
-    });
-    applyJsDebugCurrentSnapshot(snapshot, {forceGraphRefresh: true});
-  } catch (error) {
-    recordJsDebugStatsDiagnostic('warning', `current stats request failed: ${jsDebugErrorText(error)}`);
-    setJsDebugHistoryReadiness('error', {error: jsDebugErrorText(error), nextAutoRetryAtMs: performanceNow() + jsDebugHistoryRetryInitialDelayMs});
-  } finally {
-    jsDebugStatsPollState.inFlight = false;
-    if (jsDebugStatsPollState.pending) {
-      const pendingForceGraphRefresh = jsDebugStatsPollState.pendingForceGraphRefresh;
-      jsDebugStatsPollState.pending = false;
-      jsDebugStatsPollState.pendingForceGraphRefresh = false;
-      pollJsDebugStatsSample({forceGraphRefresh: pendingForceGraphRefresh});
-    }
-  }
+  // Snapshot and push delivery have one owner. Lifecycle callers may still
+  // enter through this compatibility function, but they must never recreate
+  // the retired direct snapshot transport.
+  syncJsDebugCurrentStatsClient({select: forceGraphRefresh});
 }
 
 function scheduleJsDebugStatsHistoryFlush() {
@@ -6578,6 +7431,9 @@ async function primeJsDebugStatsBeforeLongLivedStreams() {
 }
 
 async function initializeJsDebugStatsBeforeStreams() {
+  if (jsDebugGraphExactResolutionEnabled && syncJsDebugCurrentStatsClient()) {
+    return Boolean(jsDebugCurrentStatsClientState.client?.controller?.()?.generation?.());
+  }
   await primeJsDebugStatsBeforeLongLivedStreams();
   syncJsDebugStatsPolling({pollNow: false});
   return jsDebugStatsPollState.firstSampleReceived;
@@ -6586,6 +7442,7 @@ async function initializeJsDebugStatsBeforeStreams() {
 if (typeof document !== 'undefined' && document?.addEventListener) {
   document.addEventListener('visibilitychange', () => {
     const visible = document.visibilityState === 'visible';
+    if (jsDebugGraphExactResolutionEnabled) syncJsDebugCurrentStatsClient();
     syncJsDebugStatsPolling({pollNow: visible, forceGraphRefresh: visible});
     syncDebugSystemPolling({pollNow: visible});
     syncDebugLogsPolling({pollNow: visible});
@@ -6642,11 +7499,49 @@ function debugSystemCardHtml(title, body, options = {}) {
   </section>`;
 }
 
+function debugSystemTmuxSignalWatcherCardHtml(watcher = {}) {
+  const knownStates = new Set(['never-started', 'attaching', 'no-sessions', 'attached', 'exited']);
+  const state = knownStates.has(String(watcher.state || '')) ? String(watcher.state) : 'exited';
+  const demandKnown = typeof watcher.demanded === 'boolean';
+  const demanded = watcher.demanded === true;
+  const labels = {
+    'never-started': 'Never started',
+    attaching: 'Attaching',
+    'no-sessions': 'No sessions',
+    attached: 'Attached',
+    exited: 'Exited',
+  };
+  const defaultReasons = {
+    'never-started': 'Tmux signal watcher has not been started',
+    attaching: 'Tmux control client is attaching',
+    'no-sessions': 'No tmux sessions are configured to watch',
+    attached: 'Control client is attached',
+    exited: 'Tmux control client exited',
+  };
+  const sessions = Array.isArray(watcher.sessions) ? watcher.sessions.filter(value => typeof value === 'string' && value).join(', ') : '';
+  const issue = state === 'exited' || (state === 'never-started' && watcher.demanded !== false);
+  const stateLabel = state === 'never-started' && demandKnown && !demanded ? 'Idle' : labels[state];
+  return `<section class="js-debug-system-card" data-js-debug-tmux-signal-watcher data-tmux-signal-watcher-state="${esc(state)}" data-tmux-signal-watcher-demanded="${demandKnown ? String(demanded) : 'unknown'}" role="${issue ? 'alert' : 'status'}">
+    <h3>Tmux signal watcher</h3>${debugSystemRowsHtml([
+      ['State', stateLabel],
+      ['Demand', demandKnown ? (demanded ? 'Yes' : 'No') : t('common.notAvailable')],
+      ['Control client PID', Number(watcher.process_pid) > 0 ? watcher.process_pid : '—'],
+      ['Sessions', sessions || '—'],
+      ['Detail', watcher.reason || defaultReasons[state]],
+    ])}
+  </section>`;
+}
+
 function debugSystemServiceState(service = {}) {
   const pid = Number(service.pid || 0);
   if (pid <= 0) {
     if (Number(service.restart_backoff_seconds || 0) > 0) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
     return {label: t('state.idle'), tone: 'muted'};
+  }
+  const transportReason = String(service.transport_reason || '').trim();
+  if (transportReason) {
+    const failure = String(service.last_failure || '').trim();
+    return {label: `Transport: ${failure || transportReason}`, tone: 'bad', reason: transportReason};
   }
   if (service.healthy === false) return {label: t('debug.system.localServices.state.issue'), tone: 'bad'};
   return {label: t('debug.system.localServices.state.running'), tone: 'good'};
@@ -6812,11 +7707,53 @@ function debugSystemLocalServicesCardHtml() {
   </section>`;
 }
 
+function debugSystemLocalServiceCellLayoutAttrs(fieldKey) {
+  return fieldKey === 'runtime' ? ' style="white-space:pre-wrap;overflow-wrap:anywhere"' : '';
+}
+
 function debugSystemLocalServicesTableHtml(serviceNames = []) {
   const minWidthRem = 10 + (Math.max(1, serviceNames.length) * 9);
   return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-fixed-table js-debug-system-local-services-table" style="--js-debug-system-local-services-min-width:${minWidthRem}rem">
     <thead><tr><th>${esc(t('debug.system.localServices.fieldColumn'))}</th>${serviceNames.map(name => `<th data-js-debug-service-head="${esc(name)}"><span class="js-debug-system-service-name">${esc(name)}</span><span class="js-debug-system-state js-debug-system-state--muted" data-js-debug-service-state="${esc(name)}">${esc(t('state.idle'))}</span></th>`).join('')}</tr></thead>
-    <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}">—</td>`).join('')}</tr>`).join('')}</tbody>
+    <tbody>${debugSystemLocalServiceFields.map(field => `<tr data-js-debug-service-row="${esc(field.key)}"><th scope="row">${esc(t(field.labelKey))}</th>${serviceNames.map(name => `<td data-js-debug-service-cell data-service="${esc(name)}" data-field="${esc(field.key)}"${debugSystemLocalServiceCellLayoutAttrs(field.key)}>—</td>`).join('')}</tr>`).join('')}</tbody>
+  </table></div>`;
+}
+
+function debugSystemMetricText(metric = {}, key = '') {
+  if (metric.state !== 'measured') return String(metric.reason || t('common.notAvailable'));
+  if (key === 'cpu_now_percent') return `${debugSystemNumber(metric.value, 1)}%`;
+  if (key === 'rss_bytes') return debugGraphTerseBytesText(metric.value);
+  if (key === 'uptime_seconds') return debugGraphUptimeText(metric.value);
+  return debugSystemNumber(metric.value, 1);
+}
+
+function debugSystemNormalizedLocalServicesTableHtml(localServices = {}) {
+  const inventory = Array.isArray(localServices.inventory) ? localServices.inventory.map(String) : [];
+  const services = Array.isArray(localServices.services) ? localServices.services : [];
+  const servicesById = new Map(services.map(service => [String(service?.id || service?.service || ''), service]));
+  const rows = inventory.map(id => servicesById.get(id) || {
+    id,
+    label: id,
+    state: 'unavailable',
+    reason: 'Service status is missing',
+    metrics: {},
+  });
+  const metricKeys = ['cpu_now_percent', 'rss_bytes', 'uptime_seconds'];
+  return `<div class="js-debug-system-table-wrap js-debug-system-local-services-wrap"><table class="js-debug-system-table js-debug-system-local-services-table js-debug-system-local-services-table--rows">
+    <thead><tr><th>Service</th><th>Status</th><th>PID</th><th>CPU</th><th>Memory</th><th>Uptime</th><th>Reason</th></tr></thead>
+    <tbody>${rows.map(service => {
+      const id = String(service?.id || service?.service || '');
+      const state = String(service?.state || 'unavailable');
+      const reason = String(service?.reason || '');
+      const metrics = service?.metrics && typeof service.metrics === 'object' ? service.metrics : {};
+      return `<tr data-subsystem-row data-subsystem-id="${esc(id)}" data-subsystem-state="${esc(state)}">
+        <th scope="row"><span class="js-debug-system-service-name">${esc(service?.label || id)}</span><span>${esc(id)}</span></th>
+        <td data-subsystem-value><span class="js-debug-system-state js-debug-system-state--${state === 'running' ? 'good' : (state === 'idle' ? 'muted' : 'bad')}">${esc(state)}</span></td>
+        <td>${Number(service?.pid || 0) > 0 ? esc(String(service.pid)) : '—'}</td>
+        ${metricKeys.map(key => `<td data-subsystem-metric="${esc(key)}" data-metric-state="${esc(metrics[key]?.state || 'unavailable')}">${esc(debugSystemMetricText(metrics[key], key))}</td>`).join('')}
+        <td><span data-subsystem-reason${reason ? '' : ' hidden'}>${esc(reason)}</span></td>
+      </tr>`;
+    }).join('')}</tbody>
   </table></div>`;
 }
 
@@ -6852,6 +7789,11 @@ function updateDebugSystemLocalServiceCell(cell, record, fieldKey, value, nowMs)
 function updateDebugSystemLocalServicesCard(card, payload = {}) {
   const root = card?.querySelector?.('[data-js-debug-local-services]');
   if (!root) return;
+  if (Number(payload.local_services?.schema_version) === 1) {
+    root.innerHTML = debugSystemNormalizedLocalServicesTableHtml(payload.local_services);
+    root.dataset.signature = `schema-1:${(payload.local_services?.inventory || []).join('\x1f')}`;
+    return;
+  }
   const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
   const incomingNames = services.map(debugSystemServiceName);
   const retainedNames = [...debugSystemLocalServicesState.records.keys()].filter(name => !incomingNames.includes(name));
@@ -6947,6 +7889,15 @@ function debugSystemSamplerFamilySuccessAge(family, nowSeconds) {
   let succeededAt = debugSystemSamplerFamilyNumber(family, 'last_success_at', 'last_success');
   if (succeededAt > 1e12) succeededAt /= 1000;
   return succeededAt > 0 ? relativeTimeFormat(Math.max(0, nowSeconds - succeededAt)) : '—';
+}
+
+function debugSystemGeneratedAge(value, nowSeconds = Date.now() / 1000) {
+  const timestamp = Number(value);
+  // This field is wall-clock data only. Monotonic counters are small positive
+  // numbers too, but subtracting one from Date.now() produces a confident,
+  // false multi-year age instead of admitting that no wall-clock time exists.
+  if (!Number.isFinite(timestamp) || timestamp < 1_000_000_000) return t('common.notAvailable');
+  return relativeTimeFormat(Math.max(0, nowSeconds - timestamp));
 }
 
 function debugSystemSamplerFamilySeconds(family, secondsKeys, millisecondsKeys) {
@@ -7046,6 +7997,16 @@ function debugSystemCpuBudgetCardHtml(budget = {}) {
   ])}</div>`);
 }
 
+function debugSystemRecoveryBannersHtml(localServices = {}) {
+  const events = Array.isArray(localServices.recovery_events) ? localServices.recovery_events : [];
+  return events.map(event => `<section class="js-debug-system-recovery-banner" data-system-recovery-banner role="alert">
+    <strong>${esc(event?.subsystem || 'Subsystem')} recovered from ${esc(event?.event || 'a storage failure')}</strong>
+    <span>Quarantined ${esc(event?.quarantined_artifact || t('common.notAvailable'))} at ${esc(event?.quarantined_path || t('common.notAvailable'))}.</span>
+    <span>Fresh storage is active at ${esc(event?.destination_path || t('common.notAvailable'))}.</span>
+    ${event?.reason ? `<span>${esc(event.reason)}</span>` : ''}
+  </section>`).join('');
+}
+
 function debugSystemInnerHtml() {
   const payload = jsDebugSystemState.payload;
   if (!payload) {
@@ -7062,11 +8023,12 @@ function debugSystemInnerHtml() {
   const caches = payload.caches || {};
   const clientEvents = payload.client_events || {};
   const chat = payload.chat || {};
+  const tmuxSignalWatcher = payload.tmux_signal_watcher || {};
   const recurringWork = Array.isArray(refresh.recurring_work) ? refresh.recurring_work : [];
   const totals = payload.local_services?.totals || {};
   const cpuBudget = payload.cpu_budget || {};
   const services = Array.isArray(payload.local_services?.services) ? payload.local_services.services : [];
-  const generatedAgo = payload.generated_at ? relativeTimeFormat(Math.max(0, Date.now() / 1000 - Number(payload.generated_at))) : t('common.notAvailable');
+  const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
   const cards = [
     debugSystemCardHtml('Server', debugSystemRowsHtml([
       ['Status', payload.ok ? 'Running' : 'Issue'],
@@ -7098,6 +8060,7 @@ function debugSystemInnerHtml() {
       ['Delivered events', clientEvents.delivered_events],
       ['Chat subscribers', chat.subscribers], ['Chat messages', chat.store?.message_rows], ['Typing leases', chat.store?.typing_leases],
     ])),
+    debugSystemTmuxSignalWatcherCardHtml(tmuxSignalWatcher),
     debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(recurringWork), {wide: true}),
     debugSystemStatsSamplerCardHtml(services),
     debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
@@ -7108,7 +8071,7 @@ function debugSystemInnerHtml() {
   return `<div class="js-debug-system-toolbar">
     <span role="status">Updated ${esc(generatedAgo)}${jsDebugSystemState.error ? ` · ${esc(jsDebugSystemState.error)}` : ''}</span>
     <button type="button" class="preferences-inline-action" data-js-debug-system-refresh${jsDebugSystemState.inFlight ? ' disabled' : ''}>${esc(t('common.refresh'))}</button>
-  </div><div class="js-debug-system-grid">${cards.join('')}</div>`;
+  </div>${debugSystemRecoveryBannersHtml(payload.local_services)}<div class="js-debug-system-grid">${cards.join('')}</div>`;
 }
 
 function refreshDebugSystemViews() {
@@ -7161,9 +8124,25 @@ function refreshDebugLogsViews() {
   for (const view of document.querySelectorAll('[data-js-debug-subview="logs"]')) {
     const list = view.querySelector('[data-js-debug-log-list]');
     const scrollTop = list?.scrollTop || 0;
-    view.innerHTML = debugLogsInnerHtml();
-    const replacement = view.querySelector('[data-js-debug-log-list]');
+    const rendered = document.createElement('div');
+    rendered.innerHTML = debugLogsInnerHtml();
+    const replacement = rendered.querySelector('[data-js-debug-log-list]');
+    const currentError = view.querySelector('.js-debug-logs-error');
+    const replacementError = rendered.querySelector('.js-debug-logs-error');
+    if (replacementError) {
+      if (currentError) currentError.replaceWith(replacementError);
+      else list?.before(replacementError);
+    } else {
+      currentError?.remove();
+    }
+    if (replacement && list) list.replaceWith(replacement);
+    else if (replacement) view.appendChild(replacement);
     if (replacement) replacement.scrollTop = scrollTop;
+    for (const button of view.querySelectorAll('[data-js-debug-log-level]')) {
+      const active = jsDebugLogsState.levels.has(String(button.dataset.jsDebugLogLevel || ''));
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
   }
 }
 
@@ -7175,7 +8154,9 @@ async function pollDebugLogs({force = false} = {}) {
   refreshDebugLogsViews();
   try {
     const payload = await apiFetchJsonQuiet('/api/logs', {cache: 'no-store'});
-    jsDebugLogsState.payload = Array.isArray(payload?.logs) ? payload.logs.slice(-500) : [];
+    jsDebugLogsState.payload = Array.isArray(payload?.logs)
+      ? shareRedactDiagnosticValue(payload.logs.slice(-500))
+      : [];
     jsDebugLogsState.updatedAt = Date.now();
     return true;
   } catch (error) {
@@ -7198,6 +8179,7 @@ function syncDebugLogsPolling({pollNow = false} = {}) {
 
 function debugPanelHtml() {
   const counts = debugEventCounts();
+  const apiCopyLabel = debugApiCopyButtonLabel();
   return `
     ${debugSubTabsHtml()}
     <div class="js-debug-subview js-debug-events-view" ${debugSubViewAttrs('events')}>
@@ -7209,7 +8191,7 @@ function debugPanelHtml() {
           ${debugStatHtml(t('debug.errors'), counts.errors, 'errors')}
         </div>
         <div class="js-debug-actions">
-          <button type="button" class="preferences-inline-action" data-js-debug-copy>${esc(t('common.copy'))}</button>
+          <button type="button" class="preferences-inline-action" data-js-debug-copy data-copy-feedback-key="debug-api" data-copy-feedback-label="${esc(t('common.copy'))}" aria-label="${esc(apiCopyLabel)}">${esc(apiCopyLabel)}</button>
           <button type="button" class="preferences-inline-action" data-js-debug-clear>${esc(t('common.clear'))}</button>
         </div>
       </div>
@@ -8545,9 +9527,7 @@ function bindDebugPanel(panel) {
     const logsCopy = event.target.closest('[data-js-debug-logs-copy]');
     if (logsCopy && panel.contains(logsCopy)) {
       event.preventDefault();
-      copyTextToClipboard(debugLogsTextForClipboard())
-        .then(() => { statusEl.textContent = t('debug.copied'); })
-        .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
+      void runDebugCopy(debugLogsTextForClipboard(), {button: logsCopy, feedbackKey: 'debug-logs'});
       return;
     }
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
@@ -8561,9 +9541,7 @@ function bindDebugPanel(panel) {
     const copy = event.target.closest('[data-js-debug-copy]');
     if (copy && panel.contains(copy)) {
       event.preventDefault();
-      copyTextToClipboard(jsDebugTextForClipboard())
-        .then(() => { statusEl.textContent = t('debug.copied'); })
-        .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
+      void runDebugCopy(jsDebugTextForClipboard(), {button: copy, feedbackKey: 'debug-api'});
       return;
     }
     const clear = event.target.closest('[data-js-debug-clear]');

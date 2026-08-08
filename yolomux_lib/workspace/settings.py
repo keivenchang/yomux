@@ -15,11 +15,11 @@ from typing import Any
 import yaml
 
 from ..infra.atomic_file import atomic_write_text
-from ..infra.atomic_file import file_lock
 from ..infra.common import CONFIG_DIR
 from ..infra.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from ..infra.common import UPDATE_NOTIFY_LEVELS
 from ..infra.common import UPLOAD_MAX_BYTES
+from ..infra.shared_config_lock import shared_config_lock
 from .locales import LANGUAGE_PREFERENCES
 from .locales import LANGUAGE_VALUE_ALIASES
 from .locales import SYSTEM_LOCALE_PREFERENCE
@@ -1155,8 +1155,7 @@ def settings_template(settings: dict[str, Any]) -> str:
 
 @contextmanager
 def locked_settings_file(path: Path = SETTINGS_PATH) -> Any:
-    # lock + atomic-write machinery moved to atomic_file (shared with events.py / yolo_rules).
-    with file_lock(path, dir_mode=0o700):
+    with shared_config_lock(path):
         yield
 
 
@@ -1206,6 +1205,8 @@ def _read_settings_file_unlocked(path: Path = SETTINGS_PATH) -> tuple[dict[str, 
 
 
 def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]:
+    if path.exists():
+        return _read_settings_file_unlocked(path)
     with locked_settings_file(path):
         return _read_settings_file_unlocked(path)
 
@@ -1213,6 +1214,17 @@ def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]
 def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:
     settings, error = _read_settings_file_unlocked(path)
     stat = path.stat() if path.exists() else None
+    if error:
+        return {
+            "settings": None,
+            "defaults": default_settings(),
+            "choices": settings_payload_choices(),
+            "catalog": settings_catalog(),
+            "path": str(path),
+            "display_path": SETTINGS_DISPLAY_PATH,
+            "mtime_ns": stat.st_mtime_ns if stat else 0,
+            "error": error,
+        }
     return {
         "settings": settings,
         "defaults": default_settings(),
@@ -1392,13 +1404,17 @@ def settings_catalog(settings: dict[str, Any] | None = None) -> dict[str, dict[s
 
 
 def settings_payload(path: Path = SETTINGS_PATH) -> dict[str, Any]:
+    if path.exists():
+        return _settings_payload_cached_unlocked(path)
     with locked_settings_file(path):
         return _settings_payload_cached_unlocked(path)
 
 
 def save_settings(patch: Any, path: Path = SETTINGS_PATH) -> dict[str, Any]:
     with locked_settings_file(path):
-        current, _ = _read_settings_file_unlocked(path)
+        current, error = _read_settings_file_unlocked(path)
+        if error:
+            raise ValueError(f"settings file could not be loaded: {error}")
         coerced: list[str] = []
         next_settings = merge_settings(current, patch, coerced)
         _record_pricing_profile_changes(current, next_settings, effective_at=time.time())

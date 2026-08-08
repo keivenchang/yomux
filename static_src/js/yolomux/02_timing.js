@@ -23,6 +23,12 @@ const yolomuxTiming = Object.freeze({
   shareDebugProfileUploadMinIntervalMs: 5000,
   // Non-settings fallback polls use odd cadences by preference; see docs/DEVELOPMENT.md.
   autoApproveDisconnectedPollMs: 5003,
+  // A forced metadata read is answered from the server cache and names the generation of the build
+  // that will observe the request. `transcripts_changed` carries that build, but only to a client
+  // that demands the transcripts channel, which the default subscription does not. Converge on the
+  // named generation with bounded cache reads so "force" means force for every client.
+  forcedSessionMetadataSettleTimeoutMs: 8000,
+  forcedSessionMetadataSettlePollMs: 151,
   shareViewerStatusBackupRefreshMs: uiDelayMs.shareViewerStatusBackupRefresh,
   shareHostStatusBackupRefreshMs: uiDelayMs.shareHostStatusBackupRefresh,
   shareRemoteResizeAfterSocketOpenMs: uiDelayMs.shareRemoteResizeAfterSocketOpen,
@@ -58,6 +64,8 @@ const yolomuxTiming = Object.freeze({
 const {
   shareDebugProfileUploadMinIntervalMs,
   autoApproveDisconnectedPollMs,
+  forcedSessionMetadataSettleTimeoutMs,
+  forcedSessionMetadataSettlePollMs,
   shareViewerStatusBackupRefreshMs,
   shareHostStatusBackupRefreshMs,
   shareRemoteResizeAfterSocketOpenMs,

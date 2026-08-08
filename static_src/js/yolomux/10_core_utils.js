@@ -43,33 +43,619 @@ function applyShareTokenHeaders(requestOptions) {
   return requestOptions;
 }
 
-async function apiFetch(url, options = {}) {
+function applyApiRequestIdHeader(url, requestOptions) {
+  const endpoint = jsDebugEndpointText(url);
+  if (!endpoint.startsWith('/api/')) return '';
+  const requestId = `r-web-${Date.now().toString(36)}-${(++apiDebugRequestSequence).toString(36)}`;
+  const validRequestId = value => /^r-[A-Za-z0-9._-]{1,120}$/.test(String(value || ''));
+  if (typeof Headers === 'function') {
+    const headers = new Headers(requestOptions.headers || {});
+    if (!validRequestId(headers.get('X-YOLOmux-Request-ID'))) headers.set('X-YOLOmux-Request-ID', requestId);
+    requestOptions.headers = headers;
+    return String(headers.get('X-YOLOmux-Request-ID') || requestId);
+  }
+  const headers = {...(requestOptions.headers || {})};
+  const existingKey = Object.keys(headers).find(key => key.toLowerCase() === 'x-yolomux-request-id');
+  if (!existingKey || !validRequestId(headers[existingKey])) headers[existingKey || 'X-YOLOmux-Request-ID'] = requestId;
+  requestOptions.headers = headers;
+  return String(headers[existingKey || 'X-YOLOmux-Request-ID'] || requestId);
+}
+
+const apiFetchDefaultDeadlineMs = 15000;
+const apiFetchLongOperationDeadlineMs = 300000;
+
+function apiFetchDeadlineMs(url, options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'deadlineMs')) {
+    const override = Number(options.deadlineMs);
+    return Number.isFinite(override) && override > 0 ? override : apiFetchDefaultDeadlineMs;
+  }
+  if (Object.prototype.hasOwnProperty.call(options, 'timeoutMs')) {
+    const override = Number(options.timeoutMs);
+    return Number.isFinite(override) && override > 0 ? override : apiFetchDefaultDeadlineMs;
+  }
+  if (typeof FormData === 'function' && options.body instanceof FormData) return apiFetchLongOperationDeadlineMs;
+  const path = String(url || '').split('?', 1)[0];
+  if (path.endsWith('/api/self-update')) return apiFetchLongOperationDeadlineMs;
+  return apiFetchDefaultDeadlineMs;
+}
+
+function apiFetchDeadlineError(deadlineMs, subject = 'request') {
+  const seconds = Math.round(deadlineMs / 1000);
+  const message = `deadline_expired: ${String(subject || 'request')} exceeded its ${seconds}s deadline`;
+  const error = new Error(message);
+  error.name = 'ApiFetchDeadlineError';
+  error.code = 'deadline_expired';
+  error.status = 504;
+  error.statusText = 'Gateway Timeout';
+  error.payload = {error: message, reason_code: error.code, timeout_ms: deadlineMs};
+  return error;
+}
+
+function apiFetchResponseWithDeadline(response, deadlineState) {
+  if (!response || response.body === null) {
+    deadlineState.onConsumed?.();
+    deadlineState.cleanup();
+    return response;
+  }
+  let consumed = false;
+  const noteConsumed = () => {
+    if (consumed) return;
+    consumed = true;
+    deadlineState.onConsumed?.();
+  };
+  const wrappedMethods = new Map();
+  for (const name of ['arrayBuffer', 'blob', 'formData', 'json', 'text']) {
+    const consume = response[name];
+    if (typeof consume !== 'function') continue;
+    wrappedMethods.set(name, async (...args) => {
+      try {
+        return await consume.apply(response, args);
+      } catch (error) {
+        const timeoutError = deadlineState.timeoutError();
+        if (timeoutError) {
+          deadlineState.noteTimeout();
+          throw timeoutError;
+        }
+        throw error;
+      } finally {
+        noteConsumed();
+        deadlineState.cleanup();
+      }
+    });
+  }
+  return new Proxy(response, {
+    get(target, property) {
+      if (wrappedMethods.has(property)) return wrappedMethods.get(property);
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+async function apiFetch(url, options = {}, internalOptions = {}) {
   const requestOptions = {...options};
+  const abortOnTimeout = Object.prototype.hasOwnProperty.call(requestOptions, 'timeoutMs');
+  const deadlineMs = apiFetchDeadlineMs(url, requestOptions);
+  delete requestOptions.deadlineMs;
+  delete requestOptions.timeoutMs;
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
-  const startedAt = jsDebugPerformanceNow();
-  const method = jsDebugRequestMethod(requestOptions);
-  const requestBytes = jsDebugRequestBytes(url, requestOptions);
+  const recordDebug = internalOptions.recordDebug !== false;
+  const diagnosticProvenance = ['controlled_probe', 'confirmed_real'].includes(internalOptions.provenance)
+    ? internalOptions.provenance
+    : '';
+  const startedAt = recordDebug ? jsDebugPerformanceNow() : 0;
+  const method = recordDebug ? jsDebugRequestMethod(requestOptions) : '';
+  const requestBytes = recordDebug ? jsDebugRequestBytes(url, requestOptions) : 0;
+  const requestId = recordDebug ? applyApiRequestIdHeader(url, requestOptions) : '';
+  if (recordDebug) notePageLoadApiStarted(startedAt);
+  const upstreamSignal = requestOptions.signal || null;
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  let upstreamAbort = null;
+  if (controller) {
+    upstreamAbort = () => controller.abort(upstreamSignal?.reason);
+    if (upstreamSignal?.aborted) upstreamAbort();
+    else upstreamSignal?.addEventListener?.('abort', upstreamAbort, {once: true});
+    requestOptions.signal = controller.signal;
+  }
+  let timeoutId = null;
+  let timeoutError = null;
+  let timeoutNoted = false;
+  const cleanup = () => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (upstreamAbort) upstreamSignal?.removeEventListener?.('abort', upstreamAbort);
+  };
+  const noteTimeout = () => {
+    if (timeoutNoted) return;
+    timeoutNoted = true;
+    noteBackendHealthFailure();
+  };
   let response;
   try {
-    response = await fetch(url, requestOptions);
+    const requestPromise = fetch(url, requestOptions).catch(error => {
+      if (timeoutError) throw timeoutError;
+      throw error;
+    });
+    const deadlinePromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timeoutId = null;
+        timeoutError = abortOnTimeout
+          ? new DOMException('The operation was aborted.', 'AbortError')
+          : apiFetchDeadlineError(deadlineMs);
+        reject(timeoutError);
+        controller?.abort(timeoutError);
+        if (upstreamAbort) upstreamSignal?.removeEventListener?.('abort', upstreamAbort);
+      }, deadlineMs);
+    });
+    response = await Promise.race([requestPromise, deadlinePromise]);
   } catch (error) {
-    noteBackendHealthFailure();
-    recordApiDebugEvent(url, method, startedAt, {error, requestBytes});
+    if (timeoutError) noteTimeout();
+    else noteBackendHealthFailure();
+    if (recordDebug) {
+      notePageLoadApiCompleted();
+      recordApiDebugEvent(url, method, startedAt, {
+        error,
+        requestBytes,
+        requestId,
+        provenance: diagnosticProvenance,
+      });
+    }
+    cleanup();
     throw error;
   }
   noteBackendHealthSuccess();
-  const event = recordApiDebugEvent(url, method, startedAt, {status: response.status, ok: response.ok, requestBytes});
-  recordApiDebugResponseBytes(event, response);
+  if (recordDebug) notePageLoadApiCompleted();
+  let debugEvent = null;
+  if (recordDebug) {
+    debugEvent = recordApiDebugEvent(url, method, startedAt, {
+      status: response.status,
+      ok: response.ok,
+      requestBytes,
+      requestId,
+      provenance: diagnosticProvenance,
+    });
+    recordApiDebugResponseBytes(debugEvent, response);
+    noteApiDebugHeaders(debugEvent, url, startedAt);
+  }
   if (response.status === 401) {
+    if (registeredCommandRouteForRequest(url, requestOptions)?.contractClass === 'background') {
+      cleanup();
+      const error = new Error('authentication required');
+      error.status = 401;
+      throw error;
+    }
     await redirectToLogin(response);
+    cleanup();
     throw new Error('authentication required');
   }
-  return response;
+  return apiFetchResponseWithDeadline(response, {
+    cleanup,
+    noteTimeout,
+    timeoutError: () => timeoutError,
+    onConsumed: () => {
+      if (recordDebug) noteApiDebugResponseConsumed(debugEvent, url, startedAt);
+    },
+  });
+}
+
+class ApiPendingResponse extends Error {
+  constructor({status = 202, ticket = null, key = '', epoch = '', request = {}, operation = {}, retryAfterSeconds = 0} = {}) {
+    super('request_queued');
+    this.name = 'ApiPendingResponse';
+    this.pending = true;
+    this.reason = 'request_queued';
+    this.status = Number(status) || 202;
+    this.ticket = ticket == null ? null : String(ticket);
+    this.request = request && typeof request === 'object' ? {...request} : {};
+    this.operation = operation && typeof operation === 'object' ? {...operation} : {};
+    this.operationId = String(this.operation.id || '');
+    this.key = String(key || this.operationId || '');
+    this.epoch = String(epoch || this.operation?.cursor?.epoch || '');
+    this.retryAfterSeconds = Number(retryAfterSeconds) || 0;
+  }
+}
+
+function isApiPendingResponse(value) {
+  return value instanceof ApiPendingResponse
+    || Boolean(value && value.name === 'ApiPendingResponse' && value.pending === true && value.reason === 'request_queued');
+}
+
+function apiGenerationReadyKey(value) {
+  return String(value || '').replace(/^storaged\.products:/, '');
+}
+
+function apiGenerationReadyMatchesKey(pendingKey, payload = {}) {
+  const expected = apiGenerationReadyKey(pendingKey);
+  const received = apiGenerationReadyKey(payload?.key);
+  return Boolean(expected && received && expected === received);
+}
+
+function apiPendingResponseFromPayload(payload, options = {}) {
+  const responseStatus = Number(options.status) || 0;
+  const lifecycleState = String(payload?.state || '').trim().toLowerCase();
+  const operation = payload?.operation && typeof payload.operation === 'object' ? payload.operation : {};
+  const operationId = String(operation.id || '').trim();
+  if (responseStatus === 202 && lifecycleState === 'queued' && operationId) {
+    return new ApiPendingResponse({
+      status: responseStatus,
+      key: operationId,
+      epoch: operation?.cursor?.epoch,
+      request: payload?.request,
+      operation,
+    });
+  }
+  const retryAfterSeconds = Number(payload?.retry_after_seconds) || 0;
+  if (responseStatus === 202
+      && lifecycleState === 'queued'
+      && !operationId
+      && String(payload?.status || '').trim().toLowerCase() === 'pending'
+      && Number.isInteger(retryAfterSeconds)
+      && retryAfterSeconds >= 1
+      && retryAfterSeconds <= 60) {
+    return new ApiPendingResponse({
+      status: responseStatus,
+      request: payload?.request,
+      retryAfterSeconds,
+    });
+  }
+  const payloadStatus = String(payload?.status || '').trim().toUpperCase();
+  if (responseStatus !== 202 && payloadStatus !== 'QUEUED') return null;
+  const key = String(payload?.key || '').trim();
+  if ((responseStatus && responseStatus !== 202) || payloadStatus !== 'QUEUED' || !key) return null;
+  return new ApiPendingResponse({
+    status: responseStatus || 202,
+    ticket: Object.prototype.hasOwnProperty.call(payload, 'ticket') ? payload.ticket : null,
+    key,
+    epoch: payload?.epoch,
+  });
+}
+
+function apiOperationTerminalCursor(payload = {}) {
+  const cursor = payload?.operation?.cursor;
+  return {
+    epoch: String(cursor?.epoch || ''),
+    seq: Number(cursor?.seq || 0),
+  };
+}
+
+function apiOperationTerminalIsNewer(current = null, incoming = {}) {
+  const next = apiOperationTerminalCursor(incoming);
+  if (!next.epoch || !Number.isSafeInteger(next.seq)) return false;
+  if (!current) return next.seq > 0;
+  const previous = apiOperationTerminalCursor(current);
+  if (previous.epoch !== next.epoch) return false;
+  return next.seq > previous.seq;
+}
+
+function apiOperationTerminalMatchesRecord(record, payload) {
+  const accepted = apiOperationTerminalCursor({operation: {cursor: record?.cursor}});
+  const terminal = apiOperationTerminalCursor(payload);
+  if (!terminal.epoch || !Number.isSafeInteger(terminal.seq) || terminal.seq <= 0) return false;
+  if (accepted.epoch && accepted.epoch !== terminal.epoch) return false;
+  return terminal.seq > accepted.seq;
+}
+
+function pruneApiOperationReplay() {
+  if (apiOperationState.terminal.size <= apiOperationReplayLimit) return 0;
+  let removed = 0;
+  for (const operationId of apiOperationState.terminal.keys()) {
+    if (apiOperationState.terminal.size <= apiOperationReplayLimit) break;
+    if (apiOperationState.pending.has(operationId) || apiOperationState.waiters.has(operationId)) continue;
+    const record = apiOperationState.records.get(operationId);
+    apiOperationState.terminal.delete(operationId);
+    if (record?.phase === 'terminal') apiOperationState.records.delete(operationId);
+    removed += 1;
+  }
+  return removed;
+}
+
+function operationTerminalAckCursorMatches(left, right) {
+  return String(left?.epoch || '') === String(right?.epoch || '')
+    && Number(left?.seq || 0) === Number(right?.seq || 0);
+}
+
+function scheduleOperationTerminalAckFlush(delayMs = operationTerminalAckDelayMs) {
+  if (operationTerminalAckState.timer !== null || operationTerminalAckState.request || !operationTerminalAckState.pending.size) return;
+  operationTerminalAckState.timer = setTimeout(() => {
+    operationTerminalAckState.timer = null;
+    void flushOperationTerminalAcks();
+  }, delayMs);
+}
+
+function enqueueOperationTerminalAck(operationId, cursor) {
+  const id = String(operationId || '');
+  const normalizedCursor = {epoch: String(cursor?.epoch || ''), seq: Number(cursor?.seq || 0)};
+  if (!id || !normalizedCursor.epoch || !Number.isSafeInteger(normalizedCursor.seq) || normalizedCursor.seq <= 0) return false;
+  operationTerminalAckState.pending.set(id, normalizedCursor);
+  scheduleOperationTerminalAckFlush();
+  return true;
+}
+
+async function flushOperationTerminalAcks() {
+  if (operationTerminalAckState.request || !operationTerminalAckState.pending.size) return false;
+  const batch = Array.from(operationTerminalAckState.pending, ([id, cursor]) => ({id, cursor: {...cursor}}))
+    .slice(0, operationTerminalAckLimit);
+  const request = apiFetchJsonQuiet('/api/operations/ack', {
+    method: 'POST',
+    keepalive: true,
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({acks: batch}),
+  });
+  operationTerminalAckState.request = request;
+  try {
+    const response = await request;
+    const terminalIds = new Set([
+      ...(Array.isArray(response?.acknowledged) ? response.acknowledged : []),
+      ...(Array.isArray(response?.ignored) ? response.ignored : []),
+    ].map(String));
+    for (const item of batch) {
+      const current = operationTerminalAckState.pending.get(item.id);
+      if (terminalIds.has(item.id) && operationTerminalAckCursorMatches(current, item.cursor)) {
+        operationTerminalAckState.pending.delete(item.id);
+      }
+    }
+  } catch (_) {
+    // Exact replay remains durable while the acknowledgement is retried.
+  } finally {
+    if (operationTerminalAckState.request === request) operationTerminalAckState.request = null;
+    if (operationTerminalAckState.pending.size) {
+      scheduleOperationTerminalAckFlush(batch.length >= operationTerminalAckLimit ? operationTerminalAckDelayMs : operationTerminalAckRetryMs);
+    }
+  }
+  return true;
+}
+
+function completeApiOperationRecord(record, payload) {
+  if (!record || record.phase !== 'accepted' || !apiOperationTerminalMatchesRecord(record, payload)) return false;
+  const result = payload.result;
+  record.phase = 'terminal';
+  record.cursor = {...payload.operation.cursor};
+  record.source?.close?.();
+  record.source = null;
+  apiOperationState.pending.delete(record.id);
+  settleApiOperationWaiters(record.id, payload);
+  recordApiOperationWait(record, result);
+  const sessionLifecycleCurrent = !record.sessionLifecycleToken
+    || typeof tmuxSessionLifecycleTokenIsCurrent !== 'function'
+    || tmuxSessionLifecycleTokenIsCurrent(record.sessionLifecycleToken);
+  if (sessionLifecycleCurrent && typeof handleApiOperationTerminalResult === 'function') {
+    record.handlerInvocations += 1;
+    handleApiOperationTerminalResult(record, result);
+  }
+  window.dispatchEvent(new CustomEvent('yolomux:operation-terminal', {detail: payload}));
+  enqueueOperationTerminalAck(record.id, record.cursor);
+  return true;
+}
+
+function applyApiOperationTerminal(payload = {}) {
+  const operationId = String(payload?.operation?.id || '');
+  const result = payload?.result;
+  if (!operationId || !result || typeof result !== 'object') return false;
+  const record = apiOperationState.records.get(operationId);
+  if (record && record.phase !== 'accepted') return false;
+  if (record && !apiOperationTerminalMatchesRecord(record, payload)) return false;
+  const prior = apiOperationState.terminal.get(operationId);
+  if (!apiOperationTerminalIsNewer(prior, payload)) return false;
+  apiOperationState.terminal.set(operationId, payload);
+  if (!record) {
+    pruneApiOperationReplay();
+    return true;
+  }
+  const completed = completeApiOperationRecord(record, payload);
+  pruneApiOperationReplay();
+  return completed;
+}
+
+function apiOperationTerminalError(record, payload = {}) {
+  const result = payload?.result && typeof payload.result === 'object' ? payload.result : {};
+  const error = new Error(userMessageText(result, 'filesystem operation failed'));
+  error.name = 'ApiOperationTerminalError';
+  error.status = Number(payload?.status || result?.status || result?.error?.status || 0);
+  error.code = String(result?.error?.code || result?.code || result?.user_message?.key || 'operation_failed');
+  error.operationId = String(record?.id || payload?.operation?.id || '');
+  error.result = result;
+  return error;
+}
+
+function apiOperationTerminalData(record, payload = {}) {
+  const result = payload?.result && typeof payload.result === 'object' ? payload.result : {};
+  if (result.state === 'ready' && result.data && typeof result.data === 'object') return result.data;
+  throw apiOperationTerminalError(record, payload);
+}
+
+function recordApiOperationTerminalFailure(record, error, expected = {}) {
+  if (error?.name !== 'ApiOperationTerminalError' || !expected.url) return;
+  const status = Number(error.status);
+  recordApiDebugEvent(expected.url, expected.method || 'GET', record.acceptedAt, {
+    ...(Number.isSafeInteger(status) && status >= 100 && status <= 599 ? {status, ok: false} : {error}),
+    requestId: record.request?.id,
+    source: error.result?.error?.origin,
+  });
+}
+
+function settleApiOperationWaiters(operationId, payload) {
+  const waiters = apiOperationState.waiters.get(operationId);
+  if (!waiters) return;
+  apiOperationState.waiters.delete(operationId);
+  for (const waiter of waiters) {
+    waiter.cleanup();
+    try {
+      waiter.resolve(apiOperationTerminalData(waiter.record, payload));
+    } catch (error) {
+      waiter.reject(error);
+    }
+  }
+}
+
+function detachApiOperationWaiter(record, waiter, error) {
+  const waiters = apiOperationState.waiters.get(record.id);
+  if (!waiters?.delete(waiter)) return false;
+  waiter.cleanup();
+  if (!waiters.size) {
+    apiOperationState.waiters.delete(record.id);
+  }
+  waiter.reject(error);
+  return true;
+}
+
+function waitForApiOperationResult(pending, expected = {}) {
+  const record = registerApiOperationReceipt(pending);
+  if (!record) return Promise.reject(new Error('operation receipt is missing an id'));
+  const expectedKind = String(expected.kind || '');
+  const expectedOperation = String(expected.operation || '');
+  if ((expectedKind && record.kind !== expectedKind)
+      || (expectedOperation && String(record.context?.operation || '') !== expectedOperation)) {
+    return Promise.reject(new Error(`unexpected operation receipt ${record.kind}:${record.context?.operation || ''}`));
+  }
+  const retained = apiOperationState.terminal.get(record.id);
+  if (record.phase === 'terminal' && retained) {
+    try {
+      return Promise.resolve(apiOperationTerminalData(record, retained));
+    } catch (error) {
+      recordApiOperationTerminalFailure(record, error, expected);
+      return Promise.reject(error);
+    }
+  }
+  const deadlineMs = Number.isFinite(Number(expected.deadlineMs)) && Number(expected.deadlineMs) > 0
+    ? Number(expected.deadlineMs)
+    : apiFetchDefaultDeadlineMs;
+  const signal = expected.signal || null;
+  return new Promise((resolve, reject) => {
+    const waiters = apiOperationState.waiters.get(record.id) || new Set();
+    const waiter = {
+      record,
+      resolve,
+      reject,
+      timer: null,
+      abort: null,
+      cleanup() {
+        if (this.timer !== null) clearTimeout(this.timer);
+        this.timer = null;
+        if (this.abort) signal?.removeEventListener?.('abort', this.abort);
+        this.abort = null;
+      },
+    };
+    const elapsed = Math.max(0, performanceNow() - record.acceptedAt);
+    const remaining = Math.max(0, deadlineMs - elapsed);
+    waiters.add(waiter);
+    apiOperationState.waiters.set(record.id, waiters);
+    waiter.timer = setTimeout(() => {
+      const error = apiFetchDeadlineError(deadlineMs);
+      if (expected.url) {
+        recordApiDebugEvent(expected.url, expected.method || 'GET', record.acceptedAt, {
+          error,
+          requestId: record.request?.id,
+        });
+      }
+      detachApiOperationWaiter(record, waiter, error);
+    }, remaining);
+    if (signal) {
+      waiter.abort = () => detachApiOperationWaiter(
+        record,
+        waiter,
+        signal.reason || new DOMException('The operation was aborted.', 'AbortError'),
+      );
+      if (signal.aborted) {
+        waiter.abort();
+        return;
+      }
+      signal.addEventListener?.('abort', waiter.abort, {once: true});
+    }
+    const raced = apiOperationState.terminal.get(record.id);
+    if (raced && record.phase === 'accepted') completeApiOperationRecord(record, raced);
+  }).catch(error => {
+    recordApiOperationTerminalFailure(record, error, expected);
+    throw error;
+  });
+}
+
+function openApiOperationEventStream(record) {
+  if (typeof EventSource !== 'function' || !record?.eventsUrl) return null;
+  const separator = record.eventsUrl.includes('?') ? '&' : '?';
+  const eventsUrl = shareToken
+    ? `${record.eventsUrl}${separator}token=${encodeURIComponent(shareToken)}`
+    : record.eventsUrl;
+  const source = new EventSource(eventsUrl);
+  record.source = source;
+  source.addEventListener('operation_terminal', event => {
+    const envelope = safeJsonParse(event?.data, {});
+    applyApiOperationTerminal(envelope?.payload || envelope);
+  });
+  return source;
+}
+
+function startApiOperationTransport(record) {
+  if (shareToken) return openApiOperationEventStream(record);
+  if (typeof syncClientEventDemand === 'function') syncClientEventDemand({immediate: true});
+  return null;
+}
+
+function registerApiOperationReceipt(pending) {
+  const operation = pending?.operation;
+  const operationId = String(operation?.id || '');
+  if (!operationId) return null;
+  const existing = apiOperationState.records.get(operationId);
+  if (existing) return existing;
+  const context = operation.context && typeof operation.context === 'object' ? {...operation.context} : {};
+  const record = {
+    id: operationId,
+    request: {...(pending.request || {})},
+    kind: String(operation.kind || ''),
+    context,
+    statusUrl: String(operation.status_url || ''),
+    eventsUrl: String(operation.events_url || ''),
+    cursor: {...(operation.cursor || {})},
+    source: null,
+    acceptedAt: performanceNow(),
+    journeyId: newClientJourneyId('operation'),
+    handlerInvocations: 0,
+    phase: 'accepted',
+    sessionLifecycleToken: context.session && typeof tmuxSessionLifecycleToken === 'function'
+      ? tmuxSessionLifecycleToken(context.session)
+      : null,
+  };
+  apiOperationState.records.set(operationId, record);
+  apiOperationState.pending.set(operationId, record);
+  const terminal = apiOperationState.terminal.get(operationId);
+  if (terminal && apiOperationTerminalMatchesRecord(record, terminal)) {
+    apiOperationState.terminal.delete(operationId);
+    apiOperationState.terminal.set(operationId, terminal);
+    completeApiOperationRecord(record, terminal);
+    pruneApiOperationReplay();
+  } else {
+    if (terminal) apiOperationState.terminal.delete(operationId);
+    startApiOperationTransport(record);
+  }
+  return record;
+}
+
+function apiPendingResponseFromNestedEnvelope(envelope = {}) {
+  const payload = envelope?.payload && typeof envelope.payload === 'object'
+    ? envelope.payload
+    : (envelope?.data && typeof envelope.data === 'object' ? envelope.data : envelope);
+  return apiPendingResponseFromPayload(payload, {status: envelope?.status});
 }
 
 async function apiJsonResponse(response) {
-  const payload = await response.json().catch(() => ({}));
+  const payload = await response.json().catch(error => {
+    if (error?.code === 'deadline_expired') throw error;
+    return {};
+  });
+  const pending = apiPendingResponseFromPayload(payload, {status: response?.status});
+  if (pending) {
+    registerApiOperationReceipt(pending);
+    throw pending;
+  }
+  if (response.status === 202 || String(payload?.state || '').toLowerCase() === 'queued') {
+    const error = new Error('invalid_response_contract');
+    error.code = 'invalid_response_contract';
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(userMessageText(payload, response.statusText || `HTTP ${response.status}`));
     error.status = response.status;
@@ -78,25 +664,71 @@ async function apiJsonResponse(response) {
     error.response = response;
     throw error;
   }
+  const lifecycleState = String(payload?.state || '').toLowerCase();
+  const canonicalRequestId = String(payload?.request?.id || '').trim();
+  if (lifecycleState === 'failed') {
+    const error = new Error('invalid_response_contract');
+    error.code = 'invalid_response_contract';
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
+  }
+  if (lifecycleState === 'ready' && canonicalRequestId) {
+    if (!payload?.data || typeof payload.data !== 'object') {
+      const error = new Error('invalid_response_contract');
+      error.code = 'invalid_response_contract';
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+    return payload.data;
+  }
   return payload;
 }
 
 async function apiFetchJson(url, options = {}) {
-  return apiJsonResponse(await apiFetch(url, options));
+  const lifecycle = typeof tmuxSessionLifecycleRequestLease === 'function'
+    ? tmuxSessionLifecycleRequestLease(url, options)
+    : {session: '', lease: null, blocked: false};
+  if (lifecycle.blocked) throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
+  const lifecycleToken = lifecycle.lease?.token || null;
+  let leaseReleased = false;
+  const releaseLease = () => {
+    if (leaseReleased) return;
+    leaseReleased = true;
+    lifecycle.lease?.release?.();
+  };
+  try {
+    const result = await apiJsonResponse(await apiFetch(url, options));
+    if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
+      throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
+    }
+    return result;
+  } catch (error) {
+    if (!isApiPendingResponse(error) || error?.operation?.kind !== 'filesystem_operation') throw error;
+    releaseLease();
+    const result = await waitForApiOperationResult(error, {
+      kind: 'filesystem_operation',
+      operation: String(error?.operation?.context?.operation || ''),
+      deadlineMs: apiFetchDeadlineMs(url, options),
+      signal: options.signal,
+      url,
+      method: jsDebugRequestMethod(options),
+    });
+    if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
+      throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
+    }
+    return result;
+  } finally {
+    releaseLease();
+  }
 }
 
 async function apiFetchJsonQuiet(url, options = {}, phaseTimings = null) {
-  const requestOptions = {...options};
-  if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
-  applyShareTokenHeaders(requestOptions);
   const fetchStartedAt = performanceNow();
   let response;
   try {
-    response = await fetch(url, requestOptions);
-    noteBackendHealthSuccess();
-  } catch (error) {
-    noteBackendHealthFailure();
-    throw error;
+    response = await apiFetch(url, options, {recordDebug: false});
   } finally {
     if (phaseTimings && typeof phaseTimings === 'object') phaseTimings.fetchMs = performanceNow() - fetchStartedAt;
   }
@@ -155,21 +787,40 @@ function structuredMessageSnapshot(value, field = 'message') {
 function userMessageText(value, fallback = '') {
   const source = value && typeof value === 'object' ? value : {};
   const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
-  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
-  return messageDescriptorText(descriptor, payload.error || source.message || fallback || '');
+  const canonicalError = payload.error && typeof payload.error === 'object'
+    ? payload.error
+    : (payload.code && payload.message && typeof payload.message === 'object' ? payload : null);
+  const descriptor = canonicalError?.message && typeof canonicalError.message === 'object'
+    ? canonicalError.message
+    : (payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {});
+  const rawError = typeof payload.error === 'string' ? payload.error : '';
+  return messageDescriptorText(descriptor, rawError || source.message || fallback || '');
 }
 
 function userMessageSnapshot(value, fallback = '') {
   const source = value && typeof value === 'object' ? value : {};
   const payload = source.payload && typeof source.payload === 'object' ? source.payload : source;
-  const descriptor = payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {};
+  const canonicalError = payload.error && typeof payload.error === 'object'
+    ? payload.error
+    : (payload.code && payload.message && typeof payload.message === 'object' ? payload : null);
+  const descriptor = canonicalError?.message && typeof canonicalError.message === 'object'
+    ? canonicalError.message
+    : (payload.user_message && typeof payload.user_message === 'object' ? payload.user_message : {});
   const fallbackDescriptor = fallback && typeof fallback === 'object' ? fallback : {};
   const fallbackText = typeof fallback === 'object' ? String(fallbackDescriptor.fallback || '') : String(fallback || '');
   const key = String(descriptor.key || fallbackDescriptor.key || '');
   const rawParams = descriptor.key ? descriptor.params : fallbackDescriptor.params;
   const params = rawParams && typeof rawParams === 'object' ? rawParams : {};
   const sourceText = typeof value === 'string' || typeof value === 'number' ? String(value) : '';
-  const rawFallback = String(payload.error || source.message || sourceText || fallbackText || '');
+  const rawError = typeof payload.error === 'string' ? payload.error : '';
+  const rawFallback = String(
+    rawError
+    || descriptor.fallback
+    || source.message
+    || sourceText
+    || fallbackText
+    || '',
+  );
   return {
     error: rawFallback,
     user_message: {
@@ -282,16 +933,255 @@ function jsDebugUrlText(url) {
   }
 }
 
+function jsDebugEndpointText(url) {
+  try {
+    return new URL(String(url || ''), window.location.origin).pathname.slice(0, 240) || '/';
+  } catch (_) {
+    return String(url || '').split('?', 1)[0].slice(0, 240) || '/';
+  }
+}
+
+function jsDebugRoundedMs(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Number(number.toFixed(3)) : null;
+}
+
+function jsDebugResourcePhaseTimings(entry, startedAt = null) {
+  if (!entry || typeof entry !== 'object') return {};
+  const phase = (end, start) => jsDebugRoundedMs(Number(end) - Number(start));
+  const secureStart = Number(entry.secureConnectionStart) || 0;
+  const entryStartedAt = Number(entry.startTime);
+  const callStartedAt = Number(startedAt);
+  const beforeResourceMs = Number.isFinite(callStartedAt) && Number.isFinite(entryStartedAt)
+    ? Math.max(0, entryStartedAt - callStartedAt)
+    : 0;
+  const beforeRequestMs = Math.max(0, Number(entry.requestStart) - Number(entry.fetchStart));
+  const connectionMs = Math.max(0, Number(entry.connectEnd) - Number(entry.connectStart));
+  const phases = {
+    queueMs: jsDebugRoundedMs(beforeResourceMs + Math.max(0, beforeRequestMs - connectionMs)),
+    connectMs: phase(secureStart > 0 ? secureStart : entry.connectEnd, entry.connectStart),
+    tlsMs: secureStart > 0 ? phase(entry.connectEnd, secureStart) : null,
+    ttfbMs: phase(entry.responseStart, entry.requestStart),
+    downloadMs: phase(entry.responseEnd, entry.responseStart),
+  };
+  return Object.fromEntries(Object.entries(phases).filter(([_key, value]) => value !== null));
+}
+
+function jsDebugResourceTimingEntry(url, startedAt) {
+  const timings = globalThis.performance;
+  if (typeof timings?.getEntriesByName !== 'function') return null;
+  let absolute = String(url || '');
+  try {
+    absolute = new URL(absolute, window.location.origin).href;
+  } catch (_) {}
+  const entries = timings.getEntriesByName(absolute).filter(entry => !entry.initiatorType || entry.initiatorType === 'fetch');
+  if (!entries.length) return null;
+  return entries.reduce((closest, entry) => (
+    Math.abs(Number(entry.startTime) - startedAt) < Math.abs(Number(closest.startTime) - startedAt) ? entry : closest
+  ));
+}
+
+function updateApiDebugResourcePhases(event, url, startedAt) {
+  if (!event) return;
+  const entry = jsDebugResourceTimingEntry(url, startedAt);
+  if (!entry) return;
+  event.phaseTimings = {...(event.phaseTimings || {}), ...jsDebugResourcePhaseTimings(entry, startedAt)};
+  event.connectionProtocol = String(entry.nextHopProtocol || '').toLowerCase().slice(0, 24);
+}
+
+function noteApiDebugHeaders(event, url, startedAt) {
+  updateApiDebugResourcePhases(event, url, startedAt);
+}
+
+function noteApiDebugResponseConsumed(event, url, startedAt) {
+  if (!event) return;
+  updateApiDebugResourcePhases(event, url, startedAt);
+  const consumedAt = jsDebugPerformanceNow();
+  const afterPaint = () => {
+    const applyRenderMs = jsDebugRoundedMs(jsDebugPerformanceNow() - consumedAt);
+    if (applyRenderMs !== null) {
+      event.phaseTimings = {...(event.phaseTimings || {}), applyRenderMs};
+      scheduleJsDebugPanelRefresh();
+    }
+  };
+  if (typeof requestAnimationFrame !== 'function') {
+    afterPaint();
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(afterPaint));
+}
+
+function notePageLoadApiStarted(startedAt) {
+  if (pageLoadProfileState.emitted || !Number.isFinite(startedAt)) return;
+  if (pageLoadProfileState.firstApiStartedAt === null) pageLoadProfileState.firstApiStartedAt = startedAt;
+  pageLoadProfileState.lastApiStartedAt = startedAt;
+  pageLoadProfileState.apiCount += 1;
+  pageLoadProfileState.activeApiCount += 1;
+  pageLoadProfileState.maxConcurrency = Math.max(
+    pageLoadProfileState.maxConcurrency,
+    pageLoadProfileState.activeApiCount,
+  );
+}
+
+function notePageLoadApiCompleted() {
+  if (pageLoadProfileState.emitted) return;
+  pageLoadProfileState.activeApiCount = Math.max(0, pageLoadProfileState.activeApiCount - 1);
+}
+
+function pageLoadNavigationTiming() {
+  const entry = globalThis.performance?.getEntriesByType?.('navigation')?.[0];
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
+function pageLoadPaintTiming(name) {
+  const entry = (globalThis.performance?.getEntriesByType?.('paint') || []).find(item => item?.name === name);
+  return jsDebugRoundedMs(Number(entry?.startTime));
+}
+
+function pageLoadProfileEvent(completedAt = jsDebugPerformanceNow()) {
+  const navigation = pageLoadNavigationTiming();
+  const firstApi = pageLoadProfileState.firstApiStartedAt;
+  const lastApi = pageLoadProfileState.lastApiStartedAt;
+  return {
+    url: jsDebugEndpointText(window.location.pathname || '/'),
+    phaseTimings: {
+      navigationMs: jsDebugRoundedMs(navigation ? Number(navigation.responseEnd) - Number(navigation.startTime) : 0),
+      bundleParseEvalMs: jsDebugRoundedMs(pageLoadProfileState.bundleEvalEndedAt - pageLoadProfileState.bundleEvalStartedAt),
+      firstPaintMs: pageLoadPaintTiming('first-paint'),
+      firstContentfulPaintMs: pageLoadPaintTiming('first-contentful-paint'),
+      firstApiMs: jsDebugRoundedMs(firstApi === null ? 0 : firstApi),
+      fanoutMs: jsDebugRoundedMs(firstApi === null || lastApi === null ? 0 : lastApi - firstApi),
+      interactiveMs: jsDebugRoundedMs(completedAt),
+      appReadyMs: jsDebugRoundedMs(completedAt),
+    },
+    fanoutCount: pageLoadProfileState.apiCount,
+    maxConcurrency: pageLoadProfileState.maxConcurrency,
+    journeyId: reloadClientJourneyId,
+  };
+}
+
+function clientElementIsVisible(element) {
+  if (!element || element.isConnected === false) return false;
+  let current = element;
+  while (current) {
+    if (current.hasAttribute?.('hidden')) return false;
+    current = current.parentElement;
+  }
+  return true;
+}
+
+function newFinderUsableJourney() {
+  return {
+    id: newClientJourneyId('finder'),
+    startedAt: performanceNow(),
+    scheduled: false,
+  };
+}
+
+function scheduleFinderUsableObservation(tree, entries, journey) {
+  if (!journey || journey.scheduled || !Array.isArray(entries) || !clientElementIsVisible(tree)) return false;
+  journey.scheduled = true;
+  const complete = () => {
+    if (!clientElementIsVisible(tree)) return;
+    recordJsDebugEvent('finder_usable', {
+      journeyId: journey.id,
+      durationMs: jsDebugRoundedMs(performanceNow() - journey.startedAt),
+      entryCount: entries.length,
+    });
+  };
+  if (typeof requestAnimationFrame !== 'function') complete();
+  else requestAnimationFrame(() => requestAnimationFrame(complete));
+  return true;
+}
+
+function recordApiOperationWait(record, result) {
+  const acceptedAt = Number(record?.acceptedAt);
+  if (!Number.isFinite(acceptedAt)) return null;
+  const outcome = String(result?.state || result?.status || (result?.error ? 'failed' : 'ready')).toLowerCase();
+  return recordJsDebugEvent('operation_wait', {
+    journeyId: record.journeyId || newClientJourneyId('operation'),
+    durationMs: jsDebugRoundedMs(performanceNow() - acceptedAt),
+    operationKind: String(record.kind || 'operation').slice(0, 64),
+    outcome: ['ready', 'failed'].includes(outcome) ? outcome : 'ready',
+    requestId: String(record.request?.id || '').slice(0, 128),
+  });
+}
+
+function schedulePageLoadProfileCompletion() {
+  if (pageLoadProfileState.emitted) return;
+  const complete = () => {
+    if (pageLoadProfileState.emitted) return;
+    pageLoadProfileState.emitted = true;
+    recordJsDebugEvent('page_load', pageLoadProfileEvent());
+  };
+  if (typeof requestAnimationFrame !== 'function') {
+    complete();
+    return;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(complete));
+}
+
 function jsDebugErrorText(error) {
   return String(error?.message || error || '').slice(0, 500);
+}
+
+function jsDebugFailureText(value, maximum = 500) {
+  return String(value?.message || value || '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .trim()
+    .slice(0, maximum) || 'Unknown client failure';
+}
+
+function jsDebugFailureStack(value) {
+  return String(value?.stack || '')
+    .replace(/([a-z]+:\/\/[^?\s)]+)\?[^\s):]*/gi, '$1')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g, ' ')
+    .trim()
+    .slice(0, 4000);
+}
+
+function jsDebugFailureSource(value, stack = '') {
+  if (value) return jsDebugEndpointText(value);
+  const match = String(stack || '').match(/(?:https?:\/\/[^/\s)]+)?(\/[^?\s():]+)(?:\?[^\s):]*)?(?::\d+)?(?::\d+)?/);
+  return match?.[1] ? jsDebugEndpointText(match[1]) : '/';
+}
+
+function jsDebugFailureSignature(type, message, stack, source, line, column) {
+  const input = `${type}|${message}|${String(stack || '').split('\n', 2).join('\n')}|${source}|${line}|${column}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `jsf-${hash.toString(16).padStart(8, '0')}`;
+}
+
+function jsDebugFailureDetails(type, value, source = '', line = 0, column = 0) {
+  const message = jsDebugFailureText(value);
+  const stack = jsDebugFailureStack(value);
+  const safeSource = jsDebugFailureSource(source, stack);
+  const safeLine = Math.max(0, Math.trunc(Number(line) || 0));
+  const safeColumn = Math.max(0, Math.trunc(Number(column) || 0));
+  return {
+    message,
+    stack,
+    source: safeSource,
+    line: safeLine,
+    column: safeColumn,
+    signature: jsDebugFailureSignature(type, message, stack, safeSource, safeLine, safeColumn),
+  };
 }
 
 function recordApiDebugEvent(url, method, startedAt, result = {}) {
   const payload = {
     method,
     url: jsDebugUrlText(url),
+    endpoint: jsDebugEndpointText(url),
     durationMs: jsDebugDurationMs(startedAt),
   };
+  if (result.requestId) payload.requestId = String(result.requestId).slice(0, 128);
+  if (result.source) payload.source = jsDebugFailureSource(result.source);
+  if (['controlled_probe', 'confirmed_real'].includes(result.provenance)) payload.provenance = result.provenance;
   if (Number.isFinite(result.requestBytes)) payload.requestBytes = result.requestBytes;
   if (Number.isFinite(result.status)) payload.status = result.status;
   if (typeof result.ok === 'boolean') payload.ok = result.ok;
@@ -316,12 +1206,37 @@ function recordApiDebugResponseBytes(event, response) {
   }).catch(() => {});
 }
 
+const diagnosticPacificTimeFormatter = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/Los_Angeles',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+  timeZoneName: 'short',
+});
+
+function diagnosticPacificWallTime(value) {
+  const timestampMs = Number(value);
+  if (!Number.isFinite(timestampMs)) return '';
+  const date = new Date(timestampMs);
+  if (!Number.isFinite(date.getTime())) return '';
+  const parts = Object.fromEntries(
+    diagnosticPacificTimeFormatter.formatToParts(date).map(part => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} ${parts.timeZoneName}`;
+}
+
 function recordJsDebugEvent(type, payload = {}) {
+  const timestampMs = Date.now();
   const event = {
     id: ++jsDebugEventSeq,
-    ts: new Date().toISOString(),
+    ts: new Date(timestampMs).toISOString(),
+    wallTime: diagnosticPacificWallTime(timestampMs),
     type: String(type || 'event'),
-    ...payload,
+    ...shareRedactDiagnosticValue(payload),
   };
   jsDebugEvents.push(event);
   if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
@@ -332,38 +1247,35 @@ function recordJsDebugEvent(type, payload = {}) {
   return event;
 }
 
-function clientPerfMark(name) {
-  if (!name || typeof globalThis.performance?.mark !== 'function') return '';
-  const mark = `yolomux:${String(name)}`;
-  try {
-    globalThis.performance.mark(mark);
-    return mark;
-  } catch (_) {
-    return '';
-  }
+function jsDebugFailureClassification(event) {
+  const type = String(event?.type || '');
+  if (type === 'unhandledrejection') return {releaseBlocking: true, kind: 'rejection', observationKind: type};
+  const apiFailure = type === 'api' && (
+    event?.ok === false
+    || (Number.isFinite(event?.status) && event.status >= 400)
+    || Boolean(event?.error)
+  );
+  const statsLevel = String(event?.level || '').toLowerCase();
+  const releaseBlocking = type === 'error'
+    || type === 'client_failure'
+    || apiFailure
+    || (type === 'sse' && Boolean(event?.error))
+    || (type === 'stats_history' && ['warning', 'error'].includes(statsLevel));
+  return {
+    releaseBlocking,
+    kind: releaseBlocking ? 'error' : '',
+    observationKind: type === 'stats_history' ? statsLevel : (releaseBlocking ? 'error' : type),
+  };
 }
 
-function clientPerfMeasureSinceMark(counterName, markName, details = {}) {
-  if (!counterName || !markName) return null;
-  const endMark = clientPerfMark(`${counterName}:end`);
-  let durationMs = null;
-  if (typeof globalThis.performance?.measure === 'function' && endMark) {
-    try {
-      const measure = globalThis.performance.measure(`yolomux:${counterName}`, markName, endMark);
-      durationMs = Number(measure?.duration);
-      globalThis.performance.clearMeasures?.(`yolomux:${counterName}`);
-    } catch (_) {}
-  }
-  if (!Number.isFinite(durationMs)) {
-    const entries = typeof globalThis.performance?.getEntriesByName === 'function'
-      ? globalThis.performance.getEntriesByName(markName)
-      : [];
-    const startedAt = Number(entries?.at?.(-1)?.startTime);
-    if (Number.isFinite(startedAt)) durationMs = performanceNow() - startedAt;
-  }
-  globalThis.performance?.clearMarks?.(markName);
-  if (endMark) globalThis.performance?.clearMarks?.(endMark);
-  return recordClientPerfCounter(counterName, durationMs, details);
+function jsDebugFailureEvents(kind = 'all') {
+  const requested = String(kind || 'all');
+  return jsDebugEvents.filter(event => {
+    const classification = jsDebugFailureClassification(event);
+    if (requested === 'error') return classification.kind === 'error';
+    if (requested === 'rejection') return classification.kind === 'rejection';
+    return classification.releaseBlocking;
+  });
 }
 
 function clientPerfActiveAnimationCount() {
@@ -455,9 +1367,52 @@ function installClientPerfLongTaskObserver() {
           clientPerfLongTaskSamples.splice(0, clientPerfLongTaskSamples.length - clientPerfLongTaskSampleLimit);
         }
         recordClientPerfCounter('longTask', durationMs);
+        if (clientPerfLongTaskDurableCount < clientPerfDurableExemplarLimit) {
+          clientPerfLongTaskDurableCount += 1;
+          recordJsDebugEvent('long_task', {journeyId: reloadClientJourneyId, durationMs: sample.durationMs});
+        }
       }
     });
     observer.observe({entryTypes: ['longtask']});
+  } catch (_) {}
+}
+
+function clientPerfInteractionEvent(entry) {
+  const startTime = Number(entry?.startTime || 0);
+  const processingStart = Number(entry?.processingStart || startTime);
+  const processingEnd = Number(entry?.processingEnd || processingStart);
+  const durationMs = Number(entry?.duration || 0);
+  if (!Number.isFinite(durationMs) || durationMs < 0) return null;
+  return {
+    journeyId: newClientJourneyId('action'),
+    durationMs: jsDebugRoundedMs(durationMs),
+    inputDelayMs: jsDebugRoundedMs(Math.max(0, processingStart - startTime)),
+    processingMs: jsDebugRoundedMs(Math.max(0, processingEnd - processingStart)),
+    presentationDelayMs: jsDebugRoundedMs(Math.max(0, startTime + durationMs - processingEnd)),
+    interactionType: String(entry?.name || 'interaction').toLowerCase().slice(0, 32),
+  };
+}
+
+function installClientPerfInteractionObserver() {
+  if (clientPerfInteractionObserverInstalled || typeof globalThis.PerformanceObserver !== 'function') return;
+  clientPerfInteractionObserverInstalled = true;
+  try {
+    const observer = new globalThis.PerformanceObserver(list => {
+      for (const entry of list.getEntries?.() || []) {
+        const durationMs = Number(entry?.duration || 0);
+        if (
+          Number(entry?.interactionId || 0) <= 0
+          || durationMs <= clientPerfInteractionMaximumMs
+          || clientPerfInteractionDurableCount >= clientPerfDurableExemplarLimit
+        ) continue;
+        const event = clientPerfInteractionEvent(entry);
+        if (!event) continue;
+        clientPerfInteractionMaximumMs = durationMs;
+        clientPerfInteractionDurableCount += 1;
+        recordJsDebugEvent('interaction', event);
+      }
+    });
+    observer.observe({type: 'event', buffered: true, durationThreshold: 16});
   } catch (_) {}
 }
 
@@ -554,7 +1509,6 @@ function terminalRemovalLatencySummary() {
 
 function clearJsDebugEvents() {
   jsDebugEvents = [];
-  jsDebugEventSeq = 0;
   terminalRemovalLatencyPending.clear();
   terminalRemovalLatencySamples = [];
   clearClientPerfCounters();
@@ -607,17 +1561,15 @@ function installJsDebugEventCapture() {
   if (jsDebugEventCaptureInstalled || !window?.addEventListener) return;
   jsDebugEventCaptureInstalled = true;
   window.addEventListener('error', event => {
-    recordJsDebugEvent('error', {
-      message: jsDebugErrorText(event.error || event.message),
-      source: jsDebugUrlText(event.filename || ''),
-      line: Number(event.lineno || 0),
-      column: Number(event.colno || 0),
-    });
+    recordJsDebugEvent('error', jsDebugFailureDetails(
+      'error', event.error || event.message, event.filename, event.lineno, event.colno,
+    ));
   });
   window.addEventListener('unhandledrejection', event => {
-    recordJsDebugEvent('unhandledrejection', {
-      message: jsDebugErrorText(event.reason),
-    });
+    recordJsDebugEvent(
+      'unhandledrejection',
+      jsDebugFailureDetails('unhandledrejection', event.reason),
+    );
   });
 }
 
@@ -629,6 +1581,7 @@ function enableDebugMode() {
 
 installJsDebugEventCapture();
 installClientPerfLongTaskObserver();
+installClientPerfInteractionObserver();
 
 let appViewportOverride = null;
 const APP_VIEWPORT_CHANGE_EVENT = 'yolomux:app-viewport-change';
@@ -1247,10 +2200,15 @@ function fileStateHasRepo(path, state) {
 }
 
 function fileStateHasUsefulGitHistory(state) {
-  return state?.gitTracked === true
+  const readMetadataHasHistory = state?.gitTracked === true
     && state?.gitHasHistory === true
     && Array.isArray(state.gitHistory)
     && state.gitHistory.length > 1;
+  const missingWorkingSideHasHistory = state?.diffLoaded === true
+    && state?.diffUnavailable !== true
+    && state?.diffWorkingMissing === true
+    && Boolean(state?.diff || state?.diffOriginal);
+  return readMetadataHasHistory || missingWorkingSideHasHistory;
 }
 
 function ensureFileState(path, defaults = null) {
@@ -1486,6 +2444,17 @@ function graphBranchSummary(graph, branchId, currentBranchId = '') {
   const pullRequests = graphEntityValues(graph, 'pull_requests', branch.pull_request_ids);
   const linear = graphEntityValues(graph, 'linear_issues', branch.linear_issue_ids);
   return {...branch, current: String(branch.id) === String(currentBranchId), pull_requests: pullRequests, pull_request: pullRequests[0] || null, linear};
+}
+
+function branchUpdatedCommitTimestamp(branch) {
+  const timestamp = Number(branch?.updated_ts ?? branch?.updatedTs ?? 0);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function branchesNewestCommitFirst(branches = []) {
+  return (Array.isArray(branches) ? branches : []).slice().sort((left, right) => (
+    branchUpdatedCommitTimestamp(right) - branchUpdatedCommitTimestamp(left)
+  ));
 }
 
 function graphRepoSummary(graph, worktree) {
@@ -2848,6 +3817,7 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     const line = Number(match[3] || 0);
     const startIndex = (match.index || 0) + prefix.length;
     const endIndex = startIndex + path.length + (match[3] ? match[3].length + 1 : 0);
+    if (terminalFileReferenceIsHttpRequestTarget(lineText, startIndex, endIndex)) continue;
     if (excludedRanges.some(range => terminalRangesOverlap(startIndex, endIndex, range.startIndex, range.endIndex))) continue;
     const range = rangeForOffsets(startIndex, endIndex);
     if (!range) continue;
@@ -2863,6 +3833,13 @@ function terminalTextFileReferences(lineText, rangeForOffsets, y = null, exclude
     });
   }
   return refs;
+}
+
+function terminalFileReferenceIsHttpRequestTarget(lineText, startIndex, endIndex) {
+  const before = String(lineText || '').slice(0, startIndex);
+  const after = String(lineText || '').slice(endIndex);
+  return /(?:^|[\s"'])(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS|CONNECT)\s+$/.test(before)
+    && /^(?:\?[^\s]*)?\s+HTTP\/\d(?:\.\d)?(?:[\s"']|$)/.test(after);
 }
 
 // Terminal output frequently contains dotted JavaScript symbols and slash-separated status
@@ -3017,21 +3994,37 @@ function terminalWrappedRange(group, startIndex, endIndex) {
   return {start, end};
 }
 
+function terminalWrappedGroupTailMayContinue(term, group) {
+  const lastRow = group?.rows?.[group.rows.length - 1];
+  if (!lastRow) return false;
+  const buffer = term.buffer?.active;
+  const line = buffer?.getLine?.(lastRow.y - 1);
+  if (!terminalRowReachesRightEdge(line, Number(term.cols) || 0)) return false;
+  const nextLine = buffer?.getLine?.(lastRow.y);
+  return nextLine?.isWrapped === true || !terminalBufferLineText(nextLine);
+}
+
+function terminalCompletedWrappedReferences(term, group, references) {
+  if (!terminalWrappedGroupTailMayContinue(term, group)) return references;
+  return references.filter(reference => (
+    reference.type !== 'file' || Number(reference.endIndex) < group.text.length
+  ));
+}
+
 function terminalWrappedLineLinks(term, y) {
-  const group = terminalWrappedLineGroup(term, y);
-  if (!group) return [];
-  if (group.rows.length === 1) return terminalLineLinks(group.text, y);
-  return terminalTextLinks(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
+  return terminalWrappedLineReferences(term, y);
 }
 
 function terminalWrappedLineReferences(term, y) {
   const group = terminalWrappedLineGroup(term, y);
   if (!group) return [];
-  if (group.rows.length === 1) return terminalTextReferences(group.text, (startIndex, endIndex) => ({
-    start: {x: startIndex + 1, y},
-    end: {x: endIndex, y},
-  }), y);
-  return terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
+  const references = group.rows.length === 1
+    ? terminalTextReferences(group.text, (startIndex, endIndex) => ({
+      start: {x: startIndex + 1, y},
+      end: {x: endIndex, y},
+    }), y)
+    : terminalTextReferences(group.text, (startIndex, endIndex) => terminalWrappedRange(group, startIndex, endIndex), y);
+  return terminalCompletedWrappedReferences(term, group, references);
 }
 
 function terminalReferenceXtermLink(reference) {
@@ -3512,6 +4505,78 @@ function dedentSelectionText(value) {
     .join('\n');
 }
 
+const copyFeedbackMs = 1500;
+const copyFeedbackStates = new Map();
+
+function copyConfirmationLabel() {
+  const label = String(t('status.copied') || '');
+  return label ? `${label[0].toLocaleUpperCase(i18nActiveLocaleId())}${label.slice(1)}` : label;
+}
+
+function copyFeedbackLabel(key, fallback, nowMs = Date.now()) {
+  const state = copyFeedbackStates.get(String(key || ''));
+  return state && nowMs < state.until ? state.label : fallback;
+}
+
+function syncCopyFeedbackButtons(key) {
+  const normalizedKey = String(key || '');
+  if (!normalizedKey) return;
+  const active = Boolean(copyFeedbackStates.get(normalizedKey)?.until > Date.now());
+  for (const button of document.querySelectorAll(`[data-copy-feedback-key="${cssEscape(normalizedKey)}"]`)) {
+    const fallback = button.dataset.copyFeedbackLabel || button.textContent || t('common.copy');
+    const label = copyFeedbackLabel(normalizedKey, fallback);
+    button.textContent = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    if (active) button.dataset.copyFeedbackActive = 'true';
+    else delete button.dataset.copyFeedbackActive;
+  }
+}
+
+function showCopyFeedback(options = {}) {
+  const configuredStatusText = typeof options.statusText === 'function' ? options.statusText(options.result || null) : options.statusText;
+  const statusText = String(configuredStatusText || t('status.copied'));
+  const button = options.button || null;
+  const key = String(options.feedbackKey || button?.dataset?.copyFeedbackKey || '');
+  const label = copyConfirmationLabel();
+  statusOk(esc(statusText));
+  if (!button && !key) return;
+  const fallback = String(options.buttonLabel || button?.dataset?.copyFeedbackLabel || button?.textContent || button?.getAttribute?.('aria-label') || t('common.copy'));
+  if (button && !button.dataset.copyFeedbackLabel) button.dataset.copyFeedbackLabel = fallback;
+  if (key) copyFeedbackStates.set(key, {until: Date.now() + copyFeedbackMs, label});
+  if (button) {
+    button.textContent = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    button.dataset.copyFeedbackActive = 'true';
+  }
+  if (key) syncCopyFeedbackButtons(key);
+  setTimeout(() => {
+    if (key && Date.now() < (copyFeedbackStates.get(key)?.until || 0)) return;
+    if (key) {
+      copyFeedbackStates.delete(key);
+      syncCopyFeedbackButtons(key);
+    }
+    if (button?.isConnected && !key) {
+      button.textContent = fallback;
+      button.setAttribute('aria-label', fallback);
+      button.setAttribute('title', fallback);
+      delete button.dataset.copyFeedbackActive;
+    }
+  }, copyFeedbackMs);
+}
+
+function copyTextWithFeedback(text, options = {}) {
+  return copyTextToClipboard(text).then(() => {
+    showCopyFeedback(options);
+    return true;
+  }, error => {
+    statusErr(localizedHtml('common.copyFailed', {error}));
+    if (options.rethrow === true) throw error;
+    return false;
+  });
+}
+
 async function copyTextToClipboard(text) {
   const clipboard = globalThis.navigator?.clipboard;
   const value = String(text ?? '');
@@ -3573,19 +4638,13 @@ function writeTerminalTextToClipboard(text, options = {}) {
   };
   if (copyTextToClipboardViaCopyEvent(text)) {
     copyDebug('clipboard', {via: 'copy-event', chars: String(text ?? '').length, ok: true});
-    statusEl.textContent = label;
+    showCopyFeedback({statusText: label});
     cleanup();
     return;
   }
-  copyTextToClipboard(text)
-    .then(() => {
-      copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: true});
-      statusEl.textContent = label;
-    })
-    .catch(error => {
-      copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok: false, error: String(error)});
-      statusErr(localizedHtml('common.copyFailed', {error}));
-    });
+  copyTextWithFeedback(text, {statusText: label}).then(ok => {
+    copyDebug('clipboard', {via: 'async', chars: String(text ?? '').length, ok});
+  });
   cleanup();
 }
 
@@ -3721,9 +4780,7 @@ function activateCopyPathButton(event, button) {
   copyPathButtonStopEvent(event);
   const path = copyPathButtonValue(button);
   if (!path) return;
-  copyTextToClipboard(path)
-    .then(() => { statusOk(localizedHtml('status.copied')); })
-    .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
+  void copyTextWithFeedback(path, {button});
 }
 
 function handleCopyPathPointerUp(event, button) {
@@ -3793,7 +4850,7 @@ function appendContextMenuButton(menu, label, handler, closeMenu, options = {}) 
   button.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    if (!button.disabled) handler();
+    if (!button.disabled) handler(button);
     if (options.keepOpen !== true) closeMenu();
   });
   menu.appendChild(button);
@@ -3934,9 +4991,9 @@ function appendUrlContextMenuItems(menu, href, closeMenu, options = {}) {
       : handler
   );
   appendContextMenuButton(menu, t('contextmenu.openUrl'), action('open-url', () => window.open(url, '_blank', 'noopener,noreferrer')), closeMenu);
-  appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', () => copyTextToClipboard(url)), closeMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyUrl'), action('copy-url', button => copyTextWithFeedback(url, {button})), closeMenu);
   if (options.includeSelectedText && selectedText && selectedText !== url) {
-    appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', () => copyTextToClipboard(selectedText)), closeMenu);
+    appendContextMenuButton(menu, t('contextmenu.copySelectedText'), action('copy-selected-text', button => copyTextWithFeedback(selectedText, {button})), closeMenu);
   }
   return true;
 }
@@ -4159,6 +5216,10 @@ function terminalFileReferenceAbsolutePath(session, reference) {
   return terminalFileReferenceCandidatePaths(session, reference)[0] || '';
 }
 
+function terminalFileReferenceRejectionLabel(reason) {
+  return `${t('editor.fileOpenFailedTitle')}: ${reason}`;
+}
+
 async function terminalFileReferenceTarget(session, reference, options = {}) {
   if (reference?.type !== 'file') return null;
   const canReuse = options.fresh === false;
@@ -4177,15 +5238,31 @@ async function terminalFileReferenceTarget(session, reference, options = {}) {
     fresh: !canReuse,
   };
   const targetPromise = (async () => {
+    let rejection = null;
     for (const path of terminalFileReferenceCandidatePaths(session, reference)) {
       try {
         const info = await fetchFilePathInfo(path, fetchOptions);
         if (info?.kind === 'file') return {path, info, line: reference.line || null, text: reference.text || path};
-      } catch (_error) {
+      } catch (error) {
         // Try the next context-derived candidate; a missing cwd-relative path can still be repo-relative.
+        const reason = userMessageText(error, t('common.requestFailed'));
+        rejection = {
+          kind: 'rejected',
+          label: terminalFileReferenceRejectionLabel(reason),
+          path,
+          reason,
+        };
       }
     }
-    return null;
+    if (rejection && options.reportRejection) {
+      recordJsDebugEvent('client_failure', {
+        operation: 'terminal-file-reference',
+        reason_code: 'file_info_rejected',
+        path: rejection.path,
+        error: rejection.reason,
+      });
+    }
+    return options.reportRejection ? rejection : null;
   })();
   if (!canReuse) return targetPromise;
   const cacheEntry = {promise: targetPromise, value: null, expiresAt: Number.POSITIVE_INFINITY, paths: terminalFileReferenceCandidatePaths(session, reference)};
@@ -4250,9 +5327,14 @@ function appendTerminalReferenceContextMenuItems(menu, reference, fileTarget = n
       container: options.container,
     });
   }
+  if (reference.type === 'file' && fileTarget?.kind === 'rejected') {
+    appendContextMenuButton(menu, fileTarget.label, () => {}, closeTerminalContextMenu, {disabled: true});
+    appendContextMenuButton(menu, t('contextmenu.copyPath'), button => copyTextWithFeedback(fileTarget.path, {button, statusText: t('status.copiedPath')}), closeTerminalContextMenu);
+    return true;
+  }
   if (reference.type === 'file' && fileTarget) {
     appendContextMenuButton(menu, t('common.openFile'), () => openTerminalFileReference(fileTarget), closeTerminalContextMenu);
-    appendContextMenuButton(menu, t('contextmenu.copyPath'), () => copyTextToClipboard(fileTarget.path), closeTerminalContextMenu);
+    appendContextMenuButton(menu, t('contextmenu.copyPath'), button => copyTextWithFeedback(fileTarget.path, {button, statusText: t('status.copiedPath')}), closeTerminalContextMenu);
     return true;
   }
   return false;
@@ -4269,10 +5351,7 @@ async function copyTerminalSelection(session, term, options = {}, container = nu
   }
   const text = action.dedent ? dedentSelectionText(selected) : selected;
   try {
-    await copyTextToClipboard(text);
-    statusEl.textContent = terminalCopyStatusText(action);
-  } catch (error) {
-    statusErr(localizedHtml('common.copyFailed', {error}));
+    await copyTextWithFeedback(text, {button: options.button, statusText: terminalCopyStatusText(action)});
   } finally {
     clearTerminalVisibleSelection(session, term, container, action.reason);
   }
@@ -4299,17 +5378,18 @@ function copyTerminalSelectionToClipboardEvent(session, term, event, container =
   event.clipboardData.setData('text/plain', selected);
   event.preventDefault();
   event.stopPropagation();
-  statusEl.textContent = terminalCopyStatusText(TERMINAL_COPY_ACTIONS.selected);
+  showCopyFeedback({statusText: terminalCopyStatusText(TERMINAL_COPY_ACTIONS.selected)});
   clearTerminalVisibleSelection(session, term, container, TERMINAL_COPY_ACTIONS.selected.reason);
   return true;
 }
 
-async function copyTmuxSelectionToClipboard(session, term = null, container = null) {
+async function copyTmuxSelectionToClipboard(session, term = null, container = null, options = {}) {
   const payloadPromise = fetchTmuxSelectionText(session);
   try {
-    const {payload, text} = await copyDeferredTextToClipboard(payloadPromise);
-    const chars = Number.isFinite(Number(payload.chars)) ? Number(payload.chars) : text.length;
-    statusEl.textContent = terminalCopyStatusText(TERMINAL_COPY_ACTIONS.tmux, {count: chars});
+    await copyDeferredTextToClipboard(payloadPromise, {
+      button: options.button,
+      statusText: result => terminalCopyStatusText(TERMINAL_COPY_ACTIONS.tmux, {count: Number(result?.payload?.chars) || String(result?.text || '').length}),
+    });
     return true;
   } catch (error) {
     if (error?.noClipboardText) {
@@ -4334,22 +5414,24 @@ async function fetchTmuxSelectionText(session) {
   return {payload, text};
 }
 
-async function copyDeferredTextToClipboard(payloadPromise) {
+async function copyDeferredTextToClipboard(payloadPromise, options = {}) {
   const clipboard = globalThis.navigator?.clipboard;
   if (clipboard?.write && typeof globalThis.ClipboardItem === 'function' && typeof globalThis.Blob === 'function') {
     const textBlob = payloadPromise.then(({text}) => new Blob([text], {type: 'text/plain'}));
     try {
       await clipboard.write([new ClipboardItem({'text/plain': textBlob})]);
-      return await payloadPromise;
+      const result = await payloadPromise;
+      showCopyFeedback({...options, result});
+      return result;
     } catch (error) {
       if (error?.noClipboardText) throw error;
       const result = await payloadPromise;
-      await copyTextToClipboard(result.text);
+      await copyTextWithFeedback(result.text, {...options, result, rethrow: true});
       return result;
     }
   }
   const result = await payloadPromise;
-  await copyTextToClipboard(result.text);
+  await copyTextWithFeedback(result.text, {...options, result, rethrow: true});
   return result;
 }
 
@@ -4514,7 +5596,7 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
   closeFileImagePreview();
   closeOtherSessionPopovers(null);
   const terminalReference = reference || terminalReferenceAtClientPoint(term, container, x, y);
-  const fileTarget = terminalReference?.type === 'file' ? await terminalFileReferenceTarget(session, terminalReference) : null;
+  const fileTarget = terminalReference?.type === 'file' ? await terminalFileReferenceTarget(session, terminalReference, {reportRejection: true}) : null;
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu';
   menu.setAttribute('role', 'menu');
@@ -4535,14 +5617,14 @@ async function showTerminalContextMenu(session, term, x, y, options = {}) {
       [TERMINAL_COPY_ACTIONS.selectedDedent, true],
     ];
     for (const [action, dedent] of items) {
-      appendContextMenuButton(menu, terminalCopyActionLabel(action), () => copyTerminalSelection(session, term, {action, dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+      appendContextMenuButton(menu, terminalCopyActionLabel(action), button => copyTerminalSelection(session, term, {action, button, dedent, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
     }
     appendContextMenuSeparator(menu);
     if (appendTerminalReferenceContextMenuItems(menu, terminalReference, fileTarget, {selectionText: selected, session, term, container})) appendContextMenuSeparator(menu);
   }
-  appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), () => copyTmuxSelectionToClipboard(session, term, container), closeTerminalContextMenu);
+  appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.tmux), button => copyTmuxSelectionToClipboard(session, term, container, {button}), closeTerminalContextMenu);
   if (hasUrlReference) {
-    appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), () => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
+    appendContextMenuButton(menu, terminalCopyActionLabel(TERMINAL_COPY_ACTIONS.selectedDedent), button => copyTerminalSelection(session, term, {action: TERMINAL_COPY_ACTIONS.selectedDedent, button, dedent: true, selectionText: selected}, container), closeTerminalContextMenu, {disabled: !selected});
   }
   // Long-press starts this probe while Safari still grants user activation.  Do not offer a
   // dead Paste action when that probe found no text/image, and reuse the one paste transport.

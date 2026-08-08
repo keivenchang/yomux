@@ -533,7 +533,7 @@ function chatMediaActionItems(url) {
   return [
     {id: 'tab', label: t('contextmenu.openNewTab'), run: () => openChatMediaTab(normalized)},
     {id: 'browser', label: t('contextmenu.openUrl'), run: () => window.open(normalized, '_blank', 'noopener,noreferrer')},
-    {id: 'copy', label: t('contextmenu.copyUrl'), run: () => copyTextToClipboard(normalized)},
+    {id: 'copy', label: t('contextmenu.copyUrl'), run: () => copyTextWithFeedback(normalized)},
     {id: 'download', label: t('common.download'), run: () => triggerExternalUrlDownload(normalized)},
   ];
 }
@@ -842,8 +842,12 @@ function chatYoagentQuery(body) {
   return match?.[1]?.trim() || '';
 }
 
+function chatMessageRequestsYoagent(message) {
+  return message?.is_question === true || Boolean(chatYoagentQuery(message?.body));
+}
+
 async function requestChatYoagent(sourceMessage) {
-  if (!chatYoagentQuery(sourceMessage?.body)) return false;
+  if (!chatMessageRequestsYoagent(sourceMessage)) return false;
   try {
     const payload = await chatApiPost('/api/chat/yoagent', {
       browser_instance_id: chatBrowserInstanceId,
@@ -876,7 +880,7 @@ async function sendChatPending(message) {
     renderChatPanel({scrollBottom: true});
     await chatAdvanceReadCursor(payload.message?.id);
     await loadChatBootstrap();
-    if (chatYoagentQuery(payload.message?.body)) requestChatYoagent(payload.message);
+    if (chatMessageRequestsYoagent(payload.message)) requestChatYoagent(payload.message);
     return true;
   } catch (error) {
     message.failed = true;

@@ -361,6 +361,7 @@ def build_recent_agents_payload(
     session_order: list[str] | tuple[str, ...] | None = None,
     now: datetime | None = None,
     session_files_by_session: dict[str, dict[str, Any]] | None = None,
+    recent_paths_by_session: dict[str, list[list[dict[str, Any]]]] | None = None,
     transcript_views_by_path: dict[str, dict[str, Any]] | None = None,
     locale: str = "en",
 ) -> list[dict[str, Any]]:
@@ -384,6 +385,14 @@ def build_recent_agents_payload(
             window_label = window if window else "?"
             window_name = agent_window_name_for_summary(info, agent, window) or kind
             window_display = f"{window_label}:{window_name}"
+            precomputed_paths = (recent_paths_by_session or {}).get(session)
+            recent_paths = (
+                copy.deepcopy(precomputed_paths[agent_index])
+                if isinstance(precomputed_paths, list)
+                and agent_index < len(precomputed_paths)
+                and isinstance(precomputed_paths[agent_index], list)
+                else recent_agent_paths_from_files((session_files_by_session or {}).get(session), agent=agent, window=window)
+            )
             rows.append({
                 "session": session,
                 "window": window,
@@ -396,7 +405,7 @@ def build_recent_agents_payload(
                 "agent_model": agent.model or "",
                 "cwd": agent.cwd or "",
                 "transcript": agent.transcript or "",
-                "recent_paths": recent_agent_paths_from_files((session_files_by_session or {}).get(session), agent=agent, window=window),
+                "recent_paths": recent_paths,
                 "last_used_ts": float(last_used_ts or 0.0),
                 "last_used_text": last_activity.get("text") or "",
                 "last_used_source": last_activity.get("source") or "",
@@ -447,13 +456,13 @@ def tabber_activity_view_result(payload: dict[str, Any], *, max_bytes: int) -> d
             continue
         info = session_info_from_json(info_data)
         gathered_agents = raw.get("gathered_agents")
-        files_payload = raw.get("files_payload") if isinstance(raw.get("files_payload"), dict) else {}
+        recent_paths_by_agent = raw.get("recent_paths_by_agent") if isinstance(raw.get("recent_paths_by_agent"), list) else None
         transcript_views_by_path = raw.get("transcript_views_by_path") if isinstance(raw.get("transcript_views_by_path"), dict) else {}
         session_rows[str(session)] = {
             "agents": build_recent_agents_payload(
                 {session: info},
                 [session],
-                session_files_by_session={session: files_payload},
+                recent_paths_by_session={session: recent_paths_by_agent} if recent_paths_by_agent is not None else None,
                 transcript_views_by_path=transcript_views_by_path,
                 locale=locale,
             ),

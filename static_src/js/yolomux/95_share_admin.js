@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Share admin UI, viewer banner, status refresh, and read-only interaction blocking.
+// Quarantined by product decision; docs/specs/SHARE_MIRRORING.md is the revival contract.
 function ensureShareStatusPill() {
   if (shareStatusPill) return shareStatusPill;
   shareStatusPill = makeButton({
@@ -19,7 +20,7 @@ function ensureShareStatusPill() {
 
 function renderShareStatusPill() {
   const pill = ensureShareStatusPill();
-  if (!shareHasActiveShare()) {
+  if (shareFeatureQuarantined || !shareHasActiveShare()) {
     pill.hidden = true;
     pill.classList.remove('share-mode-read', 'share-mode-write');
     return;
@@ -326,8 +327,7 @@ function bindShareEntries(root) {
       const token = button.closest('[data-share-token]')?.dataset.shareToken || '';
       const share = activeShares.find(candidate => candidate.token === token);
       if (!share) return;
-      await copyTextToClipboard(share.url);
-      statusOk(localizedHtml('share.copied'));
+      await copyTextWithFeedback(share.url, {button, feedbackKey: `share-${token}`, statusText: t('share.copied')});
     });
   });
   root?.querySelectorAll?.('[data-share-stop]').forEach(button => {
@@ -481,6 +481,7 @@ async function extendActiveShare(tokenOrShortId = '', addSeconds = 600) {
 }
 
 async function showShareModal() {
+  if (shareFeatureQuarantined) return;
   shareCreateErrorPayload = null;
   openShareModalChrome(t('brand.share'));
   const {body} = shareModalElements();

@@ -7,9 +7,14 @@ while implementation lives in smaller modules.
 
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
+import re
+import time
 from typing import Any
 
+from ..common import error_payload
 from . import paths
 from . import git_ops
 from . import io_ops
@@ -33,6 +38,25 @@ SECRET_FILE_SUFFIXES = paths.SECRET_FILE_SUFFIXES
 MAX_DIRECTORY_ENTRIES = listing.MAX_DIRECTORY_ENTRIES
 REPO_MARKERS = listing.REPO_MARKERS
 
+MAX_BATCH_REQUESTS = 64
+WATCH_SIGNATURE_CHILD_LIMIT = 512
+BATCH_TRIGGER_LEGACY = "legacy"
+BATCH_ALLOWED_TRIGGERS = frozenset({
+    BATCH_TRIGGER_LEGACY,
+    "tree-render",
+    "explicit-user",
+    "fresh-repair",
+    "watch-diff",
+    "watch-diff-fallback",
+    "deferred-interaction",
+    "sync-revalidation",
+})
+BATCH_CLIENT_SCOPE_LEGACY = "legacy"
+BATCH_ALLOWED_CLIENT_SCOPES = frozenset({"browser", "share"})
+BATCH_PATH_FINGERPRINT_LIMIT = 8
+BATCH_CLIENT_REVISION_MAX_LENGTH = 80
+BATCH_TRIGGER_COUNT_LIMIT = MAX_BATCH_REQUESTS
+
 MAX_SEARCH_DIRS = search.MAX_SEARCH_DIRS
 MAX_SEARCH_FILES = search.MAX_SEARCH_FILES
 MAX_SEARCH_LIMIT = search.MAX_SEARCH_LIMIT
@@ -52,6 +76,7 @@ _configured_fs_roots = paths._configured_fs_roots
 _ensure_not_configured_root = paths._ensure_not_configured_root
 _ensure_path_allowed = paths._ensure_path_allowed
 _looks_binary = paths._looks_binary
+_normalized_absolute_text_is_within = paths._normalized_absolute_text_is_within
 _normalized_scope_path = paths._normalized_scope_path
 _path_is_secret = paths._path_is_secret
 _path_is_within = paths._path_is_within
@@ -129,9 +154,187 @@ def _sync_package_overrides() -> None:
 
 
 @normalize_os_errors
-def list_directory(raw_path: str) -> dict[str, Any]:
+def list_directory(
+    raw_path: str,
+    *,
+    performance_details: dict[str, float] | None = None,
+    watch_signature_child_limit: int = 0,
+) -> dict[str, Any]:
     _sync_package_overrides()
-    return listing.list_directory(raw_path)
+    return listing.list_directory(
+        raw_path,
+        performance_details=performance_details,
+        watch_signature_child_limit=watch_signature_child_limit,
+    )
+
+
+def validated_batch_requests(payload: dict[str, Any]) -> list[Any]:
+    """Return the one bounded request list accepted by HTTP and jobd."""
+    requests = payload.get("requests", [])
+    if not isinstance(requests, list):
+        raise ValueError("requests must be a list")
+    if len(requests) > MAX_BATCH_REQUESTS:
+        raise ValueError(f"requests must contain at most {MAX_BATCH_REQUESTS} items")
+    return requests
+
+
+def _batch_trigger_counts(item: dict[str, Any]) -> dict[str, int]:
+    raw_trigger_counts = item.get("trigger_counts")
+    if raw_trigger_counts is None:
+        raw_trigger_counts = {str(item.get("trigger", BATCH_TRIGGER_LEGACY) or BATCH_TRIGGER_LEGACY): 1}
+    item_trigger_counts: dict[str, int] = {}
+    if not isinstance(raw_trigger_counts, dict) or not raw_trigger_counts:
+        return item_trigger_counts
+    for raw_trigger, raw_count in raw_trigger_counts.items():
+        trigger = str(raw_trigger or "")
+        if trigger not in BATCH_ALLOWED_TRIGGERS or isinstance(raw_count, bool):
+            return {}
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            return {}
+        if count < 1 or count > BATCH_TRIGGER_COUNT_LIMIT:
+            return {}
+        item_trigger_counts[trigger] = count
+    return item_trigger_counts
+
+
+def filesystem_batch_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build bounded privacy-safe diagnostics without touching the filesystem."""
+    requests = validated_batch_requests(payload)
+    raw_client_revision = str(payload.get("client_revision", "") or "")
+    client_revision = (
+        raw_client_revision
+        if re.fullmatch(rf"[A-Za-z0-9._-]{{1,{BATCH_CLIENT_REVISION_MAX_LENGTH}}}", raw_client_revision)
+        else ""
+    )
+    raw_client_scope = str(payload.get("client_scope", "") or "")
+    client_scope = raw_client_scope if raw_client_scope in BATCH_ALLOWED_CLIENT_SCOPES else BATCH_CLIENT_SCOPE_LEGACY
+    op_counts: dict[str, int] = {}
+    trigger_counts: dict[str, int] = {}
+    path_fingerprints: list[str] = []
+    for item in requests:
+        if not isinstance(item, dict):
+            op_counts["invalid"] = op_counts.get("invalid", 0) + 1
+            continue
+        operation = str(item.get("type", item.get("op", "")) or "")
+        safe_operation = operation if operation in {"list", "info"} else "invalid"
+        op_counts[safe_operation] = op_counts.get(safe_operation, 0) + 1
+        item_trigger_counts = _batch_trigger_counts(item)
+        if not item_trigger_counts:
+            trigger_counts["invalid"] = trigger_counts.get("invalid", 0) + 1
+            continue
+        for trigger, count in item_trigger_counts.items():
+            trigger_counts[trigger] = trigger_counts.get(trigger, 0) + count
+        raw_path = str(item.get("path", "") or "")
+        if raw_path and len(path_fingerprints) < BATCH_PATH_FINGERPRINT_LIMIT:
+            fingerprint = hashlib.sha256(raw_path.encode("utf-8", errors="replace")).hexdigest()[:16]
+            if fingerprint not in path_fingerprints:
+                path_fingerprints.append(fingerprint)
+    return {
+        "batch_size": len(requests),
+        "operations": op_counts,
+        "path_fingerprints": path_fingerprints,
+        "triggers": trigger_counts,
+        "client_revision": client_revision or "unknown",
+        "client_scope": client_scope,
+    }
+
+
+def filesystem_batch_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """Compute one typed, max-64 list/info product in the jobd worker process."""
+    requests = validated_batch_requests(payload)
+    summary = filesystem_batch_request_summary(payload)
+    responses = []
+    list_operation_ms = 0.0
+    info_operation_ms = 0.0
+    list_performance_details: dict[str, float] = {}
+    operation_started = time.perf_counter()
+    for index, item in enumerate(requests):
+        request_id = item.get("id", index) if isinstance(item, dict) else index
+        if not isinstance(item, dict):
+            responses.append(error_payload(
+                "request must be an object",
+                message_key="request.error.object",
+                message_params={"field": "request"},
+                id=request_id,
+                ok=False,
+                status=400,
+            ))
+            continue
+        operation = str(item.get("type", item.get("op", "")) or "")
+        raw_path = str(item.get("path", "") or "")
+        if not _batch_trigger_counts(item):
+            responses.append(error_payload(
+                "invalid fs batch trigger",
+                message_key="request.error.unsupportedFsBatchOperation",
+                message_params={"operation": "trigger"},
+                id=request_id,
+                ok=False,
+                status=400,
+                path=raw_path,
+            ))
+            continue
+        if operation not in {"list", "info"}:
+            responses.append(error_payload(
+                "unsupported fs batch operation",
+                message_key="request.error.unsupportedFsBatchOperation",
+                message_params={"operation": operation},
+                id=request_id,
+                ok=False,
+                status=400,
+                path=raw_path,
+            ))
+            continue
+        try:
+            item_started = time.perf_counter()
+            item_watch_signature: tuple[Any, ...] | None = None
+            if operation == "list":
+                item_list_details: dict[str, float] = {}
+                try:
+                    include_watch_signature = item.get("include_watch_signature") is True
+                    result = list_directory(
+                        raw_path,
+                        performance_details=item_list_details,
+                        watch_signature_child_limit=(WATCH_SIGNATURE_CHILD_LIMIT if include_watch_signature else 0),
+                    )
+                    if include_watch_signature:
+                        item_watch_signature = result.pop("watch_signature", None)
+                finally:
+                    list_operation_ms += max(0.0, (time.perf_counter() - item_started) * 1000)
+                    for key, value in item_list_details.items():
+                        list_performance_details[key] = list_performance_details.get(key, 0.0) + value
+            else:
+                try:
+                    result = path_info(raw_path, operation="fs_batch.info")
+                finally:
+                    info_operation_ms += max(0.0, (time.perf_counter() - item_started) * 1000)
+        except FilesystemError as exc:
+            responses.append(exc.payload(id=request_id, ok=False, path=raw_path))
+            continue
+        response = {"id": request_id, "ok": True, "status": 200, "payload": result}
+        if item_watch_signature is not None:
+            response["watch_signature"] = item_watch_signature
+        responses.append(response)
+    return {
+        "responses": responses,
+        "performance": {
+            **summary,
+            "operation_ms": round(max(0.0, (time.perf_counter() - operation_started) * 1000), 3),
+            "list_ms": round(list_operation_ms, 3),
+            "info_ms": round(info_operation_ms, 3),
+            "list_details": {
+                key: round(value, 3) if key.endswith("_ms") else int(value)
+                for key, value in list_performance_details.items()
+            },
+        },
+    }
+
+
+@normalize_os_errors
+def watch_signature(raw_path: str, *, child_limit: int = 0) -> tuple[Any, ...]:
+    _sync_package_overrides()
+    return listing.watch_signature(raw_path, child_limit=child_limit)
 
 
 @normalize_os_errors
@@ -161,19 +364,41 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
 @normalize_os_errors
 def git_repo_info(repo: Path, include_status: bool = True) -> dict[str, Any]:
     _sync_package_overrides()
-    return git_ops.git_repo_info(repo, include_status=include_status)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    with paths.safe_path(str(repo), flags=flags) as handle:
+        payload = git_ops.git_repo_info(handle.descriptor_path(), include_status=include_status)
+        payload["root"] = str(handle.resolved)
+        payload["name"] = handle.resolved.name
+        return payload
 
 
 @normalize_os_errors
 def git_tracks_path(path: Path) -> bool:
     _sync_package_overrides()
-    return git_ops.git_tracks_path(path)
+    try:
+        with paths.safe_path(str(path), flags=getattr(os, "O_PATH", os.O_RDONLY)) as handle:
+            _repo, tracked, _history, _relative, _repo_info = git_ops.pinned_file_git_metadata(handle)
+            return tracked
+    except FilesystemError as error:
+        if error.status == 404:
+            return False
+        raise
 
 
 @normalize_os_errors
 def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
     _sync_package_overrides()
-    return git_ops.git_file_history(path, limit=limit)
+    try:
+        with paths.safe_path(str(path), flags=getattr(os, "O_PATH", os.O_RDONLY)) as handle:
+            _repo, _tracked, history, _relative, _repo_info = git_ops.pinned_file_git_metadata(
+                handle,
+                history_limit=limit,
+            )
+            return history
+    except FilesystemError as error:
+        if error.status == 404:
+            return []
+        raise
 
 
 @normalize_os_errors
@@ -191,7 +416,15 @@ def blame_file(raw_path: str, ref: str | None = None) -> dict[str, Any]:
 @normalize_os_errors
 def git_root_for_path(path: Path) -> str:
     _sync_package_overrides()
-    return git_ops.git_root_for_path(path)
+    try:
+        with paths.safe_path(str(path), flags=getattr(os, "O_PATH", os.O_RDONLY)) as handle:
+            repo = git_ops._pinned_repo_root(handle)
+    except FilesystemError as error:
+        if error.status != 404:
+            raise
+        with paths.safe_parent(str(path)) as parent:
+            repo = git_ops._pinned_repo_root(parent)
+    return str(repo) if repo is not None else ""
 
 
 @normalize_os_errors
@@ -234,9 +467,9 @@ def create_directory(raw_path: str) -> dict[str, Any]:
 
 
 @normalize_os_errors
-def path_info(raw_path: str) -> dict[str, Any]:
+def path_info(raw_path: str, *, operation: str = "path_info") -> dict[str, Any]:
     _sync_package_overrides()
-    return io_ops.path_info(raw_path)
+    return io_ops.path_info(raw_path, operation=operation)
 
 
 def is_text_path(raw_path: str) -> bool:
@@ -271,6 +504,8 @@ __all__ = [
     "FS_ROOTS_ENV",
     "IMAGE_EXTENSIONS",
     "MAX_DIRECTORY_ENTRIES",
+    "MAX_BATCH_REQUESTS",
+    "WATCH_SIGNATURE_CHILD_LIMIT",
     "MAX_RAW_BYTES",
     "MAX_READ_BYTES",
     "MAX_SEARCH_DIRS",
@@ -292,6 +527,8 @@ __all__ = [
     "git_tracks_path",
     "index_status",
     "is_text_path",
+    "filesystem_batch_request_summary",
+    "filesystem_batch_result",
     "list_directory",
     "path_info",
     "read_file",
@@ -300,6 +537,7 @@ __all__ = [
     "rename_path",
     "search_files",
     "unindex_root",
+    "validated_batch_requests",
     "write_file",
     "zip_directory",
 ]

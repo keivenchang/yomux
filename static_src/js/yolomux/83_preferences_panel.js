@@ -979,9 +979,7 @@ function bindPreferencesPanel(panel) {
       renderPreferencesPanels({force: true});
     },
     'preferences-copy-text': (_event, target) => {
-      copyTextToClipboard(target.dataset.copyText || '')
-        .then(() => { statusEl.textContent = t('status.copiedText'); })
-        .catch(error => { statusErr(localizedHtml('common.copyFailed', {error})); });
+      void copyTextWithFeedback(target.dataset.copyText || '', {button: target, statusText: t('status.copiedText')});
     },
     'preferences-yolo-rule-open': () => {
       preferencesResetConfirmVisible = false;

@@ -1220,6 +1220,21 @@ body.file-explorer-mode-tabber .file-explorer-mode-files-diff-only,
   top: 4px;
   background: inherit;
 }
+.path-copy-button[data-copy-feedback-active="true"]::before {
+  display: none;
+}
+.path-copy-button[data-copy-feedback-active="true"]::after {
+  content: "\2713";
+  inset: 0;
+  width: auto;
+  height: auto;
+  border: 0;
+  background: transparent;
+  display: grid;
+  place-items: center;
+  font-size: var(--ui-font-size-sm);
+  font-weight: 700;
+}
 .popover-copy-button {
   width: 20px;
   height: 20px;

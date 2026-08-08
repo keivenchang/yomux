@@ -35,6 +35,7 @@ function renderPanelsMeasured(previousActive = [], options = {}) {
 
   bindDropTargets();
   finishPanelLayoutRender(previousActive, options, {updateInactiveOverlays: true});
+  completeLayoutMutationGeneration(options.completionGeneration);
 }
 
 function finishPanelLayoutRender(previousActive = [], options = {}, {updateInactiveOverlays = false} = {}) {
@@ -1877,8 +1878,8 @@ function transcriptPayloadWithPriorSessionMetadata(payload, previousPayload = tr
   };
 }
 
-function transcriptPayloadWithTmuxWindowOverrides(payload) {
-  payload = transcriptPayloadWithPriorSessionMetadata(payload);
+function transcriptPayloadWithTmuxWindowOverrides(payload, previousPayload = transcriptMetadataState.payload) {
+  payload = transcriptPayloadWithPriorSessionMetadata(payload, previousPayload);
   if (!payload || typeof payload !== 'object' || !(payload.sessions && typeof payload.sessions === 'object')) return payload;
   let nextSessions = null;
   for (const session of Object.keys(payload.sessions)) {

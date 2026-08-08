@@ -219,6 +219,7 @@
   "debug.cost.backfillPartial": "Rellenado incompleto",
   "debug.cost.backfillPending": "Rellenado pendiente",
   "debug.cost.backfillRunning": "Rellenado en curso",
+  "debug.cost.backfillUnknown": "Estado del rellenado desconocido",
   "debug.cost.byModel": "Por modelo",
   "debug.cost.bySource": "Atribución de agente y fuente",
   "debug.cost.byTmux": "Coste por ventana tmux",

@@ -213,6 +213,7 @@
   "debug.cost.backfillPartial": "Aanvulling onvolledig",
   "debug.cost.backfillPending": "Aanvulling in afwachting",
   "debug.cost.backfillRunning": "Aanvulling bezig",
+  "debug.cost.backfillUnknown": "Status van aanvulling onbekend",
   "debug.cost.byModel": "Per model",
   "debug.cost.bySource": "Toeschrijving aan agent en bron",
   "debug.cost.byTmux": "Kosten per tmux-venster",

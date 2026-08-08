@@ -9,10 +9,12 @@ async function onFileTreeRowClick(row, fullPath, entry, event) {
   const selectionOnly = updateFileTreeSelectionFromClick(row, fullPath, event);
   if (selectionOnly) return;
   if (entry.kind === 'dir') {
-    if (fileExplorerExpanded.has(fullPath)) {
+    // A cold expansion is visually open before its listing resolves. Treat its pending state as
+    // expanded too, so a second user click reaches the shared collapse path and cancels the reveal.
+    if (fileExplorerExpanded.has(fullPath) || fileExplorerPendingExpansions.has(fullPath)) {
       collapseDirectoryRow(row, fullPath, {manual: true});
     } else {
-      await expandDirectoryRow(row, fullPath, {manual: true});
+      await expandDirectoryRow(row, fullPath, {manual: true, user: true});
     }
     return;
   }
@@ -146,9 +148,9 @@ async function showFileTreeContextMenu(row, fullPath, entry, x, y, options = {})
     const label = typeof action.label === 'function' ? action.label(actionContext) : action.label;
     appendContextMenuButton(menu, label || t('contextmenu.openNewTab'), action.action, closeFileContextMenu, {disabled: action.disabled ?? menuState.openInNewTabDisabled});
   }
-  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), () => copyFilePath(relativePaths.join('\n'), 'relative'), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
-  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), () => copyFilePath(selectedPaths.join('\n'), 'path'), closeFileContextMenu);
-  appendContextMenuButton(menu, t('contextmenu.copyImage'), () => copyImageFileToClipboard(selectedPaths[0]), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyRelativePaths' : 'contextmenu.copyRelativePath'), button => copyFilePath(relativePaths.join('\n'), 'relative', {button}), closeFileContextMenu, {disabled: menuState.copyRelativeDisabled});
+  appendContextMenuButton(menu, t(multiple ? 'contextmenu.copyFullPaths' : 'contextmenu.copyFullPath'), button => copyFilePath(selectedPaths.join('\n'), 'path', {button}), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyImage'), button => copyImageFileToClipboard(selectedPaths[0], {button}), closeFileContextMenu, {disabled: menuState.copyImageDisabled});
   appendContextMenuButton(menu, t('common.download'), () => triggerFileDownload(fullPath), closeFileContextMenu, {disabled: menuState.downloadDisabled});
   if (entry?.kind === 'dir') {
     appendContextMenuButton(menu, t('contextmenu.zipDownload'), () => triggerFolderZipDownload(fullPath), closeFileContextMenu, {disabled: menuState.zipDownloadDisabled});
@@ -187,24 +189,19 @@ function entryIsImageFile(entry) {
   return entry?.kind === 'file' && previewMediaKindForPath(entry.name || entry.path || '') === 'image';
 }
 
-async function copyFilePath(path, label) {
+async function copyFilePath(path, label, options = {}) {
   const text = String(path || '');
-  try {
-    await copyTextToClipboard(text);
-    statusEl.textContent = t(label === 'relative' ? 'status.copiedRelativePath' : 'status.copiedPath');
-  } catch (error) {
-    statusErr(localizedHtml('common.copyFailed', {error}));
-  }
+  await copyTextWithFeedback(text, {...options, statusText: t(label === 'relative' ? 'status.copiedRelativePath' : 'status.copiedPath')});
 }
 
-async function copyImageFileToClipboard(path) {
+async function copyImageFileToClipboard(path, options = {}) {
   if (!globalThis.ClipboardItem || !navigator?.clipboard?.write) {
     await copyFilePath(path, 'path');
     statusEl.textContent = t('status.imageClipboardUnavailable');
     return;
   }
   try {
-    const response = await apiFetch(rawFileUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(rawFileUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
     if (!response.ok) {
       await showFileTransferResponseError(response, t('common.copyFailed', {error: t('common.requestFailed')}));
       return;
@@ -212,7 +209,7 @@ async function copyImageFileToClipboard(path) {
     const blob = await response.blob();
     const type = blob.type || 'image/png';
     await navigator.clipboard.write([new ClipboardItem({[type]: blob})]);
-    statusEl.textContent = t('status.copiedImage', {name: basenameOf(path)});
+    showCopyFeedback({button: options.button, statusText: t('status.copiedImage', {name: basenameOf(path)})});
   } catch (error) {
     showFileTransferError(error, {fallback: t('common.copyFailed', {error: userMessageText(error, t('common.requestFailed'))})});
   }
@@ -270,7 +267,7 @@ async function triggerFileDownload(path) {
   const label = basenameOf(path) || path;
   statusEl.textContent = t('fileTransfer.downloading', {name: label});
   try {
-    const response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(rawFileDownloadUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
     if (!response.ok) {
       await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
       return;
@@ -289,7 +286,7 @@ async function triggerFolderZipDownload(path) {
   const label = basenameOf(path) || path;
   statusEl.textContent = t('fileTransfer.zipping', {name: label});
   try {
-    const response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store'});
+    const response = await apiFetch(zipFileDownloadUrl(path), {cache: 'no-store', deadlineMs: apiFetchLongOperationDeadlineMs});
     if (!response.ok) {
       await showFileTransferResponseError(response, t('fileTransfer.downloadFailed', {name: label}));
       return;
@@ -304,8 +301,8 @@ async function triggerFolderZipDownload(path) {
   }
 }
 
-function copyCurrentFileExplorerPath() {
-  copyFilePath(displayedFileExplorerRoot() || fileExplorerRoot || homePath || '/', 'path');
+function copyCurrentFileExplorerPath(options = {}) {
+  void copyFilePath(displayedFileExplorerRoot() || fileExplorerRoot || homePath || '/', 'path', options);
 }
 
 function childNameToPath(root, name) {
@@ -535,7 +532,9 @@ function bindFileExplorerHeaderActions(container = document) {
       refreshTabberPanels();
     } else if (view === 'differ') fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), force: true});
       else {
-        refreshFileExplorerTrees();
+        // A user-requested refresh must bypass the Finder directory cache; otherwise the control
+        // only repaints cached rows and cannot reveal filesystem changes.
+        refreshFileExplorerTrees({fresh: true});
         fetchSessionFiles({destination: 'finder', session: fileExplorerSessionFilesTargetSession(), silent: true, force: true});
       }
     } else if (action.matches('[data-file-explorer-collapse]')) {
@@ -1434,6 +1433,7 @@ function openFileStatus(state) {
   if (state.externalError) return {message: `${t('dialog.unableLoadDisk')}: ${fileErrorText(state.externalError, 'editor.refreshFailed')}`, level: 'warn'};
   if (state.externalChanged) return {message: state.dirty ? t('dialog.staleStatus') : t('dialog.externalTitle'), level: 'warn'};
   if (state.dirty) return {message: t('state.modified'), level: ''};
+  if (state.diffUnavailable) return {message: t('editor.diffUnavailable', {error: state.diffError || t('common.unknown')}), level: 'warn'};
   if (state.kind === 'text') {
     const count = String(state.original ?? '').length;
     return {message: tPlural('editor.status.characters', count), level: ''};
@@ -1789,13 +1789,14 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  renderOpenFilePath(path);
   syncFileLayoutItems();
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
   return showFileEditorPaneForPath(path, {...options, item});
 }
 
 function openFileStateHasLoadedEditorPayload(state) {
-  return Boolean(state?.kind && state.loading !== true && state.kind !== 'file');
+  return Boolean(state?.kind && state.loading !== true && state.kind !== 'file' && state.kind !== 'error');
 }
 
 function refreshOpenFileDiffDecorations(path) {
@@ -1877,6 +1878,7 @@ function applyOpenFileDiffPayload(state, payload) {
   state.diffFromRef = payload.from_ref || '';
   state.diffToRef = payload.to_ref || '';
   state.diffWorkingMissing = payload.working_missing === true;
+  if (state.externalMissing && state.diffWorkingMissing) state.content = '';
   state.untracked = payload.untracked === true;
   state.diffLoaded = true;
   state.diffUnavailable = false;
@@ -1916,7 +1918,10 @@ async function refreshOpenFileDiff(path, options = {}) {
         : (state.diffPinnedFromRef || state.diffPinnedToRef)
           ? `from=${encodeURIComponent(state.diffPinnedFromRef || 'HEAD')}&to=${encodeURIComponent(state.diffPinnedToRef || 'current')}`
           : diffRefQueryString(fileRepoForPath(path));
-      const payload = await apiFetchJson(`/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`);
+      const payload = await fetchFilesystemOperationPayload(
+        `/api/fs/diff?path=${encodeURIComponent(path)}&${refString}`,
+        'diff',
+      );
       applyOpenFileDiffPayload(state, payload);
       refreshOpenFileDiffDecorations(path);
       return true;
@@ -1932,11 +1937,13 @@ async function refreshOpenFileDiff(path, options = {}) {
       // Repaint after clearing diffLoading. Rendering while it is still true leaves the diff toolbar
       // disabled even though the MergeView has already been built, so the expand/collapse context button
       // ignores clicks until some unrelated render happens.
-      for (const panel of fileEditorPanelsForPath(path)) {
-        const item = panel.dataset.layoutItem || fileEditorItemFor(path);
-        updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
-        updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
-        if (options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+      if (options.updateControlsOnComplete !== false) {
+        for (const panel of fileEditorPanelsForPath(path)) {
+          const item = panel.dataset.layoutItem || fileEditorItemFor(path);
+          updateFileEditorDiffButton(panel.querySelector('.file-editor-diff-panel'), path, state, item);
+          updateFileEditorDiffExpandButton(panel.querySelector('.file-editor-diff-expand-panel'), path, state, item);
+          if (options.renderOnComplete !== false && editorViewModeFor(path, item) === 'diff') renderFileEditorPanel(panel, item);
+        }
       }
     }
   })();
@@ -1947,7 +1954,7 @@ async function refreshOpenFileGitMetadata(path) {
   const state = fileState.get(path);
   if (!state || state.kind !== 'text') return false;
   try {
-    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+    const payload = await fetchFileReadPayload(path);
     const current = fileState.get(path);
     if (!current || current.kind !== 'text') return false;
     applyFileGitMetadata(current, payload);
@@ -1962,6 +1969,25 @@ async function refreshOpenFileGitMetadata(path) {
     }
     return false;
   }
+}
+
+async function fetchFilesystemOperationPayload(url, operation) {
+  try {
+    return await apiFetchJson(url);
+  } catch (error) {
+    if (!isApiPendingResponse(error)) throw error;
+    return waitForApiOperationResult(error, {
+      kind: 'filesystem_operation',
+      operation,
+    });
+  }
+}
+
+async function fetchFileReadPayload(path) {
+  return fetchFilesystemOperationPayload(
+    `/api/fs/read?path=${encodeURIComponent(path)}`,
+    'read',
+  );
 }
 
 async function openFileInEditor(fullPath, entryOrName, options = {}) {
@@ -2019,7 +2045,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
     return item;
   }
   const openPromise = (async () => {
-    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(fullPath)}`);
+    const payload = await fetchFileReadPayload(fullPath);
     if (identityDedupe) {
       const existingIdentityPath = openPathForPhysicalFile(fullPath, payload);
       if (existingIdentityPath && existingIdentityPath !== fullPath) {
@@ -2049,7 +2075,7 @@ async function openFileInEditor(fullPath, entryOrName, options = {}) {
           ? tooLargeFileState(entry?.size ?? null, err)
           : status === 404
             ? missingFileState(err)
-            : fileErrorState(err);
+            : fileErrorState(err, err?.code === 'deadline_expired' ? '' : 'editor.fileLoadFailed');
       }
       await openFilesSetAndShow(fullPath, state, openOptions);
       return item;
@@ -2093,7 +2119,7 @@ async function openFileStateFromDisk(path, entry = null) {
     return {state: rawPreviewFileState(path, fileEntry)};
   }
   try {
-    const payload = await apiFetchJson(`/api/fs/read?path=${encodeURIComponent(path)}`);
+    const payload = await fetchFileReadPayload(path);
     return {state: applyFileGitMetadata({
       mtime: filePayloadMtime(payload),
       size: payload.size,
@@ -2125,15 +2151,21 @@ function markOpenFileMissing(path) {
   let state = fileState.get(path);
   clearFileAutosaveTimer(path);
   if (!state) state = setFileState(path, missingFileState());
-  if (state.dirty) {
+  const retainLoadedDiff = !state.dirty && openFileDiffAvailable(state);
+  if (state.dirty || retainLoadedDiff) {
     state.externalMissing = true;
     state.externalMissingCheckedAt = Date.now();
     delete state.externalChanged;
     delete state.externalError;
+    if (retainLoadedDiff) {
+      state.diffWorking = '';
+      state.diffWorkingMissing = true;
+    }
   } else {
     state = setFileState(path, missingFileState());
   }
   renderOpenFilePath(path);
+  if (retainLoadedDiff) void refreshOpenFileDiff(path, {silent: true});
 }
 
 async function recoverOpenFileAfterMissing(path, entry = null) {
@@ -2325,13 +2357,19 @@ function backgroundFileEditorWatchFiles() {
 function clientServerWatchRoots() {
   const roots = new Set(watchedFileExplorerDirectories());
   if (fileExplorerSessionFilesPaneIsVisible()) {
+    const repoRoots = [];
     for (const repo of fileExplorerSessionFilesState.payload?.repos || []) {
       const path = normalizeDirectoryPath(repo?.repo || repo?.root || '');
-      if (path && path !== '/') roots.add(path);
+      if (!path || path === '/') continue;
+      roots.add(path);
+      repoRoots.push(path);
     }
+    // Repository watches are recursive. Keep a parent only for a displayed non-repository file;
+    // otherwise one Differ result row would redundantly declare one hot directory root.
     for (const file of fileExplorerSessionFilesState.payload?.files || []) {
       const path = normalizeDirectoryPath(file?.abs_path || sessionFileAbsolutePath(file));
-      if (path && path !== '/') roots.add(dirnameOf(path));
+      if (!path || path === '/' || repoRoots.some(root => pathIsInsideDirectory(path, root))) continue;
+      roots.add(dirnameOf(path));
     }
   }
   return Array.from(roots)
@@ -2372,8 +2410,9 @@ function clientServerWatchState() {
     files: visibleFileEditorWatchFiles(),
     background_files: backgroundFileEditorWatchFiles(),
     context_items: transcriptContextWatchRequests(),
+    activity_summary: {visible: false},
   };
-  if (typeof activitySummaryIsVisible === 'function') {
+  if (activitySummaryEnabled && typeof activitySummaryIsVisible === 'function') {
     state.activity_summary = {
       visible: activitySummaryIsVisible(),
       locale: typeof i18nActiveLocaleId === 'function' ? i18nActiveLocaleId() : 'en',
@@ -2387,36 +2426,83 @@ function clientServerWatchState() {
   return state;
 }
 
+function mergedServerWatchRootsOptions(options = {}) {
+  return {
+    ...serverWatchRootsState.pendingOptions,
+    ...options,
+    force: serverWatchRootsState.pendingOptions.force === true || options.force === true,
+    immediate: serverWatchRootsState.pendingOptions.immediate === true || options.immediate === true,
+  };
+}
+
 function syncServerWatchRootsNow(options = {}) {
-  if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true) || serverWatchRootsState.inFlight) return;
+  if (readOnlyMode || (!clientPushCanSupplyData() && options.deactivate !== true)) return;
+  if (serverWatchRootsState.inFlight) {
+    serverWatchRootsState.pendingOptions = mergedServerWatchRootsOptions(options);
+    return;
+  }
   const state = clientServerWatchState();
   const signature = JSON.stringify(state);
   if (signature === serverWatchRootsState.signature && options.force !== true) return;
   serverWatchRootsState.signature = signature;
   serverWatchRootsState.inFlight = true;
-  apiFetch('/api/watch/roots', {
+  serverWatchRootsState.registrationPending = true;
+  serverWatchRootsState.registered = false;
+  return apiFetch('/api/watch/roots', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(state),
   }).then(() => {
+    serverWatchRootsState.registrationPending = false;
+    serverWatchRootsState.registered = true;
     serverWatchRootsState.syncedAt = Date.now();
+    return ensureFileExplorerFilesystemWatchBaseline();
   }).catch(() => {
+    serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.signature = '';
+    serverWatchRootsState.registered = false;
   }).finally(() => {
+    serverWatchRootsState.registrationPending = false;
     serverWatchRootsState.inFlight = false;
+    if (Object.keys(serverWatchRootsState.pendingOptions).length) {
+      syncServerWatchRoots({immediate: true});
+    }
   });
 }
 
+function ensureFileExplorerFilesystemWatchBaseline() {
+  if (readOnlyMode || !fileExplorerTreePaneIsVisible() || fileExplorerFilesystemWatchToken) {
+    return Boolean(fileExplorerFilesystemWatchToken);
+  }
+  if (!serverWatchRootsState.registered) {
+    syncServerWatchRoots({immediate: true, force: true});
+    return false;
+  }
+  const baseline = (async () => {
+    await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+    return Boolean(fileExplorerFilesystemWatchToken);
+  })();
+  return baseline;
+}
+
 function syncServerWatchRoots(options = {}) {
-  serverWatchRootsState.pendingOptions = {
-    ...serverWatchRootsState.pendingOptions,
-    ...options,
-    force: serverWatchRootsState.pendingOptions.force === true || options.force === true,
-  };
+  const pendingOptions = mergedServerWatchRootsOptions(options);
+  const signature = JSON.stringify(clientServerWatchState());
+  if (signature === serverWatchRootsState.signature && pendingOptions.force !== true) {
+    if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
+    serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
+    serverWatchRootsState.pendingOptions = {};
+    return;
+  }
+  serverWatchRootsState.pendingOptions = pendingOptions;
+  const delay = pendingOptions.immediate === true ? 0 : serverWatchDebounceMs;
+  if (serverWatchRootsState.timer && serverWatchRootsState.timerDelay === 0) return;
   if (serverWatchRootsState.timer) clearTimeout(serverWatchRootsState.timer);
-  const delay = options.immediate === true ? 0 : serverWatchDebounceMs;
+  serverWatchRootsState.timerDelay = delay;
   serverWatchRootsState.timer = setTimeout(() => {
     serverWatchRootsState.timer = null;
+    serverWatchRootsState.timerDelay = null;
     const pending = serverWatchRootsState.pendingOptions;
     serverWatchRootsState.pendingOptions = {};
     syncServerWatchRootsNow(pending);
@@ -2459,7 +2545,8 @@ async function refreshWatchedFilesystem(options = {}) {
   try {
     if (fileExplorerTreePaneIsVisible()) {
       if (options.full === true && typeof refreshFileExplorerFromWatchDiff === 'function') {
-        await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+        if (fileExplorerFilesystemWatchToken) await refreshFileExplorerFromWatchDiff({full: true}, {full: true});
+        else await ensureFileExplorerFilesystemWatchBaseline();
       } else {
         await refreshFileExplorerIfChanged();
       }

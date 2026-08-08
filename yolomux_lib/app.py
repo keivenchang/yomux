@@ -38,17 +38,14 @@ from urllib.parse import unquote
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
-try:
-    from watchfiles import watch as watchfiles_watch
-except ImportError:  # pragma: no cover - direct-source fallback before setup
-    watchfiles_watch = None
-
 from .infra import common
 from .search import file_index
 from . import filesystem
 from .filesystem.io_ops import read_json_file
 from .workspace import session_files
 from .local_services import registry as local_services_registry
+from .local_services.client import local_service_failure_is_transient
+from .local_services.runtime import local_service_exception_cause
 from .stats_current import resolution as stats_resolution
 from .approval import yolo_rules
 from .approval.approvals import blank_prompt_state  # noqa: F401 - compatibility re-export
@@ -58,6 +55,7 @@ from .observability.activity_summary import assemble_agent_window_rows
 from .observability.activity_summary import build_recent_agents_payload
 from .observability.activity_summary import build_global_activity_summary
 from .observability.activity_summary import build_session_activity_summary
+from .observability.activity_summary import recent_agent_paths_from_files
 from .observability.activity_summary import yoagent_capabilities_payload
 from .approval.approvald import ApprovalClient
 from .approval.auto_approve_worker import auto_approve_lock_message
@@ -74,6 +72,10 @@ from .infra.atomic_file import atomic_write_text
 from .infra.atomic_file import file_lock
 from .infra.cache import MISS as CACHE_MISS
 from .infra.cache import TtlCache
+from .infra.host_diagnostics import collect_host_diagnostics
+from .infra.host_identity import current_host_identity
+from .infra.host_partition import host_namespaced_path
+from .infra.host_partition import host_partitioned_state_dir
 from .client_events import CLIENT_EVENT_TYPES
 from .client_events import ClientEventBroker
 from .client_events import client_event_resource
@@ -100,9 +102,9 @@ from .common import UPLOAD_MAX_BYTES
 from .locales import LANGUAGE_PREFERENCES
 from .login_escalation import EdgeBlockController
 from .login_escalation import default_edge_runner
-from .login_rate_limit import LOGIN_THROTTLE_DATABASE_NAME
 from .login_rate_limit import LOGIN_THROTTLE_OVERRIDE_NAME
 from .login_rate_limit import LoginRateLimiter
+from .login_rate_limit import default_login_throttle_database_path
 from .login_rate_limit import load_login_rate_policy
 from .locales import message_descriptor
 from .locales import message_fields
@@ -115,18 +117,19 @@ from .common import truncate_text
 from .common import yolomux_client_revision
 from .control import YolomuxControlServer
 from .control import send_yolomux_control_request
+from .browser_diagnostic_receipts import JAVASCRIPT_MAX_SAFE_INTEGER
+from .diagnostic_redaction import redact_diagnostic_value
 from .search.search_indexer import SearchIndexerClient
 from .jobd import JobClient
 from .observability.pricing_catalog import PricingCatalog
 from .observability.pricing_catalog import PricingRefreshCoordinator
+from .observability.queued_delivery import QueuedDeliveryLedger
 from .stats_current.client import StatsCurrentClient
 from .stats_current.client import iter_append_batches as stats_current_append_batches
 from .stats_current import collectors as stats_current_collectors
+from .stats_current import host_collectors as stats_current_host_collectors
 from .stats_current import families as stats_current_families
 from .stats_current.http import StatsHttpForwarder
-from .stats_current import observations as stats_current_observations
-from .stats_current import protocol as stats_current_protocol
-from .stats_current import revision as stats_current_revision
 from .stats_current.runtime import StatsCurrentRuntime
 from .stats_current import storage as stats_current_storage
 from .stats_current.transcripts import StatsCurrentTranscriptUsageScanner
@@ -142,6 +145,8 @@ from .server_logs import emit_server_log
 from .tmux.agent_tui import classify_agent_pane
 from .tmux.agent_tui import normalized_prompt_state
 from .chat.chat_store import ChatStore
+from .chat.chat_store import default_chat_database_path
+from .chat.chat_service import default_chat_cursor_secret_path
 from .chat.chat_service import CHAT_YOAGENT_INSTANCE_ID
 from .chat.chat_service import CHAT_YOAGENT_USERNAME
 from .chat.chat_service import ChatService
@@ -161,10 +166,23 @@ from .metadata import session_to_json
 from .metadata import watched_pr_metadata
 from .tmux.sessions import active_window_for_panes
 from .tmux.sessions import discover_sessions
+from .tmux.sessions import list_tmux_panes
 from .tmux.sessions import discover_status_sessions
 from .statusd_client import StatusClient
+from .statusd_protocol import STATUSD_ACTIVITY_MAX_WORK_BYTES
+from .statusd_protocol import activity_summary_disabled_response
+from .statusd_protocol import activity_summary_enabled
+from .statusd_protocol import require_activity_summary_enabled
 from .statusd_protocol import StatusProtocolError
+from .statusd_protocol import validate_activity_summary
 from .statusd_protocol import validate_snapshot as validate_status_snapshot
+from .watchd_client import WatchClient
+from .watchd_protocol import WATCHD_DESCRIPTOR_RESYNC_SECONDS
+from .watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
+from .watchd_protocol import WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS
+from .watchd_protocol import WATCHD_SNAPSHOT_DEADLINE_SECONDS
+from .watch_diff import payload_from_products as watch_diff_payload_from_products
+from .watch_diff import responses_by_index as watch_diff_responses_by_index
 from .settings import default_settings
 from .settings import save_settings
 from .settings import SETTINGS_PATH
@@ -206,6 +224,7 @@ from .state_services import ActivityTranscriptService
 from .state_services import ClientEventWatcherRecord
 from .state_services import ClientWatchDescriptor
 from .state_services import ClientWatchService
+from .state_services import JobdOperationService
 from .state_services import SessionFilesDiskPruneRecord
 from .state_services import SessionFilesGitSnapshotRecord
 from .state_services import SessionFilesService
@@ -366,6 +385,29 @@ class SessionFilesJobdUnavailable(RuntimeError):
     Raised out of the owner-side compute so the single-flight record is released and NOTHING stale is
     cached; the next request re-triggers. It never falls back to inline git in the caller's thread.
     """
+
+    def __init__(self, message: str, failure: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.failure = copy.deepcopy(failure or {})
+
+
+class JobdOperationUnavailable(RuntimeError):
+    """An accepted jobd product could not reach one durable terminal result."""
+
+    def __init__(
+        self,
+        message: str,
+        failure: dict[str, Any] | None = None,
+        *,
+        code: str = "service_unavailable",
+        status: HTTPStatus = HTTPStatus.SERVICE_UNAVAILABLE,
+    ) -> None:
+        super().__init__(message)
+        self.failure = copy.deepcopy(failure or {"error": message})
+        self.code = str(code)
+        self.status = status
+
+
 TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS = 15_000
 TABBER_ACTIVITY_JOBD_WAIT_SECONDS = 20.0
 
@@ -397,11 +439,22 @@ class JobdProductRpcUnavailable(RuntimeError):
     """The broker could not answer a product read during a bounded owner-side wait."""
 
 
+class ActivitySummaryStatusdUnavailable(RuntimeError):
+    """statusd could not return one completed activity-summary body."""
+
+    def __init__(self, response: dict[str, Any]):
+        message = str(response.get("error") or "status service unavailable")
+        super().__init__(message)
+        self.response = copy.deepcopy(response)
+
+
 def wait_for_jobd_product(
     job_client: JobClient,
     coalesce_key: str,
     generation: int,
     wait_seconds: float,
+    *,
+    stop_event: threading.Event | None = None,
 ) -> tuple[dict[str, Any] | None, bytes | None, str]:
     """Read one matching jobd product without spinning the owner worker while it is pending.
 
@@ -411,7 +464,7 @@ def wait_for_jobd_product(
     """
     deadline = time.monotonic() + wait_seconds
     poll_seconds = JOBD_PRODUCT_POLL_INITIAL_SECONDS
-    while True:
+    while stop_event is None or not stop_event.is_set():
         meta, body = job_client.product(coalesce_key)
         if not meta.get("ok"):
             raise JobdProductRpcUnavailable("jobd product rpc unavailable")
@@ -421,13 +474,49 @@ def wait_for_jobd_product(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return None, None, state
-        time.sleep(min(poll_seconds, remaining))
+        wait_for = min(poll_seconds, remaining)
+        if stop_event is not None:
+            if stop_event.wait(wait_for):
+                return None, None, "stopped"
+        else:
+            time.sleep(wait_for)
         poll_seconds = min(JOBD_PRODUCT_POLL_MAX_SECONDS, poll_seconds * 2.0)
+    return None, None, "stopped"
 
 
 SESSION_FILES_CACHE_VERSION = 1
 SESSION_FILES_CACHE_KEY_VERSION = 4
-SESSION_FILES_CACHE_DIR = common.STATE_DIR / "session-files-cache"
+def default_session_files_cache_dir(state_dir: Path | None = None) -> Path:
+    """Keep one host's session-file cache out of a shared home mount."""
+
+    root = common.STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / "session-files-cache"
+
+
+def default_tabber_activity_cache_dir(state_dir: Path | None = None) -> Path:
+    """Keep one host's tabber activity cache out of a shared home mount."""
+
+    root = common.STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / "activity-cache"
+
+
+def default_background_client_events_path(state_dir: Path | None = None) -> Path:
+    """Share follower replay events only among this host's web processes."""
+
+    root = common.STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / "background-owner" / "client-events.json"
+
+
+def default_session_files_operation_state_path(state_dir: Path | None = None) -> Path:
+    """Persist accepted-operation receipts and terminals inside this isolated instance root."""
+    root = common.STATE_DIR if state_dir is None else Path(state_dir)
+    return host_partitioned_state_dir(root) / "operations" / "session-files.json"
+
+
+SESSION_FILES_CACHE_DIR = default_session_files_cache_dir()
+SESSION_FILES_OPERATION_STATE_PATH = default_session_files_operation_state_path()
+SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS = 0.05
+SESSION_FILES_OPERATION_POLL_MAX_SECONDS = 0.5
 SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 SESSION_FILES_DISK_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS = 5 * 60
@@ -435,7 +524,7 @@ SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE = 256
 SESSION_FILES_DISK_CACHE_INDEX_FILENAME = "cache-index.json"
 SESSION_FILES_DISK_CACHE_INDEX_VERSION = 1
 TABBER_ACTIVITY_CACHE_VERSION = 2
-TABBER_ACTIVITY_CACHE_DIR = common.STATE_DIR / "activity-cache"
+TABBER_ACTIVITY_CACHE_DIR = default_tabber_activity_cache_dir()
 TABBER_ACTIVITY_CONSUMER_TTL_SECONDS = 30.0
 TABBER_ACTIVITY_REFRESH_DEBOUNCE_SECONDS = 0.2
 # Session-files cold rebuilds parse transcripts and run Git at the same time.  Two
@@ -452,11 +541,12 @@ TRANSCRIPTS_PAYLOAD_CACHE_SECONDS = 15.0
 # healthy build, which is a handful of timeout-bounded git calls per indexed repo.
 TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS = 60.0
 CONTEXT_ITEMS_CACHE_MAX_ITEMS = 128
-# Bounded synchronous wait the /api/context* consumers give a warm/fast transcript product so it
-# returns in the same request instead of an empty pending shape. Kept well under the HTTP route
-# timeout; a cold transcript still returns pending immediately once this budget elapses.
-CONTEXT_VIEW_SYNC_WAIT_MS = 251
-CONTEXT_VIEW_SYNC_POLL_MS = 23
+CONTEXT_OPERATION_DEADLINE_SECONDS = 15.0
+FS_BATCH_OPERATION_DEADLINE_SECONDS = 120.0
+WATCHD_OPERATION_PRODUCT_LIMIT = 64
+WATCHD_FAILURE_ACTIONS = frozenset({"acquire", "upsert", "remove", "wait_revision"})
+WATCHD_FAILURE_CODES = frozenset({"deadline_expired", "handler_failed", "producer_failed", "service_unavailable", "stale_generation", "unknown_lease", "upgrade_required"})
+WATCHD_FAILURE_LOG_GRACE_SECONDS = 2.0
 SHARE_TOKEN_DEFAULT_TTL_SECONDS = 3600.0
 SHARE_TOKEN_MAX_TTL_SECONDS = 8.0 * 3600.0
 SHARE_MAX_VIEWERS_DEFAULT = 2
@@ -464,17 +554,24 @@ SHARE_MAX_VIEWERS_HARD_LIMIT = 300
 SHARE_SHORT_ID_BYTES = 6
 SHARE_DEBUG_PROFILE_EVENT_LIMIT = 100
 SHARE_DEBUG_PROFILE_LOG_DIR = Path(os.environ.get("YOLOMUX_SHARE_DEBUG_DIR", "/tmp/yolomux-share-debug"))
-SHARE_DEBUG_PROFILE_KEY_RE = re.compile(r"(token|secret|password|passwd|authorization|cookie|api[_-]?key|bearer)", re.I)
-SHARE_DEBUG_PROFILE_URL_RE = re.compile(r"(?:https?://[^\"'\s<>]+)?/share/[A-Za-z0-9_-]+(?:#[^\"'\s<>]*)?")
 SERVER_INTERACTIVE_EVENT_POLL_SECONDS = 1.5
 SERVER_INTERACTIVE_EVENT_POLL_JITTER_SECONDS = 0.5
 SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
+# A stopped SSE watcher gets a two-second teardown join. Keep the blocking RPC below that
+# boundary so reconnects cannot strand obsolete waiters in statusd's bounded handler pool.
+STATUS_GENERATION_RPC_WAIT_SECONDS = 1.0
 TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
 STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS = 60.0
+# Deliberately the idle token cadence: the transcript enrich is re-run at most as often as the
+# collector's own slowest sample, and any change to the unresolved-agent roster bypasses the TTL.
+STATS_AGENT_TOKEN_ENRICH_MEMO_TTL_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS
+# One entry per distinct unresolved-agent roster. The roster changes only when a pane starts or
+# stops, so this holds far more history than a live host produces; oldest-expiry entries evict.
+STATS_AGENT_TOKEN_ENRICH_MEMO_MAX_ENTRIES = 64
 
 
 def stats_current_usage_health(
@@ -599,7 +696,25 @@ def current_process_rss_bytes() -> int | None:
     return max_rss if sys.platform == "darwin" else max_rss * 1024
 
 
-def clamp_cpu_percent(value: float) -> float:
+def clamp_system_cpu_percent(value: float) -> float:
+    """Normalize aggregate host CPU, which is always a capacity share."""
+
+    if not math.isfinite(value):
+        return 0.0
+    return max(0.0, min(100.0, value))
+
+
+def normalize_process_cpu_percent(value: float) -> float:
+    """Keep a process's per-core CPU share, which may exceed one core."""
+
+    if not math.isfinite(value):
+        return 0.0
+    return max(0.0, value)
+
+
+def clamp_gpu_utilization_percent(value: float) -> float:
+    """Normalize a single GPU utilization reading, which is a device share."""
+
     if not math.isfinite(value):
         return 0.0
     return max(0.0, min(100.0, value))
@@ -680,31 +795,13 @@ def system_cpu_percent_from_times(previous: tuple[float, float] | None, current:
     busy_delta = current[1] - previous[1]
     if total_delta <= 0 or busy_delta < 0:
         return 0.0
-    return clamp_cpu_percent((busy_delta / total_delta) * 100.0)
+    return clamp_system_cpu_percent((busy_delta / total_delta) * 100.0)
 
 
 def current_system_cpu_percent_from_ps() -> float | None:
-    global _stats_host_fallback_warning_emitted
-    if not _stats_host_fallback_warning_emitted:
-        logger.warning("Stats host CPU fallback uses ps subprocess; native host counters were unavailable")
-        _stats_host_fallback_warning_emitted = True
-    try:
-        result = subprocess.run(["ps", "-A", "-o", "%cpu="], capture_output=True, text=True, timeout=0.75, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    total = 0.0
-    found = False
-    for line in result.stdout.splitlines():
-        try:
-            total += float(line.strip())
-            found = True
-        except ValueError:
-            continue
-    if not found:
-        return None
-    return clamp_cpu_percent(total / max(1, os.cpu_count() or 1))
+    """Web request threads never fork for stats; statsd owns host sampling."""
+
+    return None
 
 
 def current_system_memory_bytes() -> tuple[int, int] | None:
@@ -871,88 +968,11 @@ def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
 
 
 def stats_GPU_gpu_metrics() -> dict[str, Any]:
-    """Collect aggregate GPU device facts through the installed driver CLI, if present."""
-    try:
-        devices_result = subprocess.run(
-            ["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True,
-            text=True,
-            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if devices_result.returncode != 0:
-        return {}
-    devices: dict[str, dict[str, float | str]] = {}
-    for line in devices_result.stdout.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) != 5:
-            continue
-        try:
-            index = int(parts[0])
-            util = clamp_cpu_percent(float(parts[2]))
-            memory_used = max(0.0, float(parts[3]))
-            memory_total = max(0.0, float(parts[4]))
-        except ValueError:
-            continue
-        key = f"gpu:{index}"
-        devices[key] = {
-            "label": f"GPU {index} ({parts[1]})" if parts[1] else f"GPU {index}",
-            "util_percent": util,
-            "memory_used_bytes": int(memory_used * 1024 * 1024),
-            "memory_capacity_bytes": int(memory_total * 1024 * 1024),
-        }
-    if not devices:
-        return {}
-    return {"devices": devices}
+    return {"devices": stats_current_host_collectors.generic_gpu_devices()}
 
 
 def stats_macos_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
-    """Use macOS IORegistry's public aggregate GPU counters; macOS exposes no per-process GPU API."""
-    if sys.platform != "darwin":
-        return {}
-    try:
-        result = subprocess.run(
-            ["ioreg", "-a", "-r", "-d1", "-w0", "-c", "IOAccelerator"],
-            capture_output=True,
-            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
-            check=False,
-        )
-        records = plistlib.loads(result.stdout) if result.returncode == 0 and result.stdout else []
-    except (OSError, subprocess.SubprocessError, plistlib.InvalidFileException):
-        return {}
-    if not isinstance(records, list):
-        return {}
-    memory = current_system_memory_bytes()
-    total_memory = memory[0] if memory is not None else 0
-    devices: dict[str, dict[str, float | str]] = {}
-    for index, record in enumerate(records):
-        if not isinstance(record, dict):
-            continue
-        stats = record.get("PerformanceStatistics")
-        if not isinstance(stats, dict):
-            continue
-        # Current Apple-silicon drivers expose Device Utilization %; older
-        # releases used GPU Activity(%). Missing telemetry is not a zero sample.
-        util = stats.get(
-            "Device Utilization %",
-            stats.get("GPU Activity(%)", stats.get("GPU Activity")),
-        )
-        used = stats.get("In use system memory", stats.get("In use video memory", 0))
-        if util is None:
-            continue
-        try:
-            util_percent = clamp_cpu_percent(float(util))
-            memory_used_bytes = max(0, int(used))
-        except (TypeError, ValueError):
-            continue
-        devices[f"gpu:{index}"] = {
-            "label": f"GPU {index} ({gpu_name})" if gpu_name else f"GPU {index}",
-            "util_percent": util_percent,
-            "memory_used_bytes": memory_used_bytes,
-            "memory_capacity_bytes": total_memory,
-        }
+    devices = stats_current_host_collectors.gpu_devices()
     return {"devices": devices} if devices else {}
 
 
@@ -962,35 +982,7 @@ _stats_hardware_metadata_initialized = False
 
 
 def stats_macos_hardware_metadata() -> dict[str, str]:
-    """Return static Apple-silicon labels without treating unified memory as discrete VRAM."""
-    try:
-        result = subprocess.run(
-            ["system_profiler", "-json", "SPHardwareDataType", "SPMemoryDataType", "SPDisplaysDataType"],
-            capture_output=True,
-            text=True,
-            timeout=STATS_HOST_RESOURCE_TIMEOUT_SECONDS,
-            check=False,
-        )
-        payload = json.loads(result.stdout) if result.returncode == 0 and result.stdout else {}
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    hardware = next((item for item in payload.get("SPHardwareDataType", []) if isinstance(item, dict)), {})
-    memory = next((item for item in payload.get("SPMemoryDataType", []) if isinstance(item, dict)), {})
-    display = next((item for item in payload.get("SPDisplaysDataType", []) if isinstance(item, dict)), {})
-    chip = str(hardware.get("chip_type") or display.get("sppci_model") or "").strip()
-    core_fields = re.findall(r"\d+", str(hardware.get("number_processors") or ""))
-    cpu_detail = chip
-    if len(core_fields) >= 3:
-        cpu_detail = f"{chip} · {core_fields[0]} cores ({core_fields[1]} performance + {core_fields[2]} efficiency)" if chip else f"{core_fields[0]} cores ({core_fields[1]} performance + {core_fields[2]} efficiency)"
-    elif core_fields:
-        cpu_detail = f"{chip} · {core_fields[0]} cores" if chip else f"{core_fields[0]} cores"
-    memory_type = str(memory.get("dimm_type") or "").strip()
-    metadata = {"cpu_label": cpu_detail, "gpu_label": str(display.get("sppci_model") or chip).strip()}
-    if memory_type:
-        metadata["system_memory_label"] = f"{memory_type} unified memory"
-    return {key: value for key, value in metadata.items() if value}
+    return stats_current_host_collectors.macos_hardware_metadata()
 
 
 def stats_host_hardware_metadata() -> dict[str, str]:
@@ -1029,9 +1021,12 @@ PERFORMANCE_RECORD_LIMIT = 4096
 PERFORMANCE_RECENT_LIMIT = 120
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
 SERVER_CPU_BUDGET_PERCENT = 30.0
+# Below this share of the measured CPU, the profiled consumer list is not an explanation and
+# the warning must say so instead of letting the top row read as the cause.
+SERVER_CPU_BUDGET_ATTRIBUTION_MIN_PERCENT = 50.0
 SERVER_CPU_BUDGET_SUSTAINED_SECONDS = 300.0
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
-BACKGROUND_CLIENT_EVENTS_PATH = common.STATE_DIR / "background-owner" / "client-events.json"
+BACKGROUND_CLIENT_EVENTS_PATH = default_background_client_events_path()
 # The event's storage owner determines whether another server must be notified immediately.
 # Keep this table next to the transport rather than letting each write path choose between a
 # local publish and a poll-dependent refresh.
@@ -1083,23 +1078,18 @@ CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "status_spinner_advanced",
     "status_tokens",
     "metadata_badge_pulse_remaining_ms",
+    # Delivery identity, not content: it advances on every rebuild. Signing it would make the
+    # change-detection signature differ on every pass and publish an unchanged payload each time.
+    # `metadata_identity` is the same value as one object and carries the same generation, so it
+    # has to be ignored for the same reason -- signing it would reintroduce the per-pass publish.
+    "metadata_generation",
+    "metadata_identity",
     "timings",
     "title",
     "working_elapsed_seconds",
 })
-DIRECTORY_WATCH_ENTRY_LIMIT = 512
-NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS = 250
-NATIVE_FILESYSTEM_WATCH_STEP_MS = 50
-NATIVE_FILESYSTEM_WATCH_RUST_TIMEOUT_MS = 1_000
-NATIVE_FILESYSTEM_RECONCILE_SECONDS = 300.0
-NATIVE_FILESYSTEM_RETRY_SECONDS = 10.0
-# Native watching is preferred; when unavailable, only visible Finder/Differ
-# roots are polled at this bounded cadence.
-VISIBLE_FILESYSTEM_FALLBACK_POLL_SECONDS = 2.0
 CLIENT_EVENT_RECURRING_WORK_SPECS = {
-    "filesystem_reconcile": {"class": "repair", "cadence_seconds": NATIVE_FILESYSTEM_RECONCILE_SECONDS},
-    "filesystem_fallback": {"class": "fallback", "cadence_seconds": VISIBLE_FILESYSTEM_FALLBACK_POLL_SECONDS},
-    "status_generation_lease": {"class": "lease", "cadence_seconds": 30.0},
+    "status_generation_lease": {"class": "lease", "cadence_seconds": STATUS_GENERATION_RPC_WAIT_SECONDS},
     "attention_ack_fallback": {"class": "fallback", "cadence_seconds": SERVER_AUTO_APPROVE_EVENT_POLL_SECONDS},
     "tmux_signal_fallback": {"class": "fallback", "cadence_seconds": SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS},
     "watched_pr_reconcile": {"class": "external-reconcile", "cadence_seconds": 60.0},
@@ -1121,78 +1111,19 @@ SELF_RESTART_ENV_KEYS = (
     "YOLOMUX_TEST_AUTH_BYPASS",
     "VIRTUAL_ENV",
 )
-XTERM_RUNTIME_ASSETS = {
-    "xterm.js": {
-        "node_path": Path("node_modules/@xterm/xterm/lib/xterm.js"),
-        "url": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js",
-    },
-    "xterm.css": {
-        "node_path": Path("node_modules/@xterm/xterm/css/xterm.css"),
-        "url": "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css",
-    },
-    "xterm-addon-unicode11.js": {
-        "node_path": Path("node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"),
-        "url": "https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.9.0/lib/addon-unicode11.js",
-    },
-}
+XTERM_RUNTIME_ASSETS = ("xterm.js", "xterm.css", "xterm-addon-unicode11.js")
 
 
 def xterm_runtime_assets_ready(root: str | Path) -> bool:
     root_path = Path(root)
-    return all(
-        (root_path / "static" / name).is_file() or (root_path / details["node_path"]).is_file()
-        for name, details in XTERM_RUNTIME_ASSETS.items()
-    )
+    return all((root_path / "static" / "vendor" / name).is_file() for name in XTERM_RUNTIME_ASSETS)
 
 
 def ensure_xterm_runtime_assets(root: str | Path) -> tuple[bool, str]:
-    """Install the declared xterm packages when an update leaves any runtime asset absent."""
+    """Validate the tracked xterm vendor assets required by the runtime."""
     root_path = Path(root)
-    if xterm_runtime_assets_ready(root_path):
-        return True, ""
-    npm = shutil.which("npm")
-    if npm:
-        try:
-            result = subprocess.run(
-                [npm, "install", "--no-audit", "--no-fund", "--silent"],
-                cwd=root_path,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            result = None
-        if result is not None and result.returncode == 0 and xterm_runtime_assets_ready(root_path):
-            return True, ""
-    curl = shutil.which("curl")
-    if not curl:
-        return False, "curl is required to download xterm runtime assets"
-    static_dir = root_path / "static"
-    static_dir.mkdir(parents=True, exist_ok=True)
-    for name, details in XTERM_RUNTIME_ASSETS.items():
-        destination = static_dir / name
-        if destination.is_file() or (root_path / details["node_path"]).is_file():
-            continue
-        temporary = destination.with_name(f".{name}.{os.getpid()}.tmp")
-        try:
-            result = subprocess.run(
-                [curl, "--fail", "--location", "--silent", "--show-error", "--connect-timeout", "10", "--retry", "2", "--output", str(temporary), details["url"]],
-                cwd=root_path,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-            if result.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
-                detail = cmd_error(result, "download failed")
-                temporary.unlink(missing_ok=True)
-                return False, f"xterm asset download failed: {detail[:400]}"
-            temporary.replace(destination)
-        except (OSError, subprocess.SubprocessError) as exc:
-            temporary.unlink(missing_ok=True)
-            return False, f"xterm asset download failed: {exc}"
-    return (True, "") if xterm_runtime_assets_ready(root_path) else (False, "xterm assets are still missing")
+    missing = [f"static/vendor/{name}" for name in XTERM_RUNTIME_ASSETS if not (root_path / "static" / "vendor" / name).is_file()]
+    return (False, f"tracked xterm vendor assets are missing: {', '.join(missing)}") if missing else (True, "")
 
 
 @dataclass(frozen=True)
@@ -1225,6 +1156,57 @@ class InputHeartbeatRecord:
 class BackgroundRefreshEventLogRecord:
     count: int = 0
     last_emit_count: int = 0
+
+
+@dataclass(frozen=True)
+class JobdProductOperation:
+    job_id: str
+    product_key: str
+    generation: int
+
+
+@dataclass(frozen=True)
+class FilesystemOperationHttpResponse:
+    """Either a persisted cold receipt or one ready product for the HTTP writer."""
+
+    payload: dict[str, Any] | None
+    status: HTTPStatus
+    body: bytes = b""
+    product: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class FilesystemWatchBatchProduct:
+    producer: JobdProductOperation
+    ready_product: dict[str, Any] | None = None
+
+
+@dataclass
+class FilesystemWatchReceiptFence:
+    """Join a warm jobd product to the receipt persisted in parallel."""
+
+    receipt_ready: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    operation_id: str = ""
+
+    def accept(self, operation_id: str) -> None:
+        self.operation_id = str(operation_id)
+        self.receipt_ready.set()
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        self.receipt_ready.set()
+
+    def wait_for_operation_id(self) -> str:
+        self.receipt_ready.wait()
+        return "" if self.cancelled.is_set() else self.operation_id
+
+
+@dataclass(frozen=True)
+class TranscriptProductOperation(JobdProductOperation):
+    cache_key: tuple[Any, ...]
+    expected_generation: tuple[int, int]
+    expected_identity: tuple[int, int]
 
 
 @dataclass
@@ -1275,8 +1257,10 @@ class SharedWatchRootIndex:
         ttl_seconds: float = CLIENT_WATCH_ROOT_TTL_SECONDS,
         limit: int = CLIENT_WATCH_ROOT_LIMIT,
         clock: Callable[[], float] | None = None,
+        host_identity: Any | None = None,
     ) -> None:
-        self.path = Path(path)
+        self.host_identity = host_identity
+        self.path = host_namespaced_path(path, self.host_identity)
         self.owner_id = str(owner_id)
         self.ttl_seconds = max(1.0, float(ttl_seconds))
         self.limit = max(1, int(limit))
@@ -1307,7 +1291,20 @@ class SharedWatchRootIndex:
         return {"version": 1, "owners": {}}
 
     def _empty_owner_payload(self) -> dict[str, Any]:
-        return {"version": 2, "owner_id": self.owner_id, "entries": {}, "updated_at": self._clock()}
+        return {
+            "version": 2,
+            "owner_id": self.owner_id,
+            **(
+                {
+                    "stable_host_id": self.host_identity.stable_host_id,
+                    "hostname": self.host_identity.display_hostname,
+                }
+                if self.host_identity
+                else {}
+            ),
+            "entries": {},
+            "updated_at": self._clock(),
+        }
 
     def _read_payload(self) -> dict[str, Any]:
         raw = read_json_file(self.path, None, exceptions=(OSError, ValueError, TypeError))
@@ -1356,6 +1353,14 @@ class SharedWatchRootIndex:
         return {
             "version": 2,
             "owner_id": str(raw.get("owner_id") or self.owner_id),
+            **(
+                {
+                    "stable_host_id": self.host_identity.stable_host_id,
+                    "hostname": self.host_identity.display_hostname,
+                }
+                if self.host_identity
+                else {}
+            ),
             "entries": entries,
             "updated_at": self._clock(),
         }
@@ -1397,6 +1402,14 @@ class SharedWatchRootIndex:
         owner_payload = {
             "version": 2,
             "owner_id": self.owner_id,
+            **(
+                {
+                    "stable_host_id": self.host_identity.stable_host_id,
+                    "hostname": self.host_identity.display_hostname,
+                }
+                if self.host_identity
+                else {}
+            ),
             "entries": payload.get("entries") if isinstance(payload.get("entries"), dict) else {},
             "updated_at": self._clock(),
         }
@@ -1567,38 +1580,122 @@ def transcript_cache_identity(transcript: str | None) -> tuple[str, int, int]:
     return (resolved, int(stat.st_dev), int(stat.st_ino))
 
 
-def filesystem_watch_signature(path: str | Path) -> tuple[Any, ...]:
-    target = Path(path).expanduser()
-    try:
-        stat = target.lstat()
-    except OSError:
-        return (str(target), "missing")
-    if not target.is_dir():
-        return (str(target), "file", int(stat.st_mtime_ns), int(stat.st_size))
-    entries: list[tuple[str, str, int, int]] = []
-    try:
-        children = sorted(target.iterdir(), key=lambda item: item.name)[:DIRECTORY_WATCH_ENTRY_LIMIT]
-    except OSError:
-        children = []
-    for child in children:
-        try:
-            child_stat = child.lstat()
-        except OSError:
-            entries.append((child.name, "missing", 0, 0))
+def immutable_watch_signature(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        return tuple(immutable_watch_signature(item) for item in value)
+    return value
+
+
+def filesystem_paths_intersect(left: Path, right: Path) -> bool:
+    return (
+        left == right
+        or filesystem._path_is_within(left, right)
+        or filesystem._path_is_within(right, left)
+    )
+
+
+def filesystem_watch_product_signature(
+    roots: list[str],
+    products: list[dict[str, Any]],
+) -> tuple[Any, ...]:
+    responses = watch_diff_responses_by_index(products)
+    signature = []
+    for index, root in enumerate(roots):
+        response = responses.get(index, {})
+        raw_signature = response.get("watch_signature")
+        item_signature = immutable_watch_signature(raw_signature)
+        if (
+            response.get("ok") is True
+            and isinstance(item_signature, tuple)
+            and item_signature
+            and str(item_signature[0]) == root
+        ):
+            signature.append((root, item_signature))
             continue
-        kind = "dir" if child.is_dir() else "file"
-        entries.append((child.name, kind, int(child_stat.st_mtime_ns), int(child_stat.st_size)))
-    return (str(target), "dir", int(stat.st_mtime_ns), int(stat.st_size), tuple(entries))
+        signature.append((root, (root, "error", int(response.get("status") or HTTPStatus.SERVICE_UNAVAILABLE))))
+    return tuple(signature)
 
 
-def file_watch_signature(path: str | Path) -> tuple[Any, ...]:
-    target = Path(path).expanduser()
-    try:
-        stat = target.lstat()
-    except OSError:
-        return (str(target), "missing")
-    kind = "dir" if target.is_dir() else "file"
-    return (str(target), kind, int(stat.st_mtime_ns), int(stat.st_size))
+def filesystem_batch_submission(
+    payload: dict[str, Any],
+    *,
+    key_prefix: str,
+    identity_seed: str = "",
+) -> tuple[dict[str, Any], str, list[Any]]:
+    requests = filesystem.validated_batch_requests(payload)
+    request_ids: list[Any] = []
+    canonical_requests: list[Any] = []
+    for index, request in enumerate(requests):
+        request_ids.append(request.get("id", index) if isinstance(request, dict) else index)
+        if not isinstance(request, dict):
+            canonical_requests.append(copy.deepcopy(request))
+            continue
+        canonical_request = copy.deepcopy(request)
+        canonical_request["id"] = index
+        canonical_requests.append(canonical_request)
+    canonical_payload = {**copy.deepcopy(payload), "requests": canonical_requests}
+    identity = hashlib.sha256(json.dumps(
+        {"identity_seed": identity_seed, "payload": canonical_payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:24]
+    return canonical_payload, f"{key_prefix}:{identity}", request_ids
+
+
+FILESYSTEM_RETAINED_READ_OPERATIONS = frozenset({
+    "list", "read", "info", "search", "index_status", "count", "diff", "blame",
+})
+
+
+def filesystem_operation_submission(
+    operation: str,
+    path: str,
+    args: dict[str, Any],
+    *,
+    scope: str,
+    generation: str,
+) -> tuple[dict[str, Any], str]:
+    """Return one normalized, access-scoped retained filesystem-read descriptor."""
+    canonical_payload = {
+        "op": str(operation),
+        "path": os.path.normpath(os.path.expanduser(str(path))),
+        "args": copy.deepcopy(args),
+    }
+    identity = hashlib.sha256(json.dumps(
+        {
+            "scope": str(scope),
+            "generation": str(generation),
+            "payload": canonical_payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:24]
+    return canonical_payload, f"filesystem-operation:{identity}"
+
+
+def filesystem_watch_batch_submission(
+    roots: list[str],
+    identity_seed: str,
+) -> tuple[dict[str, Any], str]:
+    requests = [
+        {
+            "id": index,
+            "type": "list",
+            "path": root,
+            "trigger_counts": {"watch-diff": 1},
+            "include_watch_signature": True,
+        }
+        for index, root in enumerate(roots)
+    ]
+    payload = {"requests": requests, "client_scope": "browser"}
+    canonical_payload, product_key, _request_ids = filesystem_batch_submission(
+        payload,
+        key_prefix="fs-watch",
+        identity_seed=identity_seed,
+    )
+    return canonical_payload, product_key
 
 
 def filesystem_signature_entry_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[str, int, int]]:
@@ -1893,22 +1990,27 @@ del _yoagent_app_field, _yoagent_global_callable
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False, *, status_service_mode: bool = False):
         self.sessions = sessions
+        self.session_reservation_lock = threading.Lock()
+        self.session_reservation_generation = 0
         self.dangerously_yolo = dangerously_yolo
         self.status_service_mode = status_service_mode
+        self.host_identity = current_host_identity()
+        self.state_dir = common.STATE_DIR
+        self.tmux_ai_status_path = self.host_identity.namespaced_path(self.state_dir, "tmux-AI-status.json")
         self.share_tokens: dict[str, dict[str, Any]] = {}
         self.share_tokens_lock = threading.RLock()
         self.metadata_cache = MetadataCache()
-        self.chat_store = ChatStore(common.STATE_DIR / "yochat.sqlite3")
+        self.chat_store = ChatStore(default_chat_database_path())
         self.chat_service = ChatService(
             self.chat_store,
-            cursor_secret_path=common.STATE_DIR / "chat-cursor.key",
+            cursor_secret_path=default_chat_cursor_secret_path(),
             retention_days=self.chat_retention_days,
         )
         # Shared login throttle: one WAL SQLite file under the state dir enforces the
         # policy across every port pointing here. Admission runs before PBKDF2 in the
         # auth mixin; policy overrides are validated at load and fall back to defaults.
         self.login_rate_limiter = LoginRateLimiter(
-            common.STATE_DIR / LOGIN_THROTTLE_DATABASE_NAME,
+            default_login_throttle_database_path(common.STATE_DIR),
             policy=load_login_rate_policy(common.CONFIG_DIR / LOGIN_THROTTLE_OVERRIDE_NAME),
         )
         # Optional, OFF-BY-DEFAULT attack-response escalation (defense in depth, not the
@@ -1917,7 +2019,11 @@ class TmuxWebtermApp:
         self.login_edge_controller = EdgeBlockController(runner=default_edge_runner, enabled=False)
         # DOIT.58 Phase 1: per-session/window user+agent activity ledger (heartbeat-coalesced
         # typed-time). Constructor defaults today; Preferences exposure is a deferred follow-up.
-        self.activity_ledger = ActivityLedger(ACTIVITY_PATH, heartbeat_path=ACTIVITY_HEARTBEATS_PATH)
+        self.activity_ledger = ActivityLedger(
+            ACTIVITY_PATH,
+            heartbeat_path=ACTIVITY_HEARTBEATS_PATH,
+            host_identity=self.host_identity,
+        )
         self.activity_ledger.load()
         self.activity_heartbeat_next_rotate_at = 0.0
         self.input_heartbeat_record = InputHeartbeatRecord()
@@ -1940,19 +2046,27 @@ class TmuxWebtermApp:
         self.stats_collection_state = StatsCollectionState()
         self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
         self.job_client = JobClient()
+        self.jobd_operation_service = JobdOperationService()
         self.upload_retention_sweeper = UploadRetentionSweeper()
         self.approval_client = ApprovalClient()
         self.status_client = StatusClient()
+        self.watch_client = WatchClient()
+        self.watchd_operation_products_lock = threading.RLock()
+        self.watchd_operation_products: collections.OrderedDict[str, tuple[dict[str, Any], bytes]] = collections.OrderedDict()
         self.attention_ack_lock = threading.RLock()
         self.attention_ack_keys: dict[str, float] = {}
         self.agent_window_transition_lock = threading.RLock()
         self.agent_window_transition_state: dict[str, dict[str, float | str]] = {}
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
+        self.queued_delivery_ledger = QueuedDeliveryLedger(
+            state_path=SESSION_FILES_OPERATION_STATE_PATH,
+        )
         self.background_refresh_event_log_lock = threading.Lock()
         self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
         self.replayed_background_client_event_ids: set[str] = set()
         self.client_events = ClientEventBroker()
+        self.abandon_recovered_operations()
         # Catalog startup is offline-only; the coordinator performs provider
         # fetches exclusively in its explicit background Refresh worker.
         self.pricing_catalog = PricingCatalog()
@@ -1966,7 +2080,11 @@ class TmuxWebtermApp:
             ),
         )
         self.watch_root_owner_id = f"{SERVER_HOSTNAME}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
-        self.watch_root_index = SharedWatchRootIndex(WATCH_INDEX_PATH, owner_id=self.watch_root_owner_id)
+        self.watch_root_index = SharedWatchRootIndex(
+            WATCH_INDEX_PATH,
+            owner_id=self.watch_root_owner_id,
+            host_identity=self.host_identity,
+        )
         self.tmux_theme_color = ""
         self.yoagent_cli_lock = threading.RLock()
         self.yoagent_cli_sessions: dict[str, dict[str, Any]] = yoagent_conversation.load_cli_sessions(monotonic_now=time.monotonic())
@@ -2015,15 +2133,14 @@ class TmuxWebtermApp:
         self.stats_current_runtime = StatsCurrentRuntime(
             self.stats_current_client,
             {
-                "cpu": self.collect_current_stats_cpu,
                 "agent_status": self.collect_current_stats_agent_status,
-                "gpu": self.collect_current_stats_gpu,
                 "service_load": self.collect_current_stats_service_load,
                 "system_memory": self.collect_current_stats_system_memory,
                 "agent_tokens": self.collect_current_stats_agent_tokens,
             },
             owner_generation=self.stats_current_owner_generation,
             token_cadence_seconds=self.stats_current_token_cadence_seconds,
+            collector_context=self.stats_current_collector_context,
             family_cadence_seconds=self.stats_current_family_cadence_seconds,
         )
         # A persistent child owns all Quick Open builds and SQLite writes.
@@ -2053,33 +2170,35 @@ class TmuxWebtermApp:
         label = f"yolomux.py :{port}" if port else f"yolomux.py PID {pid}"
         return key, label, port
 
+    def stats_current_collector_context(self) -> dict[str, int]:
+        """Expose only the elected web identity; statsd reads mutable inputs itself."""
+
+        _source_id, _label, port = self.stats_current_process_identity()
+        generation = self.stats_current_owner_generation()
+        if generation is None:
+            raise RuntimeError("stats collector owner is unavailable")
+        return {
+            "pid": os.getpid(),
+            "port": port,
+            "owner_generation": generation,
+        }
+
     def tmux_ai_status_empty(self) -> dict[str, Any]:
         return {
             "version": TMUX_AI_STATUS_VERSION,
             "rev": 0,
             "updated_at": 0.0,
+            "stable_host_id": self.host_identity.stable_host_id,
+            "hostname": self.host_identity.display_hostname,
             "attention_acks": {"rev": 0, "updated_at": 0.0, "keys": {}},
             "attention_instances": {"updated_at": 0.0, "instances": {}},
         }
 
     def _read_shared_tmux_ai_status_locked(self) -> dict[str, Any]:
         status = self.tmux_ai_status_empty()
-        data = read_json_file(common.TMUX_AI_STATUS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError, ValueError))
+        data = read_json_file(self.tmux_ai_status_path, {}, exceptions=(OSError, json.JSONDecodeError, TypeError, ValueError))
         if not isinstance(data, dict):
             data = {}
-        legacy = read_json_file(common.LEGACY_ATTENTION_ACKS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError, ValueError))
-        if not isinstance(legacy, dict):
-            legacy = {}
-        if not data and legacy:
-            data = {
-                "version": TMUX_AI_STATUS_VERSION,
-                "rev": legacy.get("rev", 0),
-                "attention_acks": {
-                    "rev": legacy.get("rev", 0),
-                    "updated_at": legacy.get("updated_at", 0.0),
-                    "keys": legacy.get("keys", {}),
-                },
-            }
         try:
             status["rev"] = max(0, int(data.get("rev", 0)))
         except (TypeError, ValueError):
@@ -2091,26 +2210,6 @@ class TmuxWebtermApp:
         attention = data.get("attention_acks") if isinstance(data.get("attention_acks"), dict) else {}
         if not attention and isinstance(data.get("keys"), dict):
             attention = {"rev": data.get("rev", 0), "updated_at": data.get("updated_at", 0.0), "keys": data.get("keys", {})}
-        legacy_keys = legacy.get("keys") if isinstance(legacy.get("keys"), dict) else {}
-        if legacy_keys:
-            attention = dict(attention) if isinstance(attention, dict) else {}
-            merged_keys = dict(attention.get("keys")) if isinstance(attention.get("keys"), dict) else {}
-            for key, ts in legacy_keys.items():
-                try:
-                    legacy_ts = float(ts)
-                except (TypeError, ValueError):
-                    continue
-                try:
-                    existing_ts = float(merged_keys.get(str(key)) or 0.0)
-                except (TypeError, ValueError):
-                    existing_ts = 0.0
-                merged_keys[str(key)] = max(existing_ts, legacy_ts)
-            attention["keys"] = merged_keys
-            try:
-                attention["rev"] = max(int(attention.get("rev") or 0), int(legacy.get("rev") or 0))
-            except (TypeError, ValueError):
-                attention["rev"] = 0
-            attention["legacy_rev"] = legacy.get("rev", 0)
         status["attention_acks"] = attention if isinstance(attention, dict) else {}
         attention_instances = data.get("attention_instances") if isinstance(data.get("attention_instances"), dict) else {}
         status["attention_instances"] = attention_instances
@@ -2126,8 +2225,11 @@ class TmuxWebtermApp:
         payload["version"] = TMUX_AI_STATUS_VERSION
         payload["rev"] = rev
         payload["updated_at"] = now
+        payload["stable_host_id"] = self.host_identity.stable_host_id
+        payload["hostname"] = self.host_identity.display_hostname
+        self.tmux_ai_status_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
-            common.TMUX_AI_STATUS_PATH,
+            self.tmux_ai_status_path,
             json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
             mode=0o600,
         )
@@ -2317,36 +2419,73 @@ class TmuxWebtermApp:
         # statusd deliberately discovers only cheap topology/status fields, so its public rows
         # cannot carry transcript paths. Token collection runs on its independent cadence and is
         # the sole consumer that needs enriched paths; keep that work out of UI status refreshes.
-        if rows and not include_missing and any(not str(row.get("transcript") or "").strip() for row in rows):
-            discovered_sessions, _errors = discover_sessions(self.sessions)
-            discovered_rows: list[dict[str, Any]] = []
-            for session, info in discovered_sessions.items():
-                for agent in info.agents:
-                    kind = str(agent.kind or "").strip().lower()
-                    transcript = str(agent.transcript or "").strip()
-                    if kind not in {"claude", "codex"} or not transcript:
-                        continue
-                    window, _pane = session_files.agent_window_for_info(info, agent)
-                    try:
-                        window_index = int(window)
-                    except ValueError:
-                        window_index = None
-                    discovered_rows.append({
-                        "session": session,
-                        "window": window,
-                        "window_index": window_index,
-                        "window_label": f"{window}:{kind}" if window else kind,
-                        "kind": kind,
-                        "transcript": transcript,
-                    })
-            if discovered_rows:
-                discovered_token_rows = self.stats_agent_token_rows(discovered_rows)
+        if rows and not include_missing:
+            unresolved_keys = sorted({
+                self.stats_agent_token_key(row, index)
+                for index, row in enumerate(rows)
+                if not str(row.get("transcript") or "").strip()
+            })
+            if unresolved_keys:
+                discovered_token_rows = self.stats_agent_token_enriched_rows("\n".join(unresolved_keys))
                 existing_keys = {str(row["key"]) for row in token_rows}
                 token_rows.extend(
                     row for row in discovered_token_rows
                     if str(row["key"]) not in existing_keys
                 )
         return token_rows
+
+    def stats_agent_token_enrich_memo(self) -> TtlCache:
+        """Negative/positive memo for the transcript enrich, keyed on the unresolved-agent roster.
+
+        Some agents can never resolve — session ``yo7770`` runs in a tree with no matching Codex
+        rollout — so ``any(not row["transcript"])`` was permanently true and forced a full
+        ``discover_sessions(enrich_paths=True)`` (measured 1.53-2.05s CPU) on every collector
+        sample, ~17.7% of a core at the 10s watched cadence, with no way to ever improve.
+
+        The memo is keyed on the exact set of transcript-less agent keys, so a newly started agent
+        changes the key and re-enriches on the very next sample. The TTL only bounds the other
+        case: an unchanged roster whose transcript appears late. It matches the idle collector
+        cadence, so at worst this costs what the idle path already paid.
+        """
+
+        memo = self.__dict__.get("stats_agent_token_enrich_memo_cache")
+        if memo is None:
+            memo = TtlCache(
+                ttl_seconds=STATS_AGENT_TOKEN_ENRICH_MEMO_TTL_SECONDS,
+                max_entries=STATS_AGENT_TOKEN_ENRICH_MEMO_MAX_ENTRIES,
+            )
+            self.__dict__["stats_agent_token_enrich_memo_cache"] = memo
+        return memo
+
+    def stats_agent_token_enriched_rows(self, unresolved_signature: str) -> list[dict[str, Any]]:
+        memo = self.stats_agent_token_enrich_memo()
+        cached = memo.get_or_miss(unresolved_signature)
+        if cached is not CACHE_MISS:
+            return cached
+        discovered_sessions, _errors = discover_sessions(self.sessions)
+        discovered_rows: list[dict[str, Any]] = []
+        for session, info in discovered_sessions.items():
+            for agent in info.agents:
+                kind = str(agent.kind or "").strip().lower()
+                transcript = str(agent.transcript or "").strip()
+                if kind not in {"claude", "codex"} or not transcript:
+                    continue
+                window, _pane = session_files.agent_window_for_info(info, agent)
+                try:
+                    window_index = int(window)
+                except ValueError:
+                    window_index = None
+                discovered_rows.append({
+                    "session": session,
+                    "window": window,
+                    "window_index": window_index,
+                    "window_label": f"{window}:{kind}" if window else kind,
+                    "kind": kind,
+                    "transcript": transcript,
+                })
+        discovered_token_rows = self.stats_agent_token_rows(discovered_rows) if discovered_rows else []
+        memo.set(unresolved_signature, discovered_token_rows)
+        return discovered_token_rows
 
     def stats_current_owner_generation(self) -> int | None:
         if not self.background_can_run(BACKGROUND_ROLE_STATS_SAMPLER):
@@ -2368,30 +2507,12 @@ class TmuxWebtermApp:
 
     def record_current_browser_observations(
         self,
-        payload: object,
+        body: bytes,
         *,
         authenticated_username: str,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        """Validate and append one bounded batch of original browser facts."""
+        """Forward one bounded browser batch to statsd without decoding it."""
 
-        try:
-            observations = stats_current_observations.parse_browser_observations(
-                payload,
-                client_binding_secret=common.AUTH_COOKIE_SECRET,
-                authenticated_username=authenticated_username,
-            )
-        except stats_current_observations.BrowserObservationUpgradeRequired:
-            return stats_current_protocol.upgrade_required_response(
-                stats_current_storage.MIN_WRITER_PROTOCOL,
-                stats_current_storage.SCHEMA_VERSION,
-                stats_current_revision.CURRENT_CODE_REVISION,
-            ), HTTPStatus.UPGRADE_REQUIRED
-        except stats_current_observations.BrowserObservationError as error:
-            return {
-                "ok": False,
-                "status": "unsupported",
-                "reason": str(error)[:256],
-            }, HTTPStatus.BAD_REQUEST
         if not self.stats_current_client.ensure_started():
             status = self.stats_current_client.status()
             if (
@@ -2404,23 +2525,25 @@ class TmuxWebtermApp:
                 "status": "unavailable",
                 "reason": "statsd unavailable",
             }, HTTPStatus.SERVICE_UNAVAILABLE
-        response = self.stats_current_client.append(observations=observations)
+        response = self.stats_current_client.append(
+            browser_upload=body,
+            authenticated_username=authenticated_username,
+        )
         if response.get("ok") is not True:
             if (
                 response.get("status") == "upgrade_required"
                 or response.get("error_code") == "upgrade_required"
             ):
                 return response, HTTPStatus.UPGRADE_REQUIRED
-            return {
-                "ok": False,
-                "status": "unavailable",
-                "reason": "statsd unavailable",
-            }, HTTPStatus.SERVICE_UNAVAILABLE
+            if response.get("status") == "unsupported":
+                return response, HTTPStatus.BAD_REQUEST
+            return {"ok": False, "status": "unavailable", "reason": "statsd unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE
         return {
             "ok": True,
             "source_generation": response.get("source_generation", 0),
             "accepted": response.get("accepted", 0),
             "duplicates": response.get("duplicates", 0),
+            "observation_receipts": response.get("observation_receipts", []),
         }, HTTPStatus.OK
 
     def collect_current_stats_cpu(
@@ -2579,11 +2702,15 @@ class TmuxWebtermApp:
     ) -> stats_current_collectors.CollectorFacts:
         rows = self.stats_agent_window_rows()
         if self.sessions and not rows:
-            raise RuntimeError("agent roster unavailable")
+            # statusd owns this roster. During a refresh it can be briefly
+            # unavailable; emitting no facts preserves that unknown interval
+            # without treating it as measured zero token usage.
+            return stats_current_collectors.CollectorFacts()
         atoms = []
         tombstones = []
         scan = self.stats_current_transcript_usage.scan(self.stats_agent_token_rows(rows))
         current_settings = self.settings_payload().get("settings", {})
+        rejection_reasons: dict[str, int] = {}
         for item in scan.items:
             fields = dict(vars(item.atom))
             fields["tmux_key"] = item.tmux_key
@@ -2598,8 +2725,18 @@ class TmuxWebtermApp:
                 )
             try:
                 atoms.append(stats_current_usage.usage_atom_from_source(fields))
-            except stats_current_usage.UsageValidationError:
+            except stats_current_usage.UsageValidationError as error:
+                reason = str(error)[:160] or "usage_validation_error"
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 continue
+        if "stats_current_client" in self.__dict__ and isinstance(self.stats_current_client, StatsCurrentClient):
+            self.stats_current_client.set_usage_atom_backfill_status(
+                self.stats_current_transcript_usage.usage_atom_backfill_status_for_scan(
+                    scan,
+                    atoms_accepted=len(atoms),
+                    rejection_reasons=rejection_reasons,
+                )
+            )
         for item in scan.tombstones:
             tombstones.append(
                 stats_current_usage.legacy_fork_usage_tombstone_from_source(
@@ -2638,52 +2775,20 @@ class TmuxWebtermApp:
         }
 
     def current_stats_sample(self, *, force: bool = False) -> tuple[dict[str, Any], bool]:
-        now = time.time()
-        monotonic_now = time.monotonic()
-        with self.stats_collection_state.sample_lock:
-            record = self.stats_collection_state.sample_record
-            cached = record.cached_payload
-            cached_monotonic = record.cached_monotonic
-            use_cached = (
-                not force
-                and cached is not None
-                and cached_monotonic is not None
-                and monotonic_now - cached_monotonic < STATS_SAMPLE_CACHE_SECONDS
-            )
-            if use_cached:
-                sample = dict(cached)
-                record_cpu_sample = False
-            else:
-                process_time = time.process_time()
-                cpu_percent = 0.0
-                if record.last_monotonic is not None and record.last_process_time is not None:
-                    elapsed = monotonic_now - record.last_monotonic
-                    cpu_elapsed = process_time - record.last_process_time
-                    if elapsed > 0 and cpu_elapsed >= 0:
-                        cpu_percent = clamp_cpu_percent((cpu_elapsed / elapsed) * 100.0)
-                system_cpu_times = current_system_cpu_times()
-                if system_cpu_times is not None:
-                    system_cpu_percent = system_cpu_percent_from_times(record.last_system_cpu_times, system_cpu_times)
-                    record.last_system_cpu_times = system_cpu_times
-                else:
-                    system_cpu_percent = current_system_cpu_percent_from_ps() or 0.0
-                record.last_monotonic = monotonic_now
-                record.last_process_time = process_time
-                sample = {
-                    "time": now,
-                    "pid": os.getpid(),
-                    "started_at": SERVER_STARTED_AT,
-                    "uptime_seconds": max(0.0, now - SERVER_STARTED_AT),
-                    "cpu_percent": round(cpu_percent, 3),
-                    "system_cpu_percent": round(system_cpu_percent, 3),
-                    "rss_bytes": current_process_rss_bytes(),
-                }
-                record.cached_monotonic = monotonic_now
-                record.cached_payload = dict(sample)
-                record_cpu_sample = True
-        return sample, record_cpu_sample
+        """Compatibility reader: statsd pushes the sole sample into this cache."""
 
-    def start_background_owner(self, port: int | None = None, priority: int = 0) -> bool:
+        return self.latest_stats_sample(), False
+
+    def start_background_owner(self, port: int | None = None, priority: int = 0, *, managed_instance: bool = False) -> bool:
+        if managed_instance:
+            # The launcher allocated this root from the port before importing the
+            # product, so all background work is private to this process.  Keep
+            # the owner API intact for callers while bypassing same-root election.
+            self.background_owner = DisabledBackgroundOwner(port=port, project_root=str(PROJECT_ROOT))
+            file_index.set_background_owner_checker(self.search_index_can_build)
+            self.background_owner.start()
+            self.handle_background_owner_acquired({"last_transition": "local", "generation": self.background_owner.owner_payload()})
+            return True
         self.background_owner = BackgroundOwnerRegistry(
             control_socket=str(self.control_server.path),
             port=port,
@@ -2764,6 +2869,15 @@ class TmuxWebtermApp:
         """Return bounded profiling summaries without making status polling expensive."""
 
         metrics = self.performance_metrics_payload()
+        browser_diagnostics_response = self.stats_current_client.browser_diagnostics()
+        browser_profiles = {
+            key: value for key, value in browser_diagnostics_response.get("profiles", {}).items()
+            if key != "ok"
+        }
+        browser_observation_status = {
+            key: value for key, value in browser_diagnostics_response.get("observation_status", {}).items()
+            if key != "ok"
+        }
         phase_rows = [
             dict(row)
             for row in metrics.get("summary", [])
@@ -2790,9 +2904,342 @@ class TmuxWebtermApp:
         repeated_work.sort(key=lambda row: (-int(row["avoided_recomputes"]), row["role"], row["surface"]))
         return {
             "perf": metrics,
+            "transport": local_services_registry.transport_diagnostics(),
             "shared_phase_counters": phase_rows[:64],
             "repeated_work": repeated_work[:64],
+            "browser_profiles": browser_profiles,
+            "browser_observation_status": browser_observation_status,
+            **self.queued_delivery_ledger.diagnostics(),
         }
+
+    def observe_http_delivery(self, payload: object, status: HTTPStatus | int) -> None:
+        """Record one structured HTTP promise or terminal at the response boundary."""
+
+        self.queued_delivery_ledger.observe_http_response(payload, status)
+
+    def observe_http_product_delivery(self, key: str, epoch: int) -> None:
+        """Register one explicit ready-byte terminal before the response is framed."""
+
+        self.queued_delivery_ledger.observe_ready_product(key, epoch)
+
+    @staticmethod
+    def new_api_request_id() -> str:
+        return f"r-{uuid.uuid4().hex}"
+
+    @staticmethod
+    def operation_ready_result(
+        request_id: str,
+        data: dict[str, Any],
+        *,
+        quality: dict[str, Any] | None = None,
+        warnings: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "state": "ready",
+            "request": {"id": str(request_id)},
+            "data": copy.deepcopy(data),
+            "quality": copy.deepcopy(quality or {"complete": True, "stale": False}),
+            "warnings": copy.deepcopy(warnings or []),
+        }
+
+    @staticmethod
+    def operation_failed_result(request_id: str, failure: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "state": "failed",
+            "request": {"id": str(request_id)},
+            **copy.deepcopy(failure),
+        }
+
+    @staticmethod
+    def typed_filesystem_operation_failure(failure: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus] | None:
+        job = failure.get("job") if isinstance(failure.get("job"), dict) else failure
+        details = job.get("failure") if isinstance(job.get("failure"), dict) else job
+        filesystem_error = details.get("filesystem_error") if isinstance(details.get("filesystem_error"), dict) else None
+        if filesystem_error is None:
+            return None
+        try:
+            status = HTTPStatus(int(details.get("status") or filesystem_error.get("status") or HTTPStatus.BAD_REQUEST))
+        except (TypeError, ValueError):
+            status = HTTPStatus.BAD_REQUEST
+        terminal_error = copy.deepcopy(filesystem_error)
+        terminal_error["terminal"] = True
+        return terminal_error, status
+
+    @staticmethod
+    def typed_filesystem_operation_failed_result(
+        request_id: str,
+        filesystem_error: dict[str, Any],
+        status: HTTPStatus,
+        *,
+        route: str,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """Frame a worker-owned filesystem failure for terminal HTTP replay."""
+
+        descriptor = filesystem_error.get("user_message")
+        if not isinstance(descriptor, dict):
+            descriptor = {}
+        status_codes = {
+            HTTPStatus.NOT_FOUND: "path_not_found",
+            HTTPStatus.CONFLICT: "conflict",
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "request_too_large",
+            HTTPStatus.UNSUPPORTED_MEDIA_TYPE: "unsupported_media_type",
+        }
+        code = status_codes.get(status, "invalid_request" if status < 500 else "dependency_failed")
+        diagnostic = str(filesystem_error.get("error") or "")
+        return common.error_payload(
+            descriptor.get("fallback") or diagnostic or "filesystem operation failed",
+            message_key=str(descriptor.get("key") or "common.requestFailed"),
+            message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
+            canonical=True,
+            code=code,
+            origin="local_services.jobd",
+            retryable=False,
+            details={
+                "status": int(status),
+                "path": str(filesystem_error.get("path") or ""),
+                "operation_id": operation_id,
+                "diagnostic": diagnostic,
+            },
+            stack=[
+                {
+                    "component": "server.http",
+                    "operation": route,
+                    "code": "dependency_failed",
+                },
+                {
+                    "component": "local_services.jobd",
+                    "operation": "jobd.result",
+                    "code": code,
+                },
+            ],
+            request_id=request_id,
+        )
+
+    @classmethod
+    def session_files_ready_result(
+        cls,
+        request_id: str,
+        payload: SessionFilesPayload,
+    ) -> dict[str, Any]:
+        data = copy.deepcopy(payload)
+        cache = data.get("cache") if isinstance(data.get("cache"), dict) else {}
+        warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+        return cls.operation_ready_result(
+            request_id,
+            data,
+            quality={
+                "complete": not bool(data.get("partial")),
+                "stale": bool(cache.get("stale")),
+            },
+            warnings=warnings,
+        )
+
+    @staticmethod
+    def local_service_operation_failure_result(
+        request_id: str,
+        failure: dict[str, Any],
+        *,
+        service: str,
+        route: str,
+        operation_id: str = "",
+        operation: str = "request",
+        code: str = "service_unavailable",
+    ) -> dict[str, Any]:
+        service_name = str(service).strip()
+        message = str(failure.get("error") or failure.get("reason") or f"{service_name} product producer unavailable")
+        cause = failure.get("cause")
+        if not isinstance(cause, dict):
+            cause = failure.get("failure") if isinstance(failure.get("failure"), dict) else {}
+        root = {
+            "component": f"local_services.{service_name}",
+            "operation": str(operation),
+            "code": str(code),
+        }
+        exception = cause.get("exception") if isinstance(cause, dict) else None
+        frames = cause.get("frames") if isinstance(cause, dict) else None
+        if isinstance(exception, dict):
+            root["exception"] = copy.deepcopy(exception)
+        if isinstance(frames, list):
+            root["frames"] = copy.deepcopy(frames)
+        return common.error_payload(
+            message,
+            message_key="common.requestFailed",
+            canonical=True,
+            code=code,
+            origin=f"local_services.{service_name}",
+            retryable=False,
+            details={
+                "service": service_name,
+                "operation_id": str(operation_id),
+                "reason": str(failure.get("_transport_error") or failure.get("status") or code),
+            },
+            stack=[
+                {
+                    "component": "server.http",
+                    "operation": str(route),
+                    "code": "dependency_failed",
+                },
+                root,
+            ],
+            request_id=request_id,
+        )
+
+    @classmethod
+    def jobd_operation_failure_result(
+        cls,
+        request_id: str,
+        failure: dict[str, Any],
+        *,
+        route: str,
+        operation_id: str = "",
+        operation: str = "jobd.request",
+        code: str = "service_unavailable",
+    ) -> dict[str, Any]:
+        return cls.local_service_operation_failure_result(
+            request_id,
+            failure,
+            service="jobd",
+            route=route,
+            operation_id=operation_id,
+            operation=operation,
+            code=code,
+        )
+
+    @classmethod
+    def session_files_failure_result(
+        cls,
+        request_id: str,
+        failure: dict[str, Any],
+        *,
+        operation_id: str = "",
+        operation: str = "jobd.request",
+        code: str = "service_unavailable",
+    ) -> dict[str, Any]:
+        return cls.jobd_operation_failure_result(
+            request_id,
+            failure,
+            route="GET /api/session-files",
+            operation_id=operation_id,
+            operation=operation,
+            code=code,
+        )
+
+    def record_operation_failure(self, operation_id: str, result: dict[str, Any]) -> None:
+        error = result.get("error") if isinstance(result.get("error"), dict) else {}
+        details = error.get("details") if isinstance(error.get("details"), dict) else {}
+        service = str(details.get("service") or "jobd")
+        emit_server_log(
+            "error",
+            f"{service}-operation",
+            json.dumps({
+                "request": result.get("request"),
+                "operation": {"id": str(operation_id)},
+                "code": error.get("code"),
+                "origin": error.get("origin"),
+                "stack": error.get("stack"),
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            category="operation",
+            dedupe_key=f"{service}-operation:{operation_id}",
+            dedupe_seconds=5.0,
+        )
+
+    def terminalize_operation(
+        self,
+        operation_id: str,
+        result: dict[str, Any],
+        status: HTTPStatus | int,
+    ) -> dict[str, Any] | None:
+        event = self.queued_delivery_ledger.terminalize_operation(operation_id, result, status)
+        if event is None:
+            return None
+        if str(result.get("state") or "") == "failed":
+            self.record_operation_failure(operation_id, result)
+        self.publish_client_event(
+            "operation_terminal",
+            event,
+            trigger="operation-terminal",
+            cache="ready",
+        )
+        return event
+
+    def abandon_recovered_operations(self) -> None:
+        for record in self.queued_delivery_ledger.open_operations():
+            operation_id = str(record.get("id") or "")
+            request_id = str(record.get("request_id") or self.new_api_request_id())
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {
+                    "error": "accepted producer was abandoned when the server instance stopped",
+                    "status": "producer_abandoned",
+                },
+                route=str(record.get("route") or "GET /api/operations/{id}"),
+                operation_id=operation_id,
+                operation="jobd.result",
+                code="producer_abandoned",
+            )
+            self.queued_delivery_ledger.terminalize_operation(
+                operation_id,
+                result,
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+
+    def operation_status_payload(self, operation_id: str) -> tuple[dict[str, Any], HTTPStatus]:
+        status = self.queued_delivery_ledger.operation_status(operation_id)
+        if status is not None:
+            return status
+        request_id = self.new_api_request_id()
+        return common.error_payload(
+            "operation not found",
+            message_key="common.notFound",
+            canonical=True,
+            code="operation_not_found",
+            origin="server.http",
+            retryable=False,
+            details={"operation_id": str(operation_id)},
+            stack=[{
+                "component": "server.http",
+                "operation": "GET /api/operations/{id}",
+                "code": "operation_not_found",
+            }],
+            request_id=request_id,
+        ), HTTPStatus.NOT_FOUND
+
+    def operation_replay_payload(self, operation_id: str) -> dict[str, Any] | None:
+        return self.queued_delivery_ledger.operation_replay_event(operation_id)
+
+    def acknowledge_operation_delivery(self, operation_id: str, cursor: dict[str, Any]) -> bool:
+        return self.queued_delivery_ledger.acknowledge_operation_delivery(operation_id, cursor)
+
+    def acknowledge_operation_deliveries(self, acknowledgments: list[dict[str, Any]]) -> tuple[dict[str, Any], HTTPStatus]:
+        acknowledged = self.queued_delivery_ledger.acknowledge_operation_deliveries(acknowledgments)
+        acknowledged_set = set(acknowledged)
+        return {
+            "ok": True,
+            "acknowledged": acknowledged,
+            "ignored": [item["id"] for item in acknowledgments if item["id"] not in acknowledged_set],
+        }, HTTPStatus.OK
+
+    def operation_access_allowed(self, operation_id: str, sessions: list[str]) -> bool:
+        context = self.queued_delivery_ledger.operation_context(operation_id)
+        if context is None:
+            return False
+        operation_session = str(context.get("session") or "")
+        return bool(operation_session and operation_session in {str(session) for session in sessions})
+
+    def wait_for_jobd_operations_terminal(self, timeout: float) -> None:
+        """Keep the completion owner live until every accepted operation is terminal."""
+
+        settled = self.jobd_operation_service.wait_for_idle(timeout)
+        open_operations = self.queued_delivery_ledger.open_operations()
+        if not settled or open_operations:
+            raise AssertionError({
+                "accepted_operations_settled": settled,
+                "open_operations": open_operations,
+            })
+
+    def stop_jobd_operation_service(self) -> None:
+        self.jobd_operation_service.stop()
 
     def background_owner_claim_payload(self) -> tuple[dict[str, Any], HTTPStatus]:
         was_owner = self.background_owner.is_owner()
@@ -2814,6 +3261,7 @@ class TmuxWebtermApp:
     def demote_background_owner(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
         self.stats_current_runtime.stop()
+        self.job_client.stop_for_scheduler()
         with self.metadata_warm_lock:
             self.metadata_warm_record.stop_event.set()
         with self.activity_transcript_service.tabber_cache_lock:
@@ -3670,20 +4118,7 @@ class TmuxWebtermApp:
         return self.share_payload_for_record(clean_token, record, base_url) | {"shares": []}, HTTPStatus.OK
 
     def redact_share_debug_profile_value(self, value: Any, key: str = "", depth: int = 0) -> Any:
-        if depth > 12:
-            return "[truncated-depth]"
-        if SHARE_DEBUG_PROFILE_KEY_RE.search(str(key or "")):
-            return "[redacted-share-token]"
-        if isinstance(value, dict):
-            return {str(name)[:120]: self.redact_share_debug_profile_value(item, str(name), depth + 1) for name, item in value.items()}
-        if isinstance(value, list):
-            return [self.redact_share_debug_profile_value(item, key, depth + 1) for item in value[:256]]
-        if isinstance(value, str):
-            text = SHARE_DEBUG_PROFILE_URL_RE.sub("[redacted-share-url]", value)
-            text = re.sub(r"([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s\"']+", r"\1[redacted-share-token]", text, flags=re.I)
-            text = re.sub(r"\b((?:token|shareToken|share_token)=)[^&#\s\"']+", r"\1[redacted-share-token]", text, flags=re.I)
-            return text[:4000] + ("[truncated]" if len(text) > 4000 else "")
-        return value
+        return redact_diagnostic_value(value, key=key, depth=depth)
 
     def append_share_debug_profile_event(self, event: dict[str, Any]) -> tuple[bool, str]:
         short_id = str(event.get("share_id") or "unknown")
@@ -4251,6 +4686,79 @@ class TmuxWebtermApp:
     def stable_client_event_payload_signature(self, payload: Any) -> str:
         return self.client_event_payload_signature(self.stable_client_event_signature_payload(payload))
 
+    def keyed_client_event_patch(
+        self,
+        previous: dict[str, Any] | None,
+        current: dict[str, Any],
+        *,
+        collection: str,
+        record_key: Callable[[dict[str, Any]], str] | None = None,
+        ignored_fields: frozenset[str] = frozenset(),
+        always_fields: frozenset[str] = frozenset(),
+    ) -> dict[str, Any] | None:
+        """Return one shared changed-record patch, or ``None`` for no meaningful change."""
+
+        if not isinstance(previous, dict):
+            return {"data": current}
+
+        def indexed_records(payload: dict[str, Any]) -> dict[str, Any] | None:
+            records = payload.get(collection)
+            if isinstance(records, dict):
+                return {str(key): value for key, value in records.items()}
+            if not isinstance(records, list) or record_key is None:
+                return None
+            indexed: dict[str, Any] = {}
+            for record in records:
+                if not isinstance(record, dict):
+                    return None
+                key = str(record_key(record) or "")
+                if not key or key in indexed:
+                    return None
+                indexed[key] = record
+            return indexed
+
+        previous_records = indexed_records(previous)
+        current_records = indexed_records(current)
+        if previous_records is None or current_records is None:
+            return {"data": current}
+        changes = {
+            key: copy.deepcopy(record)
+            for key, record in current_records.items()
+            if self.stable_client_event_payload_signature(previous_records.get(key))
+            != self.stable_client_event_payload_signature(record)
+        }
+        removed_keys = sorted(set(previous_records) - set(current_records))
+        fields: dict[str, Any] = {}
+        removed_fields: list[str] = []
+        comparable_keys = (set(previous) | set(current)) - {collection} - CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS - ignored_fields - always_fields
+        for key in sorted(comparable_keys):
+            if key not in current:
+                removed_fields.append(key)
+            elif key not in previous or self.stable_client_event_payload_signature(previous.get(key)) != self.stable_client_event_payload_signature(current.get(key)):
+                fields[key] = copy.deepcopy(current[key])
+        if not changes and not removed_keys and not fields and not removed_fields:
+            return None
+        for key in sorted(always_fields):
+            if key in current:
+                fields[key] = copy.deepcopy(current[key])
+        return {
+            "patch": True,
+            "collection": collection,
+            "changes": changes,
+            "removed_keys": removed_keys,
+            "fields": fields,
+            "removed_fields": removed_fields,
+        }
+
+    def auto_approve_client_event_patch(self, previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any] | None:
+        return self.keyed_client_event_patch(
+            previous,
+            current,
+            collection="sessions",
+            ignored_fields=frozenset({"agent_window_snapshot_revision"}),
+            always_fields=frozenset({"agent_window_snapshot_revision"}),
+        )
+
     def work_graph_refresh_signature(self, graph: dict[str, Any]) -> str:
         """Compare graph content without treating its per-build ordering token as a change."""
         return self.stable_client_event_payload_signature({key: value for key, value in graph.items() if key != "generation"})
@@ -4336,54 +4844,26 @@ class TmuxWebtermApp:
             return {}
         return event
 
-    def add_tmux_signal_removal_event_fields(self, payload: dict[str, Any], removed_keys: list[str]) -> dict[str, Any]:
-        if not removed_keys:
-            return payload
-        next_payload = dict(payload)
-        next_payload["removed_window_keys"] = removed_keys
-        removal_event = self.recent_tmux_signal_removal_event(next_payload.get("generated_at"))
-        if removal_event:
-            next_payload["removed_window_event_at"] = removal_event.get("time")
-            next_payload["removed_window_event_type"] = removal_event.get("type")
-        return next_payload
-
     def tmux_signal_patch_payload(self, previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
-        previous_windows = previous.get("windows") if isinstance(previous, dict) else None
-        current_windows = current.get("windows") if isinstance(current, dict) else None
-        if not isinstance(previous_windows, list) or not isinstance(current_windows, list):
+        patch = self.keyed_client_event_patch(
+            previous,
+            current,
+            collection="windows",
+            record_key=window_record_key,
+            always_fields=frozenset({"generated_at", "compute_ms"}),
+        )
+        if patch is None:
             return {"data": current}
-        previous_by_key = {
-            key: window
-            for window in previous_windows
-            if isinstance(window, dict) and (key := window_record_key(window))
-        }
-        changed_windows: list[dict[str, Any]] = []
-        current_keys: set[str] = set()
-        for window in current_windows:
-            if not isinstance(window, dict):
-                continue
-            key = window_record_key(window)
-            if not key:
-                return {"data": current}
-            current_keys.add(key)
-            if self.stable_client_event_payload_signature(previous_by_key.get(key)) != self.stable_client_event_payload_signature(window):
-                changed_windows.append(window)
-        removed_keys = sorted(set(previous_by_key) - current_keys)
-        patchable_window_meta_keys = {"windows", "window_count"}
-        previous_meta = {key: value for key, value in self.tmux_signal_signature_payload(previous or {}).items() if key not in patchable_window_meta_keys}
-        current_meta = {key: value for key, value in self.tmux_signal_signature_payload(current).items() if key not in patchable_window_meta_keys}
-        if previous_meta != current_meta:
-            return {"data": self.add_tmux_signal_removal_event_fields(current, removed_keys)}
-        patch = {
-            "patch": True,
-            "windows": changed_windows,
-            "removed_window_keys": removed_keys,
-            "window_count": current.get("window_count", len(current_windows)),
-            "ok": current.get("ok", True),
-            "generated_at": current.get("generated_at"),
-            "compute_ms": current.get("compute_ms"),
-        }
-        return self.add_tmux_signal_removal_event_fields(patch, removed_keys)
+        removed_keys = list(patch.get("removed_keys") or [])
+        if removed_keys and patch.get("patch") is True:
+            fields = patch.get("fields") if isinstance(patch.get("fields"), dict) else {}
+            fields["removed_window_keys"] = removed_keys
+            removal_event = self.recent_tmux_signal_removal_event(current.get("generated_at"))
+            if removal_event:
+                fields["removed_window_event_at"] = removal_event.get("time")
+                fields["removed_window_event_type"] = removal_event.get("type")
+            patch["fields"] = fields
+        return patch
 
     def tmux_signal_window_for_target(self, target: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
         raw_target = str(target or "").strip()
@@ -4576,7 +5056,7 @@ class TmuxWebtermApp:
 
     def perform_self_update(self, dryrun: bool = False) -> dict[str, Any]:
         root = str(common.PROJECT_ROOT)
-        plan = ["git pull --ff-only origin main", "install or download xterm assets", "python3 tools/static_build.py", "restart server"]
+        plan = ["git pull --ff-only origin main", "validate tracked xterm vendor assets", "python3 tools/static_build.py", "restart server"]
         if dryrun:
             diagnostic = "dryrun: nothing pulled, server not restarted"
             return {
@@ -4902,15 +5382,7 @@ class TmuxWebtermApp:
         current = record or self.client_watch_service.event_watcher_record
         channels = self.client_events.aggregate_channels()
         deadlines: list[float] = []
-        if not channels.isdisjoint({"files", "transcripts", "activity"}):
-            # Native watch is the change source while healthy. Keep only its named slow
-            # reconciliation deadline; the old visible/background scans are fallback-only.
-            deadlines.append(current.next_signature_poll_at)
-            if not current.filesystem_healthy:
-                deadlines.extend((current.next_file_poll_at, current.next_background_file_poll_at, current.next_filesystem_retry_at))
         if not channels.isdisjoint({"status", "attention"}):
-            if not current.filesystem_healthy:
-                deadlines.append(current.next_attention_ack_poll_at)
             if current.tmux_signal_refresh_at > 0:
                 deadlines.append(current.tmux_signal_refresh_at)
             elif not self.tmux_signal_event_watcher_healthy():
@@ -4960,7 +5432,43 @@ class TmuxWebtermApp:
         session_files_requests = self.normalized_client_session_files(payload.get("session_files", []))
         activity_summary = self.normalized_client_activity_summary(payload.get("activity_summary", {}))
         watch_update_started = time.perf_counter()
+        # Transitional cross-web mirror for existing background readers. watchd
+        # independently unions the leased descriptors and is the only watch owner.
         self.watch_root_index.update_client_roots(unique, descriptor_id)
+        with self.client_watch_service.lock:
+            previous_descriptor = self.client_watch_service.descriptors.get(descriptor_id)
+            stable_descriptor = (
+                tuple(unique),
+                tuple(unique_files),
+                tuple(unique_background_files),
+                tuple(context_items),
+                tuple(session_files_requests),
+                activity_summary,
+            )
+            previous_stable = (
+                previous_descriptor.roots,
+                previous_descriptor.files,
+                previous_descriptor.background_files,
+                previous_descriptor.context_items,
+                previous_descriptor.session_files,
+                previous_descriptor.activity_summary,
+            ) if previous_descriptor is not None else None
+            descriptor_changed = previous_stable != stable_descriptor
+            descriptor_generation = (
+                previous_descriptor.descriptor_generation
+                if previous_descriptor is not None and previous_stable == stable_descriptor
+                else (previous_descriptor.descriptor_generation + 1 if previous_descriptor is not None else 1)
+            )
+            self.client_watch_service.descriptors[descriptor_id] = ClientWatchDescriptor(
+                expires_at=now + CLIENT_WATCH_ROOT_TTL_SECONDS,
+                descriptor_generation=descriptor_generation,
+                roots=tuple(unique),
+                files=tuple(unique_files),
+                background_files=tuple(unique_background_files),
+                context_items=tuple(context_items),
+                session_files=tuple(session_files_requests),
+                activity_summary=activity_summary,
+            )
         self.record_performance_sample(
             BACKGROUND_ROLE_WATCH_ROOTS,
             "client-roots-update",
@@ -4970,21 +5478,11 @@ class TmuxWebtermApp:
             cache_status="updated",
             count=len(unique),
         )
-        with self.client_watch_service.lock:
-            self.client_watch_service.descriptors[descriptor_id] = ClientWatchDescriptor(
-                expires_at=now + CLIENT_WATCH_ROOT_TTL_SECONDS,
-                roots=tuple(unique),
-                files=tuple(unique_files),
-                background_files=tuple(unique_background_files),
-                context_items=tuple(context_items),
-                session_files=tuple(session_files_requests),
-                activity_summary=activity_summary,
-            )
-        self.wake_client_event_watcher()
-        self.request_native_filesystem_watch_reconfigure()
+        if descriptor_changed:
+            self.wake_client_event_watcher()
         with self.client_events.lock:
             has_client_event_subscribers = bool(self.client_events.subscribers)
-        if has_client_event_subscribers:
+        if descriptor_changed and has_client_event_subscribers:
             self.start_client_watch_snapshot_publish()
         return {
             "ok": True,
@@ -5047,6 +5545,8 @@ class TmuxWebtermApp:
         return items[:MAX_YOLOMUX_SESSION_TABS]
 
     def normalized_client_activity_summary(self, value: Any) -> dict[str, Any]:
+        if not activity_summary_enabled():
+            return {}
         if not isinstance(value, dict):
             return {}
         locale = normalize_locale(value.get("locale"))
@@ -5065,8 +5565,10 @@ class TmuxWebtermApp:
             expired = [client_id for client_id, descriptor in self.client_watch_service.descriptors.items() if descriptor.expires_at <= now]
             for client_id in expired:
                 self.client_watch_service.descriptors.pop(client_id, None)
-        for client_id in expired:
-            self.watch_root_index.remove_client_roots(client_id)
+        if expired:
+            for client_id in expired:
+                self.watch_root_index.remove_client_roots(client_id)
+            self.wake_client_event_watcher()
 
     def touch_client_watch_descriptor(self, client_id: str) -> None:
         """Renew the orphan backstop from a live SSE stream, never from a browser interval."""
@@ -5081,6 +5583,7 @@ class TmuxWebtermApp:
             descriptor.expires_at = now + CLIENT_WATCH_ROOT_TTL_SECONDS
             roots = list(descriptor.roots)
         self.watch_root_index.update_client_roots(roots, normalized_client_id)
+        self.wake_client_event_watcher()
 
     def client_event_subscriber_disconnected(self, client_id: str) -> None:
         """Release a browser's watch descriptor after its final same-id SSE stream closes."""
@@ -5091,7 +5594,6 @@ class TmuxWebtermApp:
             self.client_watch_service.descriptors.pop(normalized_client_id, None)
         self.watch_root_index.remove_client_roots(normalized_client_id)
         self.wake_client_event_watcher()
-        self.request_native_filesystem_watch_reconfigure()
 
     def client_watch_file_paths(self, *, background: bool) -> list[str]:
         with self.client_watch_service.lock:
@@ -5109,538 +5611,460 @@ class TmuxWebtermApp:
     def client_watch_background_files_snapshot(self) -> list[str]:
         return self.client_watch_file_paths(background=True)
 
-    def settings_watch_signature(self) -> tuple[Any, ...]:
-        try:
-            return file_stat_signature(SETTINGS_PATH)
-        except OSError:
-            return (str(SETTINGS_PATH), 0, 0)
+    def watchd_topology_signature(self) -> str | None:
+        """Fingerprint the tmux topology the descriptor transcript set is derived from.
 
-    def transcripts_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
-        rows: list[tuple[Any, ...]] = []
-        for name, info in sorted(sessions.items()):
-            for agent in info.agents:
-                transcript = str(agent.transcript or "")
-                if not transcript:
-                    continue
-                rows.append((name, agent.kind or "", agent.session_id or "", transcript))
-        return tuple(rows)
+        One `tmux list-panes -a`: measured 0.57ms CPU / 5.24ms wall over 49 panes, against the
+        25.8ms CPU of the discover_sessions it gates. It must never do the work it exists to
+        avoid — no process table, no agent enrichment, no transcript stat or tail — so it sees
+        exactly what tmux reports. A new session, a new or killed pane, a renamed session or
+        window, and a pane whose foreground command changes all move it; an agent that starts
+        writing a transcript without changing any of those does not, which is what
+        WATCHD_DESCRIPTOR_RESYNC_SECONDS backstops.
 
-    def transcript_content_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
-        rows: list[tuple[Any, ...]] = []
-        for name, info in sorted(sessions.items()):
-            for agent in info.agents:
-                transcript = str(agent.transcript or "")
-                if not transcript:
-                    continue
-                try:
-                    signature = file_stat_signature(Path(transcript))
-                except OSError:
-                    signature = (transcript, 0, 0)
-                rows.append((name, agent.kind or "", agent.session_id or "", signature))
-        return tuple(rows)
+        Returns None when tmux cannot be read, which never matches a stored signature and so
+        forces the rebuild rather than pinning whatever was last derived.
+        """
 
-    def filesystem_roots_for_watch(self, sessions: dict[str, SessionInfo]) -> list[str]:
-        # Keep active-session discovery for its metadata consumers, but do not
-        # turn every session cwd or configured companion into a hot filesystem
-        # watch. High-frequency observation belongs only to roots the browser
-        # currently displays in Finder or Differ.
-        self.watch_root_index.update_active_roots(self.active_directory_watch_roots(sessions))
-        roots = set(self.client_watch_roots_snapshot())
-        return sorted(str(Path(root).expanduser()) for root in roots if str(root or "").startswith("/"))[:CLIENT_WATCH_ROOT_LIMIT]
-
-    def active_directory_watch_roots(self, sessions: dict[str, SessionInfo]) -> dict[str, str]:
-        roots: dict[str, str] = {}
-        for session, info in sorted((sessions or {}).items()):
-            path = ""
-            if info.selected_pane and info.selected_pane.current_path:
-                path = info.selected_pane.current_path
-            if not path:
-                agent = next((item for item in info.agents if item.cwd), None)
-                path = agent.cwd if agent and agent.cwd else ""
-            root = self.active_directory_watch_root(path)
-            if root:
-                roots[str(session)] = root
-        return roots
-
-    def active_directory_watch_root(self, path: str | None) -> str:
-        raw = str(path or "").strip()
-        if not raw.startswith("/"):
-            return ""
-        expanded = Path(raw).expanduser()
-        git_root = filesystem.git_root_for_path(expanded)
-        return git_root or str(expanded)
-
-    def filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
-        started = time.perf_counter()
-        roots = self.filesystem_roots_for_watch(sessions)
-        signature = tuple((root, filesystem_watch_signature(root)) for root in roots)
-        changed = self.watch_root_index.publish_signature_snapshot(signature)
-        self.record_performance_sample(
-            BACKGROUND_ROLE_WATCH_ROOTS,
-            "watch-signature",
-            trigger="poll",
-            compute_ms=(time.perf_counter() - started) * 1000,
-            payload={"roots": roots, "signature_count": len(signature)},
-            cache_status="changed" if changed else "unchanged",
-            count=len(roots),
+        panes, error = list_tmux_panes()
+        if error:
+            return None
+        watched = sorted(self.sessions)
+        rows = sorted(
+            (pane.session, pane.window, pane.window_name, pane.pane, pane.pane_id, pane.command, pane.pid)
+            for pane in panes
+            if pane.session in set(watched)
         )
-        return signature
+        return hashlib.sha256(repr((watched, rows)).encode("utf-8")).hexdigest()
 
-    def request_watch_roots_owner_refresh(self, roots: list[str], reason: str) -> None:
-        if not roots:
-            return
-        self.record_background_avoided_recompute(BACKGROUND_ROLE_WATCH_ROOTS)
-        self.request_background_refresh(BACKGROUND_ROLE_WATCH_ROOTS, {"reason": reason, "roots": roots[:CLIENT_WATCH_ROOT_LIMIT]})
+    def watchd_transcript_paths(self) -> list[str]:
+        """The transcripts the descriptors watch, rebuilt on topology change or every 15s.
 
-    def follower_filesystem_roots_watch_signature(self, sessions: dict[str, SessionInfo]) -> tuple[Any, ...]:
-        roots = self.filesystem_roots_for_watch(sessions)
-        self.request_watch_roots_owner_refresh(roots, "poll")
-        shared_signature = self.watch_root_index.signature_snapshot()
-        if shared_signature:
-            return shared_signature
-        with self.client_watch_service.lock:
-            return self.client_watch_service.filesystem_signature or (("watch-roots", "follower"),)
+        The revision loop calls this once per revision and the transcripts it returns are what
+        produce those revisions, so deriving it every time was a feedback loop: 25.8ms of CPU a
+        pass, which measured as ~90% of a core on the live server.
+        """
 
-    def files_for_watch(self) -> list[str]:
-        return self.client_watch_files_snapshot()[:CLIENT_WATCH_FILE_LIMIT]
-
-    def files_watch_signature(self) -> tuple[Any, ...]:
-        return tuple((path, file_watch_signature(path)) for path in self.files_for_watch())
-
-    def background_files_for_watch(self) -> list[str]:
-        return self.client_watch_background_files_snapshot()[:CLIENT_WATCH_FILE_LIMIT]
-
-    def background_files_watch_signature(self) -> tuple[Any, ...]:
-        return tuple((path, file_watch_signature(path)) for path in self.background_files_for_watch())
-
-    def native_filesystem_watching_supported(self) -> bool:
-        return watchfiles_watch is not None
-
-    @staticmethod
-    def compact_native_filesystem_watch_paths(paths: list[str]) -> tuple[str, ...]:
-        """Watch the smallest non-overlapping set of roots."""
-        candidates = sorted(
-            {str(Path(path).expanduser().resolve(strict=False)) for path in paths if str(path or "").startswith("/")},
-            key=lambda item: (len(Path(item).parts), item),
-        )
-        compacted: list[str] = []
-        for candidate in candidates:
-            candidate_path = Path(candidate)
-            if any(filesystem._path_is_within(candidate_path, Path(parent)) for parent in compacted):
-                continue
-            compacted.append(candidate)
-        return tuple(compacted)
-
-    def native_filesystem_watch_configuration(self) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], frozenset[str]]:
-        """Return demanded filesystem roots plus exact settings/transcript/file parents."""
+        signature = self.watchd_topology_signature()
+        now = time.monotonic()
+        service = self.client_watch_service
+        with service.lock:
+            reusable = (
+                signature is not None
+                and signature == service.watchd_transcripts_signature
+                and now - service.watchd_transcripts_at < WATCHD_DESCRIPTOR_RESYNC_SECONDS
+            )
+            if reusable:
+                return list(service.watchd_transcripts)
+        # discover_sessions runs outside the lock: it is the slow call this memo exists to
+        # bound, and holding the watch service lock across it would stall every route that
+        # touches a descriptor.
         sessions, _errors = discover_sessions(self.sessions)
-        # watchfiles reports canonical paths on macOS (for example `/private/tmp`
-        # for a `/tmp` root), so keep the index/event roots canonical too.
-        roots = tuple(sorted({
-            str(Path(root).expanduser().resolve(strict=False))
-            for root in self.filesystem_roots_for_watch(sessions)
-        }))
-        transcripts = tuple(sorted({
+        transcripts = sorted({
             str(Path(agent.transcript).expanduser().resolve(strict=False))
             for info in sessions.values()
             for agent in info.agents
             if agent.transcript
-        }))
-        files = [*self.files_for_watch(), *self.background_files_for_watch()]
-        # Attention acknowledgements have a producer fan-out for normal writes.
-        # Watch the shared state file as well so direct/external writes do not
-        # require the client-event timer to reread it every 1.5 seconds.
-        watch_paths = [*roots, str(SETTINGS_PATH.parent), str(common.TMUX_AI_STATUS_PATH.parent), *(str(Path(path).expanduser().parent) for path in files), *(str(Path(path).parent) for path in transcripts)]
+        })[:CLIENT_WATCH_FILE_LIMIT]
+        with service.lock:
+            service.watchd_transcripts = list(transcripts)
+            service.watchd_transcripts_signature = signature or ""
+            service.watchd_transcripts_at = now
+        return transcripts
+
+    def watchd_descriptor_payloads(self) -> dict[str, dict[str, Any]]:
+        """Build bounded daemon descriptors off the request path."""
+        self.prune_client_watch_descriptors()
+        transcripts = self.watchd_transcript_paths()
         settings = settings_payload().get("settings", {})
         file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
-        indexed_dirs = self.indexed_repo_discovery_dirs(file_explorer)
-        # Repository discovery is a watched resource too: without its configured
-        # parents here, a newly created repository can never advance its cache key.
-        watch_paths.extend(indexed_dirs)
-        skip_dirs = filesystem.search._configured_search_skip_dirs(file_explorer if isinstance(file_explorer, dict) else {})
-        return roots, self.compact_native_filesystem_watch_paths(watch_paths), transcripts, frozenset(skip_dirs)
-
-    def request_native_filesystem_watch_reconfigure(self) -> None:
+        indexed_dirs = list(self.indexed_repo_discovery_dirs(file_explorer))
+        skip_dirs = sorted(filesystem.search._configured_search_skip_dirs(file_explorer if isinstance(file_explorer, dict) else {}))
+        configured_roots = [str(root) for root in filesystem._configured_fs_roots()]
+        with self.session_files_service.cache_lock:
+            repo_roots = sorted(self.session_files_service.repo_dirty_generations)
         with self.client_watch_service.lock:
-            record = self.client_watch_service.event_watcher_record
-            if record.filesystem_worker is None:
-                return
-            record.filesystem_reconfigure_event.set()
-            record.filesystem_stop_event.set()
-            record.wake_event.set()
+            descriptors = {
+                descriptor_id: copy.deepcopy(descriptor)
+                for descriptor_id, descriptor in self.client_watch_service.descriptors.items()
+            }
+        expires_at = time.monotonic() + WATCHD_DESCRIPTOR_TTL_SECONDS
+        return {
+            descriptor_id: {
+                "descriptor_generation": descriptor.descriptor_generation,
+                "expires_at": expires_at,
+                "roots": list(descriptor.roots),
+                "files": list(descriptor.files),
+                "background_files": list(descriptor.background_files),
+                "transcripts": transcripts,
+                "repo_roots": repo_roots,
+                "indexed_dirs": indexed_dirs,
+                "skip_dirs": skip_dirs,
+                "settings_path": str(SETTINGS_PATH.expanduser().resolve(strict=False)),
+                "attention_path": str(self.tmux_ai_status_path.expanduser().resolve(strict=False)),
+                "configured_roots": configured_roots,
+            }
+            for descriptor_id, descriptor in descriptors.items()
+        }
 
-    def handle_native_filesystem_watch_loss(
-        self,
-        record: ClientEventWatcherRecord,
-        *,
-        reason: str,
-        diagnostic: str = "",
-    ) -> bool:
-        """Fail over one watcher generation to the bounded reconciliation owner.
-
-        watchfiles exposes create/modify/delete but no portable overflow event. A
-        backend exception or an unexpected iterator end therefore has the same
-        correctness meaning as an overflow: native events may have been lost.
-        Mark that state before waking the existing one-shot directory reconciler;
-        its single-worker guard coalesces repeated backend failures.
-        """
-        now = time.monotonic()
-        with self.client_watch_service.lock:
-            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
-                return False
-            record.filesystem_healthy = False
-            record.next_filesystem_retry_at = now + NATIVE_FILESYSTEM_RETRY_SECONDS
-            record.next_file_poll_at = min(record.next_file_poll_at, now) if record.next_file_poll_at else now
-            record.next_background_file_poll_at = min(record.next_background_file_poll_at, now) if record.next_background_file_poll_at else now
-            record.next_signature_poll_at = min(record.next_signature_poll_at, now) if record.next_signature_poll_at else now
-        self.log_event(
-            None,
-            "native_filesystem_watch_loss",
-            f"native filesystem watch lost ({reason}); reconciling watched state",
-            {"reason": reason, "diagnostic": diagnostic},
-            message_key="events.message.clientEvent.directoryWatchFailed",
+    def apply_watchd_revision(self, record: ClientEventWatcherRecord, revision: dict[str, Any], *, reset: bool = False) -> list[str]:
+        """Mirror compact daemon state and fan it into the existing SSE owners."""
+        epoch = str(revision.get("epoch") or "")
+        revision_number = int(revision.get("revision") or 0)
+        watch_generation = int(revision.get("watch_generation") or 0)
+        active_watch_generation = int(revision.get("active_watch_generation") or 0)
+        changed_paths = [
+            Path(path)
+            for path in revision.get("changed_paths", [])
+            if isinstance(path, str) and path.startswith("/")
+        ]
+        files_changed = revision.get("files_changed") if isinstance(revision.get("files_changed"), list) else []
+        roots = tuple(str(root) for root in revision.get("roots", []) if isinstance(root, str))
+        root_generations = revision.get("root_generations") if isinstance(revision.get("root_generations"), dict) else {}
+        signature = tuple(
+            (root, (root, "watchd", int(root_generations.get(root) or 0), watch_generation, ()))
+            for root in sorted(roots)
         )
-        self.start_client_directory_poll(record)
-        record.wake_event.set()
-        return True
-
-    GIT_METADATA_EVENT_NAMES = frozenset({"HEAD", "index", "packed-refs", "MERGE_HEAD", "config"})
-
-    def git_metadata_event_allowed(self, path: Path, record: ClientEventWatcherRecord) -> bool:
-        """Admit exactly the .git paths that change `git_snapshot_identity`.
-
-        Ref updates and commits touch only .git (HEAD, index, refs, packed-refs,
-        MERGE_HEAD); without these events a pure commit would never dirty the
-        repository record. objects/ and logs/ churn stays filtered out.
-        """
-        parts = path.parts
-        try:
-            git_index = parts.index(".git")
-        except ValueError:
-            return False
-        tail = parts[git_index + 1:]
-        if not tail or not (tail[0] in self.GIT_METADATA_EVENT_NAMES or tail[0] == "refs"):
-            return False
-        return any(
-            path == Path(root) or filesystem._path_is_within(path, Path(root))
-            for root in record.filesystem_watch_paths
-        )
-
-    def native_filesystem_event_allowed(self, path: Path, record: ClientEventWatcherRecord) -> bool:
-        if ".git" in path.parts:
-            return self.git_metadata_event_allowed(path, record)
-        if any(part in record.filesystem_skip_dirs for part in path.parts):
-            return False
-        # Native backends report every change under an ancestor watch root,
-        # including credentials we deliberately never allow filesystem APIs to
-        # inspect.  Apply that same policy before a batch can reach indexing.
-        try:
-            filesystem._ensure_path_allowed(path)
-        except filesystem.FilesystemError:
-            return False
-        return any(
-            path == Path(root) or filesystem._path_is_within(path, Path(root))
-            for root in record.filesystem_watch_paths
-        )
-
-    @staticmethod
-    def native_filesystem_paths_intersect(left: Path, right: Path) -> bool:
-        return (
-            left == right
-            or filesystem._path_is_within(left, right)
-            or filesystem._path_is_within(right, left)
-        )
-
-    @staticmethod
-    def native_filesystem_path_requires_reindex(change: Any, path: Path, roots: tuple[str, ...] = ()) -> bool:
-        """Ignore directory-metadata notifications when invalidating Quick Open.
-
-        Native backends commonly report a modified watch root in addition to the
-        actual file that changed below it.  Reindexing that root would turn one
-        edit into a full subtree walk.  A file event, or an added/deleted
-        directory, still needs normal incremental handling.
-        """
-        try:
-            change_code = int(change)
-        except (TypeError, ValueError):
-            change_code = 0
-        if change_code == 2 and path.is_dir():  # watchfiles.Change.modified
-            return False
-        # A watch root is already present when registration succeeds. Native
-        # backends can report that root as added, deleted, or modified while
-        # reconciling their own cursor; treating any of those as a dirty
-        # subtree rewalks the entire index. Real descendant events are still
-        # delivered, and the periodic reconciliation remains the backstop.
-        return not any(path == Path(root) for root in roots)
-
-    @staticmethod
-    def native_filesystem_path_requires_metadata_invalidation(change: Any, path: Path, roots: tuple[str, ...] = ()) -> bool:
-        """Ignore only synthetic modified watch-root notifications for Git metadata.
-
-        macOS reports a modified watch root alongside real child events.  That
-        root can contain every indexed repository, so treating it as a source
-        change invalidates the complete Git cache on each watcher batch. Root
-        add/delete events remain invalidating because they can replace a repo.
-        """
-        try:
-            change_code = int(change)
-        except (TypeError, ValueError):
-            change_code = 0
-        if change_code == 2 and any(path == Path(root) for root in roots):
-            return False
-        # A repo's own `git status` rewrites `.git/index` (stat-cache refresh) on every
-        # call, and index/lock churn is never a branch/commit signal on its own. Counting
-        # it as an external invalidation made a status compute bump the very generation
-        # that then discarded its result -- a self-feeding refresh livelock on any repo
-        # under active writes. Real ref changes (`.git/HEAD`, `refs/**`, `packed-refs`,
-        # `MERGE_HEAD`, `logs/**`) still invalidate; the git-metadata TTL backstops a
-        # staging-only change skipped here.
-        if ".git" in path.parts and (path.name == "index" or path.name.endswith(".lock")):
-            return False
-        return True
-
-    def publish_native_files_changed(self, changed_paths: list[Path]) -> list[str]:
-        watched_files = [*self.files_for_watch(), *self.background_files_for_watch()]
-        changed: list[dict[str, Any]] = []
-        for raw_path in sorted(set(watched_files)):
-            path = Path(raw_path).expanduser().resolve(strict=False)
-            if not any(self.native_filesystem_paths_intersect(path, changed_path) for changed_path in changed_paths):
-                continue
-            changed.append({"path": str(path), "signature": file_watch_signature(path)})
-        if not changed:
-            return []
-        self.publish_client_event(
-            "files_changed",
-            {"files": changed, "count": len(changed)},
-            trigger="native-watch",
-            cache="ready",
-        )
-        return ["files_changed"]
-
-    def handle_native_filesystem_changes(
-        self,
-        record: ClientEventWatcherRecord,
-        changes: set[tuple[Any, str]],
-    ) -> list[str]:
-        """Route one debounced native event batch through existing event owners."""
+        token = str(revision.get("token") or f"{epoch}:{revision_number}")
         with self.client_watch_service.lock:
             if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
                 return []
-            roots = tuple(record.filesystem_roots)
-            transcripts = tuple(record.filesystem_transcripts)
-        attention_status_path = common.TMUX_AI_STATUS_PATH.expanduser().resolve(strict=False)
-        attention_status_changed = False
-        native_changes: list[tuple[Any, Path]] = []
-        for change, raw_path in changes:
-            if not isinstance(raw_path, str) or not raw_path.startswith("/"):
-                continue
-            path = Path(raw_path).expanduser().resolve(strict=False)
-            if path == attention_status_path:
-                attention_status_changed = True
-                continue
-            if self.native_filesystem_event_allowed(path, record):
-                native_changes.append((change, path))
-        all_changed = sorted({path for _change, path in native_changes}, key=str)
-        events = self.refresh_shared_attention_acks(trigger="native-watch", notify_followers=True) if attention_status_changed else []
-        if not all_changed:
-            return events
-        # Every change (worktree or .git metadata) dirties intersecting repo
-        # records; .git paths take part in NOTHING else below.
-        self.mark_repo_state_dirty(all_changed)
-        invalidate_git_metadata_paths([
-            path
-            for change, path in native_changes
-            if self.native_filesystem_path_requires_metadata_invalidation(change, path, roots)
-        ])
-        self.mark_indexed_repo_discovery_dirty(all_changed)
-        changed_paths = [path for path in all_changed if ".git" not in path.parts]
-        if not changed_paths:
-            return []
-        events.extend(self.publish_native_files_changed(changed_paths))
-        settings_path = SETTINGS_PATH.expanduser().resolve(strict=False)
-        if any(self.native_filesystem_paths_intersect(settings_path, path) for path in changed_paths):
-            settings_signature = self.settings_watch_signature()
-            with self.client_watch_service.lock:
-                previous = self.client_watch_service.settings_signature
-                self.client_watch_service.settings_signature = settings_signature
-            if previous and previous != settings_signature:
-                self.publish_client_event(
-                    "settings_changed",
-                    {"signature": settings_signature, "data": self.settings_payload()},
-                    trigger="native-watch",
-                    cache="ready",
-                )
-                events.append("settings_changed")
-        transcript_paths = [Path(path) for path in transcripts]
-        if transcript_paths and any(
-            self.native_filesystem_paths_intersect(transcript, path)
-            for transcript in transcript_paths
+            if not reset and record.watchd_epoch == epoch and revision_number <= record.watchd_revision:
+                return []
+            if reset or record.watchd_epoch != epoch:
+                self.client_watch_service.filesystem_history.clear()
+                self.client_watch_service.filesystem_payload_signature = ""
+            previous_filesystem_roots = record.filesystem_roots
+            record.watchd_epoch = epoch
+            record.watchd_revision = revision_number
+            record.watchd_applied_generation = watch_generation
+            record.watchd_active_generation = active_watch_generation
+            record.filesystem_healthy = bool(revision.get("healthy")) or bool(revision.get("fallback"))
+            record.filesystem_roots = roots
+            record.watchd_state = "polling" if revision.get("fallback") else ("ready" if record.filesystem_healthy else "errored")
+            self.client_watch_service.filesystem_signature = signature
+            self.client_watch_service.filesystem_history.append({
+                "token": token,
+                "created_at": float(revision.get("created_at") or time.time()),
+                "signature": signature,
+                "watchd_epoch": epoch,
+                "watchd_revision": revision_number,
+                "watch_generation": watch_generation,
+                "active_watch_generation": active_watch_generation,
+                "changed_paths": tuple(str(path) for path in changed_paths[:CLIENT_WATCH_FILE_LIMIT]),
+                "files_changed": copy.deepcopy(files_changed[:CLIENT_WATCH_FILE_LIMIT]),
+            })
+            self.client_watch_service.filesystem_history = self.client_watch_service.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
+            daemon_repo_generations = revision.get("repo_generations") if isinstance(revision.get("repo_generations"), dict) else {}
+            prior_daemon_generations = self.client_watch_service.watchd_repo_generations
+            changed_repos = [
+                repo
+                for repo, generation in daemon_repo_generations.items()
+                if int(generation or 0) != int(prior_daemon_generations.get(repo) or 0)
+            ]
+            self.client_watch_service.watchd_repo_generations = {
+                str(repo): int(generation or 0)
+                for repo, generation in daemon_repo_generations.items()
+            }
+        if record.filesystem_healthy:
+            self.publish_watchd_recovery(record)
+        if changed_repos:
+            with self.session_files_service.cache_lock:
+                for repo in changed_repos:
+                    if repo in self.session_files_service.repo_dirty_generations:
+                        self.session_files_service.repo_dirty_generations[repo] += 1
+        filesystem_roots = {Path(root) for root in (*previous_filesystem_roots, *roots)}
+        filesystem_changed = any(
+            filesystem_paths_intersect(path, root)
             for path in changed_paths
-        ):
+            for root in filesystem_roots
+        )
+        events: list[str] = []
+        if changed_paths:
+            self.mark_indexed_repo_discovery_dirty(changed_paths)
+            # Invalidate from the admissible working-tree paths, not from ".git"
+            # internals. Nothing beneath an ignored directory is published any
+            # more, so a ".git"-only filter here selects nothing and the branch
+            # and status caches would never be invalidated at all.
+            # ``invalidate_git_metadata_paths`` already intersects each path
+            # against the cached repository roots, so an ordinary file inside a
+            # repository invalidates exactly that repository.
+            invalidate_git_metadata_paths(changed_paths)
+        if revision.get("attention_changed"):
+            events.extend(self.refresh_shared_attention_acks(trigger="watchd", notify_followers=True))
+        if revision.get("settings_changed"):
+            self.publish_client_event("settings_changed", {"data": self.settings_payload()}, trigger="watchd", cache="ready")
+            events.append("settings_changed")
+        if revision.get("transcripts_changed"):
             self.clear_transcript_caches()
-            self.publish_client_event(
-                "transcripts_changed",
-                {"refresh": True},
-                trigger="native-watch",
-                cache="refresh",
-            )
+            self.publish_client_event("transcripts_changed", {"refresh": True}, trigger="watchd", cache="refresh")
             events.append("transcripts_changed")
-            events.extend(self.publish_context_items_ready_events(trigger="native-watch"))
-            events.extend(self.publish_activity_summary_ready_events(trigger="native-watch"))
-            events.extend(self.publish_session_files_ready_events(trigger="native-watch"))
-            self.request_tabber_activity_refresh("transcript-native-watch")
-        filesystem_event_paths = [
-            path
-            for path in changed_paths
-            if any(path == Path(root) or filesystem._path_is_within(path, Path(root)) for root in roots)
-        ]
-        if not filesystem_event_paths:
-            return events
-        filesystem_paths = sorted({
-            path
-            for change, path in native_changes
-            if self.native_filesystem_path_requires_reindex(change, path, roots)
-            and any(
-                path == Path(root)
-                or filesystem._path_is_within(path, Path(root))
-                for root in roots
+        if files_changed:
+            self.publish_client_event("files_changed", {"files": files_changed, "count": len(files_changed)}, trigger="watchd", cache="ready")
+            events.append("files_changed")
+        if revision_number > 0 and filesystem_changed:
+            self.publish_client_event(
+                "fs_changed",
+                {
+                    "roots": list(roots),
+                    "mode": "diff",
+                    "refresh": True,
+                    "token": token,
+                    "change_summary": {
+                        "roots_changed": len(changed_paths),
+                        "coarse": bool(revision.get("coarse")),
+                    },
+                    "daemon_state": record.watchd_state,
+                },
+                trigger="watchd",
+                cache="ready",
             )
-        }, key=str)
-        if filesystem_paths:
-            filesystem.reindex_roots_for_paths([str(path) for path in filesystem_paths], reason="native-watch")
-        current_signature = self.filesystem_watch_signature_for_roots(list(roots))
-        with self.client_watch_service.lock:
-            previous_signature = self.client_watch_service.filesystem_signature
-            self.client_watch_service.filesystem_signature = current_signature
-        touched_roots = sorted({
-            root
-            for root in roots
-            if any(path == Path(root) or filesystem._path_is_within(path, Path(root)) for path in filesystem_event_paths)
-        })
-        change_summary = {
-            "roots_changed": len(touched_roots),
-            "roots_added": 0,
-            "roots_removed": 0,
-            "event_paths": len(filesystem_event_paths),
-            "indexed_paths": len(filesystem_paths),
-        }
-        if previous_signature != current_signature or touched_roots:
-            events.extend(self.publish_filesystem_ready_event(
-                list(roots),
-                trigger="native-watch",
-                change_summary=change_summary,
-                current_signature=current_signature,
-            ))
-        events.extend(self.publish_session_files_ready_events(trigger="native-watch"))
+            events.append("fs_changed")
+        if changed_paths:
+            events.extend(self.publish_session_files_ready_events(trigger="watchd"))
         return events
 
-    def start_native_filesystem_watcher(self, record: ClientEventWatcherRecord | None = None) -> bool:
-        if not self.native_filesystem_watching_supported() or not self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
-            return False
+    def publish_watchd_recovery(self, record: ClientEventWatcherRecord) -> None:
         with self.client_watch_service.lock:
-            current = record or self.client_watch_service.event_watcher_record
-            if self.client_watch_service.event_watcher_record is not current or current.stop_event.is_set():
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return
+            recovered_episode = record.watchd_failure_episode
+            if recovered_episode == 0:
+                return
+            recovered_started_at = record.watchd_failure_started_at
+            recovered_count = record.watchd_failure_count
+            recovered_delivery = record.watchd_failure_delivery
+            recovered_published = record.watchd_failure_published
+            record.watchd_failure_episode = 0
+            record.watchd_failure_started_at = 0.0
+            record.watchd_failure_count = 0
+            record.watchd_failure_delivery = ""
+            record.watchd_failure_action = ""
+            record.watchd_failure_error_code = ""
+            record.watchd_failure_published = False
+        if not recovered_published:
+            return
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return
+        recovery_seconds = min(86_400.0, max(0.0, time.monotonic() - recovered_started_at))
+        emit_server_log(
+            "info",
+            "watchd",
+            f"watchd recovered after {recovery_seconds:.1f}s and {recovered_count} failed attempt(s)",
+            category="transport",
+            dedupe_key=f"watchd-recovered:{recovered_episode}",
+            request_id=f"watchd-episode-{recovered_episode}",
+            route="local-service:watchd",
+            event="watchd_recovered",
+            delivery=f"recovered:{recovered_delivery}"[:64],
+        )
+
+    def publish_watchd_failure(self, record: ClientEventWatcherRecord, response: dict[str, Any], *, action: str) -> None:
+        if action not in WATCHD_FAILURE_ACTIONS:
+            raise ValueError("unknown watchd failure action")
+        transport = str(response.get("_transport_error") or "")
+        state = "not_running" if transport in {"absent", "refused"} else "errored"
+        if transport:
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                    return
+                record.watchd_state = state
+                record.filesystem_healthy = False
+            return
+        retrying = bool(transport) or bool(response.get("retryable"))
+        delivery = "retrying" if retrying else "failed"
+        error_code = str(response.get("error_code") or "service_unavailable")
+        if error_code not in WATCHD_FAILURE_CODES:
+            error_code = "service_unavailable"
+        now = time.monotonic()
+        publish_failure = False
+        failure_action = ""
+        failure_error_code = ""
+        failure_delivery = ""
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return
+            record.watchd_failure_count += 1
+            if record.watchd_failure_episode == 0:
+                record.watchd_failure_episode = record.watchd_next_failure_episode
+                record.watchd_next_failure_episode += 1
+                record.watchd_failure_started_at = now
+                record.watchd_failure_delivery = delivery
+                record.watchd_failure_action = action
+                record.watchd_failure_error_code = error_code
+            record.watchd_state = state
+            record.filesystem_healthy = False
+            if (
+                not record.watchd_failure_published
+                and now - record.watchd_failure_started_at >= WATCHD_FAILURE_LOG_GRACE_SECONDS
+            ):
+                record.watchd_failure_published = True
+                publish_failure = True
+                failure_action = record.watchd_failure_action
+                failure_error_code = record.watchd_failure_error_code
+                failure_delivery = record.watchd_failure_delivery
+        if publish_failure:
+            failure_retrying = failure_delivery == "retrying"
+            emit_server_log(
+                "warning" if failure_retrying else "error",
+                "watchd",
+                f"watchd {failure_action} failed ({failure_error_code}); retrying" if failure_retrying else f"watchd {failure_action} failed ({failure_error_code})",
+                category="transport",
+                dedupe_key=f"watchd-failure:{record.watchd_failure_episode}",
+                request_id=f"watchd-episode-{record.watchd_failure_episode}",
+                route="local-service:watchd",
+                event=f"watchd_{failure_action}_failure",
+                delivery=failure_delivery,
+            )
+
+    @staticmethod
+    def record_watchd_synced_generation(record: ClientEventWatcherRecord, response: dict[str, Any]) -> None:
+        """Own the one place a daemon response advances this client's rebuild window.
+
+        Every response that names a watch generation is evidence about whether
+        watchd still owes an activation, whichever client bumped it, so the
+        window opens from an upsert this bridge issued and from a generation a
+        different lease holder caused equally.
+        """
+        record.watchd_synced_generation = max(record.watchd_synced_generation, int(response.get("watch_generation") or 0))
+        record.watchd_active_generation = max(record.watchd_active_generation, int(response.get("active_watch_generation") or 0))
+
+    def sync_watchd_descriptors(self, record: ClientEventWatcherRecord) -> bool:
+        descriptors = self.watchd_descriptor_payloads()
+        active_ids = set(descriptors)
+        descriptor_generations = {
+            descriptor_id: int(descriptor.get("descriptor_generation") or 0)
+            for descriptor_id, descriptor in descriptors.items()
+        }
+        for descriptor_id, descriptor in descriptors.items():
+            response = self.watch_client.upsert(record.watchd_lease_id, descriptor_id, descriptor, reconfiguring=record.watchd_rebuild_window_open())
+            if response.get("ok") is not True:
+                self.publish_watchd_failure(record, response, action="upsert")
                 return False
-            worker = current.filesystem_worker
+            # Record the bumped generation before the next request is armed: the
+            # upsert that opens a rebuild window is answered before the daemon
+            # blocks, so only the requests after it need the covering deadline.
+            self.record_watchd_synced_generation(record, response)
+        for descriptor_id in sorted(record.watchd_descriptor_ids - active_ids):
+            response = self.watch_client.remove(record.watchd_lease_id, descriptor_id, reconfiguring=record.watchd_rebuild_window_open())
+            if response.get("ok") is not True:
+                self.publish_watchd_failure(record, response, action="remove")
+                return False
+            self.record_watchd_synced_generation(record, response)
+        record.watchd_descriptor_ids = active_ids
+        record.watchd_descriptor_generations = descriptor_generations
+        self.publish_watchd_recovery(record)
+        return True
+
+    def watchd_revision_loop(self, record: ClientEventWatcherRecord) -> None:
+        worker = threading.current_thread()
+        iteration_started = 0.0
+        try:
+            while not record.stop_event.is_set() and not record.watchd_stop_event.is_set():
+                # Pace the loop, not the work inside it. See
+                # WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS: this loop's CPU is
+                # body_cpu / loop_period, and a cheaper body only re-arms sooner, so no
+                # amount of optimizing the body can bring it under budget. The remainder is
+                # waited on the stop event rather than slept, so a shutdown breaks out of it
+                # immediately instead of paying the floor. The first iteration never waits.
+                remaining = WATCHD_REVISION_LOOP_MIN_PERIOD_SECONDS - (time.monotonic() - iteration_started)
+                if remaining > 0 and record.watchd_stop_event.wait(remaining):
+                    break
+                if record.stop_event.is_set():
+                    break
+                iteration_started = time.monotonic()
+                if not record.watchd_lease_id:
+                    lease = self.watch_client.acquire_lease()
+                    if lease.get("ok") is not True:
+                        self.publish_watchd_failure(record, lease, action="acquire")
+                        record.watchd_stop_event.wait(1.0)
+                        continue
+                    record.watchd_lease_id = str(lease.get("lease_id") or "")
+                    record.watchd_pid = int(lease.get("pid") or 0)
+                    record.watchd_epoch = str(lease.get("epoch") or "")
+                    record.watchd_revision = 0
+                    record.watchd_synced_generation = 0
+                    record.watchd_applied_generation = 0
+                    record.watchd_active_generation = 0
+                    record.watchd_descriptor_generations = {}
+                    # A rebuild another lease holder started is already in flight
+                    # before this bridge issues anything, so the lease response is
+                    # the first evidence of the window it has to arm against.
+                    self.record_watchd_synced_generation(record, lease)
+                if not self.sync_watchd_descriptors(record):
+                    record.watchd_stop_event.wait(1.0)
+                    continue
+                response = self.watch_client.wait_revision(record.watchd_epoch, record.watchd_revision, timeout=2.0, reconfiguring=record.watchd_rebuild_window_open())
+                if response.get("ok") is not True:
+                    self.publish_watchd_failure(record, response, action="wait_revision")
+                    if response.get("_transport_error") in {"absent", "refused"}:
+                        record.watchd_lease_id = ""
+                    record.watchd_stop_event.wait(1.0)
+                    continue
+                # A declared native-watch rebuild is an expected outcome carrying
+                # its own reason, not a failure: the daemon cannot answer while it
+                # registers, so the next request is armed against that window.
+                if WatchClient.response_is_reconfiguring(response):
+                    self.record_watchd_synced_generation(record, response)
+                    self.publish_watchd_recovery(record)
+                    record.watchd_stop_event.wait(WatchClient.reconfigure_backoff_seconds(response))
+                    continue
+                revision = response.get("revision") if isinstance(response.get("revision"), dict) else {}
+                if response.get("changed") and revision:
+                    self.apply_watchd_revision(record, revision, reset=bool(response.get("reset")))
+                else:
+                    self.publish_watchd_recovery(record)
+        finally:
+            lease_id = record.watchd_lease_id
+            if lease_id:
+                self.watch_client.release_lease(lease_id)
+            with self.client_watch_service.lock:
+                if self.client_watch_service.event_watcher_record is record and record.watchd_worker is worker:
+                    record.watchd_worker = None
+                    record.watchd_lease_id = ""
+                    record.watchd_pid = 0
+                    record.filesystem_healthy = False
+
+    def watchd_runtime_status(self) -> dict[str, Any]:
+        """Return the bridge mirror without making a status route call watchd."""
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+            return {
+                "service": "watchd",
+                "pid": record.watchd_pid,
+                "started_at": 0.0,
+                "version": 1,
+                "healthy": record.watchd_state in {"ready", "polling"},
+                "clients": 1 if record.watchd_lease_id else 0,
+                "queues": {"depth": 0},
+                "cache": {"ready": record.watchd_revision > 0},
+                "epoch": record.watchd_epoch,
+                "revision": record.watchd_revision,
+                "fallback": record.watchd_state == "polling",
+                "last_failure": "" if record.watchd_state in {"starting", "ready", "polling"} else record.watchd_state,
+                "resources": {},
+            }
+
+    def start_watchd_revision_watcher(self, record: ClientEventWatcherRecord) -> bool:
+        with self.client_watch_service.lock:
+            if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
+                return False
+            worker = record.watchd_worker
             if worker is not None and worker.is_alive():
                 return False
-            worker = threading.Thread(target=self.native_filesystem_watch_loop, args=(current,), name="native-filesystem-watch", daemon=True)
-            current.filesystem_worker = worker
+            worker = threading.Thread(target=self.watchd_revision_loop, args=(record,), name="watchd-revision", daemon=True)
+            record.watchd_worker = worker
 
         def rollback() -> None:
             with self.client_watch_service.lock:
-                if self.client_watch_service.event_watcher_record is current and current.filesystem_worker is worker:
-                    current.filesystem_worker = None
-                    current.filesystem_healthy = False
+                if self.client_watch_service.event_watcher_record is record and record.watchd_worker is worker:
+                    record.watchd_worker = None
+                    record.watchd_stop_event.set()
 
         common.start_thread_with_rollback(worker, rollback)
         return True
 
-    def native_filesystem_watch_loop(self, record: ClientEventWatcherRecord) -> None:
-        worker = threading.current_thread()
-        try:
-            while not record.stop_event.is_set():
-                roots, watch_paths, transcripts, skip_dirs = self.native_filesystem_watch_configuration()
-                with self.client_watch_service.lock:
-                    if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
-                        return
-                    record.filesystem_roots = roots
-                    record.filesystem_watch_paths = watch_paths
-                    record.filesystem_transcripts = transcripts
-                    record.filesystem_skip_dirs = skip_dirs
-                    record.filesystem_stop_event = threading.Event()
-                    record.filesystem_reconfigure_event.clear()
-                    stop_event = record.filesystem_stop_event
-                if not watch_paths:
-                    record.wake_event.wait(timeout=1.0)
-                    record.wake_event.clear()
-                    continue
-                try:
-                    with self.client_watch_service.lock:
-                        record.filesystem_healthy = True
-                    assert watchfiles_watch is not None
-                    for changes in watchfiles_watch(
-                        *watch_paths,
-                        watch_filter=lambda _change, raw_path: self.native_filesystem_event_allowed(Path(raw_path).expanduser().resolve(strict=False), record),
-                        debounce=NATIVE_FILESYSTEM_WATCH_DEBOUNCE_MS,
-                        step=NATIVE_FILESYSTEM_WATCH_STEP_MS,
-                        rust_timeout=NATIVE_FILESYSTEM_WATCH_RUST_TIMEOUT_MS,
-                        stop_event=stop_event,
-                        raise_interrupt=False,
-                    ):
-                        if record.stop_event.is_set() or stop_event.is_set():
-                            break
-                        if changes:
-                            try:
-                                self.handle_native_filesystem_changes(record, changes)
-                            except Exception as exc:  # Keep one bad OS event from killing the watcher.
-                                self.log_event(
-                                    None,
-                                    "native_filesystem_watch_event_error",
-                                    f"native filesystem watch event failed: {exc}",
-                                    {"diagnostic": str(exc)},
-                                    message_key="events.message.clientEvent.directoryWatchFailed",
-                                )
-                except (OSError, RuntimeError, ValueError) as exc:
-                    self.handle_native_filesystem_watch_loss(record, reason="watch-error", diagnostic=str(exc))
-                    if record.stop_event.wait(NATIVE_FILESYSTEM_RETRY_SECONDS):
-                        return
-                    continue
-                if not record.filesystem_reconfigure_event.is_set() and not record.stop_event.is_set():
-                    # A backend that returns without an error is treated like a transient
-                    # watch loss; retry after the same bounded backoff.
-                    self.handle_native_filesystem_watch_loss(record, reason="watch-ended")
-                    if record.stop_event.wait(NATIVE_FILESYSTEM_RETRY_SECONDS):
-                        return
-        finally:
-            with self.client_watch_service.lock:
-                if self.client_watch_service.event_watcher_record is record and record.filesystem_worker is worker:
-                    record.filesystem_worker = None
-                    record.filesystem_healthy = False
-
-    def publish_files_changed_event(self, previous: tuple[Any, ...] | None, current: tuple[Any, ...], compute_ms: float = 0.0) -> list[str]:
-        if previous == current:
-            return []
-        previous_by_path = {str(item[0]): item[1] for item in previous or () if isinstance(item, tuple) and len(item) >= 2}
-        changed: list[dict[str, Any]] = []
-        for item in current:
-            if not isinstance(item, tuple) or len(item) < 2:
-                continue
-            path = str(item[0])
-            signature = item[1]
-            if previous_by_path.get(path) == signature:
-                continue
-            changed.append({"path": path, "signature": signature})
-        if not changed:
-            return []
-        self.publish_client_event(
-            "files_changed",
-            {"files": changed, "count": len(changed)},
-            trigger="watch",
-            cache="ready",
-            compute_ms=compute_ms,
-        )
-        return ["files_changed"]
 
     def record_filesystem_watch_snapshot(self, signature: tuple[Any, ...]) -> str:
         now = time.time()
@@ -5673,22 +6097,20 @@ class TmuxWebtermApp:
                     return copy.deepcopy(record)
         return None
 
-    def latest_filesystem_watch_record(self, refresh: bool = False) -> dict[str, Any] | None:
+    def latest_filesystem_watch_record(self) -> dict[str, Any] | None:
         with self.client_watch_service.lock:
-            if self.client_watch_service.filesystem_history and not refresh:
+            if self.client_watch_service.filesystem_history:
                 return copy.deepcopy(self.client_watch_service.filesystem_history[-1])
-        sessions, _errors = discover_sessions(self.sessions)
-        if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
-            signature = self.filesystem_roots_watch_signature(sessions)
-        else:
-            signature = self.follower_filesystem_roots_watch_signature(sessions)
-        if not signature:
-            return None
-        token = self.record_filesystem_watch_snapshot(signature)
-        return self.filesystem_watch_record_for_token(token)
+        return None
 
-    def filesystem_watch_signature_for_roots(self, roots: list[str]) -> tuple[Any, ...]:
-        return tuple((root, filesystem_watch_signature(root)) for root in roots[:CLIENT_WATCH_ROOT_LIMIT])
+    def filesystem_watch_signature_for_roots(
+        self,
+        roots: list[str],
+    ) -> tuple[Any, ...]:
+        return tuple(
+            (root, filesystem.watch_signature(root, child_limit=filesystem.WATCH_SIGNATURE_CHILD_LIMIT))
+            for root in roots[:CLIENT_WATCH_ROOT_LIMIT]
+        )
 
     def filesystem_watch_full_due(self) -> bool:
         with self.client_watch_service.lock:
@@ -5698,24 +6120,47 @@ class TmuxWebtermApp:
         with self.client_watch_service.lock:
             self.client_watch_service.filesystem_last_full_at = time.monotonic()
 
-    def filesystem_watch_full_payload(self, record: dict[str, Any], reason: str = "full") -> dict[str, Any]:
+    def filesystem_watch_full_plan(
+        self,
+        record: dict[str, Any],
+        reason: str = "full",
+    ) -> tuple[dict[str, Any], list[str]]:
         signature = record.get("signature")
         roots = sorted(filesystem_signature_root_map(signature).keys())
-        payload = self.filesystem_push_payload(roots)
-        payload["mode"] = "full"
-        payload["reason"] = reason
-        payload["token"] = record.get("token", "")
-        return payload
+        return {
+            "mode": "full",
+            "reason": reason,
+            "token": record.get("token", ""),
+            "removed_roots": [],
+        }, roots
 
-    def filesystem_watch_diff_payload(self, since_token: str = "", force_full: bool = False) -> dict[str, Any]:
-        current = self.latest_filesystem_watch_record(refresh=force_full)
-        if current is None:
-            return {"mode": "none", "token": "", "directories": [], "removed_roots": []}
+    def filesystem_watch_diff_plan(
+        self,
+        since_token: str = "",
+        force_full: bool = False,
+    ) -> tuple[dict[str, Any], list[str]]:
         if force_full:
-            return self.filesystem_watch_full_payload(current, "forced")
+            roots = self.client_watch_roots_snapshot()
+            return {
+                "mode": "full",
+                "reason": "forced",
+                "token": "",
+                "removed_roots": [],
+            }, roots
+        current = self.latest_filesystem_watch_record()
+        if current is None:
+            roots = self.client_watch_roots_snapshot()
+            if roots:
+                return {
+                    "mode": "full",
+                    "reason": "snapshot-unavailable",
+                    "token": "",
+                    "removed_roots": [],
+                }, roots
+            return {"mode": "none", "token": "", "directories": [], "removed_roots": []}, []
         previous = self.filesystem_watch_record_for_token(since_token)
         if previous is None:
-            return self.filesystem_watch_full_payload(current, "stale-since")
+            return self.filesystem_watch_full_plan(current, "stale-since")
         current_signature = current.get("signature")
         previous_signature = previous.get("signature")
         if previous.get("token") == current.get("token") or previous_signature == current_signature:
@@ -5726,15 +6171,322 @@ class TmuxWebtermApp:
                 "directories": [],
                 "removed_roots": [],
                 "change_summary": filesystem_change_summary(previous_signature, current_signature),
-            }
+            }, []
         changed_roots, removed_roots = filesystem_changed_roots(previous_signature, current_signature)
-        payload = self.filesystem_push_payload(changed_roots)
-        payload["mode"] = "diff"
-        payload["token"] = current.get("token", "")
-        payload["since"] = previous.get("token", "")
-        payload["removed_roots"] = removed_roots
-        payload["change_summary"] = filesystem_change_summary(previous_signature, current_signature)
-        return payload
+        return {
+            "mode": "diff",
+            "token": current.get("token", ""),
+            "since": previous.get("token", ""),
+            "removed_roots": removed_roots,
+            "change_summary": filesystem_change_summary(previous_signature, current_signature),
+        }, changed_roots
+
+    @staticmethod
+    def decode_filesystem_watch_batch_product(body: bytes) -> dict[str, Any]:
+        try:
+            product = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise JobdOperationUnavailable(
+                "malformed completed filesystem batch product",
+                {"error": str(error), "status": "malformed_product"},
+            ) from error
+        if not isinstance(product, dict) or not isinstance(product.get("responses"), list):
+            raise JobdOperationUnavailable(
+                "malformed completed filesystem batch product",
+                {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
+            )
+        return product
+
+    def submit_filesystem_watch_batches(
+        self,
+        roots: list[str],
+        identity_seed: str,
+        *,
+        delivery: str = "receipt",
+    ) -> tuple[FilesystemWatchBatchProduct, ...]:
+        if len(roots) > filesystem.MAX_BATCH_REQUESTS:
+            raise JobdOperationUnavailable(
+                f"filesystem watch roots must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                {
+                    "error": f"filesystem watch roots must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                    "status": "invalid_request",
+                    "roots": len(roots),
+                    "maximum": filesystem.MAX_BATCH_REQUESTS,
+                },
+                code="invalid_request",
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        payload, product_key = filesystem_watch_batch_submission(roots, identity_seed)
+        response, body = self.job_client.produce(
+            "filesystem_batch",
+            payload,
+            priority="interactive",
+            generation=1,
+            coalesce_key=product_key,
+            deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
+            delivery=delivery,
+        )
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        state = str(job.get("status") or "")
+        if response.get("ok") is not True or not job_id or state not in {"queued", "running", "completed"}:
+            failure = dict(response)
+            raise JobdOperationUnavailable(
+                str(failure.get("error") or "jobd did not accept filesystem watch batch"),
+                failure,
+            )
+        if body and delivery == "receipt":
+            raise JobdOperationUnavailable(
+                "receipt-only filesystem watch batch unexpectedly returned product bytes",
+                {"error": "receipt-only filesystem watch batch unexpectedly returned product bytes"},
+            )
+        ready_product = self.decode_filesystem_watch_batch_product(body) if body else None
+        return (FilesystemWatchBatchProduct(
+            producer=JobdProductOperation(job_id=job_id, product_key=product_key, generation=1),
+            ready_product=ready_product,
+        ),)
+
+    def filesystem_watch_batch_identity_seed(
+        self,
+        base_payload: dict[str, Any],
+        roots: list[str],
+    ) -> str:
+        token = str(base_payload.get("token") or "")
+        if token:
+            return token
+        with self.client_watch_service.lock:
+            latest = self.client_watch_service.filesystem_history[-1] if self.client_watch_service.filesystem_history else {}
+            latest_token = str(latest.get("token") or "")
+            latest_roots = sorted(filesystem_signature_root_map(latest.get("signature")).keys())
+            if latest_token and latest_roots == sorted(roots):
+                return latest_token
+            return f"event-generation:{self.client_watch_service.filesystem_event_generation}"
+
+    def cached_filesystem_watch_products(self, product_key: str) -> list[dict[str, Any]] | None:
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.filesystem_ready_product
+            if product_key not in record.keys or not record.products:
+                return None
+            return [copy.deepcopy(product) for product in record.products]
+
+    def cache_filesystem_watch_products(
+        self,
+        products: list[dict[str, Any]],
+        product_keys: set[str],
+    ) -> None:
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.filesystem_ready_product
+            record.keys = frozenset(str(key) for key in product_keys if str(key))
+            record.products = tuple(copy.deepcopy(product) for product in products)
+
+    def materialize_filesystem_watch_products(
+        self,
+        base_payload: dict[str, Any],
+        roots: list[str],
+        products: list[dict[str, Any]],
+        *,
+        product_keys: set[str],
+    ) -> dict[str, Any]:
+        signature = filesystem_watch_product_signature(roots, products)
+        token = self.record_filesystem_watch_snapshot(signature)
+        _payload, token_product_key = filesystem_watch_batch_submission(roots, token)
+        self.cache_filesystem_watch_products(products, {*product_keys, token_product_key})
+        return self.filesystem_watch_payload_from_products(
+            {**copy.deepcopy(base_payload), "token": token},
+            roots,
+            products,
+        )
+
+    def resolve_filesystem_watch_batches(
+        self,
+        batches: tuple[FilesystemWatchBatchProduct, ...],
+        deadline_at: float,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> list[dict[str, Any]]:
+        products: list[dict[str, Any]] = []
+        for batch in batches:
+            if batch.ready_product is not None:
+                products.append(copy.deepcopy(batch.ready_product))
+                continue
+            product = self.wait_for_jobd_operation_product(
+                batch.producer,
+                deadline_at,
+                cancel_event=cancel_event,
+            )
+            if not isinstance(product.get("responses"), list):
+                raise JobdOperationUnavailable(
+                    "malformed completed filesystem batch product",
+                    {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
+                )
+            products.append(product)
+        return products
+
+    @staticmethod
+    def filesystem_watch_payload_from_products(
+        base_payload: dict[str, Any],
+        roots: list[str],
+        products: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return watch_diff_payload_from_products(base_payload, roots, products)
+
+    def complete_filesystem_watch_diff_operation(
+        self,
+        receipt_fence: FilesystemWatchReceiptFence,
+        request_id: str,
+        base_payload: dict[str, Any],
+        roots: list[str],
+        deadline_at: float,
+        identity_seed: str,
+    ) -> None:
+        route = "GET /api/fs/watch-diff"
+        operation = "jobd.produce"
+        data: dict[str, Any] | None = None
+        failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
+        try:
+            batches = self.submit_filesystem_watch_batches(
+                roots,
+                identity_seed,
+                delivery="ready_or_receipt",
+            )
+            operation = "jobd.product"
+            products = self.resolve_filesystem_watch_batches(
+                batches,
+                deadline_at,
+                cancel_event=receipt_fence.cancelled,
+            )
+            data = self.materialize_filesystem_watch_products(
+                base_payload,
+                roots,
+                products,
+                product_keys={batch.producer.product_key for batch in batches},
+            )
+        except JobdOperationUnavailable as error:
+            failure = (error.failure, operation, error.status, error.code)
+        except Exception as error:
+            failure = (
+                {"error": str(error), "cause": local_service_exception_cause(error)},
+                "filesystem-watch-diff.complete",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "producer_failed",
+            )
+        operation_id = receipt_fence.wait_for_operation_id()
+        if not operation_id:
+            return
+        if failure is None:
+            assert data is not None
+            result = self.operation_ready_result(request_id, data)
+            status = HTTPStatus.OK
+        else:
+            failure_payload, failure_operation, status, code = failure
+            result = self.jobd_operation_failure_result(
+                request_id,
+                failure_payload,
+                route=route,
+                operation_id=operation_id,
+                operation=failure_operation,
+                code=code,
+            )
+        self.terminalize_operation(operation_id, result, status)
+
+    def accept_filesystem_watch_diff_operation(
+        self,
+        request_id: str,
+        base_payload: dict[str, Any],
+        roots: list[str],
+        identity_seed: str,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
+        receipt_fence = FilesystemWatchReceiptFence()
+        submitted = self.jobd_operation_service.submit_reserved(
+            self.complete_filesystem_watch_diff_operation,
+            receipt_fence,
+            request_id,
+            base_payload,
+            roots,
+            deadline_at,
+            identity_seed,
+        )
+        if not submitted:
+            return self.jobd_operation_failure_result(
+                request_id,
+                {"error": "filesystem watch completion worker could not start"},
+                route="GET /api/fs/watch-diff",
+                operation="jobd.produce",
+                code="producer_failed",
+            ), HTTPStatus.SERVICE_UNAVAILABLE
+        try:
+            receipt = self.queued_delivery_ledger.accept_operation(
+                request_id=request_id,
+                route="GET /api/fs/watch-diff",
+                deadline_at=deadline_at,
+                progress={
+                    "phase": "refreshing_snapshot" if not base_payload.get("token") else "waiting_for_product",
+                    "producer": "jobd",
+                    "producer_state": "submitting",
+                },
+                producer={
+                    "service": "jobd",
+                    "delivery": "ready_or_receipt",
+                },
+                kind="fs_watch_diff",
+                context={
+                    "mode": str(base_payload.get("mode") or ""),
+                    "token": str(base_payload.get("token") or ""),
+                    "since": str(base_payload.get("since") or ""),
+                    "roots": len(roots),
+                    "batches": 1,
+                },
+            )
+        except Exception:
+            receipt_fence.cancel()
+            raise
+        operation_id = str(receipt["operation"]["id"])
+        receipt_fence.accept(operation_id)
+        return receipt, HTTPStatus.ACCEPTED
+
+    def filesystem_watch_diff_http_payload(
+        self,
+        since_token: str = "",
+        force_full: bool = False,
+        request_id: str = "",
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        request_id = str(request_id or self.new_api_request_id())
+        base_payload, roots = self.filesystem_watch_diff_plan(since_token, force_full)
+        if not roots:
+            return base_payload, HTTPStatus.OK
+        if len(roots) > filesystem.MAX_BATCH_REQUESTS:
+            return common.error_payload(
+                f"filesystem watch roots must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                message_key="request.error.list",
+                canonical=True,
+                code="invalid_request",
+                origin="server.http",
+                retryable=False,
+                details={"roots": len(roots), "maximum": filesystem.MAX_BATCH_REQUESTS},
+                request_id=request_id,
+            ), HTTPStatus.BAD_REQUEST
+        identity_seed = self.filesystem_watch_batch_identity_seed(base_payload, roots)
+        _batch_payload, product_key = filesystem_watch_batch_submission(roots, identity_seed)
+        cached_products = self.cached_filesystem_watch_products(product_key)
+        if cached_products is not None:
+            return self.materialize_filesystem_watch_products(
+                base_payload,
+                roots,
+                cached_products,
+                product_keys={product_key},
+            ), HTTPStatus.OK
+        if not self.jobd_operation_service.reserve():
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                route="GET /api/fs/watch-diff",
+                operation="jobd.produce",
+                code="service_busy",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        return self.accept_filesystem_watch_diff_operation(request_id, base_payload, roots, identity_seed)
 
     def publish_filesystem_ready_event(
         self,
@@ -5743,6 +6495,7 @@ class TmuxWebtermApp:
         change_summary: dict[str, Any] | None = None,
         current_signature: tuple[Any, ...] | None = None,
         force_full: bool = False,
+        defer_full: bool = False,
     ) -> list[str]:
         if not roots:
             return []
@@ -5751,16 +6504,12 @@ class TmuxWebtermApp:
         token = self.record_filesystem_watch_snapshot(filesystem_signature)
         with self.client_watch_service.lock:
             previous_signature = self.client_watch_service.filesystem_payload_signature
-            self.client_watch_service.filesystem_payload_signature = token
         if previous_signature == token:
             return []
-        full = force_full or trigger not in {"watch", "native-watch"} or self.filesystem_watch_full_due()
-        if full:
-            payload = self.filesystem_push_payload(roots)
-            payload["mode"] = "full"
-            payload["token"] = token
-            self.mark_filesystem_watch_full_sent()
-        else:
+        full = not defer_full and (force_full or trigger != "watch" or self.filesystem_watch_full_due())
+        if not full:
+            with self.client_watch_service.lock:
+                self.client_watch_service.filesystem_payload_signature = token
             payload = {
                 "roots": roots,
                 "mode": "diff",
@@ -5769,6 +6518,112 @@ class TmuxWebtermApp:
                 "change_summary": change_summary or {},
                 "compute_ms": round((time.perf_counter() - started) * 1000, 1),
             }
+            self.publish_client_event(
+                "fs_changed",
+                payload,
+                trigger=trigger,
+                cache="ready",
+                compute_ms=float(payload.get("compute_ms") or 0.0),
+            )
+            return ["fs_changed"]
+        with self.client_watch_service.lock:
+            inflight_token = self.client_watch_service.filesystem_full_inflight_token
+            if not inflight_token:
+                self.client_watch_service.filesystem_full_inflight_token = token
+        if inflight_token == token:
+            return []
+        if inflight_token:
+            with self.client_watch_service.lock:
+                self.client_watch_service.filesystem_payload_signature = token
+            payload = {
+                "roots": roots,
+                "mode": "diff",
+                "refresh": True,
+                "token": token,
+                "change_summary": change_summary or {},
+                "compute_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+            self.publish_client_event(
+                "fs_changed",
+                payload,
+                trigger=trigger,
+                cache="ready",
+                compute_ms=float(payload.get("compute_ms") or 0.0),
+            )
+            return ["fs_changed"]
+        if not self.jobd_operation_service.reserve():
+            self.clear_filesystem_watch_full_inflight(token)
+            return []
+        try:
+            batches = self.submit_filesystem_watch_batches(roots, token, delivery="ready_or_receipt")
+        except JobdOperationUnavailable as error:
+            self.jobd_operation_service.release_reservation()
+            self.record_filesystem_watch_product_failure(error, trigger)
+            self.clear_filesystem_watch_full_inflight(token)
+            return []
+        except Exception:
+            self.jobd_operation_service.release_reservation()
+            self.clear_filesystem_watch_full_inflight(token)
+            raise
+        base_payload = {"mode": "full", "token": token, "removed_roots": []}
+        if all(batch.ready_product is not None for batch in batches):
+            self.jobd_operation_service.release_reservation()
+            products = [copy.deepcopy(batch.ready_product) for batch in batches if batch.ready_product is not None]
+            payload = self.materialize_filesystem_watch_products(
+                base_payload,
+                roots,
+                products,
+                product_keys={batch.producer.product_key for batch in batches},
+            )
+            return self.publish_completed_filesystem_full_payload(token, trigger, payload)
+        deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
+        submitted = self.jobd_operation_service.submit_reserved(
+            self.complete_filesystem_ready_event,
+            token,
+            trigger,
+            base_payload,
+            roots,
+            batches,
+            deadline_at,
+        )
+        if not submitted:
+            self.clear_filesystem_watch_full_inflight(token)
+        return []
+
+    def clear_filesystem_watch_full_inflight(self, token: str) -> None:
+        with self.client_watch_service.lock:
+            if self.client_watch_service.filesystem_full_inflight_token == token:
+                self.client_watch_service.filesystem_full_inflight_token = ""
+
+    def record_filesystem_watch_product_failure(
+        self,
+        error: JobdOperationUnavailable,
+        trigger: str,
+    ) -> None:
+        result = self.jobd_operation_failure_result(
+            self.new_api_request_id(),
+            error.failure,
+            route="fs_changed",
+            operation="jobd.product",
+            code=error.code,
+        )
+        self.record_operation_failure("", result)
+
+    def publish_completed_filesystem_full_payload(
+        self,
+        token: str,
+        trigger: str,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        with self.client_watch_service.lock:
+            if self.client_watch_service.filesystem_full_inflight_token == token:
+                self.client_watch_service.filesystem_full_inflight_token = ""
+            latest_record = self.client_watch_service.filesystem_history[-1] if self.client_watch_service.filesystem_history else {}
+            latest_token = str(latest_record.get("token") or "")
+            if latest_token and latest_token != token:
+                return []
+            self.client_watch_service.filesystem_payload_signature = token
+            self.client_watch_service.filesystem_last_full_at = time.monotonic()
         self.publish_client_event(
             "fs_changed",
             payload,
@@ -5778,41 +6633,39 @@ class TmuxWebtermApp:
         )
         return ["fs_changed"]
 
-    def filesystem_push_payload(self, roots: list[str]) -> dict[str, Any]:
-        directories: list[dict[str, Any]] = []
-        summary = {
-            "roots_requested": len(roots[:CLIENT_WATCH_ROOT_LIMIT]),
-            "roots_listed": 0,
-            "roots_error": 0,
-            "entries_listed": 0,
-            "files_listed": 0,
-            "dirs_listed": 0,
-        }
-        started = time.perf_counter()
-        for root in roots[:CLIENT_WATCH_ROOT_LIMIT]:
-            try:
-                payload = filesystem.list_directory(root)
-            except filesystem.FilesystemError as exc:
-                directories.append({"path": root, "status": int(exc.status), "ok": False, "error": str(exc)})
-                summary["roots_error"] += 1
-                continue
-            entries = payload.get("entries", []) if isinstance(payload, dict) else []
-            if isinstance(entries, list):
-                summary["entries_listed"] += len(entries)
-                for entry in entries:
-                    kind = str(entry.get("kind", "")) if isinstance(entry, dict) else ""
-                    if kind == "dir":
-                        summary["dirs_listed"] += 1
-                    else:
-                        summary["files_listed"] += 1
-            summary["roots_listed"] += 1
-            directories.append({"path": root, "status": 200, "ok": True, "data": payload})
-        return {
-            "roots": roots,
-            "directories": directories,
-            "listing_summary": summary,
-            "compute_ms": round((time.perf_counter() - started) * 1000, 1),
-        }
+    def complete_filesystem_ready_event(
+        self,
+        token: str,
+        trigger: str,
+        base_payload: dict[str, Any],
+        roots: list[str],
+        batches: tuple[FilesystemWatchBatchProduct, ...],
+        deadline_at: float,
+    ) -> None:
+        try:
+            products = self.resolve_filesystem_watch_batches(batches, deadline_at)
+            payload = self.materialize_filesystem_watch_products(
+                base_payload,
+                roots,
+                products,
+                product_keys={batch.producer.product_key for batch in batches},
+            )
+        except JobdOperationUnavailable as error:
+            if error.code != "producer_abandoned" or not self.jobd_operation_service.stop_event.is_set():
+                self.record_filesystem_watch_product_failure(error, trigger)
+            self.clear_filesystem_watch_full_inflight(token)
+            return
+        except Exception as error:
+            failure = JobdOperationUnavailable(
+                str(error),
+                {"error": str(error), "cause": local_service_exception_cause(error)},
+                code="producer_failed",
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            self.record_filesystem_watch_product_failure(failure, trigger)
+            self.clear_filesystem_watch_full_inflight(token)
+            return
+        self.publish_completed_filesystem_full_payload(token, trigger, payload)
 
     def clear_transcript_content_caches(self) -> None:
         with self.activity_transcript_service.transcript_tail_cache_lock:
@@ -5825,9 +6678,19 @@ class TmuxWebtermApp:
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
             record.generation += 1
-            record.worker = None
             record.stored_at = None
             record.payload = None
+            # Invalidation supersedes the in-flight build, so it must release the whole guard, not
+            # just the worker handle. Leaving `worker_started_at`/`publish_requested` set left an
+            # intent behind that belonged to a caller this invalidation had already superseded.
+            record.release_worker()
+        # A queued follow-up build is a promise to a forced caller waiting on a named generation.
+        # The invalidated worker can no longer keep it -- its finish is a generation mismatch and
+        # returns before the drain -- so the promise was left sitting on the record until some
+        # unrelated later build inherited it and published an extra follow-up. Drain it here through
+        # the one owner instead: the caller gets the build it was promised, and the record is left
+        # with no worker and no queued intent.
+        self.start_queued_transcripts_payload_rebuild()
 
     def start_client_watch_snapshot_publish(self) -> bool:
         generation = 0
@@ -5902,13 +6765,6 @@ class TmuxWebtermApp:
             self.publish_activity_summary_ready_events(trigger="watch_state")
             if guarded and not self.client_watch_snapshot_is_current(record, worker):
                 return
-            roots = self.client_watch_roots_snapshot()
-            if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
-                self.publish_filesystem_ready_event(roots, trigger="watch_state")
-            else:
-                self.request_watch_roots_owner_refresh(roots, "watch_state")
-            if guarded and not self.client_watch_snapshot_is_current(record, worker):
-                return
             self.publish_session_files_ready_events(trigger="watch_state")
         finally:
             self.finish_transcripts_payload_work(generation, worker)
@@ -5916,91 +6772,6 @@ class TmuxWebtermApp:
                 if guarded and self.client_watch_service.event_watcher_record is record and record.snapshot_worker is worker:
                     record.snapshot_worker = None
 
-    def poll_client_events_once(self) -> list[str]:
-        sessions, _errors = discover_sessions(self.sessions)
-        settings_signature = self.settings_watch_signature()
-        transcripts_signature = self.transcripts_watch_signature(sessions)
-        transcript_content_signature = self.transcript_content_watch_signature(sessions)
-        if self.background_can_run(BACKGROUND_ROLE_WATCH_ROOTS):
-            filesystem_signature = self.filesystem_roots_watch_signature(sessions)
-        else:
-            filesystem_signature = self.follower_filesystem_roots_watch_signature(sessions)
-        events: list[str] = []
-        with self.client_watch_service.lock:
-            initialized = self.client_watch_service.initialized
-            previous_filesystem_signature = self.client_watch_service.filesystem_signature
-            settings_changed = initialized and self.client_watch_service.settings_signature != settings_signature
-            transcripts_changed = initialized and self.client_watch_service.transcripts_signature != transcripts_signature
-            transcript_content_changed = initialized and self.client_watch_service.transcript_content_signature != transcript_content_signature
-            filesystem_changed = initialized and previous_filesystem_signature != filesystem_signature
-            self.client_watch_service.initialized = True
-            self.client_watch_service.settings_signature = settings_signature
-            self.client_watch_service.transcripts_signature = transcripts_signature
-            self.client_watch_service.transcript_content_signature = transcript_content_signature
-            self.client_watch_service.filesystem_signature = filesystem_signature
-        if settings_changed:
-            started = time.perf_counter()
-            payload = self.settings_payload()
-            self.publish_client_event(
-                "settings_changed",
-                {"signature": settings_signature, "data": payload},
-                cache="ready",
-                compute_ms=(time.perf_counter() - started) * 1000,
-            )
-            events.append("settings_changed")
-        if transcripts_changed:
-            self.clear_transcript_caches()
-            self.publish_client_event(
-                "transcripts_changed",
-                {"signature": transcripts_signature, "refresh": True},
-                cache="refresh",
-            )
-            events.append("transcripts_changed")
-            events.extend(self.publish_context_items_ready_events(trigger="transcripts_changed"))
-            events.extend(self.publish_activity_summary_ready_events(trigger="transcripts_changed"))
-            events.extend(self.publish_session_files_ready_events(trigger="transcripts_changed"))
-        elif transcript_content_changed:
-            self.clear_transcript_content_caches()
-            events.extend(self.publish_context_items_ready_events(trigger="transcript_content_changed"))
-            events.extend(self.publish_activity_summary_ready_events(trigger="transcript_content_changed"))
-            events.extend(self.publish_session_files_ready_events(trigger="transcript_content_changed"))
-        if filesystem_changed:
-            roots = self.filesystem_roots_for_watch(sessions)
-            change_summary = filesystem_change_summary(previous_filesystem_signature, filesystem_signature)
-            changed_paths = filesystem_changed_paths(previous_filesystem_signature, filesystem_signature)
-            if changed_paths:
-                filesystem.reindex_roots_for_paths(changed_paths, reason="fs-watch")
-            events.extend(self.publish_filesystem_ready_event(roots, change_summary=change_summary, current_signature=filesystem_signature))
-            session_file_events = self.publish_session_files_ready_events(trigger="fs_changed")
-            if session_file_events:
-                events.extend(session_file_events)
-        elif self.background_can_run(BACKGROUND_ROLE_SEARCH_INDEX):
-            file_index.schedule_refreshes()
-        return events
-
-    def poll_client_file_events_once(self) -> list[str]:
-        started = time.perf_counter()
-        files_signature = self.files_watch_signature()
-        compute_ms = (time.perf_counter() - started) * 1000
-        with self.client_watch_service.lock:
-            initialized = self.client_watch_service.file_signature is not None
-            previous = self.client_watch_service.file_signature
-            self.client_watch_service.file_signature = files_signature
-        if not initialized:
-            return []
-        return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
-
-    def poll_client_background_file_events_once(self) -> list[str]:
-        started = time.perf_counter()
-        files_signature = self.background_files_watch_signature()
-        compute_ms = (time.perf_counter() - started) * 1000
-        with self.client_watch_service.lock:
-            initialized = self.client_watch_service.background_file_signature is not None
-            previous = self.client_watch_service.background_file_signature
-            self.client_watch_service.background_file_signature = files_signature
-        if not initialized:
-            return []
-        return self.publish_files_changed_event(previous, files_signature, compute_ms=compute_ms)
 
     def record_dependency_invalidation(self, trigger: str) -> None:
         # Bounded by trigger reason (fs_changed, transcripts_changed, transcript_content_changed,
@@ -6016,7 +6787,9 @@ class TmuxWebtermApp:
         events: list[str] = []
         for item in context_items:
             started = time.perf_counter()
-            payload, status = self.context_items(item["session"], int(item["messages"]))
+            payload, status = self.context_items(item["session"], int(item["messages"]), accept_pending=False)
+            if status != HTTPStatus.OK or payload.get("pending"):
+                continue
             event_payload = {"session": item["session"], "messages": item["messages"], "status": int(status), "data": payload}
             signature = self.client_event_payload_signature(event_payload)
             key = self.client_event_payload_signature({"session": item["session"], "messages": item["messages"]})
@@ -6037,6 +6810,8 @@ class TmuxWebtermApp:
         return events
 
     def publish_activity_summary_ready_events(self, trigger: str = "watch") -> list[str]:
+        if not activity_summary_enabled():
+            return []
         if str(trigger or "") not in ACTIVITY_SUMMARY_READY_PUSH_TRIGGERS:
             return []
         self.prune_client_watch_descriptors()
@@ -6064,9 +6839,14 @@ class TmuxWebtermApp:
         )
         return ["activity_summary_ready"]
 
-    def publish_session_files_ready_events(self, trigger: str = "watch") -> list[str]:
+    def publish_session_files_ready_events(self, trigger: str = "watch", *, force: bool = False) -> list[str]:
         self.prune_client_watch_descriptors()
         _context_items, session_files_requests, _activity = self.client_watch_service.snapshot()
+        if force and not session_files_requests:
+            session_files_requests = [
+                {"session": session, "hours": 24.0}
+                for session in self.sessions
+            ]
         events: list[str] = []
         for item in session_files_requests:
             started = time.perf_counter()
@@ -6091,7 +6871,7 @@ class TmuxWebtermApp:
             with self.client_watch_service.lock:
                 previous_signature = self.client_watch_service.session_file_payload_signatures.get(key)
                 self.client_watch_service.session_file_payload_signatures[key] = signature
-            if previous_signature == signature:
+            if previous_signature == signature and not force:
                 continue
             self.record_dependency_invalidation(trigger)
             self.publish_client_event(
@@ -6131,6 +6911,16 @@ class TmuxWebtermApp:
                     record.status_generation_retry_at = time.monotonic() + 1.0
             return False
         generation = max(0, int(response.get("generation") or 0))
+        snapshot_payload: dict[str, Any] | None = None
+        if _body:
+            metadata = None
+            try:
+                metadata = validate_status_snapshot(response, _body)
+                decoded_snapshot = json.loads(_body)
+            except (StatusProtocolError, ValueError, TypeError):
+                decoded_snapshot = None
+            if metadata is not None and metadata.generation == generation and isinstance(decoded_snapshot, dict):
+                snapshot_payload = decoded_snapshot
         with self.client_watch_service.lock:
             if self.client_watch_service.event_watcher_record is not record or record.stop_event.is_set():
                 self.status_client.release_generation_lease(lease_id)
@@ -6139,6 +6929,7 @@ class TmuxWebtermApp:
             record.status_generation_lease_id = lease_id
             record.status_generation = generation
             self.client_watch_service.auto_approve_signature = f"statusd:{generation}:{int(response.get('status') or HTTPStatus.OK)}"
+            self.client_watch_service.auto_approve_payload = copy.deepcopy(snapshot_payload)
             worker = threading.Thread(target=self.status_generation_wait_loop, args=(record,), name="statusd-generation-wait", daemon=True)
             record.status_generation_worker = worker
         common.start_thread_with_rollback(worker, lambda: self.stop_status_generation_watcher(record))
@@ -6165,7 +6956,7 @@ class TmuxWebtermApp:
                     if self.client_watch_service.event_watcher_record is not record:
                         return
                     generation = record.status_generation
-                response = self.status_client.wait_generation(generation, timeout=30.0)
+                response = self.status_client.probe_generation(generation)
                 if response.get("ok") is True:
                     next_generation = max(0, int(response.get("generation") or 0))
                     changed = response.get("changed") is True and next_generation > generation
@@ -6178,6 +6969,7 @@ class TmuxWebtermApp:
                             "signature": f"statusd:{next_generation}:{int(HTTPStatus.OK)}",
                         }
                         snapshot_response, snapshot_body = self.status_client.snapshot(self.sessions, timeout=1.0)
+                        snapshot_payload = None
                         if snapshot_response.get("ok") is True and snapshot_body:
                             metadata = None
                             try:
@@ -6186,20 +6978,25 @@ class TmuxWebtermApp:
                             except (StatusProtocolError, ValueError, TypeError):
                                 snapshot_payload = None
                             if metadata is not None and metadata.generation == next_generation and isinstance(snapshot_payload, dict):
-                                event_payload["data"] = snapshot_payload
                                 event_payload["refresh"] = False
                         with self.client_watch_service.lock:
                             if self.client_watch_service.event_watcher_record is not record:
                                 return
+                            previous_payload = copy.deepcopy(self.client_watch_service.auto_approve_payload)
                             record.status_generation = next_generation
                             self.client_watch_service.auto_approve_signature = f"statusd:{next_generation}:{int(HTTPStatus.OK)}"
-                        self.publish_client_event(
-                            "auto_approve_changed",
-                            event_payload,
-                            trigger="statusd-generation",
-                            cache="ready",
-                        )
+                            if isinstance(snapshot_payload, dict):
+                                self.client_watch_service.auto_approve_payload = copy.deepcopy(snapshot_payload)
+                        if isinstance(snapshot_payload, dict):
+                            patch = self.auto_approve_client_event_patch(previous_payload, snapshot_payload)
+                            if patch is None:
+                                retry_seconds = 0.25
+                                continue
+                            event_payload = {**event_payload, **patch}
+                        self.publish_client_event("auto_approve_changed", event_payload, trigger="statusd-generation", cache="ready")
                     retry_seconds = 0.25
+                    if not changed and record.status_generation_stop_event.wait(STATUS_GENERATION_RPC_WAIT_SECONDS):
+                        return
                     continue
                 if record.status_generation_stop_event.wait(retry_seconds):
                     return
@@ -6264,10 +7061,14 @@ class TmuxWebtermApp:
         record.wake_event.set()
 
     def tmux_signal_event_watcher_healthy(self) -> bool:
+        return self.tmux_signal_event_watcher_status().get("state") == "attached"
+
+    def tmux_signal_event_watcher_status(self) -> dict[str, Any]:
         with self.client_watch_service.lock:
             watcher = self.tmux_signal_event_watcher
-            thread = watcher.thread if watcher is not None else None
-        return thread is not None and thread.is_alive()
+        status = TmuxSignalEventWatcher.never_started_status() if watcher is None else watcher.status_payload()
+        status["demanded"] = int(self.client_events.snapshot().get("subscribers") or 0) > 0
+        return status
 
     def log_tmux_signal_event_error(self, message: str) -> None:
         self.log_event(
@@ -6280,10 +7081,13 @@ class TmuxWebtermApp:
 
     def start_tmux_signal_event_watcher(self) -> bool:
         with self.client_watch_service.lock:
-            if self.tmux_signal_event_watcher is not None:
+            current = self.tmux_signal_event_watcher
+            if current is not None and current.thread is not None and current.thread.is_alive():
                 return False
             watcher = TmuxSignalEventWatcher(lambda: list(self.sessions), self.handle_tmux_signal_event, self.log_tmux_signal_event_error)
             self.tmux_signal_event_watcher = watcher
+        if current is not None:
+            current.stop()
         return watcher.start()
 
     def stop_tmux_signal_event_watcher(self) -> None:
@@ -6318,6 +7122,9 @@ class TmuxWebtermApp:
         with self.client_watch_service.lock:
             current = self.client_watch_service.event_watcher_record
             if current.worker is not None and current.worker.is_alive():
+                # A retained client-event worker must not make a previously failed tmux signal
+                # watcher permanent. New SSE subscribers are the lifecycle re-entry point.
+                self.start_tmux_signal_event_watcher()
                 return
             record = ClientEventWatcherRecord(
                 next_attention_ack_poll_at=now + self.server_attention_ack_event_poll_seconds(),
@@ -6332,8 +7139,7 @@ class TmuxWebtermApp:
             with self.client_watch_service.lock:
                 if self.client_watch_service.event_watcher_record is record and record.worker is worker:
                     record.stop_event.set()
-                    record.filesystem_stop_event.set()
-                    record.filesystem_reconfigure_event.set()
+                    record.watchd_stop_event.set()
                     record.wake_event.set()
                     self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
                     owned = True
@@ -6347,14 +7153,14 @@ class TmuxWebtermApp:
             raise
         common.start_thread_with_rollback(worker, rollback)
         try:
-            self.start_native_filesystem_watcher(record)
+            self.start_watchd_revision_watcher(record)
         except RuntimeError as exc:
-            # Native watching is an accelerator. Keep the established polling
-            # fallback alive when a backend thread cannot start.
+            # watchd owns both native watching and its polling fallback. The web
+            # process reports a typed unavailable state and never scans locally.
             self.log_event(
                 None,
-                "native_filesystem_watch_error",
-                f"native filesystem watch failed to start: {exc}",
+                "watchd_error",
+                f"watchd revision bridge failed to start: {exc}",
                 {"diagnostic": str(exc)},
                 message_key="events.message.clientEvent.directoryWatchFailed",
             )
@@ -6364,11 +7170,10 @@ class TmuxWebtermApp:
         with self.client_watch_service.lock:
             record = self.client_watch_service.event_watcher_record
             record.stop_event.set()
-            record.filesystem_stop_event.set()
-            record.filesystem_reconfigure_event.set()
+            record.watchd_stop_event.set()
             record.wake_event.set()
             thread = record.worker
-            filesystem_worker = record.filesystem_worker
+            watchd_worker = record.watchd_worker
             snapshot_worker = record.snapshot_worker
             record.snapshot_worker = None
         self.stop_status_generation_watcher(record)
@@ -6380,8 +7185,8 @@ class TmuxWebtermApp:
                 self.finish_transcripts_payload_work(snapshot_generation, snapshot_worker, invalidate=True)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
-        if filesystem_worker is not None and filesystem_worker is not threading.current_thread():
-            filesystem_worker.join(timeout=2.0)
+        if watchd_worker is not None and watchd_worker is not threading.current_thread():
+            watchd_worker.join(timeout=5.0)
         with self.client_watch_service.lock:
             if self.client_watch_service.event_watcher_record is record:
                 self.client_watch_service.event_watcher_record = ClientEventWatcherRecord()
@@ -6393,42 +7198,6 @@ class TmuxWebtermApp:
         self.stop_client_event_watcher()
         return True
 
-    def start_client_directory_poll(self, record: ClientEventWatcherRecord | None = None) -> bool:
-        with self.client_watch_service.lock:
-            current = record or self.client_watch_service.event_watcher_record
-            if self.client_watch_service.event_watcher_record is not current or current.stop_event.is_set():
-                return False
-            worker = current.directory_poll_worker
-            if worker is not None and worker.is_alive():
-                return False
-            worker = threading.Thread(target=self.run_client_directory_poll_once, args=(current,), daemon=True)
-            current.directory_poll_worker = worker
-
-        def rollback() -> None:
-            with self.client_watch_service.lock:
-                if self.client_watch_service.event_watcher_record is current and current.directory_poll_worker is worker:
-                    current.directory_poll_worker = None
-
-        common.start_thread_with_rollback(worker, rollback)
-        return True
-
-    def run_client_directory_poll_once(self, record: ClientEventWatcherRecord | None = None) -> None:
-        current = record or self.client_watch_service.event_watcher_record
-        worker = threading.current_thread()
-        try:
-            self.poll_client_events_once()
-        except (OSError, RuntimeError, ValueError) as exc:
-            self.log_event(
-                None,
-                "client_event_watch_error",
-                f"client directory event watch failed: {exc}",
-                {"diagnostic": str(exc)},
-                message_key="events.message.clientEvent.directoryWatchFailed",
-            )
-        finally:
-            with self.client_watch_service.lock:
-                if self.client_watch_service.event_watcher_record is current and current.directory_poll_worker is worker:
-                    current.directory_poll_worker = None
 
     def client_event_watch_loop(self, record: ClientEventWatcherRecord | None = None) -> None:
         current = record or self.client_watch_service.event_watcher_record
@@ -6437,39 +7206,12 @@ class TmuxWebtermApp:
             while not current.stop_event.is_set():
                 try:
                     now = time.monotonic()
-                    file_demand = self.client_events.has_demand("files", "transcripts", "activity")
                     status_demand = self.client_events.has_demand("status", "attention")
                     notification_demand = self.client_events.has_demand("attention")
-                    # Do not scan unchanged files while the native watcher is healthy. The
-                    # watcher publishes normal changes; this path remains the explicit
-                    # correctness fallback for watch startup/failure/unwatchable filesystems.
-                    if file_demand and not current.filesystem_healthy and now >= current.next_file_poll_at:
-                        events = self.poll_client_file_events_once()
-                        self.note_client_event_recurring_work(current, "filesystem_fallback", useful=bool(events))
-                        current.next_file_poll_at = now + self.server_event_poll_seconds()
-                    if file_demand and not current.filesystem_healthy and now >= current.next_background_file_poll_at:
-                        events = self.poll_client_background_file_events_once()
-                        self.note_client_event_recurring_work(current, "filesystem_fallback", useful=bool(events))
-                        current.next_background_file_poll_at = now + self.server_background_file_event_poll_seconds()
-                    if file_demand and not current.filesystem_healthy and now >= current.next_filesystem_retry_at:
-                        self.start_native_filesystem_watcher(current)
-                        current.next_filesystem_retry_at = now + NATIVE_FILESYSTEM_RETRY_SECONDS
-                    if file_demand and now >= current.next_signature_poll_at:
-                        current.next_signature_poll_at = now + (
-                            NATIVE_FILESYSTEM_RECONCILE_SECONDS
-                            if current.filesystem_healthy
-                            else VISIBLE_FILESYSTEM_FALLBACK_POLL_SECONDS
-                        )
-                        started = self.start_client_directory_poll(current)
-                        self.note_client_event_recurring_work(current, "filesystem_reconcile", useful=started)
                     if status_demand:
                         self.start_status_generation_watcher(current)
                     else:
                         self.stop_status_generation_watcher(current)
-                    if status_demand and not current.filesystem_healthy and now >= current.next_attention_ack_poll_at:
-                        events = self.poll_attention_acks_client_event_once()
-                        self.note_client_event_recurring_work(current, "attention_ack_fallback", useful=bool(events))
-                        current.next_attention_ack_poll_at = now + self.server_attention_ack_event_poll_seconds()
                     tmux_refresh_due = current.tmux_signal_refresh_at > 0 and now >= current.tmux_signal_refresh_at
                     tmux_fallback_due = not self.tmux_signal_event_watcher_healthy() and now >= current.next_tmux_signal_poll_at
                     if status_demand and (tmux_refresh_due or tmux_fallback_due):
@@ -6666,165 +7408,6 @@ class TmuxWebtermApp:
     def session_files_disk_manifest_path(self, signature: str) -> Path:
         return SESSION_FILES_CACHE_DIR / f"{signature}.manifest.json"
 
-    def session_files_disk_cache_index_path(self) -> Path:
-        return SESSION_FILES_CACHE_DIR / SESSION_FILES_DISK_CACHE_INDEX_FILENAME
-
-    def empty_session_files_disk_cache_index(self) -> dict[str, Any]:
-        return {"version": SESSION_FILES_DISK_CACHE_INDEX_VERSION, "entries": {}, "recovery_cursor": ""}
-
-    def session_files_disk_cache_index_journal_path(self) -> Path:
-        return self.session_files_disk_cache_index_path().with_name(
-            self.session_files_disk_cache_index_path().name + ".journal"
-        )
-
-    def read_session_files_disk_cache_index_unlocked(self) -> dict[str, Any]:
-        payload = read_json_file(self.session_files_disk_cache_index_path(), None, exceptions=(FileNotFoundError, json.JSONDecodeError, OSError, TypeError))
-        entries = payload.get("entries") if isinstance(payload, dict) else None
-        index = {
-            "version": SESSION_FILES_DISK_CACHE_INDEX_VERSION,
-            "entries": (
-                {str(signature): value for signature, value in entries.items() if isinstance(value, dict)}
-                if isinstance(entries, dict) else {}
-            ),
-            "recovery_cursor": str(payload.get("recovery_cursor") or "") if isinstance(payload, dict) else "",
-        }
-        # Per-write updates are appended to a journal instead of rewriting the whole
-        # base index (which was O(historical entries) bytes per durable write); the
-        # base + journal merge here is the one read-side owner, and every full base
-        # rewrite folds the journal in and truncates it.
-        try:
-            journal_lines = self.session_files_disk_cache_index_journal_path().read_text(encoding="utf-8").splitlines()
-        except (FileNotFoundError, OSError):
-            journal_lines = []
-        for line in journal_lines:
-            try:
-                record = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(record, dict) and isinstance(record.get("signature"), str):
-                index["entries"][record["signature"]] = {
-                    "size": max(0, int(record.get("size") or 0)),
-                    "mtime": max(0.0, float(record.get("mtime") or 0.0)),
-                }
-        return index
-
-    def write_session_files_disk_cache_index_unlocked(self, index: dict[str, Any]) -> None:
-        atomic_write_text(
-            self.session_files_disk_cache_index_path(),
-            json.dumps(index, sort_keys=True, separators=(",", ":")),
-            mode=0o600,
-        )
-        # The base now contains everything the journal recorded (callers read the
-        # merged view before rewriting), so the journal restarts empty.
-        try:
-            self.session_files_disk_cache_index_journal_path().unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def update_session_files_disk_cache_index(self, signature: str, *, size: int, mtime: float) -> None:
-        index_path = self.session_files_disk_cache_index_path()
-        try:
-            with file_lock(index_path, dir_mode=0o700):
-                journal_path = self.session_files_disk_cache_index_journal_path()
-                line = json.dumps(
-                    {"signature": str(signature), "size": max(0, int(size)), "mtime": max(0.0, float(mtime))},
-                    sort_keys=True, separators=(",", ":"),
-                ) + "\n"
-                with open(journal_path, "a", encoding="utf-8") as journal:
-                    journal.write(line)
-                # Bound the journal between prunes: fold it into the base once it
-                # grows past a fixed size, so reads stay cheap and the file cannot
-                # grow without limit. The fold is the ONLY O(entries) write, and it
-                # runs once per ~512 KiB of appends instead of once per write.
-                try:
-                    journal_bytes = journal_path.stat().st_size
-                except OSError:
-                    journal_bytes = 0
-                if journal_bytes > 512 * 1024:
-                    self.write_session_files_disk_cache_index_unlocked(
-                        self.read_session_files_disk_cache_index_unlocked()
-                    )
-        except OSError as exc:
-            logger.debug("failed to update session-files cache index: %s", exc)
-
-    def recover_session_files_disk_cache_index_batch(self, index: dict[str, Any]) -> int:
-        """Adopt a bounded number of old cache files when the shared index is absent/corrupt."""
-        adopted = 0
-        try:
-            paths = SESSION_FILES_CACHE_DIR.iterdir()
-        except OSError:
-            return 0
-        for path in paths:
-            name = path.name
-            if not name.endswith(".json") or name.endswith(".manifest.json") or name == SESSION_FILES_DISK_CACHE_INDEX_FILENAME:
-                continue
-            signature = path.stem
-            if signature in index["entries"]:
-                continue
-            try:
-                payload_stat = path.stat()
-            except OSError:
-                continue
-            manifest_path = self.session_files_disk_manifest_path(signature)
-            size = int(payload_stat.st_size)
-            mtime = float(payload_stat.st_mtime)
-            try:
-                manifest_stat = manifest_path.stat()
-                size += int(manifest_stat.st_size)
-                mtime = max(mtime, float(manifest_stat.st_mtime))
-            except OSError:
-                pass
-            index["entries"].setdefault(signature, {"size": size, "mtime": mtime})
-            adopted += 1
-            if adopted >= SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE:
-                break
-        # Filesystem directory order is not stable, so use the indexed signatures rather than a
-        # lexical cursor.  Each pass stats only newly discovered entries and stops at the batch
-        # limit; a later maintenance pass adopts the next missing entries safely.
-        index["recovery_cursor"] = ""
-        return adopted
-
-    def session_files_disk_cache_entries(self) -> list[dict[str, Any]]:
-        try:
-            paths = sorted(SESSION_FILES_CACHE_DIR.glob("*.json"))
-        except OSError:
-            return []
-        entries: list[dict[str, Any]] = []
-        for path in paths:
-            if path.name.endswith(".manifest.json") or path.name == SESSION_FILES_DISK_CACHE_INDEX_FILENAME:
-                continue
-            signature = path.stem
-            manifest_path = self.session_files_disk_manifest_path(signature)
-            try:
-                payload_stat = path.stat()
-            except OSError:
-                continue
-            size = int(payload_stat.st_size)
-            mtime = float(payload_stat.st_mtime)
-            try:
-                manifest_stat = manifest_path.stat()
-                size += int(manifest_stat.st_size)
-                mtime = max(mtime, float(manifest_stat.st_mtime))
-            except OSError:
-                pass
-            entries.append({"path": path, "manifest_path": manifest_path, "signature": signature, "size": size, "mtime": mtime})
-        return entries
-
-    def remove_session_files_disk_cache_entry(self, entry: dict[str, Any]) -> tuple[int, int]:
-        removed_files = 0
-        removed_bytes = max(0, int(self.float_value(entry.get("size"), 0.0)))
-        for path in (entry.get("path"), entry.get("manifest_path")):
-            if not isinstance(path, Path):
-                continue
-            try:
-                path.unlink()
-                removed_files += 1
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                logger.debug("failed to remove session-files cache entry %s: %s", path, exc)
-        return removed_files, removed_bytes
-
     def prune_session_files_disk_cache(
         self,
         *,
@@ -6832,77 +7415,13 @@ class TmuxWebtermApp:
         max_bytes: int | None = None,
         now: float | None = None,
     ) -> dict[str, Any]:
-        max_age = SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS if max_age_seconds is None else max(0.0, float(max_age_seconds))
-        byte_cap = SESSION_FILES_DISK_CACHE_MAX_BYTES if max_bytes is None else max(0, int(max_bytes))
-        current_time = time.time() if now is None else float(now)
-        index_path = self.session_files_disk_cache_index_path()
-        try:
-            with file_lock(index_path, dir_mode=0o700):
-                index = self.read_session_files_disk_cache_index_unlocked()
-                recovered_entries = self.recover_session_files_disk_cache_index_batch(index)
-                indexed_entries = index["entries"]
-                entries = [
-                    {
-                        "path": SESSION_FILES_CACHE_DIR / f"{signature}.json",
-                        "manifest_path": self.session_files_disk_manifest_path(signature),
-                        "signature": signature,
-                        "size": max(0, int(self.float_value(metadata.get("size"), 0.0))),
-                        "mtime": max(0.0, self.float_value(metadata.get("mtime"), 0.0)),
-                    }
-                    for signature, metadata in indexed_entries.items()
-                ]
-                self.write_session_files_disk_cache_index_unlocked(index)
-        except OSError:
-            # Keep the old recovery path for a transient index lock/filesystem failure.
-            entries = self.session_files_disk_cache_entries()
-            recovered_entries = 0
-        total_indexed_bytes = sum(max(0, int(self.float_value(entry.get("size"), 0.0))) for entry in entries)
-        kept: list[dict[str, Any]] = []
-        to_remove: list[dict[str, Any]] = []
-        for entry in entries:
-            age_seconds = max(0.0, current_time - float(entry.get("mtime") or 0.0))
-            if max_age and age_seconds > max_age:
-                to_remove.append(entry)
-            else:
-                kept.append(entry)
-        total_bytes = sum(max(0, int(self.float_value(entry.get("size"), 0.0))) for entry in kept)
-        if byte_cap >= 0 and total_bytes > byte_cap:
-            for entry in sorted(kept, key=lambda item: (float(item.get("mtime") or 0.0), str(item.get("path") or ""))):
-                if total_bytes <= byte_cap:
-                    break
-                to_remove.append(entry)
-                total_bytes -= max(0, int(self.float_value(entry.get("size"), 0.0)))
-        removed_files = 0
-        removed_bytes = 0
-        seen_paths: set[Path] = set()
-        for entry in to_remove[:SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE]:
-            path = entry.get("path")
-            if isinstance(path, Path):
-                if path in seen_paths:
-                    continue
-                seen_paths.add(path)
-            files, bytes_removed = self.remove_session_files_disk_cache_entry(entry)
-            removed_files += files
-            removed_bytes += bytes_removed
-        if seen_paths:
-            try:
-                with file_lock(index_path, dir_mode=0o700):
-                    index = self.read_session_files_disk_cache_index_unlocked()
-                    for entry in to_remove[:SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE]:
-                        index["entries"].pop(str(entry.get("signature") or ""), None)
-                    self.write_session_files_disk_cache_index_unlocked(index)
-            except OSError:
-                pass
-        return {
-            "entries": len(entries),
-            "recovered_entries": recovered_entries,
-            "removed_entries": len(seen_paths),
-            "removed_files": removed_files,
-            "removed_bytes": removed_bytes,
-            "kept_bytes": max(0, total_indexed_bytes - removed_bytes),
-            "max_age_seconds": max_age,
-            "max_bytes": byte_cap,
-        }
+        return session_files.prune_disk_cache(
+            SESSION_FILES_CACHE_DIR,
+            max_age_seconds=SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds,
+            max_bytes=SESSION_FILES_DISK_CACHE_MAX_BYTES if max_bytes is None else max_bytes,
+            batch_size=SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
+            now=now,
+        )
 
     def run_session_files_disk_cache_prune(self, record: SessionFilesDiskPruneRecord | None = None) -> None:
         active_record = record or self.session_files_service.disk_prune_record
@@ -6933,18 +7452,35 @@ class TmuxWebtermApp:
                 return False
             record.running = True
             record.next_at = now + SESSION_FILES_DISK_CACHE_PRUNE_INTERVAL_SECONDS
-            worker = threading.Thread(target=lambda: self.run_session_files_disk_cache_prune(record), name="session-files-cache-prune", daemon=True)
-            record.worker = worker
-
-        def rollback() -> None:
-            with self.session_files_service.disk_prune_lock:
-                if self.session_files_service.disk_prune_record is record and record.worker is worker:
-                    record.worker = None
-                    record.running = False
-                    record.next_at = 0.0
-
-        common.start_thread_with_rollback(worker, rollback)
-        return True
+        try:
+            response, _body = self.job_client.produce(
+                "session_files_cache_prune",
+                {
+                    "cache_dir": str(SESSION_FILES_CACHE_DIR),
+                    "max_age_seconds": SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS,
+                    "max_bytes": SESSION_FILES_DISK_CACHE_MAX_BYTES,
+                    "batch_size": SESSION_FILES_DISK_CACHE_PRUNE_BATCH_SIZE,
+                },
+                priority="maintenance",
+                generation=1,
+                coalesce_key="session-files-cache-prune",
+                delivery="receipt",
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            response = {"ok": False, "error": str(exc)}
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        accepted = response.get("ok") is True and str(job.get("status") or "") in {"queued", "running", "completed"}
+        with self.session_files_service.disk_prune_lock:
+            if self.session_files_service.disk_prune_record is record:
+                record.running = False
+                record.worker = None
+                record.last_result = {
+                    "submitted": accepted,
+                    "reason": reason,
+                    "job_id": str(job.get("job_id") or ""),
+                    **({"error": str(response.get("error") or "jobd did not accept session-files cache prune")} if not accepted else {}),
+                }
+        return accepted
 
     def session_files_payload_signature(self, payload: SessionFilesPayload | dict[str, Any]) -> str:
         payload_text = self.client_event_payload_signature(payload)
@@ -7078,12 +7614,12 @@ class TmuxWebtermApp:
             mtime = max(stored_at, float(manifest_stat.st_mtime))
         except OSError:
             mtime = stored_at
-        self.update_session_files_disk_cache_index(signature, size=payload_size, mtime=mtime)
+        session_files.update_disk_cache_index(SESSION_FILES_CACHE_DIR, signature, size=payload_size, mtime=mtime)
         # Accounting (DOIT.optimize-backends): every durable generation write is a
         # counted event with its payload+manifest bytes and the rewritten index
         # size, so the bounded-storage rework can be justified from measurements.
         try:
-            index_bytes = self.session_files_disk_cache_index_path().stat().st_size
+            index_bytes = session_files.disk_cache_index_path(SESSION_FILES_CACHE_DIR).stat().st_size
         except OSError:
             index_bytes = 0
         self.record_session_files_phase(
@@ -7546,7 +8082,7 @@ class TmuxWebtermApp:
                 states.append({"path": session_files.canonical_repository_path(item[0]), "generation": item[1]})
         return states
 
-    def compute_session_files_payload_via_jobd(
+    def submit_session_files_job(
         self,
         session: str | None,
         infos: dict[str, SessionInfo],
@@ -7558,15 +8094,8 @@ class TmuxWebtermApp:
         *,
         priority: str = "freshness",
         requester: str = "unknown",
-    ) -> tuple[SessionFilesPayload, HTTPStatus]:
-        """Materialize the session-files payload in jobd instead of the web process.
-
-        Submits the `session_files_view` product and block-polls its last-known-good bytes. ALL git
-        spawns and recursive transcript discovery happen in the jobd worker. Raises
-        ``SessionFilesJobdUnavailable`` (never inline git) when the broker cannot produce a matching
-        product within the bounded wait, so the single-flight release and no-cache behavior are the
-        caller's terminal handling.
-        """
+    ) -> tuple[dict[str, Any], str, int]:
+        """Submit one immutable session-files job and return its atomic broker receipt."""
         coalesce_key, generation = self.session_files_view_coalesce_identity(cache_key)
         payload = {
             "session": session or "",
@@ -7587,8 +8116,38 @@ class TmuxWebtermApp:
             coalesce_key=coalesce_key,
             deadline_ms=SESSION_FILES_JOBD_JOB_DEADLINE_MS,
         )
+        return response, coalesce_key, generation
+
+    def compute_session_files_payload_via_jobd(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str = "freshness",
+        requester: str = "unknown",
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        """Materialize a session-files payload in the background cache worker."""
+        response, coalesce_key, generation = self.submit_session_files_job(
+            session,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            cache_key,
+            priority=priority,
+            requester=requester,
+        )
         if not response.get("ok"):
-            raise SessionFilesJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+            raise SessionFilesJobdUnavailable(
+                str(response.get("error") or "jobd submit rejected"),
+                response,
+            )
         try:
             _meta, body, state = wait_for_jobd_product(
                 self.job_client, coalesce_key, generation, SESSION_FILES_JOBD_WAIT_SECONDS
@@ -7606,6 +8165,200 @@ class TmuxWebtermApp:
             raise SessionFilesJobdUnavailable("malformed jobd session-files product")
         status = HTTPStatus(int(data.get("status") or int(HTTPStatus.OK)))
         return payload, status
+
+    def session_files_payload_from_job(self, job: dict[str, Any]) -> tuple[SessionFilesPayload, HTTPStatus]:
+        result = job.get("result")
+        payload = result.get("payload") if isinstance(result, dict) else None
+        if not isinstance(payload, dict):
+            raise SessionFilesJobdUnavailable(
+                "malformed jobd session-files result",
+                {"error": "malformed jobd session-files result", "status": str(job.get("status") or "")},
+            )
+        status = HTTPStatus(int(result.get("status") or int(HTTPStatus.OK)))
+        return payload, status
+
+    def wait_for_session_files_operation_job(
+        self,
+        job_id: str,
+        deadline_at: float,
+    ) -> tuple[SessionFilesPayload, HTTPStatus]:
+        """Wait only in the accepted-operation worker; HTTP returns before this loop starts."""
+        poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
+        while not self.jobd_operation_service.stop_event.is_set():
+            response = self.job_client.result(job_id)
+            if not response.get("ok"):
+                raise SessionFilesJobdUnavailable(
+                    str(response.get("error") or "jobd result unavailable"),
+                    response,
+                )
+            job = response.get("job")
+            if not isinstance(job, dict):
+                raise SessionFilesJobdUnavailable(
+                    "malformed jobd result response",
+                    {"error": "malformed jobd result response"},
+                )
+            producer_state = str(job.get("status") or "")
+            if producer_state == "completed":
+                return self.session_files_payload_from_job(job)
+            if producer_state in {"failed", "cancelled", "superseded", "timed_out"}:
+                raise SessionFilesJobdUnavailable(
+                    str(job.get("error") or f"jobd producer {producer_state}"),
+                    job,
+                )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise SessionFilesJobdUnavailable(
+                    "session-files operation deadline expired",
+                    {"error": "session-files operation deadline expired", "status": "deadline_expired"},
+                )
+            self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        raise SessionFilesJobdUnavailable(
+            "session-files operation completion stopped",
+            {"error": "session-files operation completion stopped", "status": "producer_abandoned"},
+        )
+
+    def complete_session_files_operation(
+        self,
+        operation_id: str,
+        request_id: str,
+        job_id: str,
+        cache_key: tuple[Any, ...],
+        deadline_at: float,
+    ) -> None:
+        """Supervisor boundary for one accepted producer and its terminal delivery."""
+        try:
+            payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(
+                cache_key,
+                lambda: self.wait_for_session_files_operation_job(job_id, deadline_at),
+            )
+            terminal_payload = copy.deepcopy(payload)
+            terminal_payload["cache"] = {
+                "hit": bool(cache_hit),
+                "stale": False,
+                "age_seconds": round(age_seconds, 3),
+                "refresh_seconds": SESSION_FILES_CACHE_SECONDS,
+            }
+            result = self.session_files_ready_result(request_id, terminal_payload)
+            self.terminalize_operation(operation_id, result, status)
+        except SessionFilesJobdUnavailable as error:
+            result = self.session_files_failure_result(
+                request_id,
+                error.failure or {"error": str(error)},
+                operation_id=operation_id,
+                operation="jobd.result",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.SERVICE_UNAVAILABLE)
+        except Exception as error:
+            result = self.session_files_failure_result(
+                request_id,
+                {
+                    "error": str(error),
+                    "cause": local_service_exception_cause(error),
+                },
+                operation_id=operation_id,
+                operation="session-files.complete",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def start_session_files_operation(
+        self,
+        session: str | None,
+        infos: dict[str, SessionInfo],
+        hours: float,
+        from_ref: str | None,
+        to_ref: str | None,
+        repo_refs: dict[str, dict[str, str]] | None,
+        cache_key: tuple[Any, ...],
+        *,
+        priority: str,
+        requester: str,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        request_id = self.new_api_request_id()
+        response, coalesce_key, generation = self.submit_session_files_job(
+            session,
+            infos,
+            hours,
+            from_ref,
+            to_ref,
+            repo_refs,
+            cache_key,
+            priority=priority,
+            requester=requester,
+        )
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        producer_state = str(job.get("status") or "")
+        if not response.get("ok") or not job_id or producer_state not in {"queued", "running", "completed"}:
+            failure = dict(response)
+            if not failure.get("error"):
+                failure["error"] = "jobd did not return an accepted job receipt"
+            result = self.session_files_failure_result(
+                request_id,
+                failure,
+                operation="jobd.submit",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        if not self.jobd_operation_service.reserve():
+            result = self.session_files_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                operation="jobd.submit",
+                code="service_busy",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        deadline_at = time.time() + (SESSION_FILES_JOBD_JOB_DEADLINE_MS / 1000.0)
+        try:
+            receipt = self.queued_delivery_ledger.accept_operation(
+                request_id=request_id,
+                route="GET /api/session-files",
+                deadline_at=deadline_at,
+                progress={
+                    "phase": "waiting_for_product",
+                    "producer": "jobd",
+                    "producer_state": producer_state,
+                },
+                producer={
+                    "service": "jobd",
+                    "job_id": job_id,
+                    "coalesce_key": coalesce_key,
+                    "generation": generation,
+                },
+                kind="session_files",
+                context={
+                    "session": str(session or ""),
+                    "from_ref": str(from_ref or ""),
+                    "to_ref": str(to_ref or ""),
+                    "hours": float(hours),
+                    "repo_refs": session_files.canonical_repository_refs(repo_refs),
+                },
+            )
+        except Exception:
+            self.jobd_operation_service.release_reservation()
+            raise
+        operation_id = str(receipt["operation"]["id"])
+        submitted = self.jobd_operation_service.submit_reserved(
+            self.complete_session_files_operation,
+            operation_id,
+            request_id,
+            job_id,
+            cache_key,
+            deadline_at,
+        )
+        if not submitted:
+            result = self.session_files_failure_result(
+                request_id,
+                {"error": "jobd operation completion worker could not start"},
+                operation_id=operation_id,
+                operation="session-files.start",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return result, HTTPStatus.INTERNAL_SERVER_ERROR
+        return receipt, HTTPStatus.ACCEPTED
 
     def refresh_session_files_payload_cache(
         self,
@@ -7748,6 +8501,8 @@ class TmuxWebtermApp:
         from_ref: str | None = None,
         to_ref: str | None = None,
         repo_refs: dict[str, dict[str, str]] | None = None,
+        *,
+        wait_for_fresh: bool = True,
     ) -> SessionFilesPayload:
         infos = {info.session: info}
         key = self.session_files_cache_key("payload", infos, info.session, hours, from_ref, to_ref, repo_refs)
@@ -7774,6 +8529,24 @@ class TmuxWebtermApp:
                             # Serve the stale bytes already read above; never resurrect inline git here.
                             pass
             return payload
+        if not wait_for_fresh:
+            self.start_session_files_cache_refresh(
+                key,
+                self.refresh_session_files_info_cache,
+                info,
+                hours,
+                from_ref,
+                to_ref,
+                repo_refs,
+            )
+            return {
+                "session": info.session,
+                "hours": session_files.bounded_session_files_hours(hours),
+                "files": [],
+                "repos": [],
+                "errors": [],
+                "refreshing_elsewhere": True,
+            }
         if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
             refresh_result = self.request_background_refresh(
                 BACKGROUND_ROLE_SESSION_FILES,
@@ -7851,6 +8624,7 @@ class TmuxWebtermApp:
         force: bool = False,
         requester: str = "api-session-files",
         extra_errors: list[str | dict[str, Any]] | None = None,
+        accepted_operation: bool = False,
     ) -> tuple[SessionFilesPayload, HTTPStatus]:
         started = time.perf_counter()
         cache_key = self.session_files_cache_key("payload", infos, session, hours, from_ref, to_ref, repo_refs)
@@ -7859,13 +8633,17 @@ class TmuxWebtermApp:
         priority = "interactive" if force else "freshness"
 
         def compute_via_jobd() -> tuple[SessionFilesPayload, HTTPStatus]:
-            return self.compute_session_files_payload_via_jobd(session, infos, hours, from_ref, to_ref, repo_refs, cache_key, priority=priority, requester=requester)
-
-        def pending_payload() -> SessionFilesPayload:
-            info = infos.get(session) if session else None
-            if info is not None:
-                return session_files.refreshing_session_files_payload_for_info(info, hours=hours, from_ref=from_ref, to_ref=to_ref, repo_refs=repo_refs)
-            return {"session": session or "", "files": [], "repos": [], "errors": [], "refreshing_elsewhere": True}
+            return self.compute_session_files_payload_via_jobd(
+                session,
+                infos,
+                hours,
+                from_ref,
+                to_ref,
+                repo_refs,
+                cache_key,
+                priority=priority,
+                requester=requester,
+            )
 
         cache_meta: dict[str, Any]
         if cached:
@@ -7898,42 +8676,27 @@ class TmuxWebtermApp:
                                 "fallback": True,
                             }
                         except SessionFilesJobdUnavailable:
-                            # Keep serving the stale payload/status already bound above; never
-                            # resurrect inline git/discovery on the request thread.
                             cache_meta["refreshing_elsewhere"] = True
                     else:
                         cache_meta["refreshing_elsewhere"] = True
         else:
-            if not self.background_can_run(BACKGROUND_ROLE_SESSION_FILES):
-                refresh_result = self.request_background_refresh(
-                    BACKGROUND_ROLE_SESSION_FILES,
-                    self.session_files_refresh_request_payload(cache_key, session, hours, from_ref, to_ref, repo_refs),
+            if accepted_operation:
+                payload, status = self.start_session_files_operation(
+                    session,
+                    infos,
+                    hours,
+                    from_ref,
+                    to_ref,
+                    repo_refs,
+                    cache_key,
+                    priority=priority,
+                    requester=requester,
                 )
-                self.record_background_avoided_recompute(BACKGROUND_ROLE_SESSION_FILES)
-                computed = False
-                if self.background_refresh_should_fallback(refresh_result):
-                    try:
-                        payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
-                        cache_meta = {
-                            "hit": cache_hit,
-                            "stale": False,
-                            "age_seconds": round(age_seconds, 3),
-                            "refresh_seconds": max_age,
-                            "fallback": True,
-                        }
-                        computed = True
-                    except SessionFilesJobdUnavailable:
-                        pass
-                if not computed:
-                    payload = pending_payload()
-                    status = HTTPStatus.OK
-                    cache_meta = {
-                        "hit": False,
-                        "stale": True,
-                        "age_seconds": None,
-                        "refresh_seconds": max_age,
-                        "refreshing_elsewhere": True,
-                    }
+                cache_meta = {
+                    "hit": False,
+                    "stale": False,
+                    "refreshing_elsewhere": status == HTTPStatus.ACCEPTED,
+                }
             else:
                 try:
                     payload, status, cache_hit, age_seconds = self.compute_session_files_cache_entry(cache_key, compute_via_jobd)
@@ -7944,17 +8707,39 @@ class TmuxWebtermApp:
                         "refresh_seconds": max_age,
                         "refreshing": False,
                     }
-                except SessionFilesJobdUnavailable:
-                    payload = pending_payload()
-                    status = HTTPStatus.OK
-                    cache_meta = {
-                        "hit": False,
-                        "stale": True,
-                        "age_seconds": None,
-                        "refresh_seconds": max_age,
-                        "refreshing_elsewhere": True,
-                    }
+                except SessionFilesJobdUnavailable as error:
+                    payload = {"ok": False, "status": "SERVICE_UNAVAILABLE", "reason": str(error), "terminal": True}
+                    status = HTTPStatus.SERVICE_UNAVAILABLE
+                    cache_meta = {"hit": False, "stale": False, "refreshing_elsewhere": False}
         payload = copy.deepcopy(payload)
+        if status == HTTPStatus.ACCEPTED:
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "payload",
+                trigger="force" if force else "request",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key=cache_key,
+                cache_status="refreshing-elsewhere",
+                cache_hit=False,
+                cache_fresh=False,
+                details={"session": session or "", "status": int(status)},
+            )
+            return payload, status
+        if status >= HTTPStatus.BAD_REQUEST and payload.get("state") == "failed":
+            self.record_performance_sample(
+                BACKGROUND_ROLE_SESSION_FILES,
+                "payload",
+                trigger="force" if force else "request",
+                compute_ms=(time.perf_counter() - started) * 1000,
+                payload=payload,
+                cache_key=cache_key,
+                cache_status=str(int(status)),
+                cache_hit=False,
+                cache_fresh=False,
+                details={"session": session or "", "status": int(status)},
+            )
+            return payload, status
         structured_extra_errors = [
             value if isinstance(value, dict) else message_descriptor("diff.warning.discovery", value, {"error": value})
             for value in (extra_errors or [])
@@ -7987,7 +8772,30 @@ class TmuxWebtermApp:
                 return None
             return copy.deepcopy(record.payload), fresh, age_seconds
 
-    def begin_transcripts_payload_work(self, worker: object | None, *, replace: bool = False) -> int:
+    def cached_transcripts_work_graph(self, session: str) -> dict[str, Any] | None:
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            payload = self.activity_transcript_service.transcripts_payload_cache_record.payload
+            sessions = payload.get("sessions") if isinstance(payload, dict) else None
+            cached_session = sessions.get(session) if isinstance(sessions, dict) else None
+            graph = cached_session.get("work_graph") if isinstance(cached_session, dict) else None
+            return copy.deepcopy(graph) if isinstance(graph, dict) else None
+
+    def begin_transcripts_payload_work(
+        self,
+        worker: object | None,
+        *,
+        replace: bool = False,
+        queue_rebuild_after: float | None = None,
+        queue_rebuild_publish: bool = False,
+    ) -> int:
+        """Claim the single-flight build guard, or queue one follow-up build for a caller it cannot answer.
+
+        ``queue_rebuild_after`` is a ``time.monotonic()`` reading the caller must be answered at or
+        after. Deciding that here, under the same lock that refuses the guard, is what makes it
+        impossible for the in-flight worker to finish in the gap and leave the caller with neither a
+        build of its own nor a queued one.
+        """
+
         with self.activity_transcript_service.transcripts_payload_cache_lock:
             record = self.activity_transcript_service.transcripts_payload_cache_record
             if record.worker is not None and not replace:
@@ -7997,10 +8805,14 @@ class TmuxWebtermApp:
                 # build cannot refuse every future refresh; the stale worker's later
                 # commit/finish is a no-op because the generation has advanced.
                 if started_at is None or time.monotonic() - started_at < TRANSCRIPTS_PAYLOAD_WORKER_DEADLINE_SECONDS:
+                    if queue_rebuild_after is not None and (started_at is None or started_at < queue_rebuild_after):
+                        record.rebuild_requested = True
+                        record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
                     return 0
             record.generation += 1
             record.worker = worker
             record.worker_started_at = time.monotonic()
+            record.publish_requested = False
             return record.generation
 
     def commit_transcripts_payload_cache(self, payload: dict[str, Any], generation: int) -> bool:
@@ -8008,6 +8820,11 @@ class TmuxWebtermApp:
             record = self.activity_transcript_service.transcripts_payload_cache_record
             if generation <= 0 or record.generation != generation:
                 return False
+            # Stamp the committing identity into the payload itself, not beside it. Every consumer
+            # -- the HTTP cache hit, the client-events push, and a direct build -- carries the same
+            # identity, so a browser can tell whether the model it rendered came from a build that
+            # observed the state it asked about, instead of inferring it from arrival order.
+            self.stamp_metadata_identity(payload, generation)
             record.stored_at = time.monotonic()
             record.payload = copy.deepcopy(payload)
             return True
@@ -8025,15 +8842,50 @@ class TmuxWebtermApp:
                 return False
             if invalidate:
                 record.generation += 1
-            record.worker = None
-            record.worker_started_at = None
-            return True
+            record.release_worker()
+        # Releasing the single-flight guard is the only moment a queued follow-up build can run, and
+        # every build path ends here, so this is the one owner rather than a copy per call site.
+        self.start_queued_transcripts_payload_rebuild()
+        return True
+
+    def start_queued_transcripts_payload_rebuild(self) -> bool:
+        """Run the rebuild a forced refresh could not start because an older build held the guard.
+
+        A forced refresh must observe state that exists when it is issued. The single-flight guard
+        used to hand it the result of a build that began earlier, so a session created after that
+        build started could never appear in the payload the force returned or published, and nothing
+        else re-ran: the browser stayed on pre-create metadata until some unrelated event fired.
+        The request is coalesced FORWARD onto exactly one follow-up build rather than backward onto
+        an older one, so repeated forces cost at most one extra build, never a rebuild storm.
+        """
+
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            if not record.rebuild_requested or record.worker is not None:
+                return False
+            publish = record.rebuild_publish
+            record.rebuild_requested = False
+            record.rebuild_publish = False
+        return self.start_transcripts_payload_refresh(publish=publish)
 
     def set_transcripts_payload_cache(self, payload: dict[str, Any]) -> None:
         generation = self.begin_transcripts_payload_work(None, replace=True)
         self.commit_transcripts_payload_cache(payload, generation)
 
-    def start_transcripts_payload_refresh(self, publish: bool = False, defer: bool = False) -> bool:
+    def start_transcripts_payload_refresh(
+        self,
+        publish: bool = False,
+        defer: bool = False,
+        *,
+        not_before: float | None = None,
+    ) -> bool:
+        """Start a metadata rebuild.
+
+        ``not_before`` is a ``time.monotonic()`` reading the caller must be answered at or after. An
+        in-flight build that began earlier cannot see what the caller is asking about, so instead of
+        silently adopting it this queues exactly one follow-up build that starts once it finishes.
+        """
+
         generation = 0
         worker: object | None = None
         def run() -> None:
@@ -8044,9 +8896,23 @@ class TmuxWebtermApp:
             worker.daemon = True
         else:
             worker = threading.Thread(target=run, daemon=True)
-        generation = self.begin_transcripts_payload_work(worker)
+        generation = self.begin_transcripts_payload_work(
+            worker,
+            queue_rebuild_after=not_before,
+            queue_rebuild_publish=publish,
+        )
         if generation <= 0:
+            if publish:
+                with self.activity_transcript_service.transcripts_payload_cache_lock:
+                    record = self.activity_transcript_service.transcripts_payload_cache_record
+                    if record.worker is not None:
+                        record.publish_requested = True
             return False
+        if publish:
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                record = self.activity_transcript_service.transcripts_payload_cache_record
+                if record.generation == generation and record.worker is worker:
+                    record.publish_requested = True
         try:
             worker.start()
         except RuntimeError:
@@ -8068,7 +8934,14 @@ class TmuxWebtermApp:
             payload = self.build_transcripts_payload()
             if not self.commit_transcripts_payload_cache(payload, generation):
                 return
-            if publish:
+            with self.activity_transcript_service.transcripts_payload_cache_lock:
+                record = self.activity_transcript_service.transcripts_payload_cache_record
+                should_publish = publish or (
+                    record.generation == generation
+                    and record.worker is current_worker
+                    and record.publish_requested
+                )
+            if should_publish:
                 payload_signature = self.transcripts_payload_event_signature(payload)
                 with self.client_watch_service.lock:
                     self.client_watch_service.transcripts_payload_signature = payload_signature
@@ -8158,67 +9031,251 @@ class TmuxWebtermApp:
             "work": work,
         }
 
+    def cached_activity_work_by_session(self) -> dict[str, dict[str, Any]]:
+        """Project only already-cached transcript work into one bounded statusd request."""
+
+        result: dict[str, dict[str, Any]] = {}
+        encoded_size = 2
+        # Project while the immutable cache snapshot is locked. Calling
+        # cached_transcripts_work_graph() here would deep-copy the entire canonical graph in the
+        # web request before selecting this small projection, retaining much of the CPU being moved.
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            payload = self.activity_transcript_service.transcripts_payload_cache_record.payload
+            cached_sessions = payload.get("sessions") if isinstance(payload, dict) else None
+            for session in dict.fromkeys(self.sessions):
+                cached_session = cached_sessions.get(session) if isinstance(cached_sessions, dict) else None
+                graph = cached_session.get("work_graph") if isinstance(cached_session, dict) else None
+                if not isinstance(graph, dict):
+                    continue
+                work = activity_work_summary_from_graph(graph)
+                encoded_entry = json.dumps({session: work}, ensure_ascii=False, separators=(",", ":"))[1:-1].encode("utf-8")
+                next_size = encoded_size + (1 if result else 0) + len(encoded_entry)
+                if next_size <= STATUSD_ACTIVITY_MAX_WORK_BYTES:
+                    result[session] = work
+                    encoded_size = next_size
+        return result
+
+    def restore_activity_summary_web_state(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Restore web-owned rolling-summary attachments and worker state after RPC decode."""
+
+        summaries = payload.get("sessions")
+        if isinstance(summaries, dict):
+            for session, summary in summaries.items():
+                if isinstance(session, str) and isinstance(summary, dict):
+                    self.yoagent_controller.attach_yoagent_session_summary(session, summary)
+        rolling_updated = self.yoagent_controller.latest_yoagent_session_summary_updated_ts()
+        with self.yoagent_summary_worker_lock:
+            summary_worker = self.yoagent_summary_worker_record
+            worker_state = {
+                "first_launch_started": summary_worker.first_launch_started,
+                "running": summary_worker.running,
+            }
+        daemon_state = payload.get("yoagent_summaries")
+        payload["yoagent_summaries"] = {
+            **(daemon_state if isinstance(daemon_state, dict) else {}),
+            **worker_state,
+            "updated_ts": rolling_updated,
+            "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
+        }
+        return payload
+
     def activity_summary_payload(self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> dict[str, Any]:
+        """Decode one daemon-owned activity summary without assembling it in the web process."""
+
+        require_activity_summary_enabled()
+        normalized_locale = normalize_locale(locale)
+        normalized_scope = self.normalized_activity_session_scope(session_scope)
+        bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        response, body = self.status_client.activity_summary(
+            list(dict.fromkeys(self.sessions)),
+            force=bool(force),
+            locale=normalized_locale,
+            session_scope=normalized_scope,
+            hours=bounded_hours,
+            work_by_session=self.cached_activity_work_by_session(),
+        )
+        if response.get("ok") is not True or not body:
+            raise ActivitySummaryStatusdUnavailable(response)
+        payload = validate_activity_summary(response, body)
+        return self.restore_activity_summary_web_state(payload)
+
+    def activity_summary_bytes(self, force: bool = False, locale: str = "en", session_scope: Any = "configured", hours: Any = 24.0) -> tuple[bytes, HTTPStatus]:
+        """Return typed HTTP bytes for a completed activity summary or terminal daemon failure."""
+
+        if not activity_summary_enabled():
+            metadata, body = activity_summary_disabled_response()
+            return body, HTTPStatus(int(metadata["status"]))
+        try:
+            payload = self.activity_summary_payload(force, locale, session_scope, hours)
+        except ActivitySummaryStatusdUnavailable as error:
+            failure = {
+                "status": "unavailable",
+                "error": str(error),
+                "terminal": True,
+                "upstream": error.response,
+            }
+            return json.dumps(failure, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.FAILED_DEPENDENCY
+        except StatusProtocolError as error:
+            failure = {
+                "status": "upgrade_required",
+                "error": str(error),
+                "terminal": True,
+            }
+            return json.dumps(failure, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.UPGRADE_REQUIRED
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), HTTPStatus.OK
+
+    def assemble_activity_summary_payload(
+        self,
+        force: bool = False,
+        locale: str = "en",
+        session_scope: Any = "configured",
+        hours: Any = 24.0,
+        work_by_session: dict[str, dict[str, Any]] | None = None,
+        timings: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Assemble the activity summary inside statusd's dedicated app instance."""
+
+        require_activity_summary_enabled()
+        started = time.perf_counter()
         locale = normalize_locale(locale)
         session_names, scope_errors, scope = self.activity_session_names(session_scope)
         bounded_hours = session_files.bounded_session_files_hours(self.float_value(hours, 24.0))
+        add_phase_timing(timings, "scope_ms", started)
+        started = time.perf_counter()
         sessions, errors = discover_sessions(session_names)
+        add_phase_timing(timings, "discover_ms", started)
         errors = [*scope_errors, *errors]
+        provided_work = work_by_session if isinstance(work_by_session, dict) else {}
+        work_signature = self.client_event_payload_signature(provided_work)
+        inflight_key = (bool(force), locale, scope, tuple(session_names), bounded_hours, work_signature)
+        service = self.activity_transcript_service
+        with service.activity_summary_lock:
+            future = service.activity_summary_futures.get(inflight_key)
+            if future is None:
+                future = Future()
+                service.activity_summary_futures[inflight_key] = future
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            return copy.deepcopy(future.result())
+        try:
+            with service.activity_summary_compute_lock:
+                payload = self._activity_summary_payload_owner(
+                    force=force,
+                    locale=locale,
+                    session_names=session_names,
+                    scope=scope,
+                    bounded_hours=bounded_hours,
+                    sessions=sessions,
+                    errors=errors,
+                    work_by_session=provided_work,
+                    timings=timings,
+                )
+            future.set_result(copy.deepcopy(payload))
+            return payload
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with service.activity_summary_lock:
+                if service.activity_summary_futures.get(inflight_key) is future:
+                    service.activity_summary_futures.pop(inflight_key, None)
+
+    def _activity_summary_payload_owner(
+        self,
+        *,
+        force: bool,
+        locale: str,
+        session_names: list[str],
+        scope: str,
+        bounded_hours: float,
+        sessions: dict[str, SessionInfo],
+        errors: list[str],
+        work_by_session: dict[str, dict[str, Any]],
+        timings: dict[str, float] | None,
+    ) -> dict[str, Any]:
+        service = self.activity_transcript_service
+        started = time.perf_counter()
         ordered_sessions = self.tmux_recency_ordered_sessions(session_names)
-        self.warm_metadata_cache_async(sessions)
         self.yoagent_controller.prune_yoagent_session_summaries(set(sessions))
+        add_phase_timing(timings, "order_ms", started)
         summaries: dict[str, Any] = {}
         ordered_summaries: list[dict[str, Any]] = []
         session_files_by_session: dict[str, SessionFilesPayload] = {}
         transcript_views_by_path: dict[str, dict[str, Any]] = {}
         session_info: dict[str, Any] = {}
+        started = time.perf_counter()
         recent_events_by_session = self.event_log.tail_many([session for session in ordered_sessions if session in sessions], limit=5)
-        with self.activity_transcript_service.activity_summary_lock:
-            if force:
-                self.activity_transcript_service.activity_summary_cache.clear()
-                self.clear_session_files_cache()
-            for session in ordered_sessions:
-                info = sessions.get(session)
-                if info is None:
-                    continue
-                work_graph = session_work_graph(info, self.metadata_cache, allow_network=False)
+        add_phase_timing(timings, "events_ms", started)
+        if force:
+            with service.activity_summary_lock:
+                service.activity_summary_cache.clear()
+            self.clear_session_files_cache()
+        for session in ordered_sessions:
+            info = sessions.get(session)
+            if info is None:
+                continue
+            started = time.perf_counter()
+            provided_work = work_by_session.get(session)
+            if isinstance(provided_work, dict):
+                work = copy.deepcopy(provided_work)
+            else:
+                work_graph = self.cached_transcripts_work_graph(session)
+                if work_graph is None:
+                    work_graph = session_work_graph(info, self.metadata_cache, allow_network=False)
                 work = activity_work_summary_from_graph(work_graph)
-                files_payload = self.cached_session_files_payload_for_info(info, hours=bounded_hours)
-                session_files_by_session[session] = files_payload
-                primary_agent = next((item for item in info.agents if item.transcript), None)
-                transcript_view: dict[str, Any] | None = None
-                if primary_agent is not None and primary_agent.transcript:
-                    view_payload, view_status = self.transcript_compact_view(session, 80, info=info, agent_override=primary_agent)
-                    if view_status == HTTPStatus.OK:
-                        transcript_view = view_payload
-                        transcript_views_by_path[str(primary_agent.transcript)] = view_payload
-                signature = activity_signature(info, work, files_payload)
-                cache_key = (locale, session)
-                cached = self.activity_transcript_service.activity_summary_cache.get(cache_key)
-                if cached and cached.get("signature") == signature:
-                    summary = dict(cached["summary"])
+            add_phase_timing(timings, "work_ms", started)
+            started = time.perf_counter()
+            files_payload = self.cached_session_files_payload_for_info(
+                info,
+                hours=bounded_hours,
+                wait_for_fresh=False,
+            )
+            add_phase_timing(timings, "files_ms", started)
+            session_files_by_session[session] = files_payload
+            primary_agent = next((item for item in info.agents if item.transcript), None)
+            transcript_view: dict[str, Any] | None = None
+            started = time.perf_counter()
+            if primary_agent is not None and primary_agent.transcript:
+                view_payload, view_status = self.transcript_compact_view(session, 80, info=info, agent_override=primary_agent)
+                if view_status == HTTPStatus.OK:
+                    transcript_view = view_payload
+                    transcript_views_by_path[str(primary_agent.transcript)] = view_payload
+            add_phase_timing(timings, "transcripts_ms", started)
+            started = time.perf_counter()
+            signature = activity_signature(info, work, files_payload)
+            cache_key = (locale, session)
+            with service.activity_summary_lock:
+                cached = service.activity_summary_cache.get(cache_key)
+            if cached and cached.get("signature") == signature:
+                summary = dict(cached["summary"])
+            else:
+                if transcript_view is None:
+                    summary = build_session_activity_summary(info, work, files_payload, locale=locale)
                 else:
-                    if transcript_view is None:
-                        summary = build_session_activity_summary(info, work, files_payload, locale=locale)
-                    else:
-                        summary = build_session_activity_summary(info, work, files_payload, locale=locale, transcript_view=transcript_view)
-                    self.activity_transcript_service.activity_summary_cache[cache_key] = {"signature": signature, "summary": summary}
-                    summary = dict(summary)
-                self.yoagent_controller.attach_yoagent_session_summary(session, summary)
-                summaries[session] = summary
-                ordered_summaries.append(summary)
-                session_info[session] = self.activity_session_info_payload(
-                    session,
-                    info,
-                    work,
-                    files_payload,
-                    summary,
-                    recent_events=recent_events_by_session.get(session, []),
-                    locale=locale,
-                )
-            for cache_key in list(self.activity_transcript_service.activity_summary_cache):
+                    summary = build_session_activity_summary(info, work, files_payload, locale=locale, transcript_view=transcript_view)
+                with service.activity_summary_lock:
+                    service.activity_summary_cache[cache_key] = {"signature": signature, "summary": dict(summary)}
+            self.yoagent_controller.attach_yoagent_session_summary(session, summary)
+            add_phase_timing(timings, "summaries_ms", started)
+            summaries[session] = summary
+            ordered_summaries.append(summary)
+            started = time.perf_counter()
+            session_info[session] = self.activity_session_info_payload(
+                session,
+                info,
+                work,
+                files_payload,
+                summary,
+                recent_events=recent_events_by_session.get(session, []),
+                locale=locale,
+            )
+            add_phase_timing(timings, "session_info_ms", started)
+        with service.activity_summary_lock:
+            for cache_key in list(service.activity_summary_cache):
                 if cache_key[1] not in sessions:
-                    self.activity_transcript_service.activity_summary_cache.pop(cache_key, None)
+                    service.activity_summary_cache.pop(cache_key, None)
         generated = datetime.now(timezone.utc)
         rolling_updated = self.yoagent_controller.latest_yoagent_session_summary_updated_ts()
         with self.yoagent_summary_worker_lock:
@@ -8227,14 +9284,20 @@ class TmuxWebtermApp:
                 "first_launch_started": summary_worker.first_launch_started,
                 "running": summary_worker.running,
             }
+        started = time.perf_counter()
+        agents = self.tabber_activity_agents_snapshot(force=force) if not transcript_views_by_path else build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session, locale=locale, transcript_views_by_path=transcript_views_by_path)
+        add_phase_timing(timings, "agents_ms", started)
+        started = time.perf_counter()
+        global_summary = build_global_activity_summary(ordered_summaries, errors, locale=locale)
+        add_phase_timing(timings, "global_ms", started)
         return {
             "generated_at": generated.isoformat(),
             "generated_ts": generated.timestamp(),
             "session_order": [session for session in ordered_sessions if session in summaries],
             "sessions": summaries,
             "session_info": session_info,
-            "agents": self.tabber_activity_agents_snapshot(force=force) if not transcript_views_by_path else build_recent_agents_payload(sessions, ordered_sessions, session_files_by_session=session_files_by_session, locale=locale, transcript_views_by_path=transcript_views_by_path),
-            "global": build_global_activity_summary(ordered_summaries, errors, locale=locale),
+            "agents": agents,
+            "global": global_summary,
             "capabilities": yoagent_capabilities_payload(locale),
             "errors": errors,
             "locale": locale,
@@ -8247,6 +9310,7 @@ class TmuxWebtermApp:
                 "updated_at": datetime.fromtimestamp(rolling_updated, timezone.utc).isoformat() if rolling_updated else "",
             },
         }
+
     def float_value(self, value: Any, default: float = 0.0) -> float:
         try:
             return float(value)
@@ -8943,6 +10007,10 @@ class TmuxWebtermApp:
                 "compute_ms_max": 0.0,
                 "payload_bytes_total": 0,
                 "cache": {},
+                "request_total_ms_total": 0.0,
+                "request_total_ms_max": 0.0,
+                "accept_to_route_ms_total": 0.0,
+                "accept_to_route_ms_max": 0.0,
             })
             summary["count"] += 1
             compute_ms = max(0.0, self.float_value(item.get("compute_ms"), 0.0))
@@ -8952,6 +10020,11 @@ class TmuxWebtermApp:
             cache_status = str(item.get("cache_status") or "")
             if cache_status:
                 summary["cache"][cache_status] = int(summary["cache"].get(cache_status, 0)) + 1
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            for field in ("request_total_ms", "accept_to_route_ms"):
+                value = max(0.0, self.float_value(details.get(field), 0.0))
+                summary[f"{field}_total"] += value
+                summary[f"{field}_max"] = max(summary[f"{field}_max"], value)
         summary_rows = []
         for item in summaries.values():
             count = max(1, int(item["count"]))
@@ -8962,6 +10035,10 @@ class TmuxWebtermApp:
                 "compute_ms_total": round(float(item["compute_ms_total"]), 3),
                 "compute_ms_avg": round(float(item["compute_ms_total"]) / count, 3),
                 "compute_ms_max": round(float(item["compute_ms_max"]), 3),
+                "request_total_ms_avg": round(float(item["request_total_ms_total"]) / count, 3),
+                "request_total_ms_max": round(float(item["request_total_ms_max"]), 3),
+                "accept_to_route_ms_avg": round(float(item["accept_to_route_ms_total"]) / count, 3),
+                "accept_to_route_ms_max": round(float(item["accept_to_route_ms_max"]), 3),
                 "payload_bytes_total": item["payload_bytes_total"],
                 "cache": item["cache"],
             })
@@ -8979,12 +10056,21 @@ class TmuxWebtermApp:
             "recent": records[-PERFORMANCE_RECENT_LIMIT:],
         }
 
-    def server_cpu_budget_top_consumers(self, limit: int = 3) -> list[dict[str, Any]]:
-        """Return bounded endpoint/background owners ranked by aggregate compute."""
+    def server_cpu_budget_top_consumers(
+        self,
+        limit: int = 3,
+        window_seconds: float = SERVER_CPU_BUDGET_SUSTAINED_SECONDS,
+    ) -> list[dict[str, Any]]:
+        """Return bounded endpoint/background owners ranked by aggregate compute.
+
+        The window must be the breach window the caller is explaining. This defaulted to
+        PERFORMANCE_SUMMARY_WINDOW_SECONDS (60s) while the warning it feeds described a 300s
+        breach, so the totals under-counted the period they were presented as covering by 5x.
+        """
 
         rows = [
             dict(row)
-            for row in self.performance_metrics_payload().get("summary", [])
+            for row in self.performance_metrics_payload(window_seconds=window_seconds).get("summary", [])
             if isinstance(row, dict) and str(row.get("role") or "")
         ]
         rows.sort(key=lambda row: (
@@ -9010,25 +10096,48 @@ class TmuxWebtermApp:
         cpu_percent = max(0.0, self.float_value(sample.get("cpu_percent"), 0.0))
         record = self.stats_collection_state.cpu_budget_record
         record.current_percent = cpu_percent
+        previous_sample_at = record.last_sample_at
+        record.last_sample_at = sample_time
         if cpu_percent <= SERVER_CPU_BUDGET_PERCENT:
             record.exceeded_since = 0.0
             record.warning_emitted = False
             record.top_consumers = []
+            record.cpu_ms_since_exceeded = 0.0
             return self.server_cpu_budget_payload(now=sample_time)
         if record.exceeded_since <= 0:
             record.exceeded_since = sample_time
+            record.cpu_ms_since_exceeded = 0.0
+        elif previous_sample_at > 0:
+            # Integrate this sample's CPU over the gap it represents. Every sample since
+            # exceeded_since was itself a breach, so this is the CPU the warning is about.
+            record.cpu_ms_since_exceeded += cpu_percent / 100.0 * max(0.0, sample_time - previous_sample_at) * 1000.0
         sustained_seconds = max(0.0, sample_time - record.exceeded_since)
         if sustained_seconds >= SERVER_CPU_BUDGET_SUSTAINED_SECONDS and not record.warning_emitted:
             record.warning_emitted = True
             record.last_warning_at = sample_time
-            record.top_consumers = self.server_cpu_budget_top_consumers()
+            record.top_consumers = self.server_cpu_budget_top_consumers(window_seconds=sustained_seconds)
+            attributed_ms = sum(float(row["compute_ms_total"]) for row in record.top_consumers)
+            consumed_ms = max(0.0, record.cpu_ms_since_exceeded)
+            attributed_percent = (attributed_ms / consumed_ms * 100.0) if consumed_ms > 0 else 0.0
             consumer_text = ", ".join(
                 f"{row['role']}:{row['surface']}={row['compute_ms_total']:.1f}ms"
                 for row in record.top_consumers
             ) or "no profiled consumers"
+            # State the coverage. Only code that calls record_performance_sample appears in the
+            # consumer list, so a background thread burning the CPU is invisible to it and the
+            # top profiled endpoint gets read as the cause. A live 7771 breach attributed 0.9ms
+            # of ~267 CPU-seconds and named an HTTP endpoint worth 0.7% of the process.
+            unattributed_percent = max(0.0, 100.0 - attributed_percent)
+            verdict = (
+                "the cause is unprofiled, not the list below"
+                if attributed_percent < SERVER_CPU_BUDGET_ATTRIBUTION_MIN_PERCENT
+                else "the list below covers most of it"
+            )
             message = (
-                f"YOLOmux CPU {cpu_percent:.1f}% exceeded {SERVER_CPU_BUDGET_PERCENT:.0f}% "
-                f"for {sustained_seconds:.0f}s; top compute: {consumer_text}"
+                f"YOLOmux CPU {cpu_percent:.1f}% (latest 1s sample) exceeded {SERVER_CPU_BUDGET_PERCENT:.0f}% "
+                f"for {sustained_seconds:.0f}s, consuming {consumed_ms / 1000.0:.1f} CPU-s; "
+                f"profiling attributes {attributed_percent:.1f}%, unattributed {unattributed_percent:.1f}% "
+                f"— {verdict}; top profiled compute: {consumer_text}"
             )
             emit_server_log(
                 "warning", "stats-cpu", message,
@@ -9042,6 +10151,9 @@ class TmuxWebtermApp:
                     "cpu_percent": round(cpu_percent, 3),
                     "budget_percent": SERVER_CPU_BUDGET_PERCENT,
                     "sustained_seconds": round(sustained_seconds, 3),
+                    "cpu_ms_consumed": round(consumed_ms, 3),
+                    "attributed_ms": round(attributed_ms, 3),
+                    "attributed_percent": round(attributed_percent, 3),
                     "top_consumers": json.dumps(record.top_consumers, separators=(",", ":")),
                 },
             )
@@ -9051,7 +10163,14 @@ class TmuxWebtermApp:
         record = self.stats_collection_state.cpu_budget_record
         sample_time = float(now if now is not None else time.time())
         sustained_seconds = max(0.0, sample_time - record.exceeded_since) if record.exceeded_since > 0 else 0.0
-        status = "warning" if record.warning_emitted else ("watching" if record.exceeded_since > 0 else "ok")
+        with self.stats_collection_state.sample_lock:
+            cached = self.stats_collection_state.sample_record.cached_payload or {}
+        pushed_at = float(cached.get("time") or 0.0)
+        sample_age_seconds = max(0.0, sample_time - pushed_at) if pushed_at > 0 else None
+        # Callers that advance the record supply that sample's timestamp. They
+        # are not a daemon-health read and must retain the just-computed state.
+        stale = now is None and (sample_age_seconds is None or sample_age_seconds > 3.0)
+        status = "stale" if stale else ("warning" if record.warning_emitted else ("watching" if record.exceeded_since > 0 else "ok"))
         return {
             "status": status,
             "current_percent": round(record.current_percent, 3),
@@ -9061,6 +10180,9 @@ class TmuxWebtermApp:
             "exceeded_since": record.exceeded_since,
             "last_warning_at": record.last_warning_at,
             "top_consumers": [dict(row) for row in record.top_consumers],
+            "source": "statsd_push",
+            "sample_age_seconds": None if sample_age_seconds is None else round(sample_age_seconds, 3),
+            "stale": stale,
         }
 
     def runtime_python_profile(self, duration_seconds: Any = 0.5, interval_seconds: Any = 0.01) -> dict[str, Any]:
@@ -9305,11 +10427,122 @@ class TmuxWebtermApp:
             summary["error"] = error
         return summary
 
+    @staticmethod
+    def system_status_metric(
+        value: object,
+        *,
+        running: bool,
+        missing_state: str,
+        missing_reason_code: str,
+        missing_reason: str,
+    ) -> dict[str, object]:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return {"state": "measured", "value": value, "reason_code": "", "reason": ""}
+        if not running:
+            return {
+                "state": "not_running",
+                "value": None,
+                "reason_code": "not_started",
+                "reason": "Service is not running",
+            }
+        return {
+            "state": missing_state,
+            "value": None,
+            "reason_code": missing_reason_code,
+            "reason": missing_reason,
+        }
+
+    def system_status_service(self, row: dict[str, Any]) -> dict[str, Any]:
+        service_id = str(row.get("service") or "").strip()
+        labels = {
+            "indexd": "Quick Open index",
+            "statsd": "YO!stats",
+            "jobd": "Filesystem jobs",
+            "statusd": "Tmux status",
+            "approvald": "Auto-approval",
+        }
+        pid = int(row.get("pid") or 0)
+        running = pid > 0
+        transport_reason = str(row.get("transport_reason") or "").strip()
+        last_failure = str(row.get("last_failure") or "").strip()
+        if running and row.get("healthy") is not False and not transport_reason:
+            state, reason_code, reason = "running", "", ""
+        elif not running and row.get("healthy") is not False and not transport_reason and not last_failure:
+            state, reason_code, reason = "idle", "not_started", "Starts on demand"
+        else:
+            state = "issue" if running else "unavailable"
+            reason_code = "transport_failed" if transport_reason else "service_unavailable"
+            reason = transport_reason or last_failure or "Service did not report healthy status"
+        resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
+        details = {
+            key: value
+            for key, value in row.items()
+            if key not in {"service", "pid", "started_at", "uptime_seconds", "resources"}
+        }
+        return {
+            **row,
+            "id": service_id,
+            "label": labels.get(service_id, service_id),
+            "state": state,
+            "reason_code": reason_code,
+            "reason": reason,
+            "metrics": {
+                "cpu_now_percent": self.system_status_metric(
+                    resources.get("cpu_percent"),
+                    running=running,
+                    missing_state="warming",
+                    missing_reason_code="baseline_pending",
+                    missing_reason="Waiting for a second cumulative CPU sample",
+                ),
+                "rss_bytes": self.system_status_metric(
+                    resources.get("rss_bytes"),
+                    running=running,
+                    missing_state="unavailable",
+                    missing_reason_code="process_read_failed",
+                    missing_reason="The operating system did not return process memory",
+                ),
+                "uptime_seconds": self.system_status_metric(
+                    row.get("uptime_seconds"),
+                    running=running,
+                    missing_state="unavailable",
+                    missing_reason_code="start_time_unavailable",
+                    missing_reason="The service start time is unavailable",
+                ),
+            },
+            "details": details,
+        }
+
+    def stats_current_recovery_events(self, migration_status: dict[str, Any]) -> list[dict[str, str]]:
+        issues = migration_status.get("issue_records")
+        if not isinstance(issues, (list, tuple)):
+            return []
+        database_path = self.stats_current_client.database_path
+        events: list[dict[str, str]] = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            kind = str(issue.get("kind") or "").strip()
+            if kind not in {"unreadable_current_database", "unsupported_legacy_database"}:
+                continue
+            source = Path(str(issue.get("source") or "")).name
+            if not source:
+                continue
+            events.append({
+                "subsystem": "statsd",
+                "event": kind,
+                "quarantined_artifact": source,
+                "quarantined_path": str(database_path.parent / source),
+                "destination_path": str(database_path),
+                "reason": str(issue.get("detail") or "Stats history was recovered from a damaged database")[:256],
+            })
+        return events[:16]
+
     def runtime_local_services(self) -> dict[str, Any]:
         """Return bounded worker diagnostics without exposing service payloads."""
         indexd = self.search_indexer.runtime_status()
         current_runtime = self.stats_current_runtime.status()
         current_service = current_runtime.get("service") if isinstance(current_runtime.get("service"), dict) else {}
+        current_service = self.stats_current_client.runtime_status(current_service)
         migration = current_service.get("migration") if isinstance(current_service.get("migration"), dict) else {}
         build = current_service.get("build") if isinstance(current_service.get("build"), dict) else {}
         service_usage = current_service.get("usage") if isinstance(current_service.get("usage"), dict) else {}
@@ -9339,12 +10572,13 @@ class TmuxWebtermApp:
             "sampler_families": current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
             "usage": usage,
             "last_failure": str(migration.get("failure") or build.get("last_failure") or ""),
-            "resources": {"cpu_percent": None, "rss_bytes": None},
+            "resources": current_service.get("resources") if isinstance(current_service.get("resources"), dict) else {},
         }
         jobd = self.job_client.runtime_status()
         statusd = self.status_client.runtime_status()
+        watchd = self.watchd_runtime_status()
         approvald = self.approval_client.runtime_status()
-        rows = [indexd, statsd, jobd, statusd, approvald]
+        rows = [indexd, statsd, jobd, statusd, watchd, approvald]
         totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
         now = time.time()
         for row in rows:
@@ -9363,7 +10597,16 @@ class TmuxWebtermApp:
                 totals["cpu_percent"] += float(cpu_percent)
             if isinstance(rss_bytes, int):
                 totals["rss_bytes"] += rss_bytes
-        return {"services": rows, "totals": totals, "ledger": self.runtime_process_ledger()}
+        inventory = ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
+        services = [self.system_status_service(row) for row in rows]
+        return {
+            "schema_version": 1,
+            "inventory": inventory,
+            "services": services,
+            "totals": totals,
+            "ledger": self.runtime_process_ledger(),
+            "recovery_events": self.stats_current_recovery_events(migration),
+        }
 
     def runtime_process_ledger(self) -> dict[str, Any]:
         """Bounded identity-verified process-group ledger for System diagnostics.
@@ -9376,14 +10619,25 @@ class TmuxWebtermApp:
         table = local_services_registry.bounded_process_table()
         port = int(getattr(self.background_owner, "port", 0) or 0) if hasattr(self, "background_owner") else 0
         port_group = local_services_registry.tracked_port_process_group(port, common.STATE_DIR, table) if port else {}
+        service_dir = common.STATE_DIR / "services"
+        tracked_groups = local_services_registry.tracked_local_service_groups(service_dir, table)
         service_groups = [
-            {key: group[key] for key in ("service", "pid", "pgid", "member_pids", "launcher_port")}
-            for group in local_services_registry.tracked_local_service_groups(common.STATE_DIR / "services", table)
+            {
+                key: group[key]
+                for key in ("service", "pid", "pgid", "member_pids", "launcher_pid", "launcher_port")
+            }
+            for group in tracked_groups
         ]
+        untracked_orphans = local_services_registry.untracked_local_service_processes(
+            service_dir,
+            table,
+            tracked_groups,
+        )
         evidence = sorted(Path("/tmp").glob(f"yolomux-overload-{port}-*.json")) if port else []
         return {
             "port_group": port_group,
             "service_groups": service_groups,
+            "untracked_orphans": untracked_orphans,
             "last_overload_evidence": str(evidence[-1]) if evidence else "",
         }
 
@@ -9523,6 +10777,7 @@ class TmuxWebtermApp:
                 **self.login_rate_limiter.diagnostics(),
                 "edge": self.login_edge_controller.diagnostics(),
             },
+            "tmux_signal_watcher": self.tmux_signal_event_watcher_status(),
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }
@@ -9550,6 +10805,7 @@ class TmuxWebtermApp:
             # capabilities endpoint; there is no diagnostic-only policy copy.
             "resolution_capabilities": stats_resolution.wire_capabilities(),
             "stats_current": self.stats_current_runtime.status(),
+            "host": collect_host_diagnostics().payload(admin=True),
         }
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
@@ -9641,7 +10897,7 @@ class TmuxWebtermApp:
                 if result and len(results) < limit:
                     results.append(result)
                     legacy_summaries.append({"session": name, "type": "rolling_summary", "text": truncate_text(rolling_text, 2000)})
-        if not session and len(results) < limit and hasattr(self, "activity_summary_lock"):
+        if activity_summary_enabled() and not session and len(results) < limit and hasattr(self, "activity_summary_lock"):
             activity_payload = self.activity_summary_payload()
             global_payload = activity_payload.get("global") if isinstance(activity_payload, dict) else None
             lines = global_payload.get("lines") if isinstance(global_payload, dict) else None
@@ -9952,10 +11208,16 @@ class TmuxWebtermApp:
                 files_payload=files_payload,
                 owned_rows_by_target=owned_agent_rows,
             )
+            recent_paths_by_agent = []
+            for agent in info.agents:
+                window, _pane = session_files.agent_window_for_info(info, agent)
+                recent_paths_by_agent.append(
+                    recent_agent_paths_from_files(files_payload, agent=agent, window=window)
+                )
             sessions_payload[session] = {
                 "info": asdict(info),
                 "gathered_agents": gathered_agents,
-                "files_payload": files_payload,
+                "recent_paths_by_agent": recent_paths_by_agent,
                 "transcript_views_by_path": transcript_views_by_path,
             }
         coalesce_key, generation = self.tabber_activity_view_coalesce_identity(scope, bounded_hours, source_signature)
@@ -10844,6 +12106,7 @@ class TmuxWebtermApp:
         repo_refs: dict[str, dict[str, str]] | None = None,
         force: bool = False,
         requester: str = "api-session-files",
+        accepted_operation: bool = False,
     ) -> tuple[SessionFilesPayload, HTTPStatus]:
         refresh_errors = self.refresh_sessions()
         if session and session not in self.sessions:
@@ -10861,7 +12124,50 @@ class TmuxWebtermApp:
             force=force,
             requester=requester,
             extra_errors=[*refresh_errors, *errors],
+            accepted_operation=accepted_operation,
         )
+
+    def session_files_http_payload(
+        self,
+        session: str | None = None,
+        hours: float = 24.0,
+        from_ref: str | None = None,
+        to_ref: str | None = None,
+        repo_refs: dict[str, dict[str, str]] | None = None,
+        force: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        payload, status = self.session_files_payload(
+            session,
+            hours,
+            from_ref=from_ref,
+            to_ref=to_ref,
+            repo_refs=repo_refs,
+            force=force,
+            accepted_operation=True,
+        )
+        if payload.get("state") in {"queued", "failed"}:
+            return payload, status
+        request_id = self.new_api_request_id()
+        if status < HTTPStatus.BAD_REQUEST:
+            return self.session_files_ready_result(request_id, payload), status
+        descriptor = payload.get("user_message") if isinstance(payload.get("user_message"), dict) else {}
+        message = str(descriptor.get("fallback") or payload.get("error") or "session-files request failed")
+        return common.error_payload(
+            message,
+            message_key=str(descriptor.get("key") or "common.requestFailed"),
+            message_params=descriptor.get("params") if isinstance(descriptor.get("params"), dict) else {},
+            canonical=True,
+            code="session_files_request_failed",
+            origin="server.http",
+            retryable=False,
+            details={"session": str(session or ""), "status": int(status)},
+            stack=[{
+                "component": "server.http",
+                "operation": "GET /api/session-files",
+                "code": "session_files_request_failed",
+            }],
+            request_id=request_id,
+        ), status
 
     def session_files_batch_payload(
         self,
@@ -10956,6 +12262,30 @@ class TmuxWebtermApp:
 
     def handle_control_request(self, request: dict[str, Any]) -> dict[str, Any]:
         action = request.get("action")
+        if action == "stats_cpu_sample":
+            sample = request.get("sample")
+            if not isinstance(sample, dict):
+                return {"ok": False, "error": "invalid stats CPU sample"}
+            try:
+                normalized = {
+                    "time": float(sample["time"]),
+                    "pid": int(sample["pid"]),
+                    "cpu_percent": max(0.0, float(sample["cpu_percent"])),
+                    "system_cpu_percent": max(0.0, float(sample["system_cpu_percent"])),
+                    "rss_bytes": max(0, int(sample["rss_bytes"])),
+                }
+            except (KeyError, TypeError, ValueError):
+                return {"ok": False, "error": "invalid stats CPU sample"}
+            if normalized["pid"] != os.getpid():
+                return {"ok": False, "error": "stats CPU sample PID mismatch"}
+            normalized["started_at"] = SERVER_STARTED_AT
+            normalized["uptime_seconds"] = max(0.0, normalized["time"] - SERVER_STARTED_AT)
+            with self.stats_collection_state.sample_lock:
+                record = self.stats_collection_state.sample_record
+                record.cached_monotonic = time.monotonic()
+                record.cached_payload = normalized
+            budget = self.update_server_cpu_budget(normalized)
+            return {"ok": True, "cpu_budget": budget}
         if action == "disable_auto_approve":
             session = request.get("session")
             requester = request.get("requester")
@@ -11031,6 +12361,86 @@ class TmuxWebtermApp:
         self.commit_auto_approve_change(session, enabled=False, trigger="takeover-release")
         return {"ok": True, "session": session, "enabled": False}
 
+    @property
+    def server_epoch(self) -> str:
+        """The identity of THIS server process, as every client already knows it.
+
+        The client-event broker already mints one per process and stamps it on every envelope, and
+        the browser already resets its per-process state when that value changes. Anything else that
+        needs "which server produced this" reads it from here rather than minting a second epoch,
+        so one process can never present two identities to the same browser.
+
+        The epoch is an opaque equality partition, never an ordering. Two generations are comparable
+        only when their epochs are equal; nothing may infer that one epoch came after another.
+        """
+
+        return self.client_events.epoch
+
+    def metadata_identity(self, generation: int) -> dict[str, Any]:
+        """The one identity object every metadata path ships: which server, which build."""
+
+        return {"epoch": self.server_epoch, "generation": max(0, int(generation))}
+
+    def stamp_metadata_identity(self, payload: dict[str, Any], generation: int) -> dict[str, Any]:
+        """Project the identity into a metadata payload, deriving the legacy scalar from it.
+
+        One projector for every metadata path -- the committed cache, the cold lightweight response,
+        the cache hit, the `/api/transcripts` alias, the share-scoped copy, and the payload pushed
+        on `transcripts_changed`. `metadata_generation` remains only as a projection of
+        `metadata_identity`, so no consumer can assemble an identity out of two fields that a
+        server restart moves independently.
+        """
+
+        identity = self.metadata_identity(generation)
+        payload["metadata_identity"] = identity
+        payload["metadata_generation"] = identity["generation"]
+        return identity
+
+    def start_metadata_refresh_for_request(
+        self,
+        requested_at: float | None,
+        *,
+        publish: bool,
+        defer: bool = False,
+    ) -> tuple[bool, int]:
+        """Start (or queue) a build that observes ``requested_at``, and name the generation that will.
+
+        Returns ``(refreshing, pending_generation)``. A pending generation of 0 means no build was
+        accepted or queued for this caller: it is NOT a build identity and must never be published
+        to a forced caller as one, because zero is already satisfied by everything.
+        """
+
+        started = self.start_transcripts_payload_refresh(publish=publish, defer=defer, not_before=requested_at)
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record = self.activity_transcript_service.transcripts_payload_cache_record
+            active = record.worker is not None
+            if started or (active and not record.rebuild_requested):
+                # Either this call started the build, or an in-flight build began at or after this
+                # request and therefore already observes what the caller is asking about.
+                pending_generation = record.generation
+            elif record.rebuild_requested:
+                # The queued follow-up build commits the generation after the in-flight one.
+                pending_generation = record.generation + 1
+            else:
+                pending_generation = 0
+        return started or active, pending_generation
+
+    def forced_metadata_pending_cache_fields(self, pending_generation: int) -> dict[str, Any]:
+        """The forced-read half of the contract: the identity the caller must wait for, or why not.
+
+        Only a forced refresh publishes its result, so only a forced refresh may name a generation
+        for a client to wait on. Naming one that is never published would replace a stale render
+        with a wait that cannot end; naming zero would replace it with a wait that ends instantly
+        against bytes that predate the request.
+        """
+
+        if pending_generation <= 0:
+            return {"pending_generation": 0, "pending_identity": None, "pending_error": "no_build_accepted"}
+        return {
+            "pending_generation": int(pending_generation),
+            "pending_identity": self.metadata_identity(pending_generation),
+        }
+
     def build_session_metadata_payload(self, lightweight: bool = False) -> dict[str, Any]:
         refresh_errors = self.refresh_sessions(maintenance=not lightweight)
         sessions, errors = discover_sessions(self.sessions)
@@ -11061,6 +12471,9 @@ class TmuxWebtermApp:
             "errors": [*refresh_errors, *errors],
             "metadata_loading": lightweight,
         }
+        # An unbuilt payload still carries the epoch: a client must be able to tell WHICH server's
+        # generation zero this is before it decides whether zero is older than what it already has.
+        self.stamp_metadata_identity(payload, 0)
         if not lightweight:
             self.apply_metadata_badge_pulses(session_payloads)
             self.warm_metadata_cache_async(sessions)
@@ -11127,7 +12540,7 @@ class TmuxWebtermApp:
             record = service.indexed_repo_record
             for root in record.indexed_dirs:
                 root_path = Path(root)
-                if any(self.native_filesystem_paths_intersect(root_path, path) for path in changed_paths):
+                if any(filesystem_paths_intersect(root_path, path) for path in changed_paths):
                     record.root_generations[root] = record.root_generations.get(root, 0) + 1
 
     def refresh_indexed_repo_roots_worker(self, indexed_dirs: tuple[str, ...], generation_signature: tuple[tuple[str, int], ...]) -> None:
@@ -11194,39 +12607,52 @@ class TmuxWebtermApp:
 
     def session_metadata_payload(self, force: bool = False) -> dict[str, Any]:
         max_age = TRANSCRIPTS_PAYLOAD_CACHE_SECONDS
-        cached = None if force else self.get_transcripts_payload_cache(max_age, allow_stale=True)
+        # A forced read is answered from the cache, so the bytes it returns are always older than
+        # the request. Name the generation the caller must wait for, and guarantee that a build
+        # which observes state as of this instant is actually started -- never coalesced onto one
+        # that began earlier and therefore cannot contain what the caller is asking about.
+        requested_at = time.monotonic()
+        cached = self.get_transcripts_payload_cache(max_age, allow_stale=True)
         if cached:
             payload, fresh, age_seconds = cached
             payload["cache"] = {
                 "hit": True,
-                "stale": not fresh,
+                "stale": force or not fresh,
                 "age_seconds": round(age_seconds, 3),
                 "refresh_seconds": max_age,
+                "generation": int(payload.get("metadata_generation") or 0),
             }
-            if not fresh:
-                payload["cache"]["refreshing"] = self.start_transcripts_payload_refresh()
+            if force or not fresh:
+                refreshing, pending_generation = self.start_metadata_refresh_for_request(
+                    requested_at if force else None,
+                    publish=force,
+                )
+                payload["cache"]["refreshing"] = refreshing
+                if force:
+                    payload["cache"].update(self.forced_metadata_pending_cache_fields(pending_generation))
             return payload
-        if not force:
-            payload = self.build_session_metadata_payload(lightweight=True)
-            payload["cache"] = {
-                "hit": False,
-                "stale": True,
-                "age_seconds": 0,
-                "refresh_seconds": max_age,
-                "refreshing": self.start_transcripts_payload_refresh(publish=True, defer=True),
-                "lightweight": True,
-            }
-            return payload
-        generation = self.begin_transcripts_payload_work(None, replace=True)
-        payload = self.build_session_metadata_payload()
-        self.commit_transcripts_payload_cache(payload, generation)
+        payload = self.build_session_metadata_payload(lightweight=True)
+        # A cold miss is the one case where the response carries nothing built at all, so it is also
+        # the case where a forced caller most needs the identity of the build that will answer it.
+        # Emitting no pending identity here handed the browser target zero, which every payload
+        # already satisfies: the force resolved instantly against a lightweight payload built before
+        # the mutation it was checking for.
+        refreshing, pending_generation = self.start_metadata_refresh_for_request(
+            requested_at if force else None,
+            publish=True,
+            defer=not force,
+        )
         payload["cache"] = {
             "hit": False,
-            "stale": False,
+            "stale": True,
             "age_seconds": 0,
             "refresh_seconds": max_age,
-            "refreshing": False,
+            "refreshing": refreshing,
+            "lightweight": True,
+            "generation": 0,
         }
+        if force:
+            payload["cache"].update(self.forced_metadata_pending_cache_fields(pending_generation))
         return payload
 
     def transcripts_payload(self, force: bool = False) -> dict[str, Any]:
@@ -11479,9 +12905,15 @@ class TmuxWebtermApp:
         )
         if not response.get("ok"):
             raise MetadataWarmJobdUnavailable(str(response.get("error") or "jobd submit rejected"))
+        with self.metadata_warm_lock:
+            stop_event = self.metadata_warm_record.stop_event
         try:
             _meta, body, state = wait_for_jobd_product(
-                self.job_client, coalesce_key, generation, METADATA_WARM_JOBD_WAIT_SECONDS
+                self.job_client,
+                coalesce_key,
+                generation,
+                METADATA_WARM_JOBD_WAIT_SECONDS,
+                stop_event=stop_event,
             )
         except JobdProductRpcUnavailable as error:
             raise MetadataWarmJobdUnavailable(str(error)) from error
@@ -11503,10 +12935,7 @@ class TmuxWebtermApp:
                 for info in sessions.values():
                     if stop_event.is_set():
                         break
-                    with self.activity_transcript_service.transcripts_payload_cache_lock:
-                        cached_payload = self.activity_transcript_service.transcripts_payload_cache_record.payload
-                        cached_session = cached_payload.get("sessions", {}).get(info.session) if isinstance(cached_payload, dict) and isinstance(cached_payload.get("sessions"), dict) else None
-                        cached_graph = cached_session.get("work_graph") if isinstance(cached_session, dict) else None
+                    cached_graph = self.cached_transcripts_work_graph(info.session)
                     signature = (metadata_warm_session_signature(info), self.metadata_warm_repository_signature(cached_graph))
                     now = time.monotonic()
                     with self.metadata_warm_lock:
@@ -11645,7 +13074,7 @@ class TmuxWebtermApp:
             "errors": errors,
         }, HTTPStatus.OK
 
-    def transcript_compact_view(
+    def transcript_compact_view_result(
         self,
         session: str,
         messages: int,
@@ -11654,7 +13083,7 @@ class TmuxWebtermApp:
         since: datetime | None = None,
         info: SessionInfo | None = None,
         agent_override: AgentInfo | None = None,
-    ) -> tuple[dict[str, Any], HTTPStatus]:
+    ) -> tuple[dict[str, Any], HTTPStatus, TranscriptProductOperation | None]:
         """Return cached compact facts, scheduling bounded parsing in jobd.
 
         This selector is deliberately the only request-path bridge to the
@@ -11668,17 +13097,17 @@ class TmuxWebtermApp:
             info = sessions.get(session)
         if not info or not info.agents:
             diagnostic = "no agent transcript found"
-            return {"session": session, "errors": errors, **user_message_payload("transcript.noAgentFound", diagnostic)}, HTTPStatus.NOT_FOUND
+            return {"session": session, "errors": errors, **user_message_payload("transcript.noAgentFound", diagnostic)}, HTTPStatus.NOT_FOUND, None
         agent = agent_override or next((item for item in info.agents if item.transcript), info.agents[0])
         if not agent.transcript:
             diagnostic = str(agent.error or "no agent transcript found")
-            return {"session": session, "agent": asdict(agent), "errors": errors, **user_message_payload("transcript.error.unavailable", diagnostic, error=diagnostic)}, HTTPStatus.NOT_FOUND
+            return {"session": session, "agent": asdict(agent), "errors": errors, **user_message_payload("transcript.error.unavailable", diagnostic, error=diagnostic)}, HTTPStatus.NOT_FOUND, None
         path = Path(agent.transcript).expanduser()
         try:
             generation = file_stat_signature(path)
         except OSError as exc:
             diagnostic = str(exc)
-            return {"session": session, "agent": asdict(agent), **user_message_payload("transcript.error.readFailed", diagnostic, error=diagnostic)}, HTTPStatus.INTERNAL_SERVER_ERROR
+            return {"session": session, "agent": asdict(agent), **user_message_payload("transcript.error.readFailed", diagnostic, error=diagnostic)}, HTTPStatus.INTERNAL_SERVER_ERROR, None
         safe_messages = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
         safe_lines = max(0, min(compact_lines, MAX_COMPACT_TRANSCRIPT_ITEMS))
         stable_identity = transcript_cache_identity(str(path))
@@ -11696,31 +13125,9 @@ class TmuxWebtermApp:
         service = self.activity_transcript_service
         with service.transcript_job_cache_lock:
             cached = service.transcript_job_cache.get(cache_key)
-            job_id = service.transcript_job_records.get(cache_key, "")
-        if cached is None and job_id:
-            response = self.job_client.result(job_id)
-            job = response.get("job") if isinstance(response.get("job"), dict) else {}
-            if job.get("status") == "completed" and isinstance(job.get("result"), dict):
-                result = dict(job["result"])
-                expected_generation = [generation[1], generation[2]]
-                # Reject append/truncate/replace races: the result must describe the exact bytes we
-                # expect AND the exact file identity (device+inode), so a replaced inode that reused
-                # the same mtime/size cannot satisfy this key.
-                identity_ok = "identity" not in result or result.get("identity") == expected_identity
-                if result.get("generation") == expected_generation and result.get("read_generation") == expected_generation and identity_ok:
-                    with service.transcript_job_cache_lock:
-                        self.cache_set_limited(service.transcript_job_cache, cache_key, result, CONTEXT_ITEMS_CACHE_MAX_ITEMS)
-                        service.transcript_job_records.pop(cache_key, None)
-                    cached = result
-                else:
-                    with service.transcript_job_cache_lock:
-                        service.transcript_job_records.pop(cache_key, None)
-            elif job.get("status") in {"failed", "cancelled", "superseded", "timed_out"}:
-                with service.transcript_job_cache_lock:
-                    service.transcript_job_records.pop(cache_key, None)
         if cached is None:
             generation_number = (int(generation[1]) ^ int(generation[2])) & ((1 << 63) - 1)
-            request = self.job_client.submit(
+            request, product_body = self.job_client.produce(
                 "transcript_view",
                 {
                     "path": str(path.resolve(strict=False)),
@@ -11734,26 +13141,53 @@ class TmuxWebtermApp:
                 generation=generation_number,
                 coalesce_key=product_key,
                 deadline_ms=15_000,
+                delivery="ready_or_receipt",
+                allow_stale=True,
             )
             job = request.get("job") if isinstance(request.get("job"), dict) else {}
-            if request.get("ok") and isinstance(job.get("job_id"), str):
+            job_id = str(job.get("job_id") or "")
+            operation = TranscriptProductOperation(
+                job_id=job_id,
+                product_key=product_key,
+                generation=generation_number,
+                cache_key=cache_key,
+                expected_generation=(int(generation[1]), int(generation[2])),
+                expected_identity=(int(expected_identity[0]), int(expected_identity[1])),
+            ) if request.get("ok") and job_id else None
+            if operation is not None:
                 with service.transcript_job_cache_lock:
-                    service.transcript_job_records[cache_key] = job["job_id"]
-            stale = self.transcript_product_view(product_key, expected_identity)
-            if stale is not None:
+                    service.transcript_job_records[cache_key] = operation.job_id
+            product = self.decode_transcript_product(product_body, expected_identity)
+            if product is not None:
+                exact = self.transcript_product_result_matches(
+                    product,
+                    (int(generation[1]), int(generation[2])),
+                    (int(expected_identity[0]), int(expected_identity[1])),
+                )
+                if exact:
+                    if operation is not None:
+                        self.cache_transcript_product_result(operation, product)
+                    else:
+                        with service.transcript_job_cache_lock:
+                            self.cache_set_limited(
+                                service.transcript_job_cache,
+                                cache_key,
+                                dict(product),
+                                CONTEXT_ITEMS_CACHE_MAX_ITEMS,
+                            )
                 return {
                     "session": session,
                     "path": str(path),
                     "messages": safe_messages,
-                    "compact_lines": list(stale.get("compact_lines") or []),
-                    "items": copy.deepcopy(stale.get("items") or []),
-                    "since_items": copy.deepcopy(stale.get("since_items") or []),
-                    "since_stats": dict(stale.get("since_stats") or {}),
+                    "compact_lines": list(product.get("compact_lines") or []),
+                    "items": copy.deepcopy(product.get("items") or []),
+                    "since_items": copy.deepcopy(product.get("since_items") or []),
+                    "since_stats": dict(product.get("since_stats") or {}),
                     "pending": False,
-                    "stale": True,
+                    "stale": not exact,
                     "agent": asdict(agent),
                     "errors": errors,
-                }, HTTPStatus.OK
+                }, HTTPStatus.OK, None
             return {
                 "session": session,
                 "path": str(path),
@@ -11766,7 +13200,7 @@ class TmuxWebtermApp:
                 "stale": False,
                 "agent": asdict(agent),
                 "errors": errors,
-            }, HTTPStatus.OK
+            }, HTTPStatus.OK, operation
         return {
             "session": session,
             "path": str(path),
@@ -11779,7 +13213,78 @@ class TmuxWebtermApp:
             "stale": False,
             "agent": asdict(agent),
             "errors": errors,
-        }, HTTPStatus.OK
+        }, HTTPStatus.OK, None
+
+    def transcript_compact_view(
+        self,
+        session: str,
+        messages: int,
+        *,
+        compact_lines: int = 0,
+        since: datetime | None = None,
+        info: SessionInfo | None = None,
+        agent_override: AgentInfo | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        payload, status, _operation = self.transcript_compact_view_result(
+            session,
+            messages,
+            compact_lines=compact_lines,
+            since=since,
+            info=info,
+            agent_override=agent_override,
+        )
+        return payload, status
+
+    @staticmethod
+    def decode_transcript_product(body: bytes, expected_identity: list[int]) -> dict[str, Any] | None:
+        if not body:
+            return None
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        if "identity" in decoded and decoded.get("identity") != expected_identity:
+            return None
+        return decoded
+
+    def cache_transcript_product_result(
+        self,
+        operation: TranscriptProductOperation,
+        result: dict[str, Any],
+    ) -> bool:
+        exact = self.transcript_product_result_matches(
+            result,
+            operation.expected_generation,
+            operation.expected_identity,
+        )
+        service = self.activity_transcript_service
+        with service.transcript_job_cache_lock:
+            if service.transcript_job_records.get(operation.cache_key) == operation.job_id:
+                service.transcript_job_records.pop(operation.cache_key, None)
+            if exact:
+                self.cache_set_limited(
+                    service.transcript_job_cache,
+                    operation.cache_key,
+                    dict(result),
+                    CONTEXT_ITEMS_CACHE_MAX_ITEMS,
+                )
+        return exact
+
+    @staticmethod
+    def transcript_product_result_matches(
+        result: dict[str, Any],
+        expected_generation: tuple[int, int],
+        expected_identity: tuple[int, int],
+    ) -> bool:
+        generation = list(expected_generation)
+        identity_ok = "identity" not in result or result.get("identity") == list(expected_identity)
+        return (
+            result.get("generation") == generation
+            and result.get("read_generation") == generation
+            and identity_ok
+        )
 
     def transcript_product_view(self, product_key: str, expected_identity: list[int]) -> dict[str, Any] | None:
         """Return decoded last-known-good product bytes for stale-while-revalidate, or None.
@@ -11794,17 +13299,7 @@ class TmuxWebtermApp:
             return None
         if product_meta.get("state") not in {"ready", "stale"}:
             return None
-        try:
-            decoded = json.loads(product_body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(decoded, dict):
-            return None
-        # The product key already scopes bytes to this device+inode, but reject a mismatched
-        # identity defensively so a reused key can never leak another file's compact facts.
-        if "identity" in decoded and decoded.get("identity") != expected_identity:
-            return None
-        return decoded
+        return self.decode_transcript_product(product_body, expected_identity)
 
     def transcript_compact_view_bounded(
         self,
@@ -11813,59 +13308,735 @@ class TmuxWebtermApp:
         *,
         compact_lines: int = 0,
         since: datetime | None = None,
-        wait_ms: int = CONTEXT_VIEW_SYNC_WAIT_MS,
+        wait_ms: int = 0,
     ) -> tuple[dict[str, Any], HTTPStatus]:
-        """Shared /api/context* entry point: give a warm/fast product a bounded synchronous wait.
+        """Compatibility wrapper for the retired request-thread bounded wait."""
+        del wait_ms
+        return self.transcript_compact_view(session, messages, compact_lines=compact_lines, since=since)
 
-        The single-shot `transcript_compact_view` already serves an exact cached result or a
-        last-known-good `stale` product synchronously; this wrapper additionally gives a freshly
-        submitted parse a short bounded window to finish so a small or already-warming transcript
-        resolves in the same request instead of the client polling again. A cold transcript still
-        returns `pending` immediately once the budget elapses. `stale` and `unavailable` stay
-        distinct from `pending` because the underlying payload's flags pass through unchanged.
-        """
-        payload, status = self.transcript_compact_view(session, messages, compact_lines=compact_lines, since=since)
-        if status != HTTPStatus.OK or wait_ms <= 0:
-            return payload, status
-        deadline = time.monotonic() + (wait_ms / 1000.0)
-        poll_seconds = max(0.001, CONTEXT_VIEW_SYNC_POLL_MS / 1000.0)
-        while payload.get("pending") and not payload.get("stale") and time.monotonic() < deadline:
-            time.sleep(poll_seconds)
-            payload, status = self.transcript_compact_view(session, messages, compact_lines=compact_lines, since=since)
-            if status != HTTPStatus.OK:
-                return payload, status
-        return payload, status
+    @staticmethod
+    def context_product_data(
+        kind: str,
+        payload: dict[str, Any],
+        messages: int,
+    ) -> dict[str, Any]:
+        common_fields = {
+            "session": str(payload.get("session") or ""),
+            "path": payload.get("path"),
+            "messages": messages,
+            "pending": bool(payload.get("pending")),
+            "stale": bool(payload.get("stale")),
+            "agent": payload.get("agent"),
+            "errors": copy.deepcopy(payload.get("errors") or []),
+        }
+        if kind == "context_tail":
+            return {
+                **common_fields,
+                "text": "\n\n".join(payload.get("compact_lines") or []),
+            }
+        if kind == "context_items":
+            return {
+                **common_fields,
+                "items": copy.deepcopy(payload.get("items") or []),
+            }
+        raise ValueError("unknown context product kind")
 
-    def context_tail(self, session: str, messages: int) -> tuple[dict[str, Any], HTTPStatus]:
+    def wait_for_jobd_operation_job(self, job_id: str, deadline_at: float) -> dict[str, Any]:
+        """Wait in the bounded completion service, never in an HTTP handler."""
+        poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
+        while not self.jobd_operation_service.stop_event.is_set():
+            response = self.job_client.result(job_id)
+            job = response.get("job") if isinstance(response.get("job"), dict) else {}
+            state = str(job.get("status") or "")
+            if response.get("ok") is not True or not job:
+                raise JobdOperationUnavailable(
+                    str(response.get("error") or "jobd result unavailable"),
+                    dict(response),
+                )
+            if state == "completed":
+                return job
+            if state in {"failed", "cancelled", "superseded", "timed_out"}:
+                raise JobdOperationUnavailable(
+                    str(job.get("error") or f"jobd producer {state}"),
+                    dict(job),
+                )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise JobdOperationUnavailable(
+                    "jobd product deadline expired",
+                    {"error": "jobd product deadline expired", "status": "deadline_expired"},
+                    code="deadline_expired",
+                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                )
+            self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        raise JobdOperationUnavailable(
+            "jobd product completion stopped",
+            {"error": "jobd product completion stopped", "status": "producer_abandoned"},
+            code="producer_abandoned",
+        )
+
+    def wait_for_jobd_operation_product(
+        self,
+        producer: JobdProductOperation,
+        deadline_at: float,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
+        """Read a potentially large accepted result through jobd's binary product frame."""
+        poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
+        while not self.jobd_operation_service.stop_event.is_set():
+            if cancel_event is not None and cancel_event.is_set():
+                raise JobdOperationUnavailable(
+                    "jobd product completion cancelled",
+                    {"error": "jobd product completion cancelled", "status": "producer_abandoned"},
+                    code="producer_abandoned",
+                )
+            metadata, body = self.job_client.product(producer.product_key)
+            state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
+            if not isinstance(metadata, dict) or metadata.get("ok") is not True:
+                raise JobdOperationUnavailable(
+                    str(metadata.get("error") or "jobd product unavailable") if isinstance(metadata, dict) else "jobd product unavailable",
+                    dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"},
+                )
+            if body and state == "ready" and int(metadata.get("generation") or 0) == producer.generation:
+                try:
+                    product = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise JobdOperationUnavailable(
+                        "malformed completed jobd product",
+                        {"error": str(error), "status": "malformed_product"},
+                    ) from error
+                if not isinstance(product, dict):
+                    raise JobdOperationUnavailable(
+                        "malformed completed jobd product",
+                        {"error": "malformed completed jobd product", "status": "malformed_product"},
+                    )
+                return product
+            if state == "none" and metadata.get("inflight") is not True:
+                response = self.job_client.result(producer.job_id)
+                job = response.get("job") if isinstance(response.get("job"), dict) else {}
+                job_state = str(job.get("status") or "")
+                if response.get("ok") is not True or job_state in {"failed", "cancelled", "superseded", "timed_out"}:
+                    failure = dict(job) if job else dict(response)
+                    raise JobdOperationUnavailable(
+                        str(failure.get("error") or f"jobd producer {job_state or 'unavailable'}"),
+                        failure,
+                    )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise JobdOperationUnavailable(
+                    "jobd product deadline expired",
+                    {"error": "jobd product deadline expired", "status": "deadline_expired"},
+                    code="deadline_expired",
+                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                )
+            wait_event = cancel_event or self.jobd_operation_service.stop_event
+            wait_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        raise JobdOperationUnavailable(
+            "jobd product completion stopped",
+            {"error": "jobd product completion stopped", "status": "producer_abandoned"},
+            code="producer_abandoned",
+        )
+
+    def accept_jobd_product_operation(
+        self,
+        *,
+        route: str,
+        kind: str,
+        context: dict[str, Any],
+        producer: JobdProductOperation | None,
+        deadline_seconds: float,
+        completion: Callable[..., None],
+        completion_args: tuple[Any, ...] = (),
+        reservation_held: bool = False,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        request_id = self.new_api_request_id()
+        if producer is None:
+            if reservation_held:
+                self.jobd_operation_service.release_reservation()
+            return self.jobd_operation_failure_result(
+                request_id,
+                {"error": "jobd did not return an accepted product receipt"},
+                route=route,
+                operation="jobd.produce",
+            ), HTTPStatus.SERVICE_UNAVAILABLE
+        if not reservation_held and not self.jobd_operation_service.reserve():
+            return self.jobd_operation_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                route=route,
+                operation="jobd.produce",
+                code="service_busy",
+            ), HTTPStatus.SERVICE_UNAVAILABLE
+        deadline_at = time.time() + max(1.0, float(deadline_seconds))
+        try:
+            receipt = self.queued_delivery_ledger.accept_operation(
+                request_id=request_id,
+                route=route,
+                deadline_at=deadline_at,
+                progress={
+                    "phase": "waiting_for_product",
+                    "producer": "jobd",
+                    "producer_state": "queued",
+                },
+                producer={
+                    "service": "jobd",
+                    "job_id": producer.job_id,
+                    "coalesce_key": producer.product_key,
+                    "generation": producer.generation,
+                },
+                kind=kind,
+                context=context,
+            )
+        except Exception:
+            self.jobd_operation_service.release_reservation()
+            raise
+        operation_id = str(receipt["operation"]["id"])
+        submitted = self.jobd_operation_service.submit_reserved(
+            completion,
+            operation_id,
+            request_id,
+            *completion_args,
+            producer,
+            deadline_at,
+        )
+        if submitted:
+            return receipt, HTTPStatus.ACCEPTED
+        result = self.jobd_operation_failure_result(
+            request_id,
+            {"error": "jobd operation completion worker could not start"},
+            route=route,
+            operation_id=operation_id,
+            operation="jobd.produce",
+            code="producer_failed",
+        )
+        self.terminalize_operation(operation_id, result, HTTPStatus.SERVICE_UNAVAILABLE)
+        return result, HTTPStatus.SERVICE_UNAVAILABLE
+
+    def complete_context_product_operation(
+        self,
+        operation_id: str,
+        request_id: str,
+        route: str,
+        kind: str,
+        messages: int,
+        base_payload: dict[str, Any],
+        producer: TranscriptProductOperation,
+        deadline_at: float,
+    ) -> None:
+        try:
+            job = self.wait_for_jobd_operation_job(producer.job_id, deadline_at)
+            if not isinstance(job.get("result"), dict):
+                raise JobdOperationUnavailable(
+                    "malformed completed jobd product",
+                    {"error": "malformed completed jobd product", "status": str(job.get("status") or "")},
+                )
+            product = dict(job["result"])
+            if not self.cache_transcript_product_result(producer, product):
+                result = self.jobd_operation_failure_result(
+                    request_id,
+                    {"error": "transcript changed before the accepted product completed", "status": "stale_product"},
+                    route=route,
+                    operation_id=operation_id,
+                    operation="jobd.result",
+                    code="stale_product",
+                )
+                self.terminalize_operation(operation_id, result, HTTPStatus.CONFLICT)
+                return
+            completed_payload = {
+                **copy.deepcopy(base_payload),
+                "compact_lines": list(product.get("compact_lines") or []),
+                "items": copy.deepcopy(product.get("items") or []),
+                "pending": False,
+                "stale": False,
+            }
+            data = self.context_product_data(kind, completed_payload, messages)
+            self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
+        except JobdOperationUnavailable as error:
+            result = self.jobd_operation_failure_result(
+                request_id,
+                error.failure,
+                route=route,
+                operation_id=operation_id,
+                operation="jobd.result",
+                code=error.code,
+            )
+            self.terminalize_operation(operation_id, result, error.status)
+        except Exception as error:
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": str(error), "cause": local_service_exception_cause(error)},
+                route=route,
+                operation_id=operation_id,
+                operation="context-product.complete",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def accept_context_product_operation(
+        self,
+        *,
+        route: str,
+        kind: str,
+        messages: int,
+        payload: dict[str, Any],
+        producer: TranscriptProductOperation | None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        return self.accept_jobd_product_operation(
+            route=route,
+            kind=kind,
+            context={"messages": messages, "session": str(payload.get("session") or "")},
+            producer=producer,
+            deadline_seconds=CONTEXT_OPERATION_DEADLINE_SECONDS,
+            completion=self.complete_context_product_operation,
+            completion_args=(route, kind, messages, payload),
+        )
+
+    def complete_filesystem_batch_operation(
+        self,
+        operation_id: str,
+        request_id: str,
+        request_ids: tuple[Any, ...],
+        producer: JobdProductOperation,
+        deadline_at: float,
+    ) -> None:
+        route = "POST /api/fs/batch"
+        try:
+            product = self.wait_for_jobd_operation_product(producer, deadline_at)
+            if not isinstance(product.get("responses"), list):
+                raise JobdOperationUnavailable(
+                    "malformed completed filesystem batch product",
+                    {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
+                )
+            data = self.materialize_filesystem_batch_product(product, request_ids)
+            self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
+        except JobdOperationUnavailable as error:
+            result = self.jobd_operation_failure_result(
+                request_id,
+                error.failure,
+                route=route,
+                operation_id=operation_id,
+                operation="jobd.result",
+                code=error.code,
+            )
+            self.terminalize_operation(operation_id, result, error.status)
+        except Exception as error:
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": str(error), "cause": local_service_exception_cause(error)},
+                route=route,
+                operation_id=operation_id,
+                operation="filesystem-batch.complete",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    @staticmethod
+    def materialize_filesystem_batch_product(
+        product: dict[str, Any],
+        request_ids: tuple[Any, ...] | list[Any],
+    ) -> dict[str, Any]:
+        responses = product.get("responses")
+        if not isinstance(responses, list):
+            raise JobdOperationUnavailable(
+                "malformed completed filesystem batch product",
+                {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
+            )
+        responses_by_id = {
+            response.get("id"): response
+            for response in responses
+            if isinstance(response, dict) and not isinstance(response.get("id"), bool)
+        }
+        materialized = []
+        for index, caller_id in enumerate(request_ids):
+            response = copy.deepcopy(responses_by_id.get(index) or {
+                "ok": False,
+                "status": int(HTTPStatus.SERVICE_UNAVAILABLE),
+                "error": "filesystem batch result missing",
+            })
+            response["id"] = caller_id
+            materialized.append(response)
+        return {**copy.deepcopy(product), "responses": materialized}
+
+    def fs_batch_http_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        shared_sessions: list[str] | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        """Submit one bounded Finder product and return its durable receipt."""
+        try:
+            requests = filesystem.validated_batch_requests(payload)
+        except ValueError as error:
+            return common.error_payload(
+                str(error),
+                message_key="request.error.list",
+                canonical=True,
+                code="invalid_request",
+                origin="server.http",
+                retryable=False,
+                request_id=self.new_api_request_id(),
+            ), HTTPStatus.BAD_REQUEST
+        if not self.jobd_operation_service.reserve():
+            request_id = self.new_api_request_id()
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                route="POST /api/fs/batch",
+                operation="jobd.produce",
+                code="service_busy",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        job_payload, product_key, request_ids = filesystem_batch_submission(
+            payload,
+            key_prefix="fs-batch",
+        )
+        generation = 1
+        try:
+            response, body = self.job_client.produce(
+                "filesystem_batch",
+                job_payload,
+                priority="interactive",
+                generation=generation,
+                coalesce_key=product_key,
+                deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
+                # jobd atomically checks its product store without waiting in the
+                # serial RPC handler. Warm products return here; cold work keeps
+                # using the accepted-operation SSE path below.
+                delivery="ready_or_receipt",
+            )
+        except Exception:
+            self.jobd_operation_service.release_reservation()
+            raise
+        if body and response.get("ok") is True:
+            self.jobd_operation_service.release_reservation()
+            try:
+                product = self.decode_filesystem_watch_batch_product(body)
+                return self.materialize_filesystem_batch_product(product, request_ids), HTTPStatus.OK
+            except JobdOperationUnavailable as error:
+                result = self.jobd_operation_failure_result(
+                    self.new_api_request_id(),
+                    error.failure,
+                    route="POST /api/fs/batch",
+                    operation="jobd.product",
+                    code=error.code,
+                )
+                self.record_operation_failure("", result)
+                return result, error.status
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        producer_state = str(job.get("status") or "")
+        if body or response.get("ok") is not True or not job_id or producer_state not in {"queued", "running", "completed"}:
+            self.jobd_operation_service.release_reservation()
+            failure = dict(response)
+            if body:
+                failure["error"] = "filesystem batch returned unusable product bytes"
+            elif not failure.get("error"):
+                failure["error"] = "jobd did not return an accepted filesystem batch receipt"
+            result = self.jobd_operation_failure_result(
+                self.new_api_request_id(),
+                failure,
+                route="POST /api/fs/batch",
+                operation="jobd.produce",
+            )
+            self.record_operation_failure("", result)
+            return result, HTTPStatus.SERVICE_UNAVAILABLE
+        producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=generation)
+        sessions = [str(session) for session in (shared_sessions or []) if str(session)]
+        return self.accept_jobd_product_operation(
+            route="POST /api/fs/batch",
+            kind="fs_batch",
+            context={
+                "session": sessions[0] if sessions else "",
+                "product_key": product_key,
+                "request_ids": request_ids,
+            },
+            producer=producer,
+            deadline_seconds=FS_BATCH_OPERATION_DEADLINE_SECONDS,
+            completion=self.complete_filesystem_batch_operation,
+            completion_args=(tuple(request_ids),),
+            reservation_held=True,
+        )
+
+    def wait_for_filesystem_operation_product(
+        self,
+        producer: JobdProductOperation,
+        deadline_at: float,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Read one retained filesystem product without interpreting opaque bytes."""
+        poll_seconds = SESSION_FILES_OPERATION_POLL_INITIAL_SECONDS
+        while not self.jobd_operation_service.stop_event.is_set():
+            metadata, body = self.job_client.product(producer.product_key)
+            state = str(metadata.get("state") or "") if isinstance(metadata, dict) else ""
+            if not isinstance(metadata, dict) or metadata.get("ok") is not True:
+                raise JobdOperationUnavailable(
+                    str(metadata.get("error") or "jobd product unavailable") if isinstance(metadata, dict) else "jobd product unavailable",
+                    dict(metadata) if isinstance(metadata, dict) else {"error": "jobd product unavailable"},
+                )
+            product = metadata.get("product") if isinstance(metadata.get("product"), dict) else None
+            if body and state == "ready" and int(metadata.get("generation") or 0) == producer.generation and product is not None:
+                return dict(product), body
+            if state == "none" and metadata.get("inflight") is not True:
+                response = self.job_client.result(producer.job_id)
+                job = response.get("job") if isinstance(response.get("job"), dict) else {}
+                job_state = str(job.get("status") or "")
+                if response.get("ok") is not True or job_state in {"failed", "cancelled", "superseded", "timed_out"}:
+                    failure = dict(job) if job else dict(response)
+                    typed_failure = self.typed_filesystem_operation_failure(failure)
+                    if typed_failure is not None:
+                        filesystem_error, status = typed_failure
+                        raise JobdOperationUnavailable(
+                            str(filesystem_error.get("error") or "filesystem operation failed"),
+                            {"filesystem_error": filesystem_error, "status": int(status)},
+                            code=str(filesystem_error.get("user_message", {}).get("key") or "filesystem_error"),
+                            status=status,
+                        )
+                    raise JobdOperationUnavailable(
+                        str(failure.get("error") or f"jobd producer {job_state or 'unavailable'}"),
+                        failure,
+                    )
+            remaining = deadline_at - time.time()
+            if remaining <= 0:
+                raise JobdOperationUnavailable(
+                    "jobd product deadline expired",
+                    {"error": "jobd product deadline expired", "status": "deadline_expired"},
+                    code="deadline_expired",
+                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                )
+            self.jobd_operation_service.stop_event.wait(min(poll_seconds, remaining))
+            poll_seconds = min(SESSION_FILES_OPERATION_POLL_MAX_SECONDS, poll_seconds * 2.0)
+        raise JobdOperationUnavailable(
+            "jobd product completion stopped",
+            {"error": "jobd product completion stopped", "status": "producer_abandoned"},
+            code="producer_abandoned",
+        )
+
+    def complete_filesystem_operation(
+        self,
+        operation_id: str,
+        request_id: str,
+        route: str,
+        reload_yolo_rules: bool,
+        producer: JobdProductOperation,
+        deadline_at: float,
+    ) -> None:
+        try:
+            product, body = self.wait_for_filesystem_operation_product(producer, deadline_at)
+            if product.get("format") != "json":
+                raise JobdOperationUnavailable(
+                    "filesystem operation returned an unsupported product format",
+                    {"error": "filesystem operation returned an unsupported product format", "status": "malformed_product"},
+                )
+            data = json.loads(body.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise JobdOperationUnavailable(
+                    "malformed completed filesystem product",
+                    {"error": "malformed completed filesystem product", "status": "malformed_product"},
+                )
+            if reload_yolo_rules:
+                data["yolo_rules"] = yolo_rules.reload_rules()
+            self.terminalize_operation(operation_id, self.operation_ready_result(request_id, data), HTTPStatus.OK)
+        except JobdOperationUnavailable as error:
+            typed_failure = self.typed_filesystem_operation_failure(error.failure)
+            if typed_failure is not None:
+                filesystem_error, status = typed_failure
+                result = self.typed_filesystem_operation_failed_result(
+                    request_id,
+                    filesystem_error,
+                    status,
+                    route=route,
+                    operation_id=operation_id,
+                )
+            else:
+                result = self.jobd_operation_failure_result(
+                    request_id,
+                    error.failure,
+                    route=route,
+                    operation_id=operation_id,
+                    operation="jobd.result",
+                    code=error.code,
+                )
+            self.terminalize_operation(operation_id, result, error.status)
+        except Exception as error:
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": str(error), "cause": local_service_exception_cause(error)},
+                route=route,
+                operation_id=operation_id,
+                operation="filesystem-operation.complete",
+                code="producer_failed",
+            )
+            self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def filesystem_operation_product_generation(self) -> str:
+        """Return a watchd revision only when it can invalidate retained filesystem reads."""
+        with self.client_watch_service.lock:
+            record = self.client_watch_service.event_watcher_record
+            if record is None or not record.filesystem_healthy or not record.watchd_epoch:
+                return ""
+            return f"watchd:{record.watchd_epoch}:{record.watchd_revision}"
+
+    def filesystem_operation_http_payload(
+        self,
+        *,
+        route: str,
+        operation: str,
+        path: str,
+        args: dict[str, Any] | None = None,
+        reload_yolo_rules: bool = False,
+        scope: str = "local",
+    ) -> FilesystemOperationHttpResponse:
+        """Submit one filesystem descriptor and persist a cold-operation receipt."""
+        request_id = self.new_api_request_id()
+        if not self.jobd_operation_service.reserve():
+            result = self.jobd_operation_failure_result(
+                request_id,
+                {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                route=route,
+                operation="jobd.produce",
+                code="service_busy",
+            )
+            self.record_operation_failure("", result)
+            return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
+        operation_args = dict(args or {})
+        generation = self.filesystem_operation_product_generation()
+        if operation in FILESYSTEM_RETAINED_READ_OPERATIONS and generation:
+            job_payload, product_key = filesystem_operation_submission(
+                operation,
+                path,
+                operation_args,
+                scope=scope,
+                generation=generation,
+            )
+        else:
+            job_payload = {"op": operation, "path": path, "args": operation_args}
+            product_key = f"filesystem-operation:{uuid.uuid4().hex}"
+        generation = 1
+        try:
+            response, body = self.job_client.produce(
+                "filesystem_operation",
+                job_payload,
+                priority="interactive",
+                generation=generation,
+                coalesce_key=product_key,
+                deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
+                delivery="ready_or_receipt",
+            )
+        except Exception:
+            self.jobd_operation_service.release_reservation()
+            raise
+        if response.get("_transport_error") == "timeout":
+            response, body = self.job_client.produce(
+                "filesystem_operation", job_payload, priority="interactive", generation=generation,
+                coalesce_key=product_key, deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000), delivery="receipt",
+            )
+        if body and response.get("ok") is True:
+            product = response.get("product") if isinstance(response.get("product"), dict) else None
+            if response.get("state") == "ready" and product is not None and product.get("format") == "json":
+                self.jobd_operation_service.release_reservation()
+                return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=body, product=dict(product))
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        producer_state = str(job.get("status") or "")
+        if body or response.get("ok") is not True or not job_id or producer_state not in {"queued", "running", "completed"}:
+            self.jobd_operation_service.release_reservation()
+            typed_failure = self.typed_filesystem_operation_failure(response)
+            if typed_failure is not None:
+                filesystem_error, status = typed_failure
+                return FilesystemOperationHttpResponse(filesystem_error, status)
+            failure = dict(response)
+            failure.setdefault("error", "jobd did not return an accepted filesystem operation receipt")
+            result = self.jobd_operation_failure_result(request_id, failure, route=route, operation="jobd.produce")
+            self.record_operation_failure("", result)
+            return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
+        producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=generation)
+        payload, status = self.accept_jobd_product_operation(
+            route=route,
+            kind="filesystem_operation",
+            context={"operation": operation, "path": path, "product_key": product_key},
+            producer=producer,
+            deadline_seconds=FS_BATCH_OPERATION_DEADLINE_SECONDS,
+            completion=self.complete_filesystem_operation,
+            completion_args=(route, reload_yolo_rules),
+            reservation_held=True,
+        )
+        return FilesystemOperationHttpResponse(payload, status)
+
+    def filesystem_operation_relay(
+        self,
+        *,
+        route: str,
+        operation: str,
+        path: str,
+        args: dict[str, Any] | None = None,
+    ) -> FilesystemOperationHttpResponse:
+        """Relay one browser-consumed byte product without a receipt protocol."""
+        request_id = self.new_api_request_id()
+        response, body = self.job_client.relay(
+            "filesystem_operation",
+            {"op": operation, "path": path, "args": dict(args or {})},
+            deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
+        )
+        product = response.get("product") if isinstance(response.get("product"), dict) else None
+        if response.get("ok") is True and product is not None:
+            return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=body, product=dict(product))
+        typed_failure = self.typed_filesystem_operation_failure(response)
+        if typed_failure is not None:
+            filesystem_error, status = typed_failure
+            return FilesystemOperationHttpResponse(filesystem_error, status)
+        result = self.jobd_operation_failure_result(
+            request_id,
+            dict(response),
+            route=route,
+            operation="jobd.relay",
+        )
+        self.record_operation_failure("", result)
+        return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
+
+    def context_tail(
+        self,
+        session: str,
+        messages: int,
+        *,
+        accept_pending: bool = True,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
         safe_messages = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
-        payload, status = self.transcript_compact_view_bounded(session, safe_messages, compact_lines=safe_messages)
+        payload, status, producer = self.transcript_compact_view_result(session, safe_messages, compact_lines=safe_messages)
         if status != HTTPStatus.OK:
             return payload, status
-        return {
-            "session": session,
-            "path": payload["path"],
-            "messages": safe_messages,
-            "text": "\n\n".join(payload["compact_lines"]),
-            "pending": bool(payload.get("pending")),
-            "stale": bool(payload.get("stale")),
-            "agent": payload.get("agent"),
-            "errors": payload.get("errors", []),
-        }, HTTPStatus.OK
+        if payload.get("pending") and accept_pending:
+            return self.accept_context_product_operation(
+                route="GET /api/context",
+                kind="context_tail",
+                messages=safe_messages,
+                payload=payload,
+                producer=producer,
+            )
+        return self.context_product_data("context_tail", payload, safe_messages), HTTPStatus.OK
 
-    def context_items(self, session: str, messages: int) -> tuple[dict[str, Any], HTTPStatus]:
-        payload, status = self.transcript_compact_view_bounded(session, messages)
+    def context_items(
+        self,
+        session: str,
+        messages: int,
+        *,
+        accept_pending: bool = True,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
+        safe_messages = max(1, min(messages, MAX_COMPACT_TRANSCRIPT_ITEMS))
+        payload, status, producer = self.transcript_compact_view_result(session, safe_messages)
         if status != HTTPStatus.OK:
             return payload, status
-        return {
-            "session": session,
-            "path": payload["path"],
-            "messages": payload["messages"],
-            "items": payload["items"],
-            "pending": bool(payload.get("pending")),
-            "stale": bool(payload.get("stale")),
-            "agent": payload.get("agent"),
-            "errors": payload.get("errors", []),
-        }, HTTPStatus.OK
+        if payload.get("pending") and accept_pending:
+            return self.accept_context_product_operation(
+                route="GET /api/context-items",
+                kind="context_items",
+                messages=safe_messages,
+                payload=payload,
+                producer=producer,
+            )
+        return self.context_product_data("context_items", payload, safe_messages), HTTPStatus.OK
 
     def codex_summary_prompt(self, session: str, lookback_seconds: int) -> tuple[dict[str, Any], HTTPStatus]:
         bounded_lookback = max(60, min(lookback_seconds, 24 * 3600))
@@ -12246,7 +14417,30 @@ class TmuxWebtermApp:
         self.sessions = sessions
         return {"session": clean_session, "exists": clean_session in sessions, "ok": True}, HTTPStatus.OK
 
-    def create_next_session(self, agent: str, dangerously_yolo: bool | None = None, terminal: str | None = None) -> tuple[dict[str, Any], HTTPStatus]:
+    def create_next_session_plan(self) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
+        if len(self.sessions) >= MAX_YOLOMUX_SESSION_TABS:
+            diagnostic = f"maximum session tabs reached: {MAX_YOLOMUX_SESSION_TABS}"
+            return {"sessions": self.sessions, **user_message_payload("session.error.maximumTabs", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS)}, HTTPStatus.CONFLICT
+        session = next_numbered_session_name(self.sessions)
+        if session is None:
+            diagnostic = f"no available numbered session names from 1 to {MAX_YOLOMUX_SESSION_TABS}"
+            return {"sessions": self.sessions, **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS)}, HTTPStatus.CONFLICT
+        with self.session_reservation_lock:
+            generation = max(time.time_ns() // 1_000_000, self.session_reservation_generation + 1)
+            if generation > JAVASCRIPT_MAX_SAFE_INTEGER:
+                raise RuntimeError("create-session generation exceeds the JavaScript safe integer range")
+            self.session_reservation_generation = generation
+        return {"ok": True, "session": session, "generation": generation}, HTTPStatus.OK
+
+    def create_next_session(
+        self,
+        agent: str,
+        dangerously_yolo: bool | None = None,
+        terminal: str | None = None,
+        requested_session: str | None = None,
+        reservation_generation: int | None = None,
+    ) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
         agent = agent if agent in AGENT_COMMANDS else "claude"
         available_agents = available_agent_commands()
@@ -12292,6 +14486,10 @@ class TmuxWebtermApp:
                 "sessions": self.sessions,
                 **user_message_payload("session.error.noAvailableNumberedNames", diagnostic, limit=MAX_YOLOMUX_SESSION_TABS),
             }, HTTPStatus.CONFLICT
+        requested = str(requested_session or "").strip()
+        if requested and (requested != session or not isinstance(reservation_generation, int) or reservation_generation <= 0):
+            diagnostic = "create-session lifecycle reservation no longer matches the next available name"
+            return {"sessions": self.sessions, **user_message_payload("status.sessionCreateFailedDefault", diagnostic, error=diagnostic)}, HTTPStatus.CONFLICT
         cwd = session_workdir(session)
         # An explicit launch choice is per session. Keep the server's old setting as the fallback for
         # older clients that do not send a mode, rather than silently changing their behavior.
@@ -12349,6 +14547,7 @@ class TmuxWebtermApp:
             "command": command,
             "dangerously_yolo": launch_dangerously_yolo,
             "terminal": terminal_name,
+            "generation": int(reservation_generation or 0),
             "ok": True,
         }, HTTPStatus.OK
 
@@ -12859,6 +15058,8 @@ class TmuxWebtermApp:
             return "approval"
         if key == "needs-input":
             return "needs-input"
+        if key == "blocked":
+            return "blocked"
         return "idle"
 
     @staticmethod
@@ -12885,9 +15086,13 @@ class TmuxWebtermApp:
         source = snapshot if isinstance(snapshot, dict) else self.activity_ledger.snapshot()
         result: dict[str, Any] = {}
         for key, value in source.items():
+            local_key = str(key)
+            prefix = self.host_identity.qualify_key("activity", "")
+            if local_key.startswith(prefix):
+                local_key = local_key.removeprefix(prefix)
             record = dict(value) if isinstance(value, dict) else {}
             record["active_recency_ts"] = self.activity_record_recency_ts(record)
-            result[key] = record
+            result[local_key] = record
         return result
 
     def agent_window_last_active_ts(self, activity_snapshot: dict[str, Any], session: str, window: str) -> float:
@@ -13033,8 +15238,10 @@ class TmuxWebtermApp:
             }
 
     @staticmethod
-    def attention_ack_key(*parts: Any) -> str:
-        return json.dumps([str(part or "") for part in parts], separators=(",", ":"))
+    def attention_ack_key(*parts: Any, host_identity: Any | None = None) -> str:
+        identity = host_identity or current_host_identity()
+        value = json.dumps([str(part or "") for part in parts], separators=(",", ":"))
+        return identity.qualify_key("attention-ack", value)
 
     @staticmethod
     def prompt_attention_signature(prompt: dict[str, Any] | None, screen: dict[str, Any] | None) -> str:
@@ -13054,7 +15261,7 @@ class TmuxWebtermApp:
 
     def prompt_attention_key(self, session: str, prompt: dict[str, Any] | None, screen: dict[str, Any] | None) -> str:
         signature = self.prompt_attention_signature(prompt, screen)
-        return self.attention_ack_key("prompt", session, signature) if signature else ""
+        return self.attention_ack_key("prompt", session, signature, host_identity=self.host_identity) if signature else ""
 
     @staticmethod
     def agent_window_attention_signature(state: str, screen: dict[str, Any] | None, stopped_ts: float = 0.0) -> str:
@@ -13098,7 +15305,7 @@ class TmuxWebtermApp:
     ) -> Any:
         key = self.agent_window_attention_instance_key(session, window, pane_target, kind)
         now = time.time()
-        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+        with file_lock(self.tmux_ai_status_path, dir_mode=0o700):
             status = self._read_shared_tmux_ai_status_locked()
             container = status.get("attention_instances") if isinstance(status.get("attention_instances"), dict) else {}
             instances = container.get("instances") if isinstance(container.get("instances"), dict) else {}
@@ -13115,7 +15322,7 @@ class TmuxWebtermApp:
 
     def shared_agent_window_attention_instances_snapshot(self) -> dict[str, AgentWindowAttentionInstance]:
         now = time.time()
-        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+        with file_lock(self.tmux_ai_status_path, dir_mode=0o700):
             status = self._read_shared_tmux_ai_status_locked()
             container = status.get("attention_instances") if isinstance(status.get("attention_instances"), dict) else {}
             raw_instances = container.get("instances") if isinstance(container.get("instances"), dict) else {}
@@ -13293,7 +15500,7 @@ class TmuxWebtermApp:
     def agent_window_attention_key(self, session: str, window: str, pane_target: str, kind: str, state: str, signature: str) -> str:
         if not signature:
             return ""
-        return self.attention_ack_key("agent-window", session, self.agent_window_index_key(window), pane_target, kind, state, signature)
+        return self.attention_ack_key("agent-window", session, self.agent_window_index_key(window), pane_target, kind, state, signature, host_identity=self.host_identity)
 
     def prune_attention_ack_keys_locked(self, now: float | None = None) -> None:
         current = time.time() if now is None else now
@@ -13330,19 +15537,35 @@ class TmuxWebtermApp:
     def _read_shared_attention_acks_locked(self) -> tuple[dict[str, float], int]:
         data = self._read_shared_tmux_ai_status_locked()
         attention = data.get("attention_acks") if isinstance(data.get("attention_acks"), dict) else {}
-        raw_keys = attention.get("keys") if isinstance(attention.get("keys"), dict) else {}
-        keys: dict[str, float] = {}
-        if isinstance(raw_keys, dict):
-            for raw_key, raw_ts in raw_keys.items():
-                key = str(raw_key or "").strip()
-                try:
-                    ts = float(raw_ts)
-                except (TypeError, ValueError):
-                    continue
-                if key and ts > 0:
-                    keys[key] = ts
+        keys = self._normalized_attention_ack_keys(attention)
         try:
             rev = int(attention.get("rev", 0)) if isinstance(attention, dict) else 0
+        except (TypeError, ValueError):
+            rev = 0
+        return keys, max(0, rev)
+
+    def _normalized_attention_ack_keys(self, payload: object) -> dict[str, float]:
+        """Return valid acknowledgement timestamps from either durable format."""
+
+        raw_keys = payload.get("keys") if isinstance(payload, dict) and isinstance(payload.get("keys"), dict) else {}
+        keys: dict[str, float] = {}
+        for raw_key, raw_ts in raw_keys.items():
+            key = str(raw_key or "").strip()
+            try:
+                ts = float(raw_ts)
+            except (TypeError, ValueError):
+                continue
+            if key and ts > 0:
+                keys[key] = ts
+        return keys
+
+    def _read_legacy_attention_acks_locked(self) -> tuple[dict[str, float], int]:
+        """Read pre-status-file acknowledgements until their contents are durably migrated."""
+
+        data = read_json_file(common.LEGACY_ATTENTION_ACKS_PATH, {}, exceptions=(OSError, json.JSONDecodeError, TypeError, ValueError))
+        keys = self._normalized_attention_ack_keys(data)
+        try:
+            rev = int(data.get("rev", 0)) if isinstance(data, dict) else 0
         except (TypeError, ValueError):
             rev = 0
         return keys, max(0, rev)
@@ -13356,12 +15579,17 @@ class TmuxWebtermApp:
 
     def write_shared_attention_acks_union(self, local_keys: dict[str, float]) -> tuple[int, list[str]]:
         now = time.time()
-        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+        with file_lock(self.tmux_ai_status_path, dir_mode=0o700):
             status = self._read_shared_tmux_ai_status_locked()
             attention = status.get("attention_acks") if isinstance(status.get("attention_acks"), dict) else {}
             merged, rev = self._read_shared_attention_acks_locked()
+            legacy_keys, legacy_rev = self._read_legacy_attention_acks_locked()
+            rev = max(rev, legacy_rev)
             self._prune_attention_ack_dict(merged, now)
             before_keys = set(merged)
+            for key, ts in legacy_keys.items():
+                if key not in merged:
+                    merged[key] = ts
             for key, ts in local_keys.items():
                 if key and ts > 0 and key not in merged:
                     merged[key] = ts
@@ -13391,8 +15619,29 @@ class TmuxWebtermApp:
         # and overwrite attention_ack_keys with the stale snapshot it read earlier, dropping a just-acked
         # key from the cache. The guard is monotonic (<=) so a stale or equal rev is never applied, and
         # changed compares the key set so a timestamp-only re-ack does not trigger a client refetch.
-        with file_lock(common.TMUX_AI_STATUS_PATH, dir_mode=0o700):
+        with file_lock(self.tmux_ai_status_path, dir_mode=0o700):
+            status = self._read_shared_tmux_ai_status_locked()
+            attention = status.get("attention_acks") if isinstance(status.get("attention_acks"), dict) else {}
             file_keys, rev = self._read_shared_attention_acks_locked()
+            legacy_keys, legacy_rev = self._read_legacy_attention_acks_locked()
+            rev = max(rev, legacy_rev)
+            now = time.time()
+            self._prune_attention_ack_dict(file_keys, now)
+            before_keys = set(file_keys)
+            for key, ts in legacy_keys.items():
+                if key not in file_keys:
+                    file_keys[key] = ts
+            self._prune_attention_ack_dict(file_keys, now)
+            if set(file_keys) != before_keys:
+                rev += 1
+                status["attention_acks"] = {
+                    "rev": rev,
+                    "updated_at": now,
+                    "keys": file_keys,
+                    "writer": self.background_owner.owner_payload(),
+                    **({"legacy_rev": attention.get("legacy_rev")} if isinstance(attention, dict) and attention.get("legacy_rev") else {}),
+                }
+                self._write_shared_tmux_ai_status_locked(status)
             with self.client_watch_service.lock:
                 if rev <= self.client_watch_service.attention_ack_rev:
                     return False
@@ -13885,18 +16134,43 @@ class TmuxWebtermApp:
             self.status_client.invalidate("auto_approve")
         response, body = self.status_client.snapshot(self.sessions, session=session, timeout=1.0)
         if response.get("ok") is not True or not body:
-            status = int(response.get("status") or HTTPStatus.SERVICE_UNAVAILABLE)
-            return b'{"error":"status service unavailable"}', HTTPStatus(status)
+            if local_service_failure_is_transient(response):
+                raw_status = int(response.get("status") or HTTPStatus.SERVICE_UNAVAILABLE)
+                status = (
+                    HTTPStatus(raw_status)
+                    if HTTPStatus.BAD_REQUEST <= raw_status <= 599
+                    else HTTPStatus.SERVICE_UNAVAILABLE
+                )
+                return json.dumps(response, separators=(",", ":")).encode("utf-8"), status
+            diagnostic = "status service unavailable"
+            payload = {
+                "status": "unavailable",
+                **user_message_payload("common.requestFailed", diagnostic),
+                "terminal": True,
+            }
+            raw_status = int(response.get("status") or HTTPStatus.SERVICE_UNAVAILABLE)
+            status = HTTPStatus.FAILED_DEPENDENCY if raw_status >= 500 else HTTPStatus(raw_status)
+            return json.dumps(payload, separators=(",", ":")).encode("utf-8"), status
         try:
             metadata = validate_status_snapshot(response, body)
         except StatusProtocolError:
-            return b'{"error":"status service upgrade required"}', HTTPStatus.SERVICE_UNAVAILABLE
+            diagnostic = "status service upgrade required"
+            payload = {
+                "status": "upgrade_required",
+                **user_message_payload("common.requestFailed", diagnostic),
+            }
+            return json.dumps(payload, separators=(",", ":")).encode("utf-8"), HTTPStatus.UPGRADE_REQUIRED
         return body, HTTPStatus(metadata.status)
 
     def stop_auto_approve_all(self) -> None:
         self.pricing_refresh_coordinator.stop_periodic()
         self.stats_current_runtime.stop()
+        self.stop_jobd_operation_service()
+        self.job_client.stop_for_scheduler()
         self.approval_client.request({"action": "shutdown"}, timeout=2.5)
+        port = int(self.background_owner.port or 0)
+        if port:
+            local_services_registry.shutdown_owned_local_services(port, common.RUNTIME_DIR / "services")
         self.background_owner.stop()
         self.yoagent_controller.close_yoagent_codex_app_server()
         self.control_server.stop()

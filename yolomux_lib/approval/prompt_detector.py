@@ -94,14 +94,8 @@ def is_dangerous(cmd_line: str) -> bool:
     if not cmd_line:
         return False
 
-    if yolo_rules.hard_floor_decision(cmd_line):
-        return True
-
-    ruleset, error = yolo_rules.cached_rules()
-    if error or ruleset is None:
-        # Fall back to the built-in default ruleset when the user's file is missing/broken.
-        ruleset = yolo_rules.validate_rules(yolo_rules.default_rule_data("approve"), source="built-in")
-    return yolo_rules.evaluate_ruleset(cmd_line, ruleset)["action"] != "approve"
+    decision = yolo_rules.evaluate(cmd_line)
+    return decision.get("action") != "approve"
 
 
 # ---------------------------------------------------------------------------
@@ -1572,6 +1566,8 @@ def agent_screen_state(visible_text: str, pane_target: str | None = None, now: f
         }
     if counter is not None:
         return _status_counter_screen_state(counter, pane_target=pane_target, now=observation_now)
+    if re.search(r"\bgoal blocked(?:\s*\([^)]*\))?\b", visible_text, flags=re.IGNORECASE):
+        return {"key": "blocked", "text": "goal blocked", "negative_reason": "goal blocked"}
     if visible_agent_working(visible_text):
         return {"key": "working", "text": "agent is working", "negative_reason": "agent is working"}
     question = visible_choice_prompt_text(visible_text)

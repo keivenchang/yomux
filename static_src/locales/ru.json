@@ -225,6 +225,7 @@
   "debug.cost.backfillPartial": "Заполнение истории не завершено",
   "debug.cost.backfillPending": "Заполнение истории ожидает",
   "debug.cost.backfillRunning": "Заполнение истории выполняется",
+  "debug.cost.backfillUnknown": "Состояние заполнения истории неизвестно",
   "debug.cost.byModel": "По модели",
   "debug.cost.bySource": "Атрибуция агента и источника",
   "debug.cost.byTmux": "Стоимость по окну tmux",

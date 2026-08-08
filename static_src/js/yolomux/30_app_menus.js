@@ -741,6 +741,10 @@ function tabMenuItems(openItems = orderedPaneItems(activePaneItems())) {
   return resultItems;
 }
 
+function appMenuCommandIdentity(command) {
+  return String(command?.dataset?.menuTargetItem || command?.getAttribute?.('aria-label') || '');
+}
+
 function refreshOpenTabsMenuRows() {
   const wrapper = Array.from(sessionButtons?.querySelectorAll?.('.app-menu') || [])
     .find(menu => menu.dataset.appMenu === 'tabs' && menu.classList.contains(CLS.open));
@@ -749,20 +753,21 @@ function refreshOpenTabsMenuRows() {
   if (!popover) return false;
   const tabsMenu = appMenuTree().find(menu => menu.id === 'tabs');
   if (!tabsMenu) return false;
+  const focusedCommand = document.activeElement?.closest?.('.app-menu-command');
+  const focusedCommandKey = popover.contains(focusedCommand) ? appMenuCommandIdentity(focusedCommand) : '';
   // A metadata refresh replaces only this menu's command rows. Preserve the host-owned hover/focus
   // marker on its matching command so DOM replay does not send an open Tabs menu without its active row.
   const activeCommandKeys = new Set(
     Array.from(popover.querySelectorAll('.app-menu-command.share-mirror-active'))
-      .map(command => String(command.dataset.menuTargetItem || command.getAttribute('aria-label') || ''))
+      .map(appMenuCommandIdentity)
       .filter(Boolean)
   );
   popover.replaceChildren(...tabsMenu.items.map(createAppMenuItem));
-  if (activeCommandKeys.size) {
-    for (const command of popover.querySelectorAll('.app-menu-command')) {
-      const commandKey = String(command.dataset.menuTargetItem || command.getAttribute('aria-label') || '');
-      if (activeCommandKeys.has(commandKey)) {
-        command.classList.add('share-mirror-active');
-      }
+  for (const command of popover.querySelectorAll('.app-menu-command')) {
+    const commandKey = appMenuCommandIdentity(command);
+    if (activeCommandKeys.has(commandKey)) command.classList.add('share-mirror-active');
+    if (focusedCommandKey && commandKey === focusedCommandKey) {
+      command.focus({preventScroll: true});
     }
   }
   fitAppMenuPopover(popover);
@@ -847,11 +852,11 @@ function appMenuTree() {
       iconHtml: appMenuUiIcon('document'),
     }),
     ...fileMenuPanelCommands().filter(command => !shareViewMode || command.targetItem !== chatItemId),
-    menuCommand(t('menu.file.share'), () => showShareModal(), {
+    ...(!shareFeatureQuarantined ? [menuCommand(t('menu.file.share'), () => showShareModal(), {
       disabled: readOnlyMode || (!shareHasActiveShare() && !shareCanOpen),
       detail: shareMenuActive || shareCanOpen ? t('share.menu.sharing') : t('share.noSession'),
       iconHtml: appMenuUiIcon('share', shareMenuActive),
-    }),
+    })] : []),
     menuCommand(t('common.preferences'), () => selectSession(prefsItemId, {userInitiated: true}), {
       checked: itemInLayout(prefsItemId),
       detail: compactHomePath(settingsConfigPath()),
@@ -1949,7 +1954,10 @@ function bindAppMenuHover(wrapper) {
     canOpen: event => autoFocusCanFollowCursor(event) || appMenuIsOpen(),
     showDelay: () => (appMenuIsOpen() ? popoverHideDelayMs : popoverShowDelayMs),
     hideDelay: () => popoverHideDelayMs,
-    stillActive: () => wrapper.matches?.(':hover'),
+    stillActive: () => (
+      (openAppMenuPinned && openAppMenuId === wrapper.dataset.appMenu)
+      || popoverStillActive(wrapper, wrapper.querySelector(':scope > .app-menu-popover'))
+    ),
     onOpen: () => {
       const menuId = wrapper.dataset.appMenu || '';
       const currentWrapper = document.querySelector(`.app-menu[data-app-menu="${cssEscape(menuId)}"]`) || wrapper;

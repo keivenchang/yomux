@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // Share mirror protocol, DOM replay, pointer mirroring, scroll sync, and geometry diagnostics.
+// Quarantined by product decision; docs/specs/SHARE_MIRRORING.md is the revival contract.
 // Share mirror protocol owner. Replay code must add names here first, then reference these constants.
 const shareMirrorFrameTypes = Object.freeze({
   uiState: 'ui-state',
@@ -2057,6 +2058,7 @@ function shareFinderStateSnapshot(options = {}) {
   return {
     ...finder,
     expanded: shareSetSnapshot(fileExplorerExpanded),
+    syncUserExpansionState: typeof fileExplorerSyncUserExpansionEntries === 'function' ? fileExplorerSyncUserExpansionEntries() : [],
     selectedPaths: shareSetSnapshot(fileExplorerSelectedPaths),
     selectionAnchor: fileExplorerSelectionAnchor || '',
     selectionLead: fileExplorerSelectionLead || '',
@@ -2348,6 +2350,9 @@ async function applyShareFinderState(finder = {}) {
   if ('diffRefTo' in finder) diffRefTo = cleanDiffRef(finder.diffRefTo, diffRefTo || 'current');
   if ('diffRefsByRepo' in finder) diffRefsByRepo = shareCleanDiffRefsByRepo(finder.diffRefsByRepo);
   if ('expanded' in finder) shareReplaceSet(fileExplorerExpanded, finder.expanded);
+  if ('syncUserExpansionState' in finder && typeof applyFileExplorerSyncUserExpansionState === 'function') {
+    applyFileExplorerSyncUserExpansionState(finder.syncUserExpansionState);
+  }
   if ('selectedPaths' in finder) shareReplaceSet(fileExplorerSelectedPaths, finder.selectedPaths);
   if ('selectionAnchor' in finder) fileExplorerSelectionAnchor = String(finder.selectionAnchor || '');
   if ('selectionLead' in finder) fileExplorerSelectionLead = String(finder.selectionLead || '');
@@ -3572,7 +3577,7 @@ async function shareUploadDebugProfile(kind = 'share-debug-profile', detail = {}
 }
 
 async function copyShareDebugDiagnostics() {
-  await copyTextToClipboard(shareDebugTextForClipboard());
+  await copyTextWithFeedback(shareDebugTextForClipboard(), {statusText: t('debug.copied')});
 }
 
 function exposeShareDebugApi() {

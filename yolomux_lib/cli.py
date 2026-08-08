@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import ssl
 import subprocess
@@ -14,29 +15,59 @@ import threading
 import time as _time
 from pathlib import Path
 from typing import Any
+from typing import Mapping
 
 from .app import TmuxWebtermApp
 from .infra.background_owner import background_owner_priority
 from .infra.background_owner import read_background_owner_debug_status
-from .infra.common import AUTH_CONFIG_DISPLAY_PATH
+from .infra.common import _YOLOMUX_ROOTS
+from .infra.common import AUTH_CONFIG_PATH
 from .infra.common import SERVER_HOSTNAME
 from .infra.common import STATE_DIR
+from .infra.common import RUNTIME_DIR
 from .infra.common import auth_setup_required
 from .infra.common import default_session_names
 from .infra.common import split_csv
 from .infra.common import unique_session_names
 from .infra.common import warn_unavailable_agent_commands_once
+from .infra.root_paths import YolomuxRoots
+from .infra.worktree_writer import server_start_writer_warning
 from .control import send_yolomux_control_request
 from .local_services.registry import bounded_process_table
 from .local_services.registry import set_local_service_launch_context
 from .local_services.registry import tracked_local_service_groups
 from .local_services.registry import tracked_port_process_group
 from .local_services.watchdog import GroupOverloadWatchdog
+from .ptrace import allow_diagnostic_ptrace
 from .server import TmuxWebtermHTTPServer
 from .server_lease import acquire_server_port_lease
 from .server_logs import emit_server_log
 from .server_logs import install_server_log_handler
 from .tmux.tmux_utils import cmd_error
+from tools.instance_isolation import ROOT_KEYS
+from tools.instance_isolation import YOLOMUX_ROOT_ENV
+from tools.instance_isolation import assert_early_port
+from tools.instance_isolation import is_managed_instance_port
+
+
+def _graceful_shutdown_signal(_signum: int, _frame: object) -> None:
+    """Route TERM through the same cleanup path as an interactive interrupt."""
+    raise KeyboardInterrupt
+
+
+def configure_dang_diagnostic_ptrace(dangerously_yolo: bool) -> bool:
+    """Enable ptrace only for an explicit --dang development launch and report the outcome."""
+    if not dangerously_yolo:
+        return False
+    if allow_diagnostic_ptrace():
+        message = "Development ptrace diagnostics are enabled by --dang (PR_SET_PTRACER_ANY)."
+        print(message)
+        emit_server_log("info", "server", message, category="diagnostics")
+        return True
+    message = "Development ptrace diagnostics are unavailable; continuing without diagnostic attach."
+    print(message)
+    emit_server_log("warning", "server", message, category="diagnostics")
+    return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -349,12 +380,12 @@ def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) ->
         return 0
     table = bounded_process_table()
     port_groups = []
-    for lease_path in sorted((STATE_DIR / "server-leases").glob("*.lock")):
+    for lease_path in sorted((RUNTIME_DIR / "server-leases").glob("*/*.lock")):
         try:
             port = int(lease_path.stem)
         except ValueError:
             continue
-        group = tracked_port_process_group(port, STATE_DIR, table)
+        group = tracked_port_process_group(port, RUNTIME_DIR, table)
         if group:
             port_groups.append(group)
     payload = {
@@ -363,7 +394,7 @@ def print_runtime_report(sessions: list[str], dangerously_yolo: bool = False) ->
         "owner_debug": owner_debug,
         "owner_control_response": response,
         "port_groups": port_groups,
-        "local_service_groups": tracked_local_service_groups(STATE_DIR / "services", table),
+        "local_service_groups": tracked_local_service_groups(RUNTIME_DIR / "services", table),
     }
     print(json.dumps(payload, sort_keys=True, indent=2))
     return 0
@@ -388,7 +419,7 @@ def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
         seconds = STARTUP_WATCHDOG_DEFAULT_SECONDS
     if seconds <= 0:
         return None
-    watchdog = GroupOverloadWatchdog(port=int(port), state_dir=STATE_DIR, service_dir=STATE_DIR / "services")
+    watchdog = GroupOverloadWatchdog(port=int(port), state_dir=RUNTIME_DIR, service_dir=RUNTIME_DIR / "services")
     thread = threading.Thread(
         target=watchdog.run,
         args=(seconds,),
@@ -401,7 +432,7 @@ def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
 
 def print_auth_setup_error() -> None:
     print(
-        f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.",
+        f"You need to set {AUTH_CONFIG_PATH} before using this program.",
         file=sys.stderr,
     )
     print(
@@ -410,15 +441,66 @@ def print_auth_setup_error() -> None:
     )
 
 
+def startup_path_line(
+    port: int,
+    *,
+    environ: Mapping[str, str] | None = None,
+    roots: YolomuxRoots | None = None,
+) -> str:
+    """Describe path provenance using the early classifier and resolved root owner."""
+
+    values = os.environ if environ is None else environ
+    resolved = _YOLOMUX_ROOTS if roots is None else roots
+    managed = is_managed_instance_port(port) if environ is None else is_managed_instance_port(port, values)
+    if managed:
+        root_description = (
+            f"{resolved.root} (auto-derived for non-default port {port} "
+            "because no root-family override was set)"
+        )
+    elif values.get(YOLOMUX_ROOT_ENV):
+        root_description = f"{resolved.root} (explicit)"
+    else:
+        overrides = sorted(key for key in ROOT_KEYS if values.get(key))
+        if overrides:
+            verb = "was" if len(overrides) == 1 else "were"
+            reason = f"{', '.join(overrides)} {verb} explicitly set"
+        else:
+            reason = "no managed instance root contract was applied"
+        root_description = f"unset (auto-derivation skipped because {reason})"
+    return (
+        f"YOLOmux paths: YOLOMUX_ROOT={root_description}; config={resolved.config_dir}; "
+        f"state={resolved.state_dir}; cache={resolved.cache_dir}; runtime={resolved.runtime_dir}"
+    )
+
+
+def report_worktree_writer_warning() -> bool:
+    """Detect a foreign writer while preserving read-only server startup."""
+
+    warning = server_start_writer_warning(Path(__file__).resolve().parents[1])
+    if warning:
+        print(f"WARNING: {warning}", file=sys.stderr)
+        emit_server_log("warning", "worktree", warning, category="safety")
+    return True
+
+
 def main() -> int:
     args = parse_args()
+    try:
+        assert_early_port(args.port)
+    except RuntimeError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
     install_server_log_handler()
+    configure_dang_diagnostic_ptrace(args.dangerously_yolo)
     warn_unavailable_agent_commands_once()
     if args.print_background_owner:
         return print_background_owner_status()
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
     if args.print_runtime_report:
         return print_runtime_report(sessions, dangerously_yolo=args.dangerously_yolo)
+    if not args.print_transcripts:
+        print(startup_path_line(args.port), flush=True)
+    report_worktree_writer_warning()
     try:
         tls_context, tls_message = tls_context_for_args(args)
     except (OSError, RuntimeError, ValueError, ssl.SSLError) as error:
@@ -446,7 +528,11 @@ def main() -> int:
                 return 2
             return print_transcripts(app)
 
-        app.start_background_owner(port=args.port, priority=background_owner_priority(args.port))
+        app.start_background_owner(
+            port=args.port,
+            priority=background_owner_priority(args.port),
+            managed_instance=is_managed_instance_port(args.port),
+        )
         server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
         if hasattr(app, "start_yoagent_backend_prewarm"):
             app.start_yoagent_backend_prewarm(reason="server_start")
@@ -464,7 +550,7 @@ def main() -> int:
             print("DANGEROUS YOLO mode is enabled: new Claude/Codex sessions bypass approval and sandbox protections.")
         if auth_setup_required():
             print("=" * 78)
-            print(f"You need to set {AUTH_CONFIG_DISPLAY_PATH} before using this program.")
+            print(f"You need to set {AUTH_CONFIG_PATH} before using this program.")
             print("YOLOmux created an inactive starter YAML file.")
             print("Leave users: as-is, then uncomment and edit one or more account entries before logging in.")
             print(f"YOLOmux is listening on {scheme}://{url_host}:{args.port}/ and will show this setup message in the browser.")
@@ -473,19 +559,30 @@ def main() -> int:
         restored_auto = app.restore_auto_approve()
         if restored_auto:
             print(f"Restored YOLO for {', '.join(restored_auto)}")
+        previous_sigterm = signal.signal(signal.SIGTERM, _graceful_shutdown_signal)
         try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print("\nStopping.")
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                print("\nStopping.")
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
         return 0
     finally:
-        if app is not None:
-            app.stop_auto_approve_all()
-        if server is not None:
-            server.server_close()
-        elif app is not None:
-            if hasattr(app, "background_owner"):
-                app.background_owner.stop()
-            if hasattr(app, "control_server"):
-                app.control_server.stop()
-        lease.release()
+        try:
+            if app is not None:
+                app.stop_auto_approve_all()
+        finally:
+            try:
+                if server is not None:
+                    # server_close owns the client-event watcher and its RustNotify
+                    # thread. It must run even if an earlier app cleanup failed, or
+                    # CPython can finalize while that native thread is still alive.
+                    server.server_close()
+                elif app is not None:
+                    if hasattr(app, "background_owner"):
+                        app.background_owner.stop()
+                    if hasattr(app, "control_server"):
+                        app.control_server.stop()
+            finally:
+                lease.release()

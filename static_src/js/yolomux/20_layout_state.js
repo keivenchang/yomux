@@ -1137,6 +1137,9 @@ function applyLayoutUrlFinderSeed(finder = {}) {
       : {};
   }
   if ('expanded' in finder) layoutUrlReplaceSet(fileExplorerExpanded, finder.expanded);
+  if ('syncUserExpansionState' in finder && typeof applyFileExplorerSyncUserExpansionState === 'function') {
+    applyFileExplorerSyncUserExpansionState(finder.syncUserExpansionState);
+  }
   if ('selectedPaths' in finder) layoutUrlReplaceSet(fileExplorerSelectedPaths, finder.selectedPaths);
   if ('selectionAnchor' in finder) fileExplorerSelectionAnchor = String(finder.selectionAnchor || '');
   if ('selectionLead' in finder) fileExplorerSelectionLead = String(finder.selectionLead || '');
@@ -1650,42 +1653,280 @@ function openFileEditorItems() {
   return items;
 }
 
-const pendingTmuxSessionGraceMs = 30000;
+function newTmuxSessionLifecycleRecord(session, phase = 'stable', topologyEpoch = tmuxTopologyEpoch) {
+  const name = String(session || '').trim();
+  if (!name) return null;
+  const previous = tmuxSessionLifecycleRecords.get(name);
+  if (previous && previous.phase !== 'retired') retireTmuxSessionLifecycleRecord(previous);
+  const record = {
+    name,
+    generation: ++tmuxSessionLifecycleGeneration,
+    topologyEpoch: Number(topologyEpoch),
+    phase,
+    committed: phase === 'stable',
+    pendingUntil: tmuxSessionLifecyclePendingPhases.has(phase) ? Date.now() + pendingTmuxSessionGraceMs : 0,
+    requestLeases: new Set(),
+    controllers: new Set(),
+    sources: new Set(),
+    timers: new Set(),
+    consumerDetachments: 0,
+  };
+  tmuxSessionLifecycleRecords.set(name, record);
+  return record;
+}
+
+function tmuxSessionLifecycleRecord(session, options = {}) {
+  const name = String(session || '').trim();
+  if (!name) return null;
+  const existing = tmuxSessionLifecycleRecords.get(name);
+  if (existing || options.create === false) return existing || null;
+  return newTmuxSessionLifecycleRecord(name, options.phase || 'stable');
+}
+
+function tmuxSessionLifecycleToken(session) {
+  const record = tmuxSessionLifecycleRecord(session);
+  return record ? {name: record.name, generation: record.generation, topologyEpoch: record.topologyEpoch, record} : null;
+}
+
+function tmuxSessionLifecycleTokenIsCurrent(token, options = {}) {
+  const record = token?.record;
+  if (!record || tmuxSessionLifecycleRecords.get(record.name) !== record || record.generation !== token.generation) return false;
+  if (options.allowBlocked === true) return record.phase !== 'retired';
+  return !tmuxSessionLifecycleBlockedPhases.has(record.phase);
+}
+
+function tmuxSessionLifecycleAllowsTopologySession(session) {
+  const record = tmuxSessionLifecycleRecord(session, {create: false});
+  return !record || (!tmuxSessionLifecycleBlockedPhases.has(record.phase)
+    && (!tmuxSessionLifecyclePendingPhases.has(record.phase) || record.committed === true));
+}
+
+function tmuxSessionLifecycleOwnSource(session, source) {
+  const token = tmuxSessionLifecycleToken(session);
+  if (!token || !source) return token;
+  token.record.sources.add(source);
+  source._tmuxSessionLifecycleToken = token;
+  return token;
+}
+
+function tmuxSessionLifecycleReleaseSource(token, source) {
+  token?.record?.sources?.delete(source);
+  if (source?._tmuxSessionLifecycleToken === token) delete source._tmuxSessionLifecycleToken;
+}
+
+function tmuxSessionLifecycleSourceIsCurrent(source) {
+  return tmuxSessionLifecycleTokenIsCurrent(source?._tmuxSessionLifecycleToken);
+}
+
+function tmuxSessionLifecycleOwnTimer(token, timer) {
+  if (token?.record && timer !== null && timer !== undefined) token.record.timers.add(timer);
+  return timer;
+}
+
+function tmuxSessionLifecycleReleaseTimer(token, timer) {
+  token?.record?.timers?.delete(timer);
+}
+
+function retireTmuxSessionLifecycleRecord(record) {
+  if (!record || record.phase === 'retired') return false;
+  record.phase = 'retired';
+  record.pendingUntil = 0;
+  for (const controller of record.controllers) controller.abort?.(new DOMException('session generation retired', 'AbortError'));
+  record.controllers.clear();
+  for (const source of record.sources) source.close?.();
+  record.sources.clear();
+  for (const timer of record.timers) clearTimeout(timer);
+  record.timers.clear();
+  return true;
+}
+
+function reconcileSupersededTmuxSessionLifecycleMutation(transaction) {
+  if (!transaction) return false;
+  transaction.state = 'superseded';
+  if (transaction.newRecord) retireTmuxSessionLifecycleRecord(transaction.newRecord);
+  const oldRecord = transaction.oldRecord;
+  if (oldRecord && tmuxSessionLifecycleRecords.get(oldRecord.name) === oldRecord && oldRecord.phase !== 'retired') {
+    oldRecord.phase = 'stable';
+    oldRecord.pendingUntil = 0;
+  }
+  return true;
+}
+
+function beginTmuxSessionLifecycleMutation(kind, options = {}) {
+  const mutationKind = String(kind || '');
+  const session = String(options.session || '').trim();
+  const newName = String(options.newName || '').trim();
+  const transaction = {
+    id: ++tmuxSessionMutationSerial,
+    kind: mutationKind,
+    topologyEpoch: ++tmuxTopologyEpoch,
+    session,
+    newName,
+    state: 'active',
+    oldRecord: null,
+    newRecord: null,
+    serverGeneration: Number(options.serverGeneration) || 0,
+  };
+  if (tmuxSessionMutationCurrent?.state === 'active') {
+    reconcileSupersededTmuxSessionLifecycleMutation(tmuxSessionMutationCurrent);
+  }
+  tmuxSessionMutationCurrent = transaction;
+  if (session && mutationKind !== 'create') {
+    transaction.oldRecord = tmuxSessionLifecycleRecord(session);
+    transaction.oldRecord.topologyEpoch = transaction.topologyEpoch;
+    transaction.oldRecord.phase = mutationKind === 'rename' ? 'renaming-out' : 'killing';
+    transaction.oldRecord.pendingUntil = 0;
+  }
+  if (mutationKind === 'create' && session) {
+    transaction.newRecord = newTmuxSessionLifecycleRecord(session, 'creating', transaction.topologyEpoch);
+    transaction.newRecord.serverGeneration = transaction.serverGeneration;
+  } else if (mutationKind === 'rename' && newName) {
+    transaction.newRecord = newTmuxSessionLifecycleRecord(newName, 'renaming-in', transaction.topologyEpoch);
+  }
+  return transaction;
+}
+
+function tmuxSessionLifecycleMutationIsCurrent(transaction) {
+  return Boolean(transaction && transaction.state === 'active' && tmuxSessionMutationCurrent === transaction);
+}
+
+function tmuxSessionLifecycleMutationLeasePromises(transaction) {
+  return Array.from(transaction?.oldRecord?.requestLeases || [], lease => lease.settled);
+}
+
+async function waitForTmuxSessionLifecycleMutationLeases(transaction) {
+  await Promise.allSettled(tmuxSessionLifecycleMutationLeasePromises(transaction));
+  return tmuxSessionLifecycleMutationIsCurrent(transaction);
+}
+
+function commitTmuxSessionLifecycleMutation(transaction, options = {}) {
+  if (!tmuxSessionLifecycleMutationIsCurrent(transaction)) return null;
+  if (transaction.kind === 'create' && !transaction.newRecord) {
+    const session = String(options.session || '').trim();
+    transaction.newRecord = newTmuxSessionLifecycleRecord(session, 'creating', transaction.topologyEpoch);
+  }
+  if (transaction.kind === 'rename' && transaction.newRecord) {
+    const committedName = String(options.newName || transaction.newRecord.name).trim();
+    if (committedName && committedName !== transaction.newRecord.name) {
+      retireTmuxSessionLifecycleRecord(transaction.newRecord);
+      transaction.newRecord = newTmuxSessionLifecycleRecord(committedName, 'renaming-in', transaction.topologyEpoch);
+    }
+  }
+  if (transaction.oldRecord) retireTmuxSessionLifecycleRecord(transaction.oldRecord);
+  if (transaction.newRecord) transaction.newRecord.committed = true;
+  transaction.state = 'committed';
+  tmuxSessionMutationCurrent = null;
+  return transaction.newRecord || transaction.oldRecord;
+}
+
+function rollbackTmuxSessionLifecycleMutation(transaction) {
+  if (!tmuxSessionLifecycleMutationIsCurrent(transaction)) return false;
+  if (transaction.newRecord) retireTmuxSessionLifecycleRecord(transaction.newRecord);
+  if (transaction.oldRecord && tmuxSessionLifecycleRecords.get(transaction.oldRecord.name) === transaction.oldRecord) {
+    transaction.oldRecord.phase = 'stable';
+    transaction.oldRecord.topologyEpoch = transaction.topologyEpoch;
+  }
+  transaction.state = 'rolled-back';
+  tmuxSessionMutationCurrent = null;
+  return true;
+}
+
+function tmuxSessionLifecycleAcquireRequest(session) {
+  const record = tmuxSessionLifecycleRecord(session);
+  if (!record || tmuxSessionLifecycleBlockedPhases.has(record.phase)) return null;
+  let settle;
+  const lease = {
+    token: tmuxSessionLifecycleToken(record.name),
+    settled: new Promise(resolve => { settle = resolve; }),
+    release() {
+      if (!record.requestLeases.delete(lease)) return false;
+      settle();
+      return true;
+    },
+  };
+  record.requestLeases.add(lease);
+  return lease;
+}
+
+function tmuxSessionLifecycleSessionForRequest(input, options = {}) {
+  const explicit = String(options.lifecycleSession || '').trim();
+  if (explicit) return explicit;
+  let parsed;
+  try {
+    parsed = new URL(String(input || ''), location.href);
+  } catch (_) {
+    return '';
+  }
+  const querySession = String(parsed.searchParams.get('session') || '').trim();
+  if (querySession) return querySession;
+  if (typeof options.body !== 'string' || !options.body.trim().startsWith('{')) return '';
+  const payload = safeJsonParse(options.body, null);
+  return String(payload?.session || '').trim();
+}
+
+function tmuxSessionLifecycleRequestLease(input, options = {}) {
+  if (options.lifecycleBypass === true) return {session: '', lease: null, blocked: false};
+  const session = tmuxSessionLifecycleSessionForRequest(input, options);
+  if (!session) return {session: '', lease: null, blocked: false};
+  const lease = tmuxSessionLifecycleAcquireRequest(session);
+  return {session, lease, blocked: !lease};
+}
+
+function tmuxSessionLifecycleStaleRequestError(session) {
+  const error = new DOMException(`session generation retired: ${session}`, 'AbortError');
+  error.code = 'stale_session_generation';
+  error.session = session;
+  return error;
+}
 
 function pruneExpiredPendingTmuxSessions(now = Date.now()) {
   let changed = false;
-  for (const [session, expiresAt] of pendingTmuxSessions.entries()) {
-    if (Number(expiresAt) <= now) {
-      pendingTmuxSessions.delete(session);
-      changed = true;
-    }
+  for (const record of tmuxSessionLifecycleRecords.values()) {
+    if (!tmuxSessionLifecyclePendingPhases.has(record.phase) || Number(record.pendingUntil) > now) continue;
+    record.phase = 'stable';
+    record.pendingUntil = 0;
+    changed = true;
   }
   return changed;
 }
 
 function pendingTmuxSessionNames() {
   pruneExpiredPendingTmuxSessions();
-  return Array.from(pendingTmuxSessions.keys());
+  return Array.from(tmuxSessionLifecycleRecords.values())
+    .filter(record => tmuxSessionLifecyclePendingPhases.has(record.phase)
+      && (record.phase !== 'creating' || record.committed === true))
+    .map(record => record.name);
 }
 
 function isPendingTmuxSession(session) {
   const key = String(session || '').trim();
   if (!key) return false;
   pruneExpiredPendingTmuxSessions();
-  return pendingTmuxSessions.has(key);
+  return tmuxSessionLifecyclePendingPhases.has(tmuxSessionLifecycleRecords.get(key)?.phase);
 }
 
 function markPendingTmuxSession(session) {
   const key = String(session || '').trim();
   if (!key) return '';
-  pendingTmuxSessions.set(key, Date.now() + pendingTmuxSessionGraceMs);
+  const record = tmuxSessionLifecycleRecord(key, {create: false});
+  if (record && !tmuxSessionLifecycleBlockedPhases.has(record.phase)) {
+    record.phase = record.phase === 'renaming-in' ? 'renaming-in' : 'creating';
+    record.committed = true;
+    record.pendingUntil = Date.now() + pendingTmuxSessionGraceMs;
+  } else {
+    const created = newTmuxSessionLifecycleRecord(key, 'creating');
+    created.committed = true;
+  }
   layoutItems = computeLayoutItems();
   return key;
 }
 
 function clearPendingTmuxSession(session) {
   const key = String(session || '').trim();
-  if (!key || !pendingTmuxSessions.delete(key)) return false;
+  const record = tmuxSessionLifecycleRecords.get(key);
+  if (!key || !record || !tmuxSessionLifecyclePendingPhases.has(record.phase)) return false;
+  record.phase = 'stable';
+  record.pendingUntil = 0;
   layoutItems = computeLayoutItems();
   return true;
 }
@@ -1693,7 +1934,7 @@ function clearPendingTmuxSession(session) {
 function clearConfirmedPendingTmuxSessions(nextSessions = []) {
   let changed = false;
   for (const session of nextSessions) {
-    if (pendingTmuxSessions.delete(session)) changed = true;
+    if (clearPendingTmuxSession(session)) changed = true;
   }
   return changed;
 }
@@ -1715,7 +1956,8 @@ function computeLayoutItems() {
 }
 
 function isTmuxSession(item) {
-  return sessions.includes(item) || pendingTmuxSessions.has(item);
+  const phase = tmuxSessionLifecycleRecords.get(item)?.phase;
+  return sessions.includes(item) || tmuxSessionLifecyclePendingPhases.has(phase);
 }
 
 function isLayoutItem(item) {
@@ -2027,6 +2269,7 @@ function attentionAcknowledgementKeyIsRecorded(key, payload = null) {
   // auto-status response from re-adding the ball after the user has clicked or typed in its pane.
   const explicitlyUnacknowledged = payload?.attention_acknowledged === false || payload?.cooldown_acknowledged === false;
   if (explicitlyUnacknowledged && record?.pending !== true && !attentionAcknowledgementKeyIsGeneratedWindowKey(value)) return false;
+  if (record?.pending === true) return true;
   if (record && record.recordedAt !== null) return true;
   if (payload && attentionAcknowledgementKeysFromPayload(payload).includes(value)) return true;
   return false;
@@ -2239,6 +2482,9 @@ function sessionState(session, info = transcriptMetadataState.payload.sessions?.
       ? screenText
       : stateReason('terminalScreenUnavailable');
     return stateValue('disconnected', disconnectedReason);
+  }
+  if (screenKey === STATE_KEY.blocked) {
+    return stateValue(STATE_KEY.blocked, screenText || stateReason('agentErrorBlocker'));
   }
   if (/blocked|denied|rejected/.test(lastAction)) {
     return stateValue(STATE_KEY.blocked, stateReason('yoloBlockedApproval'));
@@ -2510,11 +2756,11 @@ function tmuxSignalPanePathForSession(session) {
   return path ? normalizeDirectoryPath(path) : '';
 }
 
-// An alternate-screen pane is a mouse-owning TUI (for example Claude, Codex, vim, less, or
-// htop): it has its own scroll view and its tmux pane carries no scrollback (history_size stays
-// 0), so routing the wheel into tmux copy-mode is a dead end. The live tmux alternate_on signal,
-// rather than an app-name guess, is authoritative; callers use it to let xterm forward input to
-// the app instead of hijacking it.
+// An alternate-screen pane (for example Claude, vim, less, or htop) has no tmux scrollback
+// (history_size stays 0), so routing its wheel into tmux copy-mode is a dead end. The live tmux
+// alternate_on signal, rather than an app-name guess, is authoritative; callers use it to keep
+// xterm input with the app. Mouse tracking is checked separately because alternate screen alone
+// does not prove that an app owns wheel reports.
 function sessionPaneIsAlternateScreen(session) {
   return tmuxSignalActivePaneForSession(session)?.alternate_on === true;
 }
@@ -3419,7 +3665,7 @@ function keyboardShortcutCatalog() {
     {section: t('shortcuts.section.app'), items: [
       {label: t('common.commandPalette'), keys: appShortcutText('P', {shift: true})},
       {label: t('shortcuts.fileQuickOpen'), keys: appShortcutText('P')},
-      {label: t('brand.share'), keys: appShortcutText('K')},
+      ...(!shareFeatureQuarantined ? [{label: t('brand.share'), keys: appShortcutText('K')}] : []),
       {label: t('shortcuts.openYoagentRight'), keys: appShortcutText('B', {alt: true})},
       {label: t('shortcuts.toggleFinder', {name: fileExplorerLabel()}), keys: appShortcutText('B')},
       {label: t('shortcuts.openPreferences'), keys: appShortcutText(',')},
@@ -5665,7 +5911,7 @@ function maybeNotifyWorkingAgentTransition(session, agentKey, tone, options = {}
   if (notificationTargetIsFocused(session)) {
     recordSessionNotificationSent(session, key, now);
     dismissNotificationsForTarget(session);
-    postEvent(session, 'agent_window_transition_notification_suppressed_visible', '', {agent: target.kind, tone});
+    postEvent(session, 'agent_window_transition_notification_suppressed_visible', 'Notification suppressed because the session is visible', {agent: target.kind, tone});
     return false;
   }
   const throttleMs = Math.max(0, numberSetting('notifications.throttle_seconds', 60)) * 1000;
@@ -5955,6 +6201,8 @@ function updateSessionList(nextSessions, options = {}) {
 
 function applyLayoutSlots(nextSlots, options = {}) {
   const previousActive = activeSessions.slice();
+  const completionGeneration = Number(options.completionGeneration || pendingLayoutMutationGeneration) || 0;
+  if (completionGeneration === pendingLayoutMutationGeneration) pendingLayoutMutationGeneration = 0;
   if (typeof markShareGeometryDigestDirty === 'function') markShareGeometryDigestDirty();
   // A later layout mutation means the saved Fill workspace snapshot is no longer a valid restore
   // target. The fill/restore transaction explicitly opts out while it applies its own snapshot.
@@ -5979,6 +6227,8 @@ function applyLayoutSlots(nextSlots, options = {}) {
       prune: options.prune,
       sessionButtons: options.sessionButtons,
       deferDockviewLoad: options.deferDockviewLoad,
+      deferDockviewLoadAfterPaint: options.deferDockviewLoadAfterPaint,
+      completionGeneration,
     },
     reason: 'applyLayoutSlots',
     forceFull: options.forceFull === true,
@@ -6018,6 +6268,23 @@ function layoutRenderRequest(request = {}) {
   };
 }
 
+function completeLayoutMutationGeneration(value) {
+  const generation = Number(value);
+  if (!Number.isSafeInteger(generation) || generation <= layoutMutationCompletedGeneration) return;
+  layoutMutationCompletedGeneration = generation;
+  window.dispatchEvent(new CustomEvent('yolomux:layout-mutation-complete', {detail: {generation}}));
+}
+
+function beginLayoutMutationCompletion(state = null) {
+  if (Number.isSafeInteger(state?.completionGeneration) && state.completionGeneration > 0) {
+    return state.completionGeneration;
+  }
+  const generation = ++layoutMutationGeneration;
+  pendingLayoutMutationGeneration = generation;
+  if (state) state.completionGeneration = generation;
+  return generation;
+}
+
 function mergePendingLayoutRender(current, next) {
   if (!current) return next;
   return layoutRenderRequest({
@@ -6049,12 +6316,15 @@ function performLayoutRender(request = {}) {
       renderPaneTabStrips();
       syncPanelVisibility(previousActive);
     }
+    completeLayoutMutationGeneration(renderRequest.options.completionGeneration);
     return;
   }
   if (renderRequest.options.sessionButtons !== false) renderSessionButtons();
   renderPanels(previousActive, {
     prune: renderRequest.options.prune,
     deferDockviewLoad: renderRequest.options.deferDockviewLoad,
+    deferDockviewLoadAfterPaint: renderRequest.options.deferDockviewLoadAfterPaint,
+    completionGeneration: renderRequest.options.completionGeneration,
   });
 }
 

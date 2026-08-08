@@ -23,7 +23,11 @@ from ..infra.common import SessionInfo
 from ..infra.cache import TtlCache
 from ..infra.common import git
 from ..infra.common import git_ahead_behind_counts
+from ..infra.host_identity import HostIdentity
+from ..infra.host_identity import current_host_identity
 from ..filesystem.search import SEARCH_SKIP_DIRS
+from ..filesystem.git_ops import git_control_files_signature
+from ..filesystem.git_ops import invalidate_repo_info_paths
 from ..integrations.github_client import extract_linear_ids
 from ..integrations.github_client import github_checks_unknown
 from ..integrations.github_client import github_pull_request_by_branch
@@ -67,6 +71,8 @@ _GIT_METADATA_GENERATIONS: dict[str, int] = {}
 # (including a branch later deleted or renamed) without inventing a second branch inventory owner.
 _WORKTREE_BRANCH_HISTORY_LOCK = threading.Lock()
 _WORKTREE_BRANCH_HISTORY: dict[str, dict[str, dict[str, Any]]] = {}
+WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT = OTHER_BRANCH_LIMIT
+WORKTREE_BRANCH_HISTORY_WORKTREE_LIMIT = 128
 
 
 @contextmanager
@@ -343,6 +349,10 @@ def invalidate_git_metadata_paths(paths: list[Path] | tuple[Path, ...]) -> set[s
         except ValueError:
             return False
 
+    # Finder's compact branch/status rows use the same watcher ownership rather than a second,
+    # independently-invalidated cache.  Do this before the metadata lock so neither cache holds a
+    # lock while inspecting the other.
+    invalidate_repo_info_paths(changed_paths)
     with _GIT_METADATA_CACHE_LOCK:
         roots = {key[0] for key in _GIT_METADATA_CACHE}
         roots.update(key[0] for key in _GIT_METADATA_INFLIGHT)
@@ -356,45 +366,6 @@ def invalidate_git_metadata_paths(paths: list[Path] | tuple[Path, ...]) -> set[s
             for key in [key for key in _GIT_METADATA_CACHE if key[0] == root_text]:
                 _GIT_METADATA_CACHE.pop(key, None)
     return invalidated
-
-
-def git_control_files_signature(root_text: str) -> tuple[Any, ...]:
-    """Cheaply identify ref/index/config changes without launching Git."""
-    marker = Path(root_text) / ".git"
-    git_dir = marker
-    if marker.is_file():
-        try:
-            first_line = marker.read_text(encoding="utf-8", errors="replace").splitlines()[0]
-        except (OSError, IndexError):
-            first_line = ""
-        if first_line.lower().startswith("gitdir:"):
-            git_dir = Path(first_line.split(":", 1)[1].strip())
-            if not git_dir.is_absolute():
-                git_dir = marker.parent / git_dir
-    common_dir = git_dir
-    try:
-        common_text = (git_dir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        common_text = ""
-    if common_text:
-        common_dir = Path(common_text)
-        if not common_dir.is_absolute():
-            common_dir = git_dir / common_dir
-
-    paths = [git_dir / "HEAD", git_dir / "index", common_dir / "packed-refs", common_dir / "config"]
-    refs_dir = common_dir / "refs"
-    if refs_dir.is_dir():
-        for current, dirs, files in os.walk(refs_dir, topdown=True, followlinks=False):
-            dirs[:] = sorted(dirs)
-            paths.extend(Path(current) / name for name in sorted(files))
-    rows: list[tuple[str, int, int]] = []
-    for path in paths:
-        try:
-            stat = path.stat()
-            rows.append((str(path), stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            rows.append((str(path), 0, 0))
-    return tuple(rows)
 
 
 def git_inventory(cwd: str | None, branch_limit: int | None = OTHER_BRANCH_LIMIT) -> dict[str, Any] | None:
@@ -707,17 +678,36 @@ class MetadataCache(TtlCache):
 WORK_GRAPH_VERSION = 1
 
 
-def tmux_pane_graph_id(pane: TmuxPaneInfo) -> str:
-    return f"tmux-pane:{pane.session}:{pane.window}:{pane.pane}"
+def tmux_session_graph_id(session: str, *, host_identity: HostIdentity | None = None) -> str:
+    identity = host_identity or current_host_identity()
+    return identity.qualify_key("tmux-session", session)
 
 
-def tmux_window_graph_id(session: str, window: str) -> str:
-    return f"tmux-window:{session}:{window}"
+def tmux_pane_graph_id(pane: TmuxPaneInfo, *, host_identity: HostIdentity | None = None) -> str:
+    identity = host_identity or current_host_identity()
+    return identity.qualify_key("tmux-pane", f"{pane.session}:{pane.window}:{pane.pane}")
 
 
-def runtime_actor_graph_id(agent: AgentInfo | None, pane: TmuxPaneInfo, ordinal: int = 0) -> str:
+def tmux_window_graph_id(
+    session: str,
+    window: str,
+    *,
+    host_identity: HostIdentity | None = None,
+) -> str:
+    identity = host_identity or current_host_identity()
+    return identity.qualify_key("tmux-window", f"{session}:{window}")
+
+
+def runtime_actor_graph_id(
+    agent: AgentInfo | None,
+    pane: TmuxPaneInfo,
+    ordinal: int = 0,
+    *,
+    host_identity: HostIdentity | None = None,
+) -> str:
+    identity = host_identity or current_host_identity()
     if agent is None:
-        return f"runtime-actor:{tmux_pane_graph_id(pane)}:shell:{pane.pid}"
+        return identity.qualify_key("runtime-actor", f"{tmux_pane_graph_id(pane, host_identity=identity)}:shell:{pane.pid}")
     # A PID alone is not durable: constrain it by the tmux pane plus transcript/session identity, so a
     # reused PID cannot silently become an old actor during a metadata refresh.
     signature = "|".join(
@@ -730,7 +720,10 @@ def runtime_actor_graph_id(agent: AgentInfo | None, pane: TmuxPaneInfo, ordinal:
             str(ordinal),
         ]
     )
-    return f"runtime-actor:{tmux_pane_graph_id(pane)}:{quote(signature, safe='')}"
+    return identity.qualify_key(
+        "runtime-actor",
+        f"{tmux_pane_graph_id(pane, host_identity=identity)}:{quote(signature, safe='')}",
+    )
 
 
 def pane_for_agent(info: SessionInfo, agent: AgentInfo) -> TmuxPaneInfo | None:
@@ -773,7 +766,7 @@ def resolve_path_observation(path_text: str, git_inventory_by_root: dict[str, di
         return {"path": path, "exists": exists, "git_cwd": git_cwd, "git_root": None}
     cache = git_inventory_by_root if git_inventory_by_root is not None else {}
     if root not in cache:
-        cache[root] = git_inventory(git_cwd, branch_limit=None)
+        cache[root] = git_inventory(git_cwd)
     git_data = cache[root]
     local_identity = git_data.get("local_repository") if isinstance(git_data, dict) else None
     return {
@@ -787,7 +780,12 @@ def resolve_path_observation(path_text: str, git_inventory_by_root: dict[str, di
     }
 
 
-def work_graph_path_observations(info: SessionInfo) -> list[dict[str, Any]]:
+def work_graph_path_observations(
+    info: SessionInfo,
+    *,
+    host_identity: HostIdentity | None = None,
+) -> list[dict[str, Any]]:
+    identity = host_identity or current_host_identity()
     now = time.time()
     observations: list[dict[str, Any]] = []
     counter = 0
@@ -807,7 +805,7 @@ def work_graph_path_observations(info: SessionInfo) -> list[dict[str, Any]]:
         counter += 1
         observations.append(
             {
-                "id": f"path-observation:{info.session}:{counter}",
+                "id": identity.qualify_key("path-observation", f"{info.session}:{counter}"),
                 "path": path,
                 "path_snapshot": str(raw_path),
                 "exists": exists,
@@ -829,23 +827,24 @@ def work_graph_path_observations(info: SessionInfo) -> list[dict[str, Any]]:
             # same live-cwd tier as every other tmux pane so a newer dirty repo or an open PR can
             # win inside that tier. Transcript edits remain the stronger work evidence below.
             priority=10,
-            tmux_pane_id=tmux_pane_graph_id(info.selected_pane),
+            tmux_pane_id=tmux_pane_graph_id(info.selected_pane, host_identity=identity),
         )
     actors_by_pane: dict[str, list[tuple[AgentInfo, str]]] = {}
     for ordinal, agent in enumerate(info.agents):
         pane = pane_for_agent(info, agent)
         if pane is None:
             continue
-        actor_id = runtime_actor_graph_id(agent, pane, ordinal)
-        actors_by_pane.setdefault(tmux_pane_graph_id(pane), []).append((agent, actor_id))
-        add(agent.cwd, source="actor-cwd", priority=10, tmux_pane_id=tmux_pane_graph_id(pane), runtime_actor_id=actor_id)
+        actor_id = runtime_actor_graph_id(agent, pane, ordinal, host_identity=identity)
+        pane_id = tmux_pane_graph_id(pane, host_identity=identity)
+        actors_by_pane.setdefault(pane_id, []).append((agent, actor_id))
+        add(agent.cwd, source="actor-cwd", priority=10, tmux_pane_id=pane_id, runtime_actor_id=actor_id)
         for changed_path in scan_agent_changes(agent):
             # An explicit transcript edit is stronger evidence than a cwd. This is the canonical
             # replacement for the former singular-project ranking; never let a focused stale cwd
             # hide the repository where the actor actually edited a file.
-            add(changed_path, source="edit", priority=0, tmux_pane_id=tmux_pane_graph_id(pane), runtime_actor_id=actor_id)
+            add(changed_path, source="edit", priority=0, tmux_pane_id=pane_id, runtime_actor_id=actor_id)
     for pane in info.panes:
-        pane_id = tmux_pane_graph_id(pane)
+        pane_id = tmux_pane_graph_id(pane, host_identity=identity)
         add(pane.current_path, source="pane-cwd", priority=10, tmux_pane_id=pane_id)
     # Candidate discovery includes transcript-derived paths and configured session fallbacks that do
     # not necessarily belong to a currently listed tmux pane. Keep each as a first-class graph edge
@@ -935,7 +934,28 @@ def record_worktree_branch_history(
         existing = histories.get(name)
         if existing:
             snapshot["first_observed_at"] = min(float(existing.get("first_observed_at") or observed_at), observed_at)
+            snapshot["last_observed_at"] = max(float(existing.get("last_observed_at") or observed_at), observed_at)
         histories[name] = snapshot
+        while len(histories) > WORKTREE_BRANCH_HISTORY_BRANCH_LIMIT:
+            candidates = (branch_name for branch_name in histories if branch_name != name)
+            oldest_name = min(
+                candidates,
+                key=lambda branch_name: float(histories[branch_name].get("last_observed_at") or 0.0),
+            )
+            histories.pop(oldest_name)
+        while len(_WORKTREE_BRANCH_HISTORY) > WORKTREE_BRANCH_HISTORY_WORKTREE_LIMIT:
+            candidates = (candidate_id for candidate_id in _WORKTREE_BRANCH_HISTORY if candidate_id != worktree_id)
+            oldest_worktree_id = min(
+                candidates,
+                key=lambda candidate_id: max(
+                    (
+                        float(history.get("last_observed_at") or 0.0)
+                        for history in _WORKTREE_BRANCH_HISTORY[candidate_id].values()
+                    ),
+                    default=0.0,
+                ),
+            )
+            _WORKTREE_BRANCH_HISTORY.pop(oldest_worktree_id)
         return copy.deepcopy(histories)
 
 
@@ -1131,8 +1151,15 @@ def empty_work_graph(*, loading: bool = False) -> dict[str, Any]:
     }
 
 
-def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: bool = True) -> dict[str, Any]:
+def session_work_graph(
+    info: SessionInfo,
+    cache: MetadataCache,
+    allow_network: bool = True,
+    *,
+    host_identity: HostIdentity | None = None,
+) -> dict[str, Any]:
     """Build the one normalized metadata graph used by both new and legacy API projections."""
+    identity = host_identity or current_host_identity()
     graph = empty_work_graph()
     # Generation is monotonic within this process. The API consumer can reject a slower, older
     # metadata refresh without relying on wall-clock ordering across machines or clock changes.
@@ -1141,8 +1168,13 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
     _METADATA_BUILD_LOCAL.work_graph_generation = generation
     graph["generation"] = generation
     git_inventory_by_root: dict[str, dict[str, Any] | None] = {}
-    session_id = f"tmux-session:{info.session}"
+    source_host = {
+        "stable_host_id": identity.stable_host_id,
+        "hostname": identity.display_hostname,
+    }
+    session_id = tmux_session_graph_id(info.session, host_identity=identity)
     graph["tmux_sessions"][session_id] = {
+        **source_host,
         "id": session_id,
         "name": info.session,
         "tmux_window_ids": [],
@@ -1152,15 +1184,23 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
     }
     panes_by_id: dict[str, TmuxPaneInfo] = {}
     for pane in info.panes:
-        pane_id = tmux_pane_graph_id(pane)
-        window_id = tmux_window_graph_id(info.session, pane.window)
+        pane_id = tmux_pane_graph_id(pane, host_identity=identity)
+        window_id = tmux_window_graph_id(info.session, pane.window, host_identity=identity)
         panes_by_id[pane_id] = pane
         graph["tmux_windows"].setdefault(
             window_id,
-            {"id": window_id, "tmux_session_id": session_id, "index": pane.window, "name": pane.window_name, "tmux_pane_ids": []},
+            {
+                **source_host,
+                "id": window_id,
+                "tmux_session_id": session_id,
+                "index": pane.window,
+                "name": pane.window_name,
+                "tmux_pane_ids": [],
+            },
         )
         graph["tmux_windows"][window_id]["tmux_pane_ids"].append(pane_id)
         graph["tmux_panes"][pane_id] = {
+            **source_host,
             "id": pane_id,
             "tmux_window_id": window_id,
             "target": pane.target,
@@ -1182,8 +1222,8 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
         pane = pane_for_agent(info, agent)
         if pane is None:
             continue
-        pane_id = tmux_pane_graph_id(pane)
-        actor_id = runtime_actor_graph_id(agent, pane, ordinal)
+        pane_id = tmux_pane_graph_id(pane, host_identity=identity)
+        actor_id = runtime_actor_graph_id(agent, pane, ordinal, host_identity=identity)
         actor_pane_ids.add(pane_id)
         graph["runtime_actors"][actor_id] = {
             "id": actor_id,
@@ -1204,7 +1244,7 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
     for pane_id, pane in panes_by_id.items():
         if pane_id in actor_pane_ids:
             continue
-        actor_id = runtime_actor_graph_id(None, pane)
+        actor_id = runtime_actor_graph_id(None, pane, host_identity=identity)
         graph["runtime_actors"][actor_id] = {
             "id": actor_id,
             "tmux_pane_id": pane_id,
@@ -1222,7 +1262,7 @@ def session_work_graph(info: SessionInfo, cache: MetadataCache, allow_network: b
         graph["tmux_panes"][pane_id]["runtime_actor_ids"].append(actor_id)
         graph["tmux_sessions"][session_id]["runtime_actor_ids"].append(actor_id)
 
-    for observation in work_graph_path_observations(info):
+    for observation in work_graph_path_observations(info, host_identity=identity):
         observation_id = observation["id"]
         graph["path_observations"][observation_id] = observation
         graph["tmux_sessions"][session_id]["path_observation_ids"].append(observation_id)
@@ -1821,7 +1861,7 @@ def indexed_repo_summaries(
     summaries: list[dict[str, Any]] = []
     roots = indexed_repo_roots(indexed_dirs) if repo_roots is None else list(repo_roots)
     for root in roots:
-        summary = repo_summary(root, branch_limit=None)
+        summary = repo_summary(root)
         if not summary:
             continue
         summary["indexed"] = True

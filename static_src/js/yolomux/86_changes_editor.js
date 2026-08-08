@@ -267,7 +267,7 @@ function fileDiffRefHistoryItems(path) {
   if (!path || !fileStateHasUsefulGitHistory(state)) return [];
   const suggestions = defaultDiffRefSuggestions();
   const seen = new Set(suggestions.map(item => item.ref));
-  for (const item of state.gitHistory) {
+  for (const item of normalizedFileGitHistory(state.gitHistory)) {
     const ref = cleanDiffRef(item?.ref || '', '');
     if (!ref) continue;
     if (seen.has(ref)) {
@@ -296,7 +296,7 @@ function scopedDiffRefSuggestions(repo, path) {
 function fileDiffRefHistorySignature(path) {
   const state = fileState.get(path);
   if (!path || !fileStateHasUsefulGitHistory(state)) return 'none';
-  return state.gitHistory.map(item => `${item?.ref || ''}:${item?.date || ''}`).join('|');
+  return normalizedFileGitHistory(state.gitHistory).map(item => `${item.ref}:${item.date || ''}`).join('|');
 }
 
 function diffRefItemDateText(item) {
@@ -942,9 +942,15 @@ function switchFileExplorerFinderSession(session) {
   return true;
 }
 
+function fileExplorerChangesSessionInteractionIsCurrent(session) {
+  return fileExplorerChangesSelectedSession === session
+    && fileExplorerExplicitSyncSessionTarget() === session;
+}
+
 function noteFileExplorerChangesSessionInteraction(session) {
   if (!isTmuxSession(session) || !sessions.includes(session)) return false;
   if (shareViewMode && !shareWriteMode && !applyingShareRemoteUiState) return false;
+  if (fileExplorerChangesSessionInteractionIsCurrent(session)) return false;
   rememberFileExplorerExplicitSyncSession(session);
   if (fileExplorerChangesSelectedSession === session) return false;
   fileExplorerChangesSelectedSession = session;
@@ -958,9 +964,36 @@ function sessionFilesPayloadForDestination(destination) {
   return fileExplorerSessionFilesState.payload;
 }
 
+const sessionFilesProducerDeadlineMs = 5000;
+
+function scheduleSessionFilesProducerDeadline(destination, payload) {
+  if (!sessionFilesPayloadIsRefreshingElsewhere(payload)) return;
+  if (payload?.pending_operation_id) return;
+  setTimeout(() => {
+    if (sessionFilesPayloadForDestination(destination) !== payload) return;
+    if (sessionFilesLoadingForDestination(destination)) return;
+    const deadline = apiFetchDeadlineError(sessionFilesProducerDeadlineMs, 'session-files producer');
+    const nextPayload = {
+      ...payload,
+      refreshing_elsewhere: false,
+      errors: [...(Array.isArray(payload.errors) ? payload.errors : []), deadline.message],
+      loaded: true,
+    };
+    const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+    setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
+    setSessionFilesSignatureForDestination(destination, signature);
+    fileExplorerSessionFilesCache.set(sessionFilesCacheKey(nextPayload.session), {payload: nextPayload, signature});
+    renderSessionFilesDestination(destination, {force: true});
+    updateFileTreeGitStatusRows();
+    renderPaneTabStrips();
+    renderSessionButtons();
+  }, sessionFilesProducerDeadlineMs);
+}
+
 function setSessionFilesPayloadForDestination(destination, payload, options = {}) {
   if (options.invalidateRequest !== false) fileExplorerSessionFilesState.guard.invalidate();
   fileExplorerSessionFilesState.payload = payload;
+  scheduleSessionFilesProducerDeadline(destination, payload);
   updateFileExplorerSessionHighlightRows();
   if (
     destination === 'finder'
@@ -986,6 +1019,7 @@ function sessionFilesPayloadSignatureForPayload(payload) {
   ]);
   const repos = (Array.isArray(payload?.repos) ? payload.repos : []).map(item => [
     item.repo || '',
+    repoBranchDisplayText(item),
     Number(item.count || 0),
     Number(item.touched_count || 0),
     Number(item.added || 0),
@@ -1074,7 +1108,21 @@ async function fetchSessionFiles(options = {}) {
     params.set('session', session);
     params.set('hours', '24');
     if (forceRefresh) params.set('force', '1');
-    const payload = await apiFetchJson(`/api/session-files?${params.toString()}`);
+    const requestUrl = `/api/session-files?${params.toString()}`;
+    let payload;
+    try {
+      payload = await apiFetchJson(requestUrl, {deadlineMs: 5000});
+    } catch (err) {
+      // A producer can return the same accepted receipt again while its terminal result is still
+      // retained locally. Reuse that exact result instead of painting a terminal Differ as queued.
+      if (!isApiPendingResponse(err) || !err.operationId || !apiOperationState.terminal.has(err.operationId)) throw err;
+      payload = await waitForApiOperationResult(err, {
+        kind: 'session_files',
+        deadlineMs: 5000,
+        url: requestUrl,
+        method: 'GET',
+      });
+    }
     const nextPayload = normalizedSessionFilesPayload(payload, {session});
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
     if (!requestIsCurrent()) return;
@@ -1087,6 +1135,22 @@ async function fetchSessionFiles(options = {}) {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
     if (!options.silent) statusOk(esc(tPlural('status.changedFilesLoaded', nextPayload.files.length)));
   } catch (err) {
+    if (isApiPendingResponse(err)) {
+      const nextPayload = {
+        ...emptySessionFilesPayload(session, false),
+        refreshing_elsewhere: true,
+        pending_key: err.key,
+        pending_epoch: err.epoch,
+        pending_operation_id: err.operationId,
+      };
+      const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+      if (!requestIsCurrent()) return;
+      shouldRender = shouldRender || signature !== sessionFilesSignatureForDestination(destination);
+      setSessionFilesPayloadForDestination(destination, nextPayload, {invalidateRequest: false});
+      setSessionFilesSignatureForDestination(destination, signature);
+      recordClientPerfCounter('sessionFilesRefresh', 0, sessionFilesPerfDetails(nextPayload, {queued: 1}));
+      return;
+    }
     const issue = userMessageSnapshot(err, String(err?.message || err)).user_message;
     const nextPayload = {session, files: [], repos: [], refs_by_repo: {}, errors: [issue], from_ref: diffRefFrom, to_ref: diffRefTo, loaded: true};
     const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
@@ -1137,6 +1201,67 @@ function applySessionFilesPayloadFromPush(payload = {}, request = {}) {
     renderSessionButtons();
   }
   return true;
+}
+
+function applySessionFilesOperationFailure(result = {}, context = {}) {
+  const destination = 'finder';
+  const session = String(context.session || fileExplorerSessionFilesTargetSession() || '');
+  if (!session || session !== fileExplorerSessionFilesTargetSession()) return false;
+  if (!sessionFilesPushRequestMatchesCurrent(context, session)) return false;
+  const error = result.error && typeof result.error === 'object' ? result.error : {};
+  const issue = error.message && typeof error.message === 'object'
+    ? {...error.message}
+    : userMessageSnapshot(result, 'session-files request failed').user_message;
+  const nextPayload = {
+    ...emptySessionFilesPayload(session, true),
+    refreshing_elsewhere: false,
+    errors: [issue],
+    operation_error: error,
+  };
+  const signature = sessionFilesPayloadSignatureForPayload(nextPayload);
+  setSessionFilesLoadingForDestination(destination, false);
+  setSessionFilesPayloadForDestination(destination, nextPayload);
+  setSessionFilesSignatureForDestination(destination, signature);
+  fileExplorerSessionFilesCache.set(sessionFilesCacheKey(session), {payload: nextPayload, signature});
+  renderSessionFilesDestination(destination, {force: true});
+  updateFileTreeGitStatusRows();
+  renderPaneTabStrips();
+  renderSessionButtons();
+  statusErr(localizedHtml('status.changedFilesFailed', {error: userMessageText(result, 'session-files request failed')}));
+  return true;
+}
+
+function handleApiOperationTerminalResult(record, result = {}) {
+  if (record?.kind === 'fs_batch') {
+    return typeof applyFileExplorerFsBatchOperationResult === 'function'
+      && applyFileExplorerFsBatchOperationResult(record, result);
+  }
+  if (record?.kind === 'session_files') {
+    if (result.state === 'ready' && result.data && typeof result.data === 'object') {
+      return applySessionFilesPayloadFromPush(result.data, record.context || {});
+    }
+    if (result.state === 'failed') {
+      return applySessionFilesOperationFailure(result, record.context || {});
+    }
+    return false;
+  }
+  if (record?.kind === 'context_items' || record?.kind === 'context_tail') {
+    return typeof applyContextProductOperationResult === 'function'
+      && applyContextProductOperationResult(record, result);
+  }
+  if (record?.kind === 'fs_watch_diff') {
+    if (record.terminalOwner === 'filesystem-watch-diff-refresh') return true;
+    if (result.state === 'ready' && result.data && typeof result.data === 'object') {
+      void refreshFileExplorerFromPush(result.data, {fromWatchDiff: true});
+      return true;
+    }
+    if (result.state === 'failed') {
+      console.warn('filesystem watch diff operation failed', userMessageText(result, t('common.requestFailed')));
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 function sessionFileTimeText(mtime) {
@@ -1490,6 +1615,8 @@ function changesRepoMetaHtml(repoInfo, options = {}) {
   // clean repo prints nothing instead of the redundant "Behind 0 / Ahead 0".
   const hideZero = options.hideZero === true;
   const pieces = [];
+  const branch = repoBranchDisplayText(repoInfo);
+  if (branch) pieces.push(`<span class="file-tree-repo-branch">${esc(branch)}</span>`);
   const behind = Number(repoInfo?.behind);
   const ahead = Number(repoInfo?.ahead);
   if (Number.isFinite(behind) && (!hideZero || behind > 0)) pieces.push(`<span>${esc(tPlural('changes.behind', behind))}</span>`);
@@ -2009,15 +2136,28 @@ async function openChangedFileInDiff(path, ownerSession = '', status = '', repo 
   } else {
     const openedItem = await openFileInEditor(path, {name: basenameOf(path), session: ownerSession}, openOptions);
     if (openedItem) item = openedItem;
+    const openedState = fileState.get(path);
+    if (openedState?.externalMissing === true && !['A', '?'].includes(normalizedStatus)) {
+      // A tracked Differ row can vanish after the listing snapshot. Keep the missing warning, but
+      // retain a text surface so /api/fs/diff can recover the committed side from Git.
+      openedState.kind = 'text';
+      openedState.gitRoot = normalizeDirectoryPath(repo || openedState.gitRoot || '');
+      openedState.gitTracked = true;
+    }
   }
   if (!openDiffMode) {
     renderOpenFilePath(path);
     void refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
     return;
   }
-  const diffReady = await refreshOpenFileDiff(path, {silent: true, renderOnComplete: false, ...payloadRepoRefs});
+  const diffReady = await refreshOpenFileDiff(path, {
+    silent: true,
+    renderOnComplete: false,
+    updateControlsOnComplete: false,
+    ...payloadRepoRefs,
+  });
   const current = fileState.get(path);
-  if (diffReady && fileStateCanRenderDiffView(path, current)) {
+  if (diffReady && fileStateCanRenderDiffView(path, current) && current?.externalMissing !== true) {
     setFileEditorViewMode(path, 'diff', item);
   } else {
     setFileEditorViewMode(path, 'edit', item);
@@ -2327,19 +2467,14 @@ function showChangedDirectoryContextMenu(row, x, y) {
   const menu = document.createElement('div');
   menu.className = 'terminal-context-menu file-context-menu';
   menu.setAttribute('role', 'menu');
-  appendContextMenuButton(menu, t('contextmenu.copyRelativePath'), () => copyChangedPath(rel || path, 'status.copiedRelativePath'), closeFileContextMenu);
-  appendContextMenuButton(menu, t('contextmenu.copyFullPath'), () => copyChangedPath(path, 'status.copiedPath'), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyRelativePath'), button => copyChangedPath(rel || path, 'status.copiedRelativePath', {button}), closeFileContextMenu);
+  appendContextMenuButton(menu, t('contextmenu.copyFullPath'), button => copyChangedPath(path, 'status.copiedPath', {button}), closeFileContextMenu);
   appendContextMenuButton(menu, t('contextmenu.expandInFinder', {name: displayName, finder: fileExplorerLabel()}), () => openChangedDirectoryInFinder(path), closeFileContextMenu);
   fileContextMenu.open(menu, x, y);
 }
 
-async function copyChangedPath(path, statusKey) {
-  try {
-    await copyTextToClipboard(path);
-    statusEl.textContent = t(statusKey);
-  } catch (error) {
-    statusErr(localizedHtml('common.copyFailed', {error}));
-  }
+async function copyChangedPath(path, statusKey, options = {}) {
+  await copyTextWithFeedback(path, {...options, statusText: t(statusKey)});
 }
 
 async function openChangedDirectoryInFinder(path) {
@@ -2493,9 +2628,7 @@ function showUploadRsyncRecommendation(options = {}) {
     label: t('pref.advisory.copyRsync'),
     onClick: event => {
       event.stopPropagation();
-      copyTextToClipboard(command)
-        .then(() => { statusEl.textContent = t('upload.copiedRsync'); })
-        .catch(error => { statusErr(`${esc(t('common.copyFailed', {error}))}`); });
+      void copyTextWithFeedback(command, {button: event.currentTarget, statusText: t('upload.copiedRsync')});
     },
   });
   const sizeText = options.sizeBytes ? t('upload.sizeText', {size: formatFileSize(options.sizeBytes)}) : '';
@@ -2686,7 +2819,7 @@ function createFileExplorerPanel(item = finderItemId) {
   panel.querySelector('.file-explorer-path-copy-panel')?.addEventListener('click', event => {
     event.preventDefault();
     event.stopPropagation();
-    copyCurrentFileExplorerPath();
+    copyCurrentFileExplorerPath({button: event.currentTarget});
   });
   bindFileExplorerHeaderActions(panel);
   if (view === 'finder') {
@@ -2711,6 +2844,7 @@ function createFileExplorerPanel(item = finderItemId) {
 }
 
 async function refreshFileExplorerPanelTree(panel, options = {}) {
+  const observabilityJourney = options.observabilityJourney || newFinderUsableJourney();
   const view = fileExplorerViewForItem(panel?.dataset?.panelItem) || 'finder';
   const treeEl = panel.querySelector('.file-explorer-tree-panel');
   const pathEl = panel.querySelector('.file-explorer-path-inline');
@@ -2743,6 +2877,11 @@ async function refreshFileExplorerPanelTree(panel, options = {}) {
     : await fetchDirectory(root);
   if (!entries) return;
   renderTreeChildren(treeEl, root, entries, 0, {entriesByDir: options.entriesByDir});
+  scheduleFinderUsableObservation(
+    treeEl,
+    entries,
+    observabilityJourney,
+  );
   updateFileExplorerCurrentFileHighlight();
   if (pushCanSupply && typeof syncServerWatchRoots === 'function') syncServerWatchRoots();
 }

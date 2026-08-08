@@ -1,3 +1,4 @@
+const pageLoadBundleEvalStartedAt = Number(globalThis.performance?.now?.()) || 0;
 const bootstrap = JSON.parse(document.getElementById('yolomux-bootstrap').textContent);
 const statsWriterFence = (() => {
   const value = bootstrap.statsWriterFence;
@@ -48,6 +49,12 @@ const devMode = bootstrap.dev === true;   // dev-velocity #1b: subscribe to /api
 const shareBootstrap = bootstrap.share && typeof bootstrap.share === 'object' ? bootstrap.share : null;
 const shareViewMode = shareBootstrap?.view === true;
 const shareWriteMode = shareViewMode && shareBootstrap?.mode === 'rw';
+const clientCapabilityState = Object.freeze({
+  unscopedHostRequests: shareViewMode === false,
+});
+function clientCanUseUnscopedHostRequests() {
+  return clientCapabilityState.unscopedHostRequests === true;
+}
 const shareToken = (() => {
   if (!shareViewMode) return '';
   try {
@@ -706,6 +713,10 @@ const explicitPaneFocusState = {
 let fileExplorerFinderSelectedSession = shareBootstrapFinderSession();
 let fileExplorerChangesSelectedSession = shareBootstrapFinderSession();
 const fileExplorerSyncTargetRecords = new Map();
+// The one user-owned disclosure record for Finder Sync. `true` means the user
+// explicitly expanded the path; `false` means they explicitly collapsed it.
+// Automatic sync expansion is deliberately not stored here.
+const fileExplorerSyncUserExpansionState = new Map();
 let fileExplorerSyncManualCollapseTargetKey = '';
 let fileExplorerSyncManualCollapsedPaths = new Set();
 let fileExplorerVisibleSyncSession = '';
@@ -770,6 +781,7 @@ let clientSettingsMtimeNs = Number(clientSettingsPayload.mtime_ns || 0);
 let clientSettingsMetadataDeferred = clientSettingsPayload.deferred_metadata === true;
 let clientSettingsMetadataRefreshPromise = null;
 let clientSettingsMetadataRefreshTimer = null;
+const activitySummaryEnabled = bootstrap.activitySummary?.enabled === true;
 const SETTING_FALLBACKS = Object.freeze({
   'appearance.date_time_hour_cycle': '24',
   'appearance.editor_font_size': 13,
@@ -794,7 +806,14 @@ let yoloRulesPayload = bootstrap.yoloRulesPayload || {};
 const terminals = new Map();
 const ensureSessionPromises = new Map();
 const terminalStartupPromises = new Map();
-const pendingTmuxSessions = new Map();
+const tmuxSessionLifecycleRecords = new Map();
+let tmuxSessionLifecycleGeneration = 0;
+let tmuxTopologyEpoch = 0;
+const pendingTmuxSessionGraceMs = 30000;
+const tmuxSessionLifecyclePendingPhases = new Set(['creating', 'renaming-in']);
+const tmuxSessionLifecycleBlockedPhases = new Set(['renaming-out', 'killing', 'retired']);
+let tmuxSessionMutationSerial = 0;
+let tmuxSessionMutationCurrent = null;
 const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptStreams = new Map();
@@ -838,11 +857,17 @@ const fileEditorScrollSyncSuppressMs = 150;
 const serverWatchRootsState = {
   signature: '',
   inFlight: false,
+  registrationPending: false,
+  registered: false,
   syncedAt: 0,
+  watchDiffPromise: null,
+  watchDiffTrailing: null,
   timer: null,
+  timerDelay: null,
   pendingOptions: {},
 };
 let fileExplorerFilesystemWatchToken = '';
+let fileExplorerFilesystemPushToken = '';
 let fileExplorerFilesystemLastFullAt = 0;
 const fileExplorerFilesystemKeyframeMs = 60001;
 let fileExplorerIndexRefreshSeconds = initialSetting('file_explorer.index_refresh_seconds');
@@ -1094,15 +1119,37 @@ const jsDebugEventLimit = 200;
 const jsDebugRenderDebounceMs = 500;
 let jsDebugEventSeq = 0;
 let jsDebugEvents = [];
+let apiDebugRequestSequence = 0;
+function newClientJourneyId(kind = 'journey') {
+  const prefix = String(kind || 'journey').replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 24) || 'journey';
+  const identity = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `j-${prefix}-${identity}`.slice(0, 96);
+}
+const reloadClientJourneyId = newClientJourneyId('reload');
+const pageLoadProfileState = {
+  bundleEvalStartedAt: pageLoadBundleEvalStartedAt,
+  bundleEvalEndedAt: 0,
+  firstApiStartedAt: null,
+  lastApiStartedAt: null,
+  apiCount: 0,
+  activeApiCount: 0,
+  maxConcurrency: 0,
+  emitted: false,
+};
 let jsDebugEventCaptureInstalled = false;
 let jsDebugRenderTimer = null;
 let jsDebugRenderForce = false;
 let jsDebugRenderDragDeferred = false;
 const clientPerfCounterLimit = 80;
 const clientPerfLongTaskSampleLimit = 40;
+const clientPerfDurableExemplarLimit = 20;
 const clientPerfCounters = new Map();
 let clientPerfLongTaskSamples = [];
 let clientPerfLongTaskObserverInstalled = false;
+let clientPerfLongTaskDurableCount = 0;
+let clientPerfInteractionObserverInstalled = false;
+let clientPerfInteractionDurableCount = 0;
+let clientPerfInteractionMaximumMs = 0;
 const terminalRemovalLatencyPending = new Map();
 let terminalRemovalLatencySamples = [];
 const terminalRemovalLatencySampleLimit = 40;
@@ -1632,8 +1679,92 @@ const transcriptMetadataState = {
   loaded: false,
   error: null,
   request: null,
+  // Server-stamped identity of the build the rendered model came from, and the highest generation
+  // the server has told us to expect. A forced refresh is answered from the server's cache, so the
+  // bytes it returns are always older than the request; `pendingGeneration` names the build that
+  // will actually observe the state the caller asked about, and it arrives over client-events.
+  // Without this pair the only way to know whether a render reflected a fact was to wait and hope.
+  //
+  // Both numbers count builds inside ONE server process and restart at zero in its replacement, so
+  // neither means anything without `epoch`. Retaining a bare 50 across a server swap made the
+  // replacement's cache -- generation 0, built before the request -- look like an already-observed
+  // build, and a forced post-mutation refresh resolved as success without ever reading the
+  // generation it was promised.
+  //
+  // The epoch is an opaque equality partition, never an ordering: two generations are comparable
+  // only when their epochs are equal, and nothing here may infer that one epoch came after another.
+  epoch: '',
+  previousEpoch: '',
+  generation: 0,
+  pendingGeneration: 0,
+  // Every non-apply outcome, with a machine-readable reason. A dropped payload used to be a bare
+  // `false` that no caller read, so a metadata refresh that silently declined to apply looked
+  // exactly like one that had nothing to say.
+  lastApply: null,
   guard: makeGenerationGuard(),
 };
+// One metadata build's identity, read as ONE object. A generation without its epoch is an index
+// into a sequence that may already be gone, so an identity is never reassembled from independent
+// fields: either the server shipped both together or this client has no identity for the payload.
+function sessionMetadataIdentity(value) {
+  const epoch = String(value?.epoch || '');
+  const generation = Number(value?.generation);
+  if (!epoch || !Number.isSafeInteger(generation) || generation < 0) return null;
+  return {epoch, generation};
+}
+function sessionMetadataPayloadIdentity(payload) {
+  return sessionMetadataIdentity(payload?.metadata_identity);
+}
+// The build a forced read must wait for. Generation zero is not a build identity -- every payload
+// already satisfies it -- so a force that is offered zero has been told no build was accepted.
+function forcedSessionMetadataTarget(payload) {
+  const pending = sessionMetadataIdentity(payload?.cache?.pending_identity);
+  return pending && pending.generation > 0 ? pending : null;
+}
+function noteSessionMetadataPendingIdentity(payload) {
+  const pending = sessionMetadataIdentity(payload?.cache?.pending_identity);
+  if (pending && pending.epoch === transcriptMetadataState.epoch && pending.generation > transcriptMetadataState.pendingGeneration) {
+    transcriptMetadataState.pendingGeneration = pending.generation;
+  }
+  return pending;
+}
+function noteSessionMetadataApply(applied, reason, payload, details = {}) {
+  const identity = sessionMetadataPayloadIdentity(payload);
+  // A build generation is comparable only inside its own epoch. A payload with no identity, or one
+  // stamped by a process this client is not currently tracking, may still be RENDERED -- refusing
+  // it would leave the pane on bytes from a dead server -- but it can never advance the applied
+  // generation, because it is not evidence about the build anyone is waiting for.
+  const comparable = identity !== null && identity.epoch === transcriptMetadataState.epoch;
+  if (applied && comparable && identity.generation > transcriptMetadataState.generation) {
+    transcriptMetadataState.generation = identity.generation;
+  }
+  transcriptMetadataState.lastApply = {
+    applied: applied === true,
+    reason: String(reason || ''),
+    epoch: transcriptMetadataState.epoch,
+    previousEpoch: transcriptMetadataState.previousEpoch,
+    payloadEpoch: identity ? identity.epoch : '',
+    payloadGeneration: identity ? identity.generation : 0,
+    appliedGeneration: transcriptMetadataState.generation,
+    pendingGeneration: transcriptMetadataState.pendingGeneration,
+    at: Date.now(),
+    ...details,
+  };
+  return applied === true;
+}
+// One shape for every session-metadata outcome a caller can act on, so a convergence verdict is
+// never a bare boolean that the next function up quietly drops.
+function sessionMetadataResult(ok, reason, details = {}) {
+  return {
+    ok: ok === true,
+    reason: String(reason || ''),
+    epoch: transcriptMetadataState.epoch,
+    generation: Number(transcriptMetadataState.generation || 0),
+    pendingGeneration: Number(transcriptMetadataState.pendingGeneration || 0),
+    apply: transcriptMetadataState.lastApply,
+    ...details,
+  };
+}
 function setTranscriptMetadataPayload(payload, options = {}) {
   if (options.invalidateRequest !== false) transcriptMetadataState.guard.invalidate();
   transcriptMetadataState.payload = payload && typeof payload === 'object' ? payload : {};
@@ -1642,7 +1773,12 @@ function setTranscriptMetadataPayload(payload, options = {}) {
 const infoPanelRenderCache = {signature: '', html: ''};
 const clientEventTransportState = {
   source: null,
+  replacementSource: null,
   connected: false,
+  reconnectPending: false,
+  disconnectTimer: null,
+  disconnectEpisode: null,
+  nextDisconnectEpisode: 1,
   enabled: false,
   demand: null,
   demandSignature: '',
@@ -1650,16 +1786,86 @@ const clientEventTransportState = {
   queue: new Map(),
   resourceEpoch: '',
   resourceRevisions: new Map(),
+  resourceRepairs: new Map(),
   frame: 0,
   resyncTimer: null,
+};
+// One server process = one epoch = one sequence for every counter this client retains about that
+// server: client-event resource revisions AND the session-metadata build generation. They all
+// restart at zero in a replacement process, so they reset together, here, once.
+//
+// Two call sites in the client-event transport used to inline the transport half of this reset and
+// nothing reset the metadata half, which is how a browser kept claiming applied generation 50 while
+// talking to a server whose highest build was 0.
+//
+// Adoption is ATOMIC and resets only what the epoch owns. Everything scoped to the browser rather
+// than to the server process -- the request guard, the in-flight request handle, tmuxTopologyEpoch,
+// tmux lifecycle transactions and leases, layout, terminals, settings, statusd's own revisions --
+// is deliberately untouched: a server restart is not a reason to discard the user's work.
+function adoptServerEpoch(epoch) {
+  const next = String(epoch || '');
+  if (!next || clientEventTransportState.resourceEpoch === next) return false;
+  transcriptMetadataState.previousEpoch = transcriptMetadataState.epoch;
+  clientEventTransportState.resourceEpoch = next;
+  clientEventTransportState.resourceRevisions.clear();
+  clientEventTransportState.resourceRepairs.clear();
+  transcriptMetadataState.epoch = next;
+  // Reset to zero BEFORE the incoming generation is considered, so nothing can carry a number from
+  // the previous process into a comparison against this one.
+  transcriptMetadataState.generation = 0;
+  transcriptMetadataState.pendingGeneration = 0;
+  return true;
+}
+const clientEventDisconnectGraceMs = 15000;
+const apiOperationState = {
+  records: new Map(),
+  pending: new Map(),
+  terminal: new Map(),
+  waiters: new Map(),
+};
+const apiOperationReplayLimit = 128;
+const operationTerminalAckDelayMs = 25;
+const operationTerminalAckRetryMs = 250;
+const operationTerminalAckLimit = 64;
+const operationTerminalAckState = {
+  pending: new Map(),
+  timer: null,
+  request: null,
 };
 const reconnectResyncDebounceMs = 751;
 let serverVersionReloadHandled = '';
 const activitySummaryState = {
-  payload: {sessions: {}, global: {lines: []}, session_order: []},
+  payload: activitySummaryEnabled
+    ? {sessions: {}, global: {lines: []}, session_order: []}
+    : {sessions: {}, global: {lines: []}, session_order: [], status: 'feature_disabled', reason: 'async_replacement_required'},
   refreshing: false,
   guard: makeGenerationGuard(),
 };
+window.__yolomuxFixtureLifecycle = Object.freeze({
+  diagnosticMode: 'retained-js',
+  operationState() {
+    const finderVisible = typeof fileExplorerTreePaneIsVisible === 'function'
+      && fileExplorerTreePaneIsVisible();
+    const watchRootsTimerPending = Boolean(serverWatchRootsState.timer);
+    const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
+    const watchRootsInFlight = serverWatchRootsState.inFlight === true;
+    const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    return {
+      pending: Array.from(apiOperationState.pending.keys()).sort(),
+      batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
+      batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
+      batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,
+      activityRefreshing: activitySummaryState.refreshing === true,
+      watchRootsPending: watchRootsTimerPending || watchRootsRegistrationPending || watchRootsInFlight || watchRootsBaselinePending,
+      watchRootsTimerPending,
+      watchRootsRegistrationPending,
+      watchRootsInFlight,
+      watchRootsBaselinePending,
+      finderVisible,
+      finderWatchReady: !finderVisible || Boolean(fileExplorerFilesystemWatchToken),
+    };
+  },
+});
 const backgroundOwnerStatusState = {
   payload: null,
   loading: false,
@@ -1807,6 +2013,9 @@ let pendingPreferencesRender = false;
 // while the layout model changed. A boolean loses the pre-change shape and forces a full rebuild on drop.
 let pendingLayoutRender = null;
 let pendingLayoutRenderFrame = 0;
+let layoutMutationGeneration = 0;
+let layoutMutationCompletedGeneration = 0;
+let pendingLayoutMutationGeneration = 0;
 // #47: tab rects measured once per strip at drag time and reused for every dragover (tabs don't move
 // mid-drag — renders are deferred), so the drop-placement path doesn't force sync layout on each move.
 // one global editor navigation history (Popular IDE-style back/forward through visited files).

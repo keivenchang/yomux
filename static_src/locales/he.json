@@ -219,6 +219,7 @@
   "debug.cost.backfillPartial": "המילוי ההיסטורי לא הושלם",
   "debug.cost.backfillPending": "המילוי ההיסטורי ממתין",
   "debug.cost.backfillRunning": "מילוי היסטורי בתהליך",
+  "debug.cost.backfillUnknown": "מצב המילוי ההיסטורי אינו ידוע",
   "debug.cost.byModel": "לפי מודל",
   "debug.cost.bySource": "שיוך סוכן ומקור",
   "debug.cost.byTmux": "עלות לפי חלון tmux",

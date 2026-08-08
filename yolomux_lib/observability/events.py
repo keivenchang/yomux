@@ -23,6 +23,7 @@ from ..common import truncate_text
 from ..filesystem.io_ops import read_json_file
 from ..locales import message_descriptor
 from ..locales import message_fields
+from ..infra.shared_config_lock import shared_config_lock
 from ..types import RunHistoryEntry
 from ..types import SearchResult
 
@@ -32,8 +33,7 @@ T = TypeVar("T")
 
 @contextmanager
 def locked_yolomux_state_file() -> Any:
-    # lock + atomic-write machinery shared via atomic_file (with settings.py / yolo_rules).
-    with file_lock(STATE_PATH):
+    with shared_config_lock(STATE_PATH):
         yield
 
 
@@ -43,8 +43,7 @@ def _read_yolomux_state_unlocked() -> dict[str, Any]:
 
 
 def read_yolomux_state() -> dict[str, Any]:
-    with locked_yolomux_state_file():
-        return _read_yolomux_state_unlocked()
+    return _read_yolomux_state_unlocked()
 
 
 def _write_yolomux_state_unlocked(state: dict[str, Any]) -> None:
