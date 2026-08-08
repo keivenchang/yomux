@@ -564,6 +564,17 @@ SERVER_TMUX_SIGNAL_EVENT_POLL_SECONDS = SERVER_INTERACTIVE_EVENT_POLL_SECONDS
 STATUS_GENERATION_RPC_WAIT_SECONDS = 1.0
 TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
+# Essential = this server drives the service itself and a user-visible capability is wrong
+# without it. Their absence is never routine, so a recorded failure is always reportable:
+#   indexd    Quick Open results silently go stale -- the 0.7.0 QA incident.
+#   jobd      every /api/fs/* request is executed there.
+#   statusd   the tmux status/roster the session UI renders.
+#   statsd    the YO!stats database writer.
+#   approvald auto-approval; a dead approver must never read as "nothing to approve".
+# watchd is excluded: it is spawned per attached client and retires with the last one, so
+# "not running" is its correct resting state. It still alarms if it records a real failure.
+ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "jobd", "statusd", "statsd", "approvald"})
+
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
 STATS_AGENT_TOKEN_IDLE_SAMPLE_SECONDS = 60.0
@@ -573,6 +584,32 @@ STATS_AGENT_TOKEN_ENRICH_MEMO_TTL_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECOND
 # One entry per distinct unresolved-agent roster. The roster changes only when a pane starts or
 # stops, so this holds far more history than a live host produces; oldest-expiry entries evict.
 STATS_AGENT_TOKEN_ENRICH_MEMO_MAX_ENTRIES = 64
+
+
+def local_services_alert(services: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize the local services that are down, for the persistent UI indicator.
+
+    Returns {} when nothing is degraded, so the indicator has exactly one falsy resting
+    state. Every listed service carries its own machine-readable reason_code plus the
+    human reason, because "a service is down" without naming which one and what broke is
+    the same silent degradation this exists to remove.
+    """
+    degraded = [service for service in services if service.get("alerting") is True]
+    if not degraded:
+        return {}
+    return {
+        "count": len(degraded),
+        "services": [
+            {
+                "id": str(service.get("id") or ""),
+                "label": str(service.get("label") or ""),
+                "state": str(service.get("state") or ""),
+                "reason_code": str(service.get("reason_code") or ""),
+                "reason": str(service.get("reason") or ""),
+            }
+            for service in degraded
+        ],
+    }
 
 
 def stats_current_usage_health(
@@ -6072,6 +6109,10 @@ class TmuxWebtermApp:
                 "epoch": record.watchd_epoch,
                 "revision": record.watchd_revision,
                 "fallback": record.watchd_state == "polling",
+                # watchd is spawned when a client attaches a watch and retires when the
+                # last one detaches. "Absent" is its correct resting state, so it must not
+                # read as an outage; only last_failure below can make it one.
+                "demand_started": True,
                 "last_failure": "" if record.watchd_state in {"starting", "ready", "polling"} else record.watchd_state,
                 "resources": {},
             }
@@ -10495,14 +10536,21 @@ class TmuxWebtermApp:
         running = pid > 0
         transport_reason = str(row.get("transport_reason") or "").strip()
         last_failure = str(row.get("last_failure") or "").strip()
+        # A service that is spawned on first use is absent by design until something asks
+        # for it. Absence alone therefore cannot mean "down" -- only a recorded reason can.
+        # This used to be keyed off `healthy is not False`, but every runtime_status coerces
+        # healthy to a bool, so the idle branch was unreachable and a legitimately-absent
+        # watchd classified exactly like a broken daemon.
+        demand_started = row.get("demand_started") is True
         if running and row.get("healthy") is not False and not transport_reason:
             state, reason_code, reason = "running", "", ""
-        elif not running and row.get("healthy") is not False and not transport_reason and not last_failure:
+        elif not running and not transport_reason and not last_failure and demand_started:
             state, reason_code, reason = "idle", "not_started", "Starts on demand"
         else:
             state = "issue" if running else "unavailable"
             reason_code = "transport_failed" if transport_reason else "service_unavailable"
             reason = transport_reason or last_failure or "Service did not report healthy status"
+        essential = service_id in ESSENTIAL_LOCAL_SERVICES
         resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
         details = {
             key: value
@@ -10516,6 +10564,12 @@ class TmuxWebtermApp:
             "state": state,
             "reason_code": reason_code,
             "reason": reason,
+            "essential": essential,
+            # The one predicate the UI may key a visible outage on. Absence by design is
+            # already excluded above (it classifies as "idle"), so this stays true to the
+            # requirement -- any service that recorded a failure is shown, essential or
+            # not -- and a second copy of the rule cannot drift from this one.
+            "alerting": state in {"issue", "unavailable"},
             "metrics": {
                 "cpu_now_percent": self.system_status_metric(
                     resources.get("cpu_percent"),
@@ -10633,6 +10687,7 @@ class TmuxWebtermApp:
             "schema_version": 1,
             "inventory": inventory,
             "services": services,
+            "alert": local_services_alert(services),
             "totals": totals,
             "ledger": self.runtime_process_ledger(),
             "recovery_events": self.stats_current_recovery_events(migration),

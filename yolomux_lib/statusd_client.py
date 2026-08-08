@@ -9,6 +9,7 @@ from typing import Any
 from .infra import common
 from .local_services.client import LocalServiceClient
 from .local_services.rpc import safe_socket_path
+from .local_services.runtime import local_service_failure_text
 from .statusd_protocol import STATUSD_PROTOCOL_VERSION
 from .statusd_protocol import STATUSD_SERVICE_NAME
 from .statusd_protocol import STATUSD_CODE_REVISION
@@ -123,6 +124,6 @@ class StatusClient(LocalServiceClient):
             "build_count": int(payload.get("build_count") or 0),
             "encode_count": int(payload.get("encode_count") or 0),
             "invalidation_reason": str(payload.get("invalidation_reason") or ""),
-            "last_failure": str(payload.get("last_error") or runtime.get("failure_reason") or ""),
+            "last_failure": local_service_failure_text(runtime, payload),
             "resources": self.registry.resources(pid),
         }

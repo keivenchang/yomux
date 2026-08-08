@@ -137,6 +137,27 @@ def redact_local_service_text(value: object) -> str:
     return text[:256]
 
 
+def local_service_failure_text(registry_status: dict[str, object], payload: dict[str, object]) -> str:
+    """Return the one reason a down local service can be explained by.
+
+    Two sources carry it and neither alone is sufficient. A service that is UP but
+    unhealthy reports its own trouble in the live status payload (``last_error`` or
+    ``last_failure``). A service that never started has no payload at all -- its
+    reason lives only in the registry's ``failure_reason``, which is what
+    ``_record_blocked_start`` and ``_mark_failure`` write.
+
+    Every ``runtime_status`` used to spell this itself, and three of the five
+    dropped the registry half: a refused ``indexd`` start recorded a specific
+    reason that the Local-services row then replaced with a generic sentence.
+    """
+    return str(
+        payload.get("last_error")
+        or payload.get("last_failure")
+        or registry_status.get("failure_reason")
+        or ""
+    )
+
+
 def local_service_exception_cause(error: BaseException) -> dict[str, object]:
     """Serialize one redacted exception type and traceback for RPC callers and supervisors."""
     frames = []

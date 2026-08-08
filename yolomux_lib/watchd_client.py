@@ -10,6 +10,7 @@ from typing import Any
 from .infra import common
 from .local_services.client import LocalServiceClient
 from .local_services.rpc import safe_socket_path
+from .local_services.runtime import local_service_failure_text
 from .watchd_protocol import WATCHD_CODE_REVISION
 from .watchd_protocol import WATCHD_PROTOCOL_VERSION
 from .watchd_protocol import WATCHD_SERVICE_NAME
@@ -142,6 +143,6 @@ class WatchClient(LocalServiceClient):
             "descriptors": int(payload.get("descriptors") or 0),
             "roots": int(payload.get("roots") or 0),
             "fallback": bool(payload.get("fallback")),
-            "last_failure": str(payload.get("last_error") or runtime.get("failure_reason") or ""),
+            "last_failure": local_service_failure_text(runtime, payload),
             "resources": self.registry.resources(int(payload.get("pid") or 0)),
         }

@@ -25,6 +25,7 @@ from ..local_services.rpc import safe_socket_path
 from ..local_services.registry import LocalServiceRegistry
 from ..local_services.registry import LocalServiceSpec
 from ..local_services.runtime import acquire_client_lease
+from ..local_services.runtime import local_service_failure_text
 from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -310,7 +311,10 @@ class SearchIndexerClient:
             "active_task": str(payload.get("active_task") or ""),
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
             "last_success": float(payload.get("last_success") or 0.0),
-            "last_failure": str(payload.get("last_failure") or ""),
+            "last_failure": local_service_failure_text(status, payload),
+            # Quick Open starts the indexer on its first query, so "absent" is only an
+            # error once a start was attempted and refused -- which is what last_failure says.
+            "demand_started": True,
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - time.monotonic()),
             "generation": int(payload.get("generation") or 0),
             "record": status.get("record") if isinstance(status.get("record"), dict) else {},

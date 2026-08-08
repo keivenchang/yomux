@@ -24,6 +24,7 @@ from ..local_services.rpc import LOCAL_RPC_VERSION
 from ..local_services.rpc import safe_socket_path
 from ..local_services.runtime import acquire_client_lease
 from ..local_services.runtime import apply_service_process_priority
+from ..local_services.runtime import local_service_failure_text
 from ..local_services.runtime import LocalRpcServiceState
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
@@ -359,6 +360,7 @@ class ApprovalClient(LocalServiceClient):
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
             "generation": int(payload.get("generation") or 0),
             "target_count": int(payload.get("target_count") or 0),
+            "last_failure": local_service_failure_text(status, payload),
             "recurring_work": payload.get("recurring_work") if isinstance(payload.get("recurring_work"), dict) else {},
             "resources": self.registry.resources(int(payload.get("pid") or 0)),
         }
