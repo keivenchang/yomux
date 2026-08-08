@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 import uuid
 from collections import Counter
@@ -92,7 +93,7 @@ def saved_layout_search(session: str, root: str) -> str:
             "mode": "files",
             "session": session,
             "showHidden": False,
-            "expanded": [str(REPO_ROOT)],
+            "expanded": [root],
         },
         "scroll": [{"target": "finder:files", "kind": "finder", "top": 0, "left": 0, "mode": "files"}],
     }
@@ -216,7 +217,7 @@ def capture_server_measurements(app) -> dict[str, Any]:
     return {"summary": summary}
 
 
-def wait_for_server_measurements_quiet(app, timeout: float, quiet_seconds: float = 0.5) -> None:
+def wait_for_server_measurements_quiet(app, timeout: float, quiet_seconds: float = 0.5, drivers: dict[str, Any] | None = None) -> None:
     deadline = time.monotonic() + timeout
     stable_since = time.monotonic()
     previous = None
@@ -229,7 +230,32 @@ def wait_for_server_measurements_quiet(app, timeout: float, quiet_seconds: float
         elif time.monotonic() - stable_since >= quiet_seconds:
             return
         time.sleep(0.05)
-    raise RuntimeError(f"Timed out after {timeout:.1f}s waiting for Finder server measurements to settle")
+    with app.client_watch_service.lock:
+        watch_record = app.client_watch_service.event_watcher_record
+        watch_state = {
+            "watchd_epoch": watch_record.watchd_epoch,
+            "watchd_revision": watch_record.watchd_revision,
+            "watchd_generation": tuple(watch_record.filesystem_roots),
+            "descriptors": {
+                key: {
+                    "generation": descriptor.descriptor_generation,
+                    "roots": descriptor.roots,
+                }
+                for key, descriptor in app.client_watch_service.descriptors.items()
+            },
+            "history": [
+                {"token": record.get("token"), "signature": record.get("signature")}
+                for record in app.client_watch_service.filesystem_history[-4:]
+            ],
+        }
+    watchd_snapshot, watchd_body = app.watch_client.snapshot(timeout=1.0)
+    watchd_product = json.loads(watchd_body) if watchd_body else {}
+    raise RuntimeError(
+        f"Timed out after {timeout:.1f}s waiting for Finder server measurements to settle: "
+        f"roots={app.client_watch_roots_snapshot()!r} watch_state={watch_state!r} "
+        f"watchd_snapshot={watchd_snapshot!r} watchd_product={watchd_product!r} "
+        f"browser_state={{{', '.join(f'{name!r}: {finder_work_state(driver)!r}' for name, driver in (drivers or {}).items())}}}"
+    )
 
 
 def wait_for_condition(predicate, timeout: float, description: str) -> None:
@@ -246,14 +272,52 @@ def finder_is_settled(driver: Any) -> bool:
         """
         try {
           return clientEventTransportState.connected === true
+            && apiOperationState.pending.size === 0
             && fileExplorerFsBatchQueue.length === 0
             && fileExplorerFsBatchPending.size === 0
+            && fileExplorerFsBatchOperations.size === 0
             && fileExplorerFsBatchTimer === null;
         } catch (_error) {
           return false;
         }
         """
     ))
+
+
+def finder_work_state(driver: Any) -> dict[str, Any]:
+    return driver.execute_script(
+        """
+        try {
+          return {
+            connected: clientEventTransportState.connected === true,
+            api_pending: Array.from(apiOperationState.pending.keys()),
+            batch_queue: fileExplorerFsBatchQueue.map(item => ({id: item.id, type: item.type, path: item.path, sent: item.sent === true})),
+            batch_pending: Array.from(fileExplorerFsBatchPending.entries()).map(([key, pending]) => ({
+              key,
+              id: pending?.item?.id || 0,
+              path: pending?.item?.path || '',
+              sent: pending?.item?.sent === true,
+              queued_product: pending?.item?.queuedProduct || null,
+              repairing: pending?.item?.repairing === true,
+            })),
+            batch_operations: Array.from(fileExplorerFsBatchOperations.entries()).map(([id, items]) => ({
+              id,
+              items: Array.isArray(items) ? items.map(item => ({id: item.id, type: item.type, path: item.path})) : [],
+            })),
+            batch_timer: fileExplorerFsBatchTimer !== null,
+            watch_token: String(fileExplorerFilesystemWatchToken || ''),
+            push_token: String(fileExplorerFilesystemPushToken || ''),
+            finder_root: currentFileExplorerRoot(),
+            expanded: Array.from(fileExplorerExpanded),
+            watched_directories: watchedFileExplorerDirectories(),
+            server_watch_roots: clientServerWatchRoots(),
+            differ_visible: fileExplorerSessionFilesPaneIsVisible(),
+          };
+        } catch (error) {
+          return {error: String(error && (error.stack || error.message || error))};
+        }
+        """
+    )
 
 
 def finder_change_state(driver: Any) -> dict[str, str]:
@@ -274,20 +338,51 @@ def finder_change_state(driver: Any) -> dict[str, str]:
     )
 
 
-def wait_for_finder_settled(drivers: dict[str, Any], timeout: float) -> None:
-    wait_for_condition(
-        lambda: all(finder_is_settled(driver) for driver in drivers.values()),
-        timeout,
-        "both Finder clients to drain their bootstrap batch work",
-    )
-    time.sleep(0.35)
-    if not all(finder_is_settled(driver) for driver in drivers.values()):
-        raise RuntimeError("Finder batch work restarted during the quiet window")
+def wait_for_finder_settled(
+    drivers: dict[str, Any],
+    timeout: float,
+    *,
+    quiet_seconds: float = 0.35,
+    clock=None,
+    wait=None,
+) -> None:
+    clock = time.monotonic if clock is None else clock
+    wait = threading.Event().wait if wait is None else wait
+    deadline = clock() + timeout
+    stable_since = None
+    while True:
+        now = clock()
+        if all(finder_is_settled(driver) for driver in drivers.values()):
+            if stable_since is None:
+                stable_since = now
+            if now - stable_since >= quiet_seconds:
+                return
+        else:
+            stable_since = None
+        remaining = deadline - now
+        if remaining <= 0:
+            states = {name: finder_work_state(driver) for name, driver in drivers.items()}
+            raise RuntimeError(
+                f"Timed out after {timeout:.1f}s waiting for both Finder clients to remain settled "
+                f"for {quiet_seconds:.2f}s: {states}"
+            )
+        wait(min(0.05, remaining))
 
 
 def append_line(path: str, text: str) -> None:
     with Path(path).open("a", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def stop_watchd_revision_bridge(app: Any, timeout: float) -> None:
+    with app.client_watch_service.lock:
+        record = app.client_watch_service.event_watcher_record
+        worker = record.watchd_worker
+        record.watchd_stop_event.set()
+    if worker is not None:
+        worker.join(timeout=timeout)
+        if worker.is_alive():
+            raise RuntimeError(f"Timed out after {timeout:.1f}s stopping the fixture watchd revision bridge")
 
 
 def capture_phase(app, drivers: dict[str, Any], process_cpu_started: float) -> dict[str, Any]:
@@ -333,13 +428,13 @@ def trigger_forced_watch_diff_refresh(driver) -> None:
 
 
 def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_seconds: float = 2.0, event_timeout: float = 8.0, force_full_filesystem_event: bool = False) -> dict[str, Any]:
-    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1)
+    fixture = create_fixture_tree(tmp_path)
+    runtime = start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, session_cwd=fixture["root"])
     server = thread = None
     drivers: dict[str, Any] = {}
     try:
         server, thread = start_browser_share_server(monkeypatch, tmp_path, runtime.app, auth_bypass=True)
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
-        fixture = create_fixture_tree(tmp_path)
         marker = measurement_marker()
         drivers = {
             "client-a": new_chrome_driver(window_size=(1280, 900)),
@@ -350,7 +445,13 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
         search = saved_layout_search(runtime.sessions[0], fixture["root"])
         open_clients(drivers, base_url, search, fixture, event_timeout)
         wait_for_finder_settled(drivers, event_timeout)
-        wait_for_server_measurements_quiet(runtime.app, event_timeout)
+        wait_for_condition(
+            lambda: runtime.app.client_watch_roots_snapshot() == [fixture["root"]],
+            event_timeout,
+            "both fixture clients to register only the fixture-owned watch root",
+        )
+        assert runtime.app.client_watch_roots_snapshot() == [fixture["root"]]
+        wait_for_server_measurements_quiet(runtime.app, event_timeout, drivers=drivers)
 
         phases: dict[str, Any] = {}
 
@@ -378,9 +479,37 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
         phase_cpu_started = time.process_time()
         file_change_before = {name: finder_change_state(driver) for name, driver in drivers.items()}
         if force_full_filesystem_event:
+            # Native filesystem delivery is intentionally compact. Suppress it
+            # here so this measurement deterministically exercises the periodic
+            # full-SSE keyframe path instead of racing the native watcher.
+            stop_watchd_revision_bridge(runtime.app, event_timeout)
             with runtime.app.client_watch_service.lock:
                 runtime.app.client_watch_service.filesystem_last_full_at = 0.0
         append_line(fixture["watched_file"], "file-change\n")
+        if force_full_filesystem_event:
+            current_signature = runtime.app.filesystem_watch_signature_for_roots([fixture["root"]])
+            runtime.app.publish_filesystem_ready_event(
+                [fixture["root"]],
+                current_signature=current_signature,
+                force_full=True,
+            )
+            with runtime.app.client_watch_service.lock:
+                expected_token = str(runtime.app.client_watch_service.filesystem_history[-1]["token"])
+            try:
+                wait_for_condition(
+                    lambda: runtime.app.client_watch_service.filesystem_payload_signature == expected_token,
+                    event_timeout,
+                    "the explicit full filesystem event to publish its completed payload",
+                )
+            except RuntimeError as error:
+                with runtime.app.client_watch_service.lock:
+                    full_state = {
+                        "expected_token": expected_token,
+                        "payload_signature": runtime.app.client_watch_service.filesystem_payload_signature,
+                        "inflight_token": runtime.app.client_watch_service.filesystem_full_inflight_token,
+                        "history": list(runtime.app.client_watch_service.filesystem_history[-3:]),
+                    }
+                raise RuntimeError(f"{error}: {full_state!r}") from error
         wait_for_condition(
             lambda: all(
                 finder_change_state(driver) != file_change_before[name]
@@ -411,7 +540,7 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
             wait_for_app(driver, event_timeout)
             open_root(driver, fixture["root"], fixture["expected_row"], event_timeout)
         wait_for_finder_settled(drivers, event_timeout)
-        wait_for_server_measurements_quiet(runtime.app, event_timeout)
+        wait_for_server_measurements_quiet(runtime.app, event_timeout, drivers=drivers)
         phases["reload"] = capture_phase(runtime.app, drivers, phase_cpu_started)
 
         for driver in drivers.values():
