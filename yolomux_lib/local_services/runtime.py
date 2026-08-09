@@ -28,6 +28,10 @@ from ..host_identity import current_host_identity
 from ..host_identity import is_current_local_process
 from ..host_identity import process_start_identity
 from ..infra.filesystem_preflight import preflight_mutable_roots
+from .rpc import LOCAL_SERVICE_ERROR_BUSY
+from .rpc import LOCAL_SERVICE_ERROR_INVALID_REQUEST
+from .rpc import LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH
+from .rpc import LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE
 from .rpc import LocalRpcEnvelope
 from .rpc import LocalRpcError
 from .rpc import read_message
@@ -346,7 +350,7 @@ def run_local_rpc_service(
                         connection.settimeout(LOCAL_SERVICE_CONNECTION_TIMEOUT_SECONDS)
                         uid = peer_uid(connection)
                         if uid is not None and uid != os.getuid():
-                            write_message(connection, None, {"ok": False, "error": "peer uid mismatch"}, legacy=True)
+                            write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH}, legacy=True)
                             return
                         on_client()
                         try:
@@ -355,7 +359,7 @@ def run_local_rpc_service(
                             read_completed = time.monotonic()
                         except (LocalRpcError, OSError):
                             try:
-                                write_message(connection, None, {"ok": False, "error": "invalid request"}, legacy=True)
+                                write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_INVALID_REQUEST}, legacy=True)
                             except OSError:
                                 pass
                         else:
@@ -398,7 +402,7 @@ def run_local_rpc_service(
                                 write_message(connection, response_envelope, response, response_binary, legacy=legacy)
                             except (LocalRpcError, OSError):
                                 try:
-                                    write_message(connection, None, {"ok": False, "error": "response too large"}, legacy=True)
+                                    write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE}, legacy=True)
                                 except OSError:
                                     pass
                 finally:
@@ -450,7 +454,7 @@ def run_local_rpc_service(
                     if handler_slots is not None and not acquired:
                         with connection:
                             try:
-                                write_message(connection, None, {"ok": False, "error": "service busy", "queue_wait_ms": queue_wait_ms, "queue_depth": 0, "capacity_limit": handler_limit, "capacity_saturated": saturated, "capacity_rejected": True, "capacity_rejections": rejection_count}, legacy=True)
+                                write_message(connection, None, {"ok": False, "error": LOCAL_SERVICE_ERROR_BUSY, "queue_wait_ms": queue_wait_ms, "queue_depth": 0, "capacity_limit": handler_limit, "capacity_saturated": saturated, "capacity_rejected": True, "capacity_rejections": rejection_count}, legacy=True)
                             except OSError:
                                 pass
                     elif handler_slots is not None:

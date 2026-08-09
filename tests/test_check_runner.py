@@ -20,6 +20,7 @@ import pytest
 from tests import latency_calibration
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
+from tools import test_catalog
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
 from yolomux_lib.background_owner import pid_is_alive as background_owner_pid_is_alive
@@ -142,8 +143,13 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert set(check.MOCK_TRANSCRIPT_FILES).issubset(check.pytest_files("nonbrowser"))
     node_lane = next(lane for lane in lanes if lane.name == "node-layout")
     assert node_lane.steps[0].args == ["node", "tests/layout_url.test.js", *check.NODE_LAYOUT_FILES]
-    assert "tests/share_theme.test.js" not in check.NODE_LAYOUT_FILES
-    assert "tests/share_file_surface_replay.test.js" not in check.NODE_LAYOUT_FILES
+    # The lane passes these as argv, which OVERRIDES the launcher's own default list, so a shard
+    # missing here runs in no gate lane at all: test_node_suite.py runs the bare launcher but carries
+    # the node_bridge marker the default pytest lane excludes. share_theme owns quick-open, Finder,
+    # Differ, editor, terminal, and layout in addition to share, and was dropped from the gate for a
+    # share quarantine; share_file_surface_replay pins live 93_share_state.js/94_share_replay.js source.
+    assert "tests/share_theme.test.js" in check.NODE_LAYOUT_FILES
+    assert "tests/share_file_surface_replay.test.js" in check.NODE_LAYOUT_FILES
     assert "tests/gate_panels.test.js" not in check.NODE_LAYOUT_FILES
     assert "tests/test_browser_share.py" in check.pytest_files("browser")
     boot_lane = next(lane for lane in lanes if lane.name == "pytest-boot")
@@ -159,6 +165,28 @@ def test_default_check_lanes_keep_full_pytest_gate():
     assert e2e_lane.steps[0].args == ["python3", "-m", "pytest", *check.pytest_files("e2e"), "-n", e2e_workers, "-m", "e2e", "-q"]
     assert "pytest-unit" not in default_names
     assert "pytest-socket" not in default_names
+
+
+def test_every_node_shard_runs_in_the_gate_unless_one_owner_excludes_it():
+    """A shard may leave the gate only through NODE_LAYOUT_EXCLUDED_FILES, in both list owners.
+
+    The gate lane passes NODE_LAYOUT_FILES as argv and the launcher applies
+    defaultGateExcludedSuiteFiles only when run bare, so these were two hand-maintained copies of one
+    list. They drifted: share_theme.test.js and share_file_surface_replay.test.js ran in neither
+    default lane while the gate still reported green.
+    """
+
+    shards = {path.name for path in (REPO_ROOT / "tests").glob("*.test.js")}
+    shards.discard(Path(test_catalog.NODE_SHARD_LAUNCHER).name)
+    excluded = set(test_catalog.NODE_LAYOUT_EXCLUDED_FILES)
+
+    assert set(test_catalog.NODE_LAYOUT_FILES) == {f"tests/{name}" for name in shards} - excluded
+    assert excluded <= {f"tests/{name}" for name in shards}, "excluding a shard that does not exist"
+
+    launcher = (REPO_ROOT / "tests" / "layout_url.test.js").read_text(encoding="utf-8")
+    _all_suite_files, excluded_block = launcher.split("const defaultGateExcludedSuiteFiles", 1)
+    launcher_excluded = set(re.findall(r"'(tests/[^']+\.test\.js)'", excluded_block.split("]);", 1)[0]))
+    assert launcher_excluded == excluded, "the launcher and the check catalog exclude different shards"
 
 
 def test_focused_pytest_lanes_keep_expected_filters():

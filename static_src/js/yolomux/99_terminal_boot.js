@@ -7492,6 +7492,7 @@ function clientPushEventSessionKey(payload = {}) {
 // so they cannot be mistaken for an EventSource type with no server producer.
 const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
+  'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
   'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
   'operation_terminal',
@@ -7600,6 +7601,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
   }
   if (type === 'attention_acks_changed') {
     applyAttentionAcknowledgementResponse(payload);
+    return;
+  }
+  if (type === 'backend_health_changed') {
+    // Push-only, deliberately: this is what makes a dead backend service visible in the topbar with
+    // no diagnostics panel open. Do NOT add a /api/system-status refetch here.
+    applyBackendHealthPayload(payload);
     return;
   }
   if (type === 'background_owner_changed') {

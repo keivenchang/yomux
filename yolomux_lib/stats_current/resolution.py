@@ -6,6 +6,14 @@ from __future__ import annotations
 
 RING_CAPACITIES: dict[int, int] = {1: 300, 10: 180, 60: 480, 300: 288}
 RESOLUTION_CHOICES: tuple[int, ...] = tuple(RING_CAPACITIES)
+# The longest window the GUI can ask for. This is the display knob: change it
+# here and the top rung of the range ladder moves with it. It is deliberately
+# NOT the same value as storage.RETENTION_SECONDS -- how long history is kept on
+# disk is a separate decision -- but the two are ordered: retention must be at
+# least this large, or the browser asks for a range whose older half was already
+# pruned and renders a truncated span as if it were complete. storage states and
+# enforces that invariant; nothing else may re-spell this number.
+MAX_RANGE_SECONDS = 24 * 60 * 60
 RANGE_SECONDS: tuple[int, ...] = (
     5 * 60,
     15 * 60,
@@ -15,7 +23,7 @@ RANGE_SECONDS: tuple[int, ...] = (
     4 * 60 * 60,
     8 * 60 * 60,
     16 * 60 * 60,
-    24 * 60 * 60,
+    MAX_RANGE_SECONDS,
 )
 MAX_BUCKETS = 600
 MIN_BUCKETS = 12

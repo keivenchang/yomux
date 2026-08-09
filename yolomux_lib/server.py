@@ -76,6 +76,7 @@ from .tmux.tmux_utils import tmux_session_client_rows
 from .tmux.tmux_utils import tmux_session_target
 from .tmux.process_group_ownership import record_owned_process_group
 from .tmux.process_group_ownership import signal_recorded_process_group
+from .observability.failure_severity import failure_record_level
 from .observability.transcripts import codex_event_text
 from .observability.transcripts import strip_terminal_query_responses
 from .observability.transcripts import transcript_items_from_raw_line
@@ -1819,30 +1820,17 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         body_read_ms = (time.perf_counter() - started) * 1000
         if payload is None:
             return
-        requests = payload.get("requests", [])
-        if not isinstance(requests, list):
+        # filesystem.validated_batch_requests is the one owner of what a batch may contain, and
+        # the app owns the one typed rejection built from it.  Re-checking the same two rules here
+        # is how the handler and the app payload used to disagree about the failure shape.
+        try:
+            summary = filesystem.filesystem_batch_request_summary(payload)
+        except ValueError as error:
             self.write_json(
-                error_payload(
-                    "requests must be a list",
-                    message_key="request.error.list",
-                    message_params={"field": "requests"},
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
+                self.server.app.fs_batch_invalid_request_result(payload, error),
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-        if len(requests) > filesystem.MAX_BATCH_REQUESTS:
-            self.write_json(
-                error_payload(
-                    f"requests must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
-                    message_key="request.error.tooManyItems",
-                    message_params={"field": "requests", "max": filesystem.MAX_BATCH_REQUESTS},
-                    status=HTTPStatus.BAD_REQUEST,
-                ),
-                status=HTTPStatus.BAD_REQUEST,
-            )
-            return
-        summary = filesystem.filesystem_batch_request_summary(payload)
         operation_started = time.perf_counter()
         response, status = self.server.app.fs_batch_http_payload(
             payload,
@@ -3010,8 +2998,11 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
 
         if state == "failed":
             error_record = envelope["error"]
+            # The severity rule is owned by `failure_record_level`, not by this writer: a terminal
+            # operation replayed here carries the same typed code the asynchronous recorder saw, so
+            # the two writers must not be able to disagree about whether it is an error.
             emit_server_log(
-                "error",
+                failure_record_level(error_record, status=status_code),
                 "api-response",
                 json.dumps({
                     "request": envelope["request"],

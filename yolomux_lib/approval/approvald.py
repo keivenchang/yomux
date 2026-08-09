@@ -345,11 +345,28 @@ class ApprovalClient(LocalServiceClient):
         return response if isinstance(response, dict) else {}
 
     def runtime_status(self) -> dict[str, Any]:
+        """Build approvald's whole System/health row.
+
+        approvald is genuinely demand-scoped and declares it. The only path that creates it is
+        `start_worker` (`:310`), reached when a session actually turns auto-approve on, plus the
+        shared absent/refused recovery every client gets in
+        `LocalServiceClient.request_with_binary` (`local_services/client.py:175-179`) when some
+        route asks an already-wanted question. Nothing pins it up: its idle rule (`:252`) is
+        `not self.leases and not self.records`, so with no worker record it retires itself after
+        APPROVALD_DEFAULT_IDLE_SECONDS. On a machine with no auto-approve target configured that
+        is its permanent, correct resting state, and calling it `down` would alarm forever.
+
+        The dead-approver case the essential-service comment warns about is still covered, and
+        is why this flag is read LAST by the health reducer: a worker that cannot reach approvald
+        drives a start attempt, a failed start records a registry `failure_reason`, and a row
+        carrying `last_failure` reduces to `down` no matter what this flag says.
+        """
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
         return {
             "service": "approvald",
             "pid": int(payload.get("pid") or 0),
+            "demand_started": True,
             "started_at": float(payload.get("started_at") or 0.0),
             "version": int(payload.get("version") or 0),
             "socket": str(payload.get("socket") or self.socket_path),

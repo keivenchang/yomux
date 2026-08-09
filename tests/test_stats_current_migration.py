@@ -751,10 +751,12 @@ def test_migration_canonicalizes_invalid_legacy_identities_without_losing_facts(
     assert all("\n" not in issue.source + issue.detail and "\x7f" not in issue.source + issue.detail for issue in report.issues)
 
 
-def test_migration_retains_and_clips_exactly_at_24_hour_boundary(tmp_path):
+def test_migration_retains_and_clips_exactly_at_the_retention_boundary(tmp_path):
     state = tmp_path / "state"
     legacy = _create_legacy_database(state / migration.RETIRED_DATABASE_FILENAME)
-    completed_at = 100_000
+    # Retention-relative so a longer retained window cannot push the discarded
+    # fixture row to a negative timestamp.
+    completed_at = RETENTION_SECONDS + 100_000
     cutoff = completed_at - RETENTION_SECONDS
     connection = sqlite3.connect(legacy)
     for observed_at, suffix in ((cutoff - 1, "old"), (cutoff, "boundary")):

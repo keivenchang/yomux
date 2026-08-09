@@ -4730,15 +4730,24 @@ function commandPaletteLabel() {
   return t('palette.quickOpen');
 }
 
+// The one Quick Open freshness sentence, from the one derivation. Empty when every answering root
+// vouched for its snapshot.
+function commandPaletteFreshnessText() {
+  return fileIndexFreshnessMessage(fileQuickOpenState.freshness);
+}
+
 function commandPaletteEmptyText() {
   if (fileQuickOpenState.loading) return t('search.searching');
   if (fileQuickOpenState.indexWarming) return t('finder.index.indexing');
   if (commandPaletteState.query.trim().startsWith('@')) return t('palette.symbolUnavailable');
-  return t('palette.noMatches');
+  // "No matches" from a snapshot nobody is updating is a false negative. Say why instead.
+  return commandPaletteFreshnessText() || t('palette.noMatches');
 }
 
 function commandPaletteStatusText() {
-  return fileQuickOpenState.loading ? t('palette.searchingFiles') : '';
+  return [fileQuickOpenState.loading ? t('palette.searchingFiles') : '', commandPaletteFreshnessText()]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function commandPaletteLoadingTextHtml(text) {
@@ -4746,7 +4755,12 @@ function commandPaletteLoadingTextHtml(text) {
 }
 
 function commandPaletteStatusHtml() {
-  return fileQuickOpenState.loading ? commandPaletteLoadingTextHtml(commandPaletteStatusText()) : '';
+  const parts = [];
+  if (fileQuickOpenState.loading) parts.push(commandPaletteLoadingTextHtml(t('palette.searchingFiles')));
+  // Stale results stay visible and usable below; this line only tells the user what they are looking at.
+  const freshness = commandPaletteFreshnessText();
+  if (freshness) parts.push(`<span class="command-palette-freshness">${esc(freshness)}</span>`);
+  return parts.join('');
 }
 
 function commandPaletteResultsHtml(items, query) {
@@ -4840,6 +4854,9 @@ function renderCommandPaletteResults() {
     const html = commandPaletteStatusHtml();
     status.hidden = !html;
     status.setAttribute('aria-label', text);
+    // Not colour-only: the aria-live region carries the same sentence a sighted user reads, and the
+    // stale marker is a class, never a bare colour swap.
+    status.classList.toggle('stale', Boolean(commandPaletteFreshnessText()));
     status.innerHTML = html;
   }
   commandPaletteState.items = commandPaletteRankItems(commandPaletteItems(), query).slice(0, 60);
@@ -4868,6 +4885,7 @@ function openCommandPalette(options = {}) {
   fileQuickOpenState.root = fileQuickOpenRootForSearch();
   fileQuickOpenState.candidates = [];
   fileQuickOpenState.loading = false;
+  fileQuickOpenState.freshness = null;
   fileQuickOpenState.error = '';
   // Only Cmd-P (files priority) shows files on an empty box, so only it searches immediately;
   // Cmd-Shift-P fetches files on the first keystroke (via the input handler).
@@ -4943,6 +4961,7 @@ function abortFileQuickOpenSearch() {
   fileQuickOpenState.requestId += 1;
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
+  fileQuickOpenState.freshness = null;
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -4970,7 +4989,22 @@ function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
     // This is deliberately data-driven. The UI must not turn an explicit in-progress
     // backend response into a completed empty search just because it has no rows yet.
     indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
+    // Same rule for the opposite failure: a snapshot served without a live producer must not read as
+    // a current answer. One derivation, shared with the Finder index badge.
+    freshness: fileIndexFreshnessFromPayload(payload),
   };
+}
+
+// Quick Open blends rows from several roots into one list, so the user cannot tell which row came
+// from which snapshot. Report the worst freshness any answering root returned: orphaned before
+// stale, then the oldest snapshot.
+function fileQuickOpenWorstFreshness(records) {
+  const stale = (Array.isArray(records) ? records : []).filter(record => record?.stale === true);
+  const rank = record => (record.state === 'orphaned' ? 2 : 1);
+  return stale
+    .slice()
+    .sort((left, right) => (rank(right) - rank(left))
+      || ((right.ageSeconds === null ? -1 : right.ageSeconds) - (left.ageSeconds === null ? -1 : left.ageSeconds)))[0] || null;
 }
 
 async function refreshFileQuickOpenCandidates(query = '') {
@@ -4982,6 +5016,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
   const fetchOptions = fileQuickOpenState.abortController ? {signal: fileQuickOpenState.abortController.signal} : {};
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
+  fileQuickOpenState.freshness = null;
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -5029,6 +5064,8 @@ async function refreshFileQuickOpenCandidates(query = '') {
       // A new or externally indexed root can take a moment to publish its first durable snapshot.
       // The backend explicitly marks that response as warming; it is not a completed empty search.
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
+      // Stale rows stay in the list. What changes is that the palette now says they are stale.
+      fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
       if (fileQuickOpenState.indexWarming) scheduleFileQuickOpenIndexRetry(query, requestId);
     }
     fileQuickOpenState.error = '';
@@ -5037,6 +5074,7 @@ async function refreshFileQuickOpenCandidates(query = '') {
     if (error?.name === 'AbortError') return;
     fileQuickOpenState.candidates = [];
     fileQuickOpenState.indexWarming = false;
+    fileQuickOpenState.freshness = null;
     fileQuickOpenState.error = userMessageSnapshot(error, {
       key: 'common.searchFailed',
       params: {},

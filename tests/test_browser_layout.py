@@ -1125,7 +1125,11 @@ def test_current_stats_system_tab_order_visible_polling_refresh_scroll_and_narro
             const text = view?.textContent?.trim() || '';
             return view && !view.hidden && text.length > 30 && !/^loading/i.test(text) ? {
               visible: view.offsetParent !== null,
-              grid: Boolean(view.querySelector('.js-debug-system-grid')),
+              // The default Daemons view is the service roster, not the retired card grid. The
+              // grid survives only inside the collapsed Advanced diagnostics section, so its
+              // absence here is the layout contract, not a missing render.
+              roster: Boolean(view.querySelector('[data-js-debug-roster]')),
+              grid: view.querySelector('.js-debug-system-grid') === null,
               inside: view.scrollWidth <= view.clientWidth + 1 || getComputedStyle(view).overflowX === 'auto',
             } : false;
             """
@@ -1444,21 +1448,31 @@ def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path
         lambda driver: driver.execute_script(
             """
             if (typeof refreshDebugSystemViews !== 'function' || typeof jsDebugSystemState !== 'object') return false;
+            // The YO!stats sampler moved from a standalone card into statsd's own roster row
+            // disclosure, so this drives the payload through the roster and opens that row. Its
+            // contents are built lazily, which is why the row has to be expanded first.
             const base = {
               ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {}, caches: {},
-              client_events: {}, chat: {}, cpu_budget: {}, local_services: {totals: {}, services: [{
-                service: 'statsd', sampler_families: {}, usage: {quarantined_conflict_count: 1, health: {
-                  state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 130,
-                }},
-              }]}, top_endpoints: [], top_background_work: [],
+              client_events: {}, chat: {}, cpu_budget: {}, local_services: {
+                schema_version: 2, inventory: ['statsd'], totals: {}, services: [{
+                  id: 'statsd', service: 'statsd', label: 'YO!stats', state: 'running', pid: 4242, metrics: {},
+                  sampler_families: {}, usage: {quarantined_conflict_count: 1, health: {
+                    state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 130,
+                  }},
+                }],
+              }, top_endpoints: [], top_background_work: [],
             };
             jsDebugSystemState.payload = base;
             refreshDebugSystemViews();
+            const toggle = document.querySelector('[data-js-debug-roster-toggle="statsd"]');
+            if (!toggle) return false;
+            if (toggle.getAttribute('aria-expanded') !== 'true') toggle.click();
             const warning = document.querySelector('[data-js-debug-usage-health="warning"]');
             if (!warning || warning.getAttribute('role') !== 'alert' || !warning.textContent.includes('usage atoms are stale')) return false;
             base.local_services.services[0].usage.health = {
               state: 'ok', reason: 'transcripts and usage atoms are advancing', last_accepted_atom_age_seconds: 1,
             };
+            jsDebugSystemState.payload = {...base, generated_at: base.generated_at + 1};
             refreshDebugSystemViews();
             const healthy = document.querySelector('[data-js-debug-usage-health="ok"]');
             return {

@@ -1146,6 +1146,15 @@ body.theme-light {
   --auto-active-text: #112200;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: var(--danger-strong-hover);
+  /* Warning/status/danger shades tuned for DARK surfaces measure 1.2-2.0:1 on the light panel, and
+     these three had no light value at all -- so the Daemons alert box (whose only container
+     affordance is `border: 1px solid var(--warning-border-strong)`) had no visible outline in light
+     mode while its text re-themed. WCAG's non-text minimum is 3:1; these clear 4.6:1 or better
+     against the lightest surface they paint on (--panel, which resolves to --paint-white in light
+     mode) so they also work where the same token is used as text. */
+  --warning-border-strong: #8a5b00;
+  --status-tool: #a15c07;
+  --danger-text-soft: var(--danger-light-text);
   --pane-ring-attention: #d11a2a;  /* darker attention red that reads on the light pane bg */
   --danger-panel-light-bg: #fff5f5;
   --danger-panel-light-confirming-bg: #fff1f0;
@@ -1576,12 +1585,17 @@ body.editor-theme-light {
 :where(button:hover) {
   border-color: var(--pc-control-hover-border);
 }
-:where(button:disabled) {
+/* ONE owner for the unavailable-button appearance, and it must cover BOTH ways a button says so.
+   A control that stays focusable while it is busy carries `aria-disabled="true"` instead of
+   `disabled` -- setting `disabled` blurs the element the instant the attribute lands, so the user
+   loses focus mid-action (the Daemons Refresh button). Listing only `:disabled` here meant that
+   switch silently removed the dimming, and with it the "something is happening" signal. */
+:where(button:disabled, button[aria-disabled="true"]) {
   color: var(--text-muted-soft);
   cursor: not-allowed;
   opacity: 0.55;
 }
-:where(button:disabled:hover) {
+:where(button:disabled:hover, button[aria-disabled="true"]:hover) {
   border-color: var(--line);
 }
 .js-debug-stat,
@@ -1694,6 +1708,7 @@ body.editor-theme-light {
 .yoagent-composer-pill,
 .yoagent-backend-pill,
 .info-tree-ai-value,
+.backend-health-indicator,
 .file-editor-codemirror .cm-search label,
 .file-editor-codemirror-panel .cm-search label {
   display: inline-flex;
@@ -1790,6 +1805,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .tab-action-description,
 .terminal-drop-suggestion-label,
 .js-debug-system-kv dd,
+.backend-health-indicator-text,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;
@@ -2296,6 +2312,9 @@ button.topbar-status-surface {
 .topbar-status-surface[hidden] {
   display: none;
 }
+/* The one backend-health chip. Its severity is carried by the sentence it renders ("... is not
+   running" vs "... is degraded"), never by these colours alone -- they only reinforce a message that
+   already reads correctly in a monochrome or forced-colours theme. */
 .backend-health-indicator {
   min-width: 0;
   max-width: min(32vw, 20rem);
@@ -2307,6 +2326,28 @@ button.topbar-status-surface {
   border-radius: var(--radius-md);
   text-overflow: ellipsis;
   font-size: var(--ui-font-size-2xs);
+}
+.backend-health-indicator[data-backend-health="degraded"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning-border-strong) 12%, var(--panel2));
+  border-color: var(--warning-border-strong);
+}
+.backend-health-indicator-details {
+  flex: 0 0 auto;
+  padding: 0 var(--space-4);
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.backend-health-indicator-details:hover,
+.backend-health-indicator-details:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
 }
 button.topbar-status-surface:hover,
 button.topbar-status-surface:focus-visible {
@@ -4426,6 +4467,31 @@ body :is(
   display: none;
 }
 .js-debug-system-view {
+  /* NO `--js-debug-roster-header-offset` any more, and no second sticky layer to offset against.
+     ONE sticky layer, so there is no coupling to keep in sync.
+
+     What was here: a hardcoded `2.1rem` (33.6px) meant to equal the summary strip's height. Three
+     separate things were wrong with it, all measured in Chrome:
+       * the strip is a wrapping flex row, 32px on one line and 94px once it wraps, and a longer
+         locale wraps it where English does not -- so the constant was a second copy of a measured
+         quantity and only one of the two tracked reality;
+       * the strip was not actually sticky at all. It lives in a region wrapper whose box is
+         exactly its own height, and a sticky element only holds while its containing block is in
+         view, so it scrolled straight off: at a 320px pane its bottom edge sat at -10px while the
+         header held a 33.6px gap open for a strip that was no longer there;
+       * `.js-debug-roster-wrap { overflow-x: hidden }` makes the wrap a scroll container, so the
+         thead's nearest scrollport is the WRAP, not this view. The offset could therefore never
+         measure the distance it claimed to: the header pinned at 32px inside the wrap while the
+         summary pinned at 112px inside the view.
+     Driving the offset from a ResizeObserver was tried and rejected -- it would have kept the
+     number honest while leaving the third problem, so the two layers still could not be aligned.
+     The summary strip is the one worth pinning (counts, freshness, the refresh control); the
+     roster is eight rows, so its header scrolling away costs nothing. */
+  /* The roster is responsive to the PANEL it is in, not to the window. A dockview pane at a 1280px
+     window is around 980px wide, so a viewport media query would keep nine columns in a container
+     that cannot hold them and force a horizontal scrollbar. */
+  container-type: inline-size;
+  container-name: js-debug-system;
   min-height: 0;
   overflow: auto;
 }
@@ -4505,6 +4571,18 @@ body :is(
   padding: var(--space-12);
   color: var(--muted);
   text-align: center;
+}
+/* The summary strip is sticky, and it has to be the REGION that sticks. A sticky element only
+   holds while its own containing block is in view, and the strip lives inside a region wrapper
+   whose box is exactly the strip's height -- so `position: sticky` on the strip alone scrolled
+   straight off the top and never pinned at all. Measured before this: at a 320px pane the strip's
+   bottom edge sat at -10px while the roster header was pinned at +31.6px, i.e. the header was
+   holding a 33.6px gap open for a strip that was no longer there. */
+.js-debug-system-region[data-js-debug-system-region="summary"] {
+  position: sticky;
+  z-index: var(--z-layer-control);
+  top: 0;
+  background: var(--bg);
 }
 .js-debug-system-toolbar {
   position: sticky;
@@ -4618,43 +4696,67 @@ body :is(
   white-space: nowrap;
   overflow-wrap: normal;
 }
-.js-debug-system-local-services-table {
-  --js-debug-system-first-column-width: 10rem;
-  --js-debug-system-local-services-service-width: 9rem;
-  --js-debug-system-table-min-width: var(--js-debug-system-local-services-min-width, 46rem);
-}
 .js-debug-system-sampler-table {
   --js-debug-system-first-column-width: 9rem;
   --js-debug-system-table-min-width: 56rem;
 }
-.js-debug-system-local-services-table th:not(:first-child) {
-  width: var(--js-debug-system-local-services-service-width);
-  min-width: var(--js-debug-system-local-services-service-width);
-  vertical-align: top;
+/* Backend-health provenance: revision, staleness, history reset, persistence. A snapshot that
+   stopped updating has to look different from a current one, so the alert variant is bordered. */
+.js-debug-system-health-snapshot {
+  margin-block-end: var(--space-5);
+  padding: var(--space-5) var(--space-7);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font: var(--ui-font-size-xs)/1.4 var(--mono-font);
 }
-.js-debug-system-local-services-table td:not(:first-child) {
-  width: var(--js-debug-system-local-services-service-width);
-  min-width: var(--js-debug-system-local-services-service-width);
-  vertical-align: top;
+.js-debug-system-health-snapshot--alert {
+  border-color: var(--warning-border-strong);
+  color: var(--text);
 }
-.js-debug-system-local-services-table--rows {
-  --js-debug-system-table-min-width: 58rem;
-  table-layout: auto;
+.js-debug-system-health-snapshot [data-system-health-headline] {
+  margin: 0 0 var(--space-5);
+  color: var(--text);
 }
-.js-debug-system-local-services-table--rows th:first-child,
-.js-debug-system-local-services-table--rows td:first-child {
-  position: static;
-  width: auto;
-  min-width: 11rem;
-  white-space: normal;
+/* The counter denominator, stated once beneath the table it qualifies. It used to be a `nowrap`
+   fragment repeated in three column headers, where it pinned Latency, Requests and Errors to
+   121-127px apiece -- columns whose own numbers need ~68px -- and it could not shrink, so it cost
+   the roster roughly 160px of width to say one thing three times. */
+.js-debug-system-column-scope {
+  display: block;
+  margin: var(--space-5) 0 0;
+  color: var(--muted);
+  font-weight: normal;
+  text-align: start;
 }
-.js-debug-system-local-services-table--rows td:last-child {
-  min-width: 16rem;
+/* A count whose aggregate is partial carries a footnote marker in the cell; the reason sits in the
+   row directly beneath it. A partial count that looks complete is the defect this flag prevents.
+   The element is a real `<sup>`, so the raised, smaller glyph comes from the element and not from a
+   CSS-shrunk span. No inline start margin: a footnote marker belongs against the number it
+   qualifies (`826MB*`) -- a gap makes it read as a separate token. `line-height: 0` keeps the
+   raised glyph from growing the roster's already dense line boxes. */
+.js-debug-system-coverage-flag {
+  line-height: 0;
+  color: var(--warning-border-strong);
+}
+/* The retained observation for one service, inside that service's own disclosure. */
+.js-debug-system-health-row {
+  text-align: start;
   white-space: normal;
   overflow-wrap: anywhere;
+  color: var(--muted);
 }
-.js-debug-system-local-services-table thead th:not(:first-child) {
-  text-align: end;
+.js-debug-system-health-row p {
+  margin: 0 0 var(--space-3);
+}
+/* `--space-9` is 9px. A list marker renders OUTSIDE the content box, so 9px of padding left "1."
+   hanging past the list's inline start, where `.js-debug-roster-wrap { overflow-x: hidden }`
+   clipped it -- the transition list rendered ". rev #6" instead of "1. rev #6". The marker needs
+   room inside the box, and a two-digit ordinal ("16.") is the widest one the 16-row transition
+   window can produce. */
+.js-debug-system-health-notes,
+.js-debug-system-health-transitions {
+  margin: 0 0 var(--space-3);
+  padding-inline-start: 3ch;
 }
 .js-debug-system-service-name {
   display: block;
@@ -4662,24 +4764,384 @@ body :is(
   color: var(--text);
   font-family: var(--ui-font);
 }
-.js-debug-system-local-services-table [data-js-debug-service-row="queues"] th,
-.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
-  border-block-end: 0;
-  vertical-align: top;
+/* ---------------------------------------------------------------------------------------------
+   THE DAEMONS ROSTER
+   One full-width list of every daemon, above everything else. The old default view was a grid of
+   bordered summary cards that filled the first screen before the roster; the cards now live in one
+   collapsed Advanced section and this is what a reader sees first.
+   --------------------------------------------------------------------------------------------- */
+.js-debug-system-region {
+  min-width: 0;
 }
-.js-debug-system-local-services-table [data-js-debug-service-row="queues"] td {
+.js-debug-system-region + .js-debug-system-region {
+  margin-block-start: var(--space-8);
+}
+/* Empty regions collapse so no gap is spent on an alert slot with nothing in it. */
+.js-debug-system-region:empty {
+  display: none;
+}
+.js-debug-roster-summary {
+  flex-wrap: wrap;
+}
+.js-debug-roster-summary-title {
+  margin: 0;
+  color: var(--text);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+}
+.js-debug-roster-summary-facts {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: var(--space-4) var(--space-10);
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+/* ONE compact inline alert above the roster, never a second large alert card and never repeated
+   per row. */
+.js-debug-system-alert {
+  padding: var(--space-5) var(--space-8);
+  border: 1px solid var(--warning-border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: var(--ui-font-size-xs)/1.4 var(--ui-font);
+}
+.js-debug-system-alert p {
+  margin: 0;
+}
+.js-debug-system-alert p + p {
+  margin-block-start: var(--space-4);
+}
+.js-debug-roster-wrap {
+  overflow-x: hidden;
+}
+.js-debug-system-table.js-debug-roster-table {
+  inline-size: 100%;
+  min-inline-size: 0;
+  table-layout: auto;
+  font-variant-numeric: tabular-nums;
+}
+/* Quiet separators: horizontal rules only. The per-cell vertical gridlines that suit a dense
+   diagnostic table make a scannable roster look like graph paper. */
+.js-debug-roster-table th,
+.js-debug-roster-table td {
+  border-inline-end: 0;
+  vertical-align: baseline;
+}
+/* Deliberately NOT sticky -- see `.js-debug-system-view`. The summary strip is the one pinned
+   layer; a second one could not be aligned with it, because this header's scrollport is the
+   roster wrap rather than the panel. */
+.js-debug-roster-table thead th {
+  color: var(--muted);
+  background: var(--bg);
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* Service holds "approvald". A 12rem floor made the widest short string in the table set the
+   widest column in the table, and auto layout then scaled that lead up at every width. */
+.js-debug-system-table.js-debug-roster-table th.js-debug-roster-service,
+.js-debug-system-table.js-debug-roster-table td.js-debug-roster-service {
+  inline-size: auto;
+  min-inline-size: 8rem;
+  white-space: normal;
+}
+/* Deliberately NO `max-inline-size` here, though the status explanation is the widest string in the
+   column. It was tried and MEASURED: capping the cell changed the nine-column min/max content by
+   0px, because auto table layout sizes a column from its content's max-content and ignores a
+   max-width on the cell box. Capping the explanation's own measure to 10rem moved the column by 5%
+   while wrapping "Control client is attached" onto two lines -- a bad trade. The width Status was
+   really costing came from the scope caption in the headers, now stated once below the table. */
+.js-debug-roster-table .js-debug-roster-statuscell,
+.js-debug-roster-table .js-debug-roster-statushead {
+  text-align: start;
+  white-space: normal;
+}
+.js-debug-roster-row:hover > th,
+.js-debug-roster-row:hover > td {
+  background: color-mix(in srgb, var(--panel2) 70%, transparent);
+}
+.js-debug-roster-row--child > th,
+.js-debug-roster-row--child > td {
+  color: var(--muted);
+}
+.js-debug-roster-row--child .js-debug-roster-toggle {
+  padding-inline-start: var(--space-10);
+}
+/* The disclosure control. A real <button>, so mouse, Enter and Space all reach the one click
+   handler, and it fills its cell so the whole service name is the target. */
+.js-debug-roster-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  inline-size: 100%;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: none;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+.js-debug-roster-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.js-debug-roster-chevron {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+.js-debug-roster-qualifier {
+  color: var(--muted);
+}
+.js-debug-roster-status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-4);
+  background: none;
+  padding: 0;
+}
+/* Status is dot PLUS word PLUS `data-subsystem-state`; the dot glyph itself differs between idle
+   and everything else, so colour is never the only carrier. */
+.js-debug-roster-dot {
+  font-size: var(--ui-font-size-xs);
+}
+.js-debug-system-state--warn {
+  color: var(--warning-border-strong);
+}
+.js-debug-system-state--muted {
+  color: var(--muted);
+}
+.js-debug-roster-reason {
+  display: block;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+/* An author `display` beats the UA's `[hidden] { display: none }` whatever the specificity, so a
+   row with no explanation was rendering an empty block. Harmless while it was zero-height inside a
+   cell; at phone width it is a grid item and would hold a whole row gap open. */
+.js-debug-roster-reason[hidden] {
+  display: none;
+}
+/* The column's name, carried inside the cell for the width at which `thead` is hidden. Same string
+   as the header, from the same `column.labelKey`; shown if and only if the header is not. */
+.js-debug-roster-celllabel {
+  display: none;
+}
+.js-debug-roster-sep {
+  color: var(--muted);
+}
+/* Qualified by the table class. `.js-debug-system-table th, .js-debug-system-table td` sits below
+   this rule in the file and ties it on specificity (0,1,1), so source order decided the padding
+   and this block silently rendered with the dense 5px/7px table cell padding at every width --
+   the roomier disclosure padding written here had never once applied. */
+.js-debug-system-table .js-debug-roster-detailrow > td {
+  padding: var(--space-8) var(--space-10);
+  background: var(--panel2);
+  text-align: start;
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.js-debug-system-service-cell--fresh {
-  color: var(--text);
+/* The detail spans every column, because it belongs to the whole row -- but spanning is not licence
+   to lay out across the full table. At 2400px the label/value pairs sat at opposite ends of ~1700px
+   and the eye could not connect them, so the block read as a separate document wedged between two
+   rows. Packing the pairs into measured columns keeps each label beside its own value, and the
+   indent lines the block up under the service name that owns it. */
+.js-debug-roster-detail {
+  padding-inline-start: var(--space-10);
+  border-inline-start: 2px solid var(--line);
 }
-.js-debug-system-service-cell--stale,
-.js-debug-system-service-cell--prev {
+.js-debug-roster-detail .js-debug-system-kv {
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 28rem));
+  gap: var(--space-3) var(--space-10);
+}
+/* Label and value adjacent, and the value left-aligned against its own label rather than flung to
+   the far edge of the table. */
+.js-debug-roster-detail .js-debug-system-kv > div {
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: var(--space-6);
+}
+.js-debug-roster-detail .js-debug-system-kv dd {
+  text-align: start;
+}
+/* Paragraphs and lists read as prose, not as a table cell stretched to 1700px. */
+.js-debug-roster-detail .js-debug-system-health-row,
+.js-debug-roster-detail > .js-debug-roster-note {
+  max-inline-size: 78ch;
+}
+/* The copies of the columns the layout may drop. They exist in the markup at every width so no
+   number is ever unreachable, but they are only SHOWN at the width where the column itself is
+   hidden -- otherwise the disclosure restates seven values sitting inches above it. */
+.js-debug-roster-dropped {
+  display: none;
+}
+.js-debug-roster-detail-title {
+  margin: var(--space-8) 0 var(--space-5);
+  color: var(--text);
+  font: 700 var(--ui-font-size-xs)/1.2 var(--ui-font);
+}
+.js-debug-roster-detail > :first-child,
+.js-debug-roster-detail .js-debug-roster-detail-title:first-child {
+  margin-block-start: 0;
+}
+.js-debug-roster-note {
+  margin: var(--space-5) 0 0;
   color: var(--muted);
 }
-.js-debug-system-service-cell--prev {
-  font-style: italic;
+.js-debug-system-advanced > summary {
+  padding: var(--space-6) 0;
+  color: var(--muted);
+  font: 700 var(--ui-font-size-sm)/1.2 var(--ui-font);
+  cursor: pointer;
+}
+.js-debug-system-advanced > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Responsive: below this width the secondary metrics leave the row rather than forcing a
+   page-level horizontal scrollbar or a clipped table. Every value they carry is repeated in the
+   row's own disclosure, so nothing becomes unreachable -- Service, Status, Latency and Uptime stay
+   visible at every width.
+
+   The threshold is MEASURED, not chosen. Nine columns need 702px (43.9rem) of min-content once the
+   scope caption leaves the three headers -- and needed 869px (54.3rem) even before that. Both are
+   far below the 72rem this query used to test, so the roster was dropping five columns while ~18rem
+   of panel sat unused: that is why a 10% window increase bought five columns. 48rem sits just above
+   the measured minimum, so the drop happens when the table is genuinely out of room.
+   `tests/system_health_panel.test.js` pins this number against the column list that has to fit
+   inside it, so a new column cannot silently push the content back past the threshold. */
+@container js-debug-system (max-width: 48rem) {
+  .js-debug-roster-table .js-debug-roster-cell--secondary {
+    display: none;
+  }
+  /* Exactly the width at which the columns above are hidden -- so the disclosure's copies appear
+     if and only if the row's own cells are gone. One threshold, stated once. */
+  .js-debug-roster-dropped {
+    display: block;
+  }
+}
+/* PHONE WIDTH: the row stops being a table row and becomes the two-line service row this section
+   has always described.
+
+   What used to be here was `table-layout: fixed` plus `overflow-wrap: anywhere`, with a comment
+   claiming the result "reads as a two-line list per service". MEASURED in Chrome at a 390px
+   container -- the exact width the rule exists for -- it did not:
+     * the four surviving columns were 140px / 83px / 83px / 83px;
+     * a row with no status explanation was ONE line, not two (indexd, statsd, jobd, statusd);
+     * `tmux-signal-watcher` and a down `watchd` were FOUR line boxes, because a whole sentence was
+       being folded into an 83px column -- "Control client is attached" rendered as
+       `Control` / `client is` / `attached`, and at 320px as `Control` / `client` / `is` /
+       `attached`;
+     * the two structural em dashes each held 83px of a 390px screen while carrying no number;
+     * the table's own min-content in that regime measures 355px, so 390px was not short of room --
+       it was spending what it had on four columns nobody could read.
+
+   The layout below is the two lines, stated once:
+     line 1  the service name, and its state on the right;
+     line 2  every surviving metric beside its own name (`.js-debug-roster-celllabel`, which is
+             shown if and only if `thead` is hidden -- the same one-copy contract
+             `.js-debug-roster-dropped` has with the columns it copies);
+     line 3  ONLY when the service published an explanation, that sentence at full width. Four
+             facts and a sentence do not share a 390px line, and shredding the sentence into an
+             83px column is what this rule exists to stop.
+   `tests/test_gate_panels.py` measures the rendered line boxes at 390px; the rules are pinned in
+   `tests/system_health_panel.test.js`. */
+@container js-debug-system (max-width: 36rem) {
+  /* The table's boxes stop being table boxes so the row can lay out as a grid. Table semantics do
+     not survive `display: block` in any engine, which is why every element in the roster markup
+     carries its explicit ARIA role -- see `debugSystemRosterHeaderHtml`. */
+  .js-debug-system-table.js-debug-roster-table,
+  .js-debug-roster-table > tbody {
+    display: block;
+    inline-size: auto;
+    min-inline-size: 0;
+  }
+  /* A header row cannot label a stacked row, and the labels it carried are now in the cells. */
+  .js-debug-roster-table > thead {
+    display: none;
+  }
+  .js-debug-roster-celllabel {
+    display: inline;
+    margin-inline-end: var(--space-4);
+    color: var(--muted);
+  }
+  .js-debug-roster-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+    column-gap: var(--space-8);
+    row-gap: var(--space-3);
+    padding: var(--space-5);
+    border-block-end: 1px solid var(--line);
+  }
+  .js-debug-roster-detailrow {
+    display: block;
+  }
+  /* An author `display` beats the UA's `[hidden] { display: none }`, so a collapsed disclosure
+     would otherwise become visible at exactly this width. */
+  .js-debug-roster-detailrow[hidden] {
+    display: none;
+  }
+  /* Deliberately NO `display` here. A grid item is blockified by the grid container, so the cells
+     stop being table cells on their own -- and writing `display: block` would have OVERRIDDEN the
+     48rem rule that hides the five secondary columns, putting all seven metrics back on the row at
+     the narrowest width. Measured: it produced seven implicit grid columns and a 307px row.
+     Both groups are qualified by BOTH table classes: `.js-debug-system-table td:first-child` and
+     `.js-debug-system-table th, td` sit further down the file, and a one-class prefix ties them on
+     specificity and loses on order -- measured, that handed a stacked cell its table padding, its
+     rule line, and a literal `inline-size: 1%`. */
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-row > th,
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-row > td {
+    inline-size: auto;
+    min-inline-size: 0;
+    padding: 0;
+    border: 0;
+    white-space: normal;
+  }
+  /* `inline-size: auto` undoes the `td:first-child { inline-size: 1% }` shrink-to-fit trick further
+     down the file. It means "as narrow as the content" to a table cell and a literal 1% to a
+     blockified one: measured, the open disclosure's cell was 14px wide -- its padding and nothing
+     else -- so every dropped metric was present, laid out, and invisible. */
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-detailrow > td {
+    display: block;
+    inline-size: auto;
+    border: 0;
+    white-space: normal;
+  }
+  /* The status cell's two children are laid out on two different lines, so the cell box itself
+     steps out of the way and they become grid items of the row. */
+  .js-debug-system-table.js-debug-roster-table .js-debug-roster-row > .js-debug-roster-statuscell {
+    display: contents;
+  }
+  /* LINE 1: who it is, and what it is doing. */
+  .js-debug-system-table.js-debug-roster-table th.js-debug-roster-service {
+    grid-area: 1 / 1;
+    inline-size: auto;
+    min-inline-size: 0;
+  }
+  .js-debug-roster-row .js-debug-roster-status {
+    grid-area: 1 / 2;
+  }
+  /* LINE 2: the metrics that survived this width, each beside its own name. */
+  .js-debug-roster-row > .js-debug-roster-cell {
+    grid-row: 2;
+  }
+  /* LINE 3: the explanation, at the full width of the row, as one sentence. */
+  .js-debug-roster-row .js-debug-roster-reason {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    overflow-wrap: break-word;
+  }
+  .js-debug-roster-toggle {
+    flex-wrap: wrap;
+    min-inline-size: 0;
+  }
+  /* Flex items refuse to shrink below min-content unless told to. Without this the service name is
+     the reason the first line cannot narrow. */
+  .js-debug-roster-toggle > * {
+    min-inline-size: 0;
+    overflow-wrap: break-word;
+  }
+  .js-debug-roster-summary-facts {
+    gap: var(--space-3) var(--space-6);
+  }
 }
 .js-debug-system-table-wrap {
   max-width: 100%;
@@ -5104,25 +5566,6 @@ body :is(
   background: color-mix(in srgb, var(--bad) 14%, var(--panel));
   color: var(--text);
   font: 700 var(--ui-font-size-sm)/1.45 var(--ui-font);
-}
-.js-debug-system-recovery-banner {
-  display: flex;
-  min-height: 80px;
-  margin: var(--space-12) 0;
-  padding: var(--space-12);
-  flex-direction: column;
-  justify-content: center;
-  gap: var(--space-5);
-  border: 4px solid var(--bad);
-  border-radius: var(--radius-control);
-  background: color-mix(in srgb, var(--bad) 22%, var(--panel));
-  color: var(--text);
-  font: 700 1rem/1.4 var(--ui-font);
-  overflow-wrap: anywhere;
-}
-.js-debug-system-recovery-banner strong {
-  color: var(--bad);
-  font-size: 1.25em;
 }
 .js-debug-chart-shell > .js-debug-chart-grid {
   --js-debug-chart-min-height: 172px;
@@ -6958,6 +7401,17 @@ body :is(
   border-radius: var(--radius-pill);
   background: var(--accent-gold);
   vertical-align: 1px;
+}
+/* A freshness warning is a settled fact, not work in progress: the shared dot stops pulsing, and the
+   sentence itself (not the colour) carries the meaning. */
+.command-palette-status.stale::before {
+  animation: none;
+}
+.command-palette-freshness {
+  display: inline-block;
+  max-width: 100%;
+  line-height: 1.35;
+  white-space: normal;
 }
 .command-palette-status::before,
 .yoagent-message.assistant.streaming .yoagent-message-role::after {

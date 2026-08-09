@@ -323,11 +323,14 @@ def test_session_files_view_skips_deleted_root_from_durable_transcript_cache(tmp
     }, max_bytes=jobd.JOBD_MAX_RESULT_BYTES - 4096)
 
     assert result["status"] == 200
-    assert any(
-        warning.get("key") == "common.pathNotFound"
-        and warning.get("params", {}).get("reason_code") == "root_gone"
-        for warning in result["payload"]["warnings"]
-    )
+    # A retired worktree crosses the worker boundary as ONE typed repo row, not as a warning and
+    # not as one row per remembered file.
+    assert result["payload"]["warnings"] == []
+    assert result["payload"]["files"] == []
+    gone = [repo for repo in result["payload"]["repos"] if repo.get("missing") is True]
+    assert len(gone) == 1, result["payload"]["repos"]
+    assert gone[0]["repo"] == str(retired_root)
+    assert gone[0]["touched_count"] == 1
     assert cache_path.exists()
 
 
@@ -1504,7 +1507,13 @@ def test_jobd_timed_out_running_work_keeps_its_slot_and_recovers_after_worker_ex
 
     assert timed_out.status == "timed_out"
     assert service.common_status()["product_counters"]["text_facts"]["timed_out"] == 1
-    assert service.common_status()["last_failure"] == "deadline exceeded while executing"
+    # A timed-out job is HISTORICAL work failure and must not read as a CURRENT daemon
+    # failure. Publishing it as `last_failure` pinned a healthy, serving jobd to
+    # degraded/terminal_failure in the health observer - permanently, because nothing
+    # clears it. Two meanings, two names; both directions asserted.
+    _status = service.common_status()
+    assert _status["last_job_failure"] == "deadline exceeded while executing"
+    assert not _status.get("last_failure"), _status.get("last_failure")
     assert waiting.status == "queued"
     timed_out.future.set_result(b'{"bytes":4,"lines":1,"nonempty_lines":1}')
     service._pump()

@@ -110,14 +110,37 @@ def nofollow_flag() -> int:
     return flag
 
 
-def _parsed_path(raw: str) -> Path:
+def validate_request_path_lexical(raw: str) -> str:
+    """Return the one lexical acceptance rule every filesystem request must pass.
+
+    These three refusals read only the request string: no descriptor, no authorization, no
+    filesystem access and no name service.  That is what makes them safe on the web thread, which
+    applies them before it accepts an operation, so a request the worker would refuse can never be
+    accepted as a 202 receipt.  This is the only implementation of the rule; the jobd worker
+    reaches it through ``parsed_request_path``.
+
+    Expansion is deliberately NOT part of it.  ``os.path.expanduser`` on a ``~user/...`` path is an
+    NSS/passwd lookup, which blocks on a networked passwd source and would stall every request
+    sharing the web process -- exactly the work the operation queue exists to move off this thread.
+    """
+
     if not isinstance(raw, str) or not raw:
         raise FilesystemError("path is required", message_key="fs.error.pathRequired")
     if "\x00" in raw or "\n" in raw or "\r" in raw:
         raise FilesystemError("path contains illegal characters", message_key="fs.error.pathIllegal")
     if not raw.startswith("/") and not raw.startswith("~"):
         raise FilesystemError("path must be absolute", message_key="fs.error.pathAbsolute")
-    return Path(os.path.expanduser(raw))
+    return raw
+
+
+def parsed_request_path(raw: str) -> Path:
+    """Apply the lexical acceptance rule, then expand the user -- worker side only.
+
+    ``expanduser`` may block on a name-service lookup, so every caller of this function must
+    already be off the web thread.  Web-thread acceptance calls ``validate_request_path_lexical``.
+    """
+
+    return Path(os.path.expanduser(validate_request_path_lexical(raw)))
 
 
 def _canonical_root(path: Path) -> Path:
@@ -452,7 +475,7 @@ def safe_path(
 ) -> Iterator[SafePathHandle]:
     """Resolve once, authorize that value, then consume only its no-follow descriptor."""
 
-    requested = _parsed_path(raw_path)
+    requested = parsed_request_path(raw_path)
     if observe_name:
         name_observed(operation, requested)
     resolved = resolved_path if resolved_path is not None else _normalized_scope_path(requested)
@@ -530,7 +553,7 @@ def safe_parent(
 ) -> Iterator[SafeParentHandle]:
     """Pin the authorized lexical parent before a create, rename, or delete."""
 
-    requested = _parsed_path(raw_path)
+    requested = parsed_request_path(raw_path)
     observed_paths = (requested, *additional_requested)
     for observed_path in observed_paths:
         name_observed(operation, observed_path)

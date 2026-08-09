@@ -92,7 +92,19 @@ const fileExplorerFsBatchOperations = new Map();
 // the bounded completion so the queued item can repair immediately on arrival.
 const fileExplorerFsBatchReadyGenerations = new Map();
 const fileExplorerFsBatchDelayMs = 8;
-const fileExplorerFsBatchTriggerCountLimit = 64;
+// The bounds /api/fs/batch refuses above are SERVER facts, and the server states them in the boot
+// payload (`filesystemBatchLimits` in yolomux_lib/web.py) exactly the way it states maxSessionTabs.
+// `filesystem.MAX_BATCH_REQUESTS` stays the one copy: the server refuses a body above it with a 400
+// invalid_request, its own watch-batch producer chunks at it (`submit_filesystem_watch_batches`),
+// and this flush splits at it. A literal here would be a fourth copy free to drift from all three.
+// A payload that does not state a bound is a server this bundle cannot make a bounded promise
+// about, so it falls back to the only size no server can refuse for being too large: one item.
+function fileExplorerServerStatedLimit(value, unstated) {
+  return Number.isSafeInteger(value) && value > 0 ? value : unstated;
+}
+const fileExplorerFsBatchLimits = (typeof bootstrap === 'object' && bootstrap?.filesystemBatchLimits) || {};
+const fileExplorerFsBatchRequestLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.maxRequests, 1);
+const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.triggerCountLimit, 1);
 let fileExplorerFsBatchSeq = 0;
 let fileExplorerFsBatchTimer = null;
 const FILE_EXPLORER_FS_BATCH_TRIGGERS = new Set([
@@ -491,10 +503,19 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
   });
 }
 
-async function flushFileExplorerFsBatch() {
-  fileExplorerFsBatchTimer = null;
-  const items = fileExplorerFsBatchQueue.splice(0);
-  if (!items.length) return;
+function fileExplorerFsBatchChunks(items) {
+  // Consecutive slices in queue order, like the server's own root partitioner: chunk n owns items
+  // [offset, offset + size), nothing is reordered and nothing is dropped.
+  const size = fileExplorerFsBatchRequestLimit;
+  const chunks = [];
+  for (let offset = 0; offset < items.length; offset += size) chunks.push(items.slice(offset, offset + size));
+  return chunks;
+}
+
+async function postFileExplorerFsBatchChunk(items) {
+  // One chunk settles its own items and NEVER throws: a chunk that fails must not decide anything
+  // for the chunks around it, and every item it owns must end resolved, rejected, or admitted as a
+  // queued operation. A promise left unsettled here hangs whatever awaited that directory listing.
   const requests = items.map(item => {
     item.sent = true;
     return {id: item.id, type: item.type, path: item.path, trigger_counts: item.triggerCounts};
@@ -509,11 +530,35 @@ async function flushFileExplorerFsBatch() {
     for (const item of items) {
       settleFileExplorerFsBatchItem(item, responses.get(item.id) || {ok: false, status: 500, error: t('common.requestFailed')});
     }
+    return {ok: true};
   } catch (error) {
     if (acceptFileExplorerFsBatchOperation(items, error)) return {ok: true, pending: true};
-    const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
-    return {ok: results.every(result => result.ok === true)};
+    try {
+      const results = await Promise.all(items.map(fetchFileExplorerFsBatchSingleItem));
+      return {ok: results.every(result => result.ok === true)};
+    } catch (fallbackError) {
+      for (const item of items) rejectFileExplorerFsBatchItem(item, fallbackError);
+      return {ok: false};
+    }
   }
+}
+
+async function flushFileExplorerFsBatch() {
+  fileExplorerFsBatchTimer = null;
+  const items = fileExplorerFsBatchQueue.splice(0);
+  if (!items.length) return {ok: true, chunks: 0};
+  // The whole queue used to go into ONE body. A Differ pointed at a worktree that was deleted
+  // re-lists every open directory at once, which is routinely more than the server accepts, and the
+  // server refused the entire body with a 400 invalid_request — so an operation touching more than
+  // the bound failed outright rather than being split. Chunks are posted in order, one at a time,
+  // so a mass re-list does not turn into a simultaneous fan-out of requests either.
+  const results = [];
+  for (const chunk of fileExplorerFsBatchChunks(items)) results.push(await postFileExplorerFsBatchChunk(chunk));
+  return {
+    ok: results.every(result => result.ok === true),
+    chunks: results.length,
+    ...(results.some(result => result.pending === true) ? {pending: true} : {}),
+  };
 }
 
 async function fetchDirectory(path, options = {}) {
@@ -2655,7 +2700,16 @@ function sortedFileTreeEntries(entries, sortMode = fileExplorerTreeSortModeForVi
   }
   const mode = ['az', 'za', 'newest', 'oldest'].includes(sortMode) ? sortMode : 'az';
   const direction = mode === 'za' ? -1 : 1;
+  // Differ only. A deleted file is a real diff result and stays a visible child, but a run of them
+  // interleaved with live edits is what a reader has to skip past to find the file they can still
+  // open. Ranking deletion ahead of every other key groups deleted children at the bottom of each
+  // directory. Directories are not ranked: they carry no `deleted` flag and keep their existing
+  // dirs-before-files order. Finder listings carry no `deleted` either, so passing this option
+  // there is a no-op rather than a second ordering rule.
+  const deletedRank = entry => options.deletedLast === true && entry?.deleted === true ? 1 : 0;
   return visible.sort((left, right) => {
+    const deletedResult = deletedRank(left) - deletedRank(right);
+    if (deletedResult !== 0) return deletedResult;
     const leftKind = left.kind === 'dir' ? 0 : 1;
     const rightKind = right.kind === 'dir' ? 0 : 1;
     if (leftKind !== rightKind) return leftKind - rightKind;
@@ -3229,7 +3283,7 @@ function renderTreeChildren(container, parentPath, entries, depth, options = {})
   };
   const entriesByDir = renderOptions.entriesByDir instanceof Map ? renderOptions.entriesByDir : null;
   const tabberWindowOrder = renderOptions.mode === 'tabber' && entries.length > 0 && entries.every(entry => entry?.tabber?.type === 'window');
-  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder});
+  const visible = sortedFileTreeEntries(entries, renderOptions.treeSortMode, {includeHidden: renderOptions.includeHidden === true, tabberWindowOrder, deletedLast: renderOptions.differMode === true});
   const existingRows = new Map(fileTreeDirectRows(container).map(row => [row.dataset.path, row]));
   const nextNodes = [];
   for (const entry of visible) {
@@ -3866,7 +3920,7 @@ function fileExplorerIndexBadgeText(path) {
   if (fileExplorerDirectoryIsIndexed(path)) {
     const normalized = normalizeStoredFileExplorerIndexedDir(path);
   const status = fileExplorerIndexStatus.get(normalized);
-  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : t('finder.index.indexed')));
+  return status === 'building' ? '…' : (status === 'too_large' ? '!' : (status === 'error' ? '×' : (status === 'stale' ? t('finder.index.staleBadge') : t('finder.index.indexed'))));
   }
   if (fileExplorerIndexedAncestor(path)) return '';
   return '';
@@ -3879,7 +3933,49 @@ function fileExplorerIndexBadgeTitle(path) {
   const status = fileExplorerIndexStatus.get(normalized);
   if (status === 'too_large') return t('finder.index.partial');
   if (status === 'error') return t('common.errorDetail', {error: ''});
+  if (status === 'stale') return t('finder.index.staleTitle');
   return t(status === 'building' ? 'finder.index.indexing' : 'finder.index.indexed');
+}
+
+// The ONE file-index freshness derivation for every surface. `/api/fs/search` and
+// `/api/fs/index-status` both spread `SnapshotFreshness.payload_fields()`
+// (yolomux_lib/search/file_index.py), so the Finder index badge and Quick Open read this record and
+// nothing else. A second copy of this judgement is exactly how the live incident shipped: a snapshot
+// whose producer was dead degraded to "building" and the user was told nothing at all.
+const FILE_INDEX_STALE_FRESHNESS_STATES = ['stale', 'orphaned'];
+
+function fileIndexFreshnessFromPayload(payload) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const state = String(source.freshness || '');
+  const rawAge = Number(source.snapshot_age_seconds);
+  return {
+    state,
+    reason: String(source.freshness_reason || ''),
+    producerState: String(source.producer_state || ''),
+    ageSeconds: Number.isFinite(rawAge) && rawAge >= 0 ? rawAge : null,
+    // `stale`, `freshness`, `index_state` and `index_coverage` are four projections of ONE backend
+    // verdict. Read them together here so no caller can re-derive a friendlier answer from one of
+    // them; `missing` is deliberately not stale, because nothing was served to mislabel.
+    stale: source.stale === true
+      || FILE_INDEX_STALE_FRESHNESS_STATES.includes(state)
+      || String(source.index_state || '') === 'follower-stale'
+      || String(source.index_coverage || '') === 'unverified',
+    refreshingElsewhere: source.refreshing_elsewhere === true,
+  };
+}
+
+// Words a non-engineer can act on, never a raw field dump. Rendered (not derived) so a locale change
+// re-renders the same record in the new language.
+function fileIndexFreshnessMessage(freshness) {
+  if (!freshness || freshness.stale !== true) return '';
+  const lines = [freshness.ageSeconds === null
+    ? t('finder.index.staleResultsUnknownAge')
+    : t('finder.index.staleResults', {age: relativeTimeFormat(freshness.ageSeconds)})];
+  if (freshness.producerState === 'not_running') lines.push(t('finder.index.staleProducerNotRunning'));
+  else if (freshness.producerState === 'unrecorded') lines.push(t('finder.index.staleProducerUnrecorded'));
+  else if (freshness.reason === 'producer_vouch_expired') lines.push(t('finder.index.staleProducerBehind'));
+  if (freshness.refreshingElsewhere) lines.push(t('finder.index.staleRefreshRunning'));
+  return lines.join(' ');
 }
 
 // Warm the backend index for a root (kicks the build) and preserve partial coverage as a distinct,
@@ -3887,8 +3983,11 @@ function fileExplorerIndexBadgeTitle(path) {
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
+  const freshness = fileIndexFreshnessFromPayload(payload);
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
   if (state === 'error' || payload.error) return 'error';
+  // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
+  if (freshness.stale) return 'stale';
   if (payload.ready === true || payload.ready_elsewhere === true || state === 'ready') return 'ready';
   return 'building';
 }
@@ -3933,7 +4032,7 @@ function applyFileIndexStatusPayload(root, payload) {
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
   if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
-  else if (status === 'ready') fileIndexPartialWarningRoots.delete(normalized);
+  else if (status === 'ready' || status === 'stale') fileIndexPartialWarningRoots.delete(normalized);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
@@ -3979,7 +4078,9 @@ function syncFileIndexStatusPollInterval() {
 function ensureFileIndexStatus(path) {
   const normalized = normalizeStoredFileExplorerIndexedDir(path);
   if (!normalized || !fileExplorerIndexedDirs.has(normalized)) return;
-  if (['ready', 'too_large'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
+  // `stale` is a settled answer, not progress: polling it per rendered row cannot revive a dead
+  // producer, it only spams the endpoint.
+  if (['ready', 'too_large', 'stale'].includes(fileExplorerIndexStatus.get(normalized)) || fileIndexStatusPollRoots.has(normalized)) return;
   refreshFileIndexStatus(normalized);
 }
 

@@ -149,6 +149,22 @@ function serverDefaultSettings(...keys) {
   }));
 }
 
+function serverFilesystemBatchLimits() {
+  // The /api/fs/batch bounds come from the ONE owner, yolomux_lib/filesystem/__init__.py, the same
+  // way the real boot payload does. A literal here would be a copy free to drift from the constant
+  // the server actually refuses above, which is the whole reason the bundle stopped carrying one.
+  const source = fs.readFileSync(require('path').join(__dirname, '..', '..', 'yolomux_lib', 'filesystem', '__init__.py'), 'utf8');
+  const maxRequestsMatch = source.match(/^MAX_BATCH_REQUESTS = (\d+)$/m);
+  if (!maxRequestsMatch) throw new Error('layout_test_helper: MAX_BATCH_REQUESTS not found in yolomux_lib/filesystem/__init__.py');
+  const maxRequests = Number(maxRequestsMatch[1]);
+  const triggerMatch = source.match(/^BATCH_TRIGGER_COUNT_LIMIT = (MAX_BATCH_REQUESTS|\d+)$/m);
+  if (!triggerMatch) throw new Error('layout_test_helper: BATCH_TRIGGER_COUNT_LIMIT not found in yolomux_lib/filesystem/__init__.py');
+  const triggerCountLimit = triggerMatch[1] === 'MAX_BATCH_REQUESTS' ? maxRequests : Number(triggerMatch[1]);
+  return {maxRequests, triggerCountLimit};
+}
+
+const SERVER_FILESYSTEM_BATCH_LIMITS = Object.freeze(serverFilesystemBatchLimits());
+
 const DEFAULT_TEST_SETTINGS = Object.freeze({
   appearance: Object.freeze({}),
   editor: Object.freeze({
@@ -660,6 +676,11 @@ function loadYolomux(search = '', sessions = ['1', '2', '3', '4', '5', '6'], pro
     homePath: '/home/test',
     repoRoot: '/home/test/yolomux.dev',
     maxSessionTabs: 99,
+    // The real server always states the bounds /api/fs/batch refuses above (yolomux_lib/web.py),
+    // and the bundle splits its posts at maxRequests. Seed the production values so every suite
+    // exercises the configuration a browser actually boots into; the tests that care about the
+    // split or about an unstated bound override this key explicitly.
+    filesystemBatchLimits: {...SERVER_FILESYSTEM_BATCH_LIMITS},
     serverHostname: 'test-host',
     localeRegistry: {
       fallback: 'en',
@@ -1045,7 +1066,11 @@ globalThis.__layoutTestApi = {
   fileQuickOpenSearchText,
   fileQuickOpenScopeLabel,
   fileIndexStatusFromPayloadForTest: fileIndexStatusFromPayload,
+  fileIndexFreshnessFromPayloadForTest: fileIndexFreshnessFromPayload,
+  fileIndexFreshnessMessageForTest: fileIndexFreshnessMessage,
+  fileQuickOpenWorstFreshnessForTest: fileQuickOpenWorstFreshness,
   applyFileIndexStatusPayloadForTest: applyFileIndexStatusPayload,
+  fileExplorerIndexBadgeTitleForTest: fileExplorerIndexBadgeTitle,
   fileExplorerIndexStatusForTest(root) { return fileExplorerIndexStatus.get(normalizeStoredFileExplorerIndexedDir(root)) || ''; },
   showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
   clearFileIndexPartialWarningsForTest() { fileIndexPartialWarningRoots.clear(); },
@@ -1717,6 +1742,17 @@ globalThis.__layoutTestApi = {
   setNotificationDeliveryForTest(value = {}) { notificationDelivery = {inApp: value.inApp === true, system: value.system === true}; },
   queueClientPushEventForTest: queueClientPushEvent,
   handleClientPushEventForTest: handleClientPushEvent,
+  clientServerPushEventTypesForTest: () => [...clientServerPushEventTypes],
+  backendHealthStateForTest: () => ({...backendHealthState, resources: backendHealthState.resources.map(item => ({...item}))}),
+  backendHealthIndicatorModelForTest: backendHealthIndicatorModel,
+  applyBackendHealthPayloadForTest: applyBackendHealthPayload,
+  noteBackendHealthFailureForTest: noteBackendHealthFailure,
+  noteBackendHealthSuccessForTest: noteBackendHealthSuccess,
+  // The product resolves its host from the real topbar, which the node DOM stub does not build.
+  // Tests pass their own topbar-right-tools host to the one renderer; there is no second one.
+  syncBackendHealthIndicatorForTest: host => syncBackendHealthIndicator(host),
+  openBackendHealthDetailsForTest: openBackendHealthDetails,
+  debugSubTabForTest: () => jsDebugSubTab,
   flushQueuedClientPushEventsForTest: flushQueuedClientPushEvents,
   scheduleReconnectResyncForTest: scheduleReconnectResync,
   installClientEventStreamForTest: installClientEventStream,
@@ -2370,6 +2406,13 @@ globalThis.__layoutTestApi = {
     fileQuickOpenState.indexWarming = Boolean(warming);
     commandPaletteMode = 'files';
   },
+  setFileQuickOpenFreshnessForTest(freshness) {
+    fileQuickOpenState.freshness = freshness || null;
+    commandPaletteMode = 'files';
+  },
+  commandPaletteStatusTextForTest: commandPaletteStatusText,
+  commandPaletteFreshnessTextForTest: commandPaletteFreshnessText,
+  renderCommandPaletteResultsForTest: renderCommandPaletteResults,
   setFileQuickOpenLoadingForTest(loading) {
     fileQuickOpenState.loading = Boolean(loading);
     fileQuickOpenState.error = '';

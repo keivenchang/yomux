@@ -22,6 +22,7 @@ from tests.latency_calibration import NOT_CERTIFIABLE
 from tests.latency_calibration import NotCertifiableError
 from tests.latency_calibration import assert_fixed_ceiling
 from tests.latency_calibration import browser_calibration_qualification
+from tests.latency_calibration import calibration_pressure_verdict
 from tests.latency_calibration import certification_phase_fixture
 from tests.latency_calibration import fixed_ceiling_verdict
 from tests.latency_calibration import merged_qualification
@@ -39,6 +40,9 @@ I3A_DRAG_PREVIEW_CEILING_MS = 150.0
 I3B_DOCKVIEW_LOAD_CEILING_MS = 100.0
 I3_DRAG_SAMPLE_COUNT = 30
 I3_FORCED_RED_INJECTED_DELAY_MS = 220
+# Four interleaved quiet/busy pairs: the same 28 samples the quiet side already collected, now
+# collected on BOTH sides and adjacent in time, so a host that changes during the unit changes both.
+I3_PRESSURE_ROUNDS = 4
 
 
 def _retire_expected_auto_approve_failure(browser, message):
@@ -524,36 +528,80 @@ def test_i3_negative_control_unqualified_host_refuses_instead_of_passing():
 
 
 def test_i3_calibration_probe_moves_under_independent_browser_pressure(browser, request):
-    quiet_runs = [run_browser_latency_calibration(browser) for _ in range(4)]
-    quiet = max(quiet_runs, key=lambda result: result["calibrationNowMs"])
-    start_independent_browser_pressure(browser)
-    try:
-        pressure_ticks = browser.execute_async_script(
-            """
-            const done = arguments[arguments.length - 1];
-            const wait = () => {
-              if ((window.__yolomuxCalibrationPressureTicks || 0) >= 2) return done(window.__yolomuxCalibrationPressureTicks);
-              setTimeout(wait, 0);
-            };
-            wait();
-            """
-        )
-        assert pressure_ticks >= 2
-        busy = run_browser_latency_calibration(browser, reset_page=False)
-    finally:
-        stop_independent_browser_pressure(browser)
-    ratio = busy["calibrationNowMs"] / quiet["calibrationNowMs"]
-    comparison = {
-        "quiet_calibration": quiet["calibrationNowMs"],
-        "busy_calibration": busy["calibrationNowMs"],
-        "ratio": ratio,
-        "quiet_samples_ms": quiet["samplesMs"],
-        "quiet_runs": quiet_runs,
-        "busy_samples_ms": busy["samplesMs"],
-        "passed": ratio >= 1.15,
-    }
-    artifact = write_latency_evidence(nodeid=request.node.nodeid, label="I3 calibration variation", payload=comparison)
-    assert comparison["passed"], {**comparison, "artifact": str(artifact)}
+    """The probe reads higher under independent renderer pressure, measured identically on both sides.
+
+    Quiet and busy rounds are interleaved inside ONE warmed page context, so both sides see the same
+    host conditions and the same renderer state. That removes the two asymmetries that used to decide
+    this unit instead of the product:
+
+    * The quiet side navigated to a fresh document before every round and paid its cold-context cost,
+      while the busy side ran warm because it reused the page the pressure loop was already burning
+      in. Across 576 recorded quiet rounds the FIRST sample of a round exceeded 29 ms 2.26% of the
+      time and the LAST 0.00%, and the round maximum landed on one of the first two samples in 74% of
+      rounds against a 29% chance share. The discarded warm-up cost was real and it was one-sided.
+    * The quiet estimator was a maximum over four rounds of a per-round p75 -- effectively a high
+      quantile of 28 samples -- against a single busy p75 over 7. Two preempted quiet samples out of
+      28 were therefore enough to invert the ratio.
+
+    Neither asymmetry is a product property: this probe runs on `about:blank` with no application
+    code and no server, so what those tails record is the machine the gate is running on. Recorded
+    2026-08-09 in the gate, quiet samples [14.2, 41.0, 112.4, 19.9, 18.6, 22.1, 15.1] produced a
+    "quiet" reading of 41.0 ms against a busy 33.2 ms while the quiet MEDIAN was 19.9 ms.
+    """
+
+    quiet_samples_ms: list[float] = []
+    busy_samples_ms: list[float] = []
+    # One discarded round warms the context both sides then share; it is never measured.
+    run_browser_latency_calibration(browser)
+    for _ in range(I3_PRESSURE_ROUNDS):
+        quiet_samples_ms.extend(run_browser_latency_calibration(browser, reset_page=False)["samplesMs"])
+        start_independent_browser_pressure(browser)
+        try:
+            pressure_ticks = browser.execute_async_script(
+                """
+                const done = arguments[arguments.length - 1];
+                const wait = () => {
+                  if ((window.__yolomuxCalibrationPressureTicks || 0) >= 2) return done(window.__yolomuxCalibrationPressureTicks);
+                  setTimeout(wait, 0);
+                };
+                wait();
+                """
+            )
+            assert pressure_ticks >= 2
+            busy_samples_ms.extend(run_browser_latency_calibration(browser, reset_page=False)["samplesMs"])
+        finally:
+            stop_independent_browser_pressure(browser)
+    verdict = calibration_pressure_verdict(quiet_samples_ms=quiet_samples_ms, busy_samples_ms=busy_samples_ms)
+    assert verdict["quiet_sample_count"] == verdict["busy_sample_count"], verdict
+    artifact = write_latency_evidence(nodeid=request.node.nodeid, label="I3 calibration variation", payload=verdict)
+    assert verdict["passed"], {**verdict, "artifact": str(artifact)}
+
+
+def test_i3_negative_control_the_pressure_verdict_reds_on_a_probe_that_did_not_move():
+    """The matched-median comparison must still red, or the rewrite above would be a deletion.
+
+    The third case is the one the old maximum-vs-p75 comparison actually MISSED. Under pressure the
+    renderer can stop waiting for vsync, so the probe reads BELOW its quiet value. Three recorded
+    runs had busy medians of 7.8, 11.0 and 8.3 ms against quiet medians near 16.7 ms and still passed
+    the old rule, with ratios of 1.43, 1.42 and 1.66, because one or two surviving vsync-aligned
+    samples carried a seven-sample p75. Replayed against all 144 recorded runs, the matched-median
+    rule turns the six host-contention reds green and those three false greens red.
+    """
+
+    quiet_ms = [16.6] * 28
+    moved = calibration_pressure_verdict(quiet_samples_ms=quiet_ms, busy_samples_ms=[31.0] * 28)
+    assert moved["passed"] is True and moved["statistic"] == "median", moved
+    for unmoved_busy_ms in ([16.7] * 28, [17.5] * 28, [7.8] * 28):
+        verdict = calibration_pressure_verdict(quiet_samples_ms=quiet_ms, busy_samples_ms=unmoved_busy_ms)
+        assert verdict["passed"] is False, verdict
+
+    # The regression this unit was rewritten for, replayed from the gate run of 2026-08-09 03:28:
+    # two preempted samples out of 28 are the host, not the product, and may not decide the verdict.
+    preempted_ms = [16.6] * 26 + [41.0, 112.4]
+    assert calibration_pressure_verdict(quiet_samples_ms=preempted_ms, busy_samples_ms=[31.0] * 28)["passed"] is True
+
+    with pytest.raises(ValueError):
+        calibration_pressure_verdict(quiet_samples_ms=[], busy_samples_ms=[31.0])
 
 
 def test_i3_negative_control_forced_red_breaches_the_fixed_ceiling_on_a_qualified_host(browser, tmp_path, request):

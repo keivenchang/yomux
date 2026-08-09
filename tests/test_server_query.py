@@ -7,6 +7,7 @@ import os
 import socket
 from http import HTTPStatus
 from pathlib import Path
+from types import MethodType
 from types import SimpleNamespace
 from urllib.parse import urlparse
 
@@ -20,6 +21,7 @@ from yolomux_lib import server_auth as server_auth_module
 from yolomux_lib import web
 from yolomux_lib.filesystem import FilesystemError
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
+from yolomux_lib import server_logs
 from yolomux_lib.workspace import settings as settings_module
 from yolomux_lib.tmux import process_group_ownership
 from yolomux_lib.common import ACTIVITY_MAX_HOURS
@@ -2390,16 +2392,35 @@ def test_filesystem_batch_product_rejects_arbitrary_trigger_without_recording_it
 
 
 def test_handle_fs_batch_rejects_invalid_shape():
-    handler, writes = batch_handler({"requests": "nope"})
+    """The handler owns no batch rule of its own; it renders the app's one typed rejection.
 
-    Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+    The rejection is canonical, so it carries the causal frame the API response parent requires.
+    Without that frame the parent rejects its own 400 and route dispatch emits an internal 500.
+    """
 
-    assert writes[0][0] == HTTPStatus.BAD_REQUEST
-    assert writes[0][1]["user_message"] == {
+    webapp = app_module.TmuxWebtermApp([])
+    handler, writes = batch_handler({"requests": "nope"}, app=webapp)
+
+    try:
+        Handler.handle_fs_batch(handler, SimpleNamespace(path="/api/fs/batch"))
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    status, payload = writes[0]
+    assert status == HTTPStatus.BAD_REQUEST
+    assert payload["state"] == "failed"
+    assert payload["error"]["code"] == "invalid_request"
+    assert payload["error"]["message"] == {
         "key": "request.error.list",
         "params": {"field": "requests"},
         "fallback": "requests must be a list",
     }
+    assert payload["error"]["stack"] == [{
+        "component": "server.http",
+        "operation": "POST /api/fs/batch",
+        "code": "invalid_request",
+    }]
 
 
 def test_handle_ws_payload_readonly_discards_input_and_scroll(monkeypatch):
@@ -3926,6 +3947,109 @@ def test_share_terminal_reader_uses_owned_fd_duplicate_before_reading():
     assert "if self.stop_event.is_set():" in body
     assert "os.read(reader_fd" in body
     assert "os.close(reader_fd)" in body
+
+
+def _api_response_capturing_handler(method: str = "GET", path: str = "/api/fs/list"):
+    """Return one Handler whose real ``write_api_response`` writes through a capture."""
+
+    route = http_routes.Route(
+        method,
+        path,
+        "readonly",
+        lambda *_args: None,
+        protocol=http_routes.RESPONSE_JSON,
+    )
+    handler = Handler.__new__(Handler)
+    handler._route_response = route
+    handler._route_response_written = False
+    handler._api_request_id = ""
+    handler.headers = {}
+    handler.server = SimpleNamespace(app=SimpleNamespace(observe_http_delivery=lambda *_args: None))
+    writes = []
+
+    def capture(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None):
+        del json_encode_ms, product_metadata
+        writes.append((json.loads(data), HTTPStatus(int(status))))
+
+    handler._write_json_representation = MethodType(capture, handler)
+    return handler, writes
+
+
+def _terminal_filesystem_envelope(status: HTTPStatus, code: str, message_key: str) -> dict:
+    """Build the terminal failure the operation ledger replays for a filesystem operation."""
+
+    return {
+        "state": "failed",
+        "request": {"id": "r-fixture-terminal"},
+        "error": {
+            "code": code,
+            "message": {"key": message_key, "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "File not found"},
+            "origin": "local_services.jobd",
+            "retryable": False,
+            "details": {
+                "status": int(status),
+                "path": "/tmp/yo-deleted-worktree",
+                "operation_id": "op-fixture",
+                "diagnostic": "path not found",
+            },
+            "stack": [
+                {"component": "server.http", "operation": "GET /api/fs/list", "code": "dependency_failed"},
+                {"component": "local_services.jobd", "operation": "jobd.result", "code": code},
+            ],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "message_key", "expected_level"),
+    (
+        (HTTPStatus.NOT_FOUND, "path_not_found", "common.pathNotFound", "info"),
+        (HTTPStatus.FORBIDDEN, "permission_denied", "fs.error.operationFailed", "info"),
+        (HTTPStatus.INTERNAL_SERVER_ERROR, "dependency_failed", "common.requestFailed", "error"),
+        (HTTPStatus.BAD_REQUEST, "invalid_request", "common.requestFailed", "error"),
+    ),
+)
+def test_write_api_response_records_expected_outcomes_and_faults_at_one_severity_rule(
+    status,
+    code,
+    message_key,
+    expected_level,
+):
+    """The synchronous writer must reach the same verdict as the asynchronous recorder.
+
+    A terminal filesystem failure is replayed to the browser here, so if this writer kept its own
+    hardcoded ``level="error"`` the same 404 would be an operator error on one path and an ordinary
+    outcome on the other -- one rule in two places, which is the defect being removed.
+    """
+
+    handler, writes = _api_response_capturing_handler()
+    envelope = _terminal_filesystem_envelope(status, code, message_key)
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+
+    handler.write_json(envelope, status=status)
+
+    payload, written_status = writes[0]
+    assert written_status == status and payload["error"]["code"] == code, payload
+    rows = [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before]
+    assert [entry["source"] for entry in rows] == ["api-response"], rows
+    assert rows[0]["level"] == expected_level, rows
+    assert rows[0]["category"] == "api", rows
+    assert json.loads(rows[0]["message"])["code"] == code, rows
+
+
+def test_write_api_response_keeps_a_malformed_outcome_record_an_error():
+    """An outcome code inside a record missing its causal stack is still a fault."""
+
+    handler, _writes = _api_response_capturing_handler()
+    envelope = _terminal_filesystem_envelope(HTTPStatus.NOT_FOUND, "path_not_found", "common.pathNotFound")
+    envelope["error"]["details"] = {}
+    envelope["error"]["stack"] = [{"component": "server.http", "operation": "GET /api/fs/list", "code": ""}]
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+
+    with pytest.raises(ValueError, match="invalid HTTP status or error shape"):
+        handler.write_json(envelope, status=HTTPStatus.NOT_FOUND)
+
+    assert [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before] == []
 
 
 def test_bridge_shared_tmux_cleans_registration_when_add_viewer_fails():

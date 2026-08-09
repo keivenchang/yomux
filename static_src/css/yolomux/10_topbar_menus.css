@@ -422,6 +422,9 @@ button.topbar-status-surface {
 .topbar-status-surface[hidden] {
   display: none;
 }
+/* The one backend-health chip. Its severity is carried by the sentence it renders ("... is not
+   running" vs "... is degraded"), never by these colours alone -- they only reinforce a message that
+   already reads correctly in a monochrome or forced-colours theme. */
 .backend-health-indicator {
   min-width: 0;
   max-width: min(32vw, 20rem);
@@ -433,6 +436,28 @@ button.topbar-status-surface {
   border-radius: var(--radius-md);
   text-overflow: ellipsis;
   font-size: var(--ui-font-size-2xs);
+}
+.backend-health-indicator[data-backend-health="degraded"] {
+  color: var(--text);
+  background: color-mix(in srgb, var(--warning-border-strong) 12%, var(--panel2));
+  border-color: var(--warning-border-strong);
+}
+.backend-health-indicator-details {
+  flex: 0 0 auto;
+  padding: 0 var(--space-4);
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.backend-health-indicator-details:hover,
+.backend-health-indicator-details:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  color: var(--text);
 }
 button.topbar-status-surface:hover,
 button.topbar-status-surface:focus-visible {

@@ -40,12 +40,16 @@ from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
 
 from .infra import common
+from . import local_service_projection
+from .backend_health.observer import observed_health
 from .search import file_index
 from . import filesystem
+from .filesystem import exclusions
 from .filesystem.io_ops import read_json_file
 from .workspace import session_files
 from .local_services import registry as local_services_registry
 from .local_services.client import local_service_failure_is_transient
+from .local_services.rpc import local_service_traffic_snapshot
 from .local_services.runtime import local_service_exception_cause
 from .stats_current import resolution as stats_resolution
 from .approval import yolo_rules
@@ -58,6 +62,7 @@ from .observability.activity_summary import build_global_activity_summary
 from .observability.activity_summary import build_session_activity_summary
 from .observability.activity_summary import recent_agent_paths_from_files
 from .observability.activity_summary import yoagent_capabilities_payload
+from .observability.failure_severity import failure_record_level
 from .approval.approvald import ApprovalClient
 from .approval.auto_approve_worker import auto_approve_lock_message
 from .approval.auto_approve_worker import auto_approve_lock_message_fields
@@ -485,7 +490,13 @@ def wait_for_jobd_product(
     return None, None, "stopped"
 
 
-SESSION_FILES_CACHE_VERSION = 1
+# Bump when the SERIALIZED session-files record changes meaning, so a record written by an older
+# build is rejected instead of rendered as current. v2 added `repos[].missing`: without the bump a
+# pre-fix record for a retired worktree would keep drawing the old rendering for up to
+# SESSION_FILES_DISK_CACHE_MAX_AGE_SECONDS after the fix shipped. This is record COMPATIBILITY and
+# is deliberately separate from SESSION_FILES_CACHE_KEY_VERSION, which versions the logical key
+# inputs; those did not change.
+SESSION_FILES_CACHE_VERSION = 2
 SESSION_FILES_CACHE_KEY_VERSION = 4
 def default_session_files_cache_dir(state_dir: Path | None = None) -> Path:
     """Keep one host's session-file cache out of a shared home mount."""
@@ -565,15 +576,97 @@ STATUS_GENERATION_RPC_WAIT_SECONDS = 1.0
 TMUX_SIGNAL_REMOVAL_EVENT_TTL_SECONDS = 10.0
 INPUT_HEARTBEAT_COALESCE_SECONDS = 0.05
 # Essential = this server drives the service itself and a user-visible capability is wrong
-# without it. Their absence is never routine, so a recorded failure is always reportable:
+# when it FAILS. A recorded failure is always reportable:
 #   indexd    Quick Open results silently go stale -- the 0.7.0 QA incident.
 #   jobd      every /api/fs/* request is executed there.
 #   statusd   the tmux status/roster the session UI renders.
 #   statsd    the YO!stats database writer.
 #   approvald auto-approval; a dead approver must never read as "nothing to approve".
-# watchd is excluded: it is spawned per attached client and retires with the last one, so
-# "not running" is its correct resting state. It still alarms if it records a real failure.
-ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "jobd", "statusd", "statsd", "approvald"})
+#   watchd    every attached client's live file/session updates come from its revisions.
+# watchd used to be excluded here to stop its routine absence reading as an outage. That was a
+# second copy of a rule the row already owns: `demand_started` (watchd_runtime_status) is what
+# classifies a legitimately-absent demand-scoped service as "idle" in system_status_service, and
+# it is checked before this set is consulted. Keeping the exclusion as well meant one rule lived
+# in two places and could disagree -- and it also said, falsely, that a watchd which recorded a
+# real failure was less important than the other five.
+ESSENTIAL_LOCAL_SERVICES = frozenset({"indexd", "jobd", "statusd", "statsd", "watchd", "approvald"})
+
+# THE ONE ABSENCE statsd MAY HAVE EXCUSED, AND ITS EXACT BOUND
+# ------------------------------------------------------------
+# statsd is pinned up by `StatsCurrentRuntime._supervise` in the elected background owner, so its
+# absence is a verified outage -- once that pin has had its chance. It has not had it yet during
+# the boot window between `stats_current_runtime.start()` (called from
+# `handle_background_owner_acquired`) and the lease that actually spawns statsd.
+#
+# MEASURED on real isolated starts (managed instance, this host), relative to process launch.
+# Before, with the observer armed ahead of the election (port 17781):
+#   +0.632s  background-owner generation created (the election is DECIDED here)
+#   +0.635s  observer's first completed cycle -> statsd published `down` / `service_absent`
+#   +1.136s  statsd child process spawned
+#   +1.622s  statsd wrote its service record and began serving
+#   +4.696s  statsd published `ready` (the two-observation recovery debounce)
+# 4.06 seconds of false "YO!stats is not running" at every boot, for a statsd that was never down.
+#
+# The two changes were then ablated separately, because "it went green" is not a cause:
+#   this excuse alone, observer still armed first (17783): `down` at +1.005s -> STILL BROKEN. At
+#       +1.005s `stats_current_runtime.start()` had not run yet, so there was no pin owner to
+#       state the excuse. The ordering in `cli.main()` is what makes the fact available at all.
+#   the ordering alone, excuse removed (17784): first cycle at +2.911s, statsd already serving,
+#       no `down`. It closes the window on THIS host only because `start_background_owner()`
+#       synchronously takes jobd's scheduler lease (~2.2s) while statsd needs ~1.6s -- a 1.3s
+#       margin that is timing, not a guarantee.
+#   both (17782): first cycle at +2.738s, statsd `starting` -> `ready` at +4.750s, no `down`.
+# So the ordering is what closes the measured window and the excuse is what stops the guarantee
+# from resting on that 1.3s margin: whenever the first cycle does land inside the pin window, the
+# row states the reason instead of the observer inventing an outage.
+#
+# This is the DYNAMIC excuse (`absence_expected_reason`), never the static `demand_started` one:
+# statsd is not demand-scoped, and saying it were would silence a real outage forever. The
+# excuse is bounded by `statsd_pin_pending()` below so it cannot outlive the pending start.
+STATSD_ABSENT_WHILE_PIN_PENDING = "stats_pin_pending"
+# The supervisor phases that mean "this process is actively taking the statsd pin and has not
+# taken it yet" (`stats_current/runtime.py:_supervise`). Deliberately NOT `waiting_owner`,
+# `demoting`, `stopping`, `stopped`, `backoff` or `blocked`: every one of those means this
+# process is not on its way to pinning statsd, and excusing them would let a statsd that died,
+# or that a demoted/losing process can no longer see, stay silent forever.
+STATSD_PIN_PENDING_PHASES = frozenset({"starting", "acquiring_lease", "starting_scheduler"})
+
+
+def statsd_pin_pending(runtime_status: Mapping[str, Any]) -> bool:
+    """Whether this process is mid-flight taking the statsd pin, so absence is not yet a failure.
+
+    The one owner of statsd's expected-absence claim, read from the pin owner's own live status
+    (`StatsCurrentRuntime.status()`) rather than from a timer or a boot grace period. Four
+    conditions, all of which must hold, and each of which closes one silent-excuse hole:
+
+    * ``supervisor.alive`` -- the pin owner thread exists at all. A process that lost the
+      election never calls ``stats_current_runtime.start()``, so this is False there and an
+      absent statsd stays `down`, which is correct: the winner is supposed to be keeping it up.
+    * ``leased is not True`` -- the pin has not taken effect yet. Once it has, statsd exists and
+      any later absence is an outage.
+    * ``failure_count == 0`` -- the pin owner has recorded no failure. A statsd that is
+      genuinely dead at boot fails ``acquire_lease``, which increments this and moves the phase
+      to ``backoff``/``blocked``, so the excuse is withdrawn on the first failed attempt.
+    * ``phase in STATSD_PIN_PENDING_PHASES`` -- it is in one of the three phases that lead to
+      the lease, not one of the phases that mean it stopped, was demoted, or is backing off.
+
+    The residual window is exactly one in-flight ``acquire_lease`` call, which is bounded by the
+    registry's own start timeout; when that call fails the first condition set above is broken.
+    """
+
+    if not isinstance(runtime_status, Mapping):
+        return False
+    if runtime_status.get("leased") is True:
+        return False
+    supervisor = runtime_status.get("supervisor")
+    if not isinstance(supervisor, Mapping):
+        return False
+    if supervisor.get("alive") is not True:
+        return False
+    if int(supervisor.get("failure_count") or 0) != 0:
+        return False
+    return str(supervisor.get("phase") or "") in STATSD_PIN_PENDING_PHASES
+
 
 STATS_SAMPLE_CACHE_SECONDS = 0.95
 STATS_AGENT_TOKEN_SAMPLE_SECONDS = 10.0
@@ -1005,44 +1098,14 @@ def current_darwin_system_memory_bytes() -> tuple[int, int] | None:
     return None if snapshot is None else snapshot[0]
 
 
-def stats_GPU_gpu_metrics() -> dict[str, Any]:
-    return {"devices": stats_current_host_collectors.generic_gpu_devices()}
-
-
-def stats_macos_gpu_metrics(gpu_name: str = "") -> dict[str, Any]:
-    devices = stats_current_host_collectors.gpu_devices()
-    return {"devices": devices} if devices else {}
-
-
-_stats_hardware_metadata_lock = threading.RLock()
-_stats_hardware_metadata_cache: dict[str, str] = {}
-_stats_hardware_metadata_initialized = False
-
-
-def stats_macos_hardware_metadata() -> dict[str, str]:
-    return stats_current_host_collectors.macos_hardware_metadata()
-
-
-def stats_host_hardware_metadata() -> dict[str, str]:
-    global _stats_hardware_metadata_initialized
-    with _stats_hardware_metadata_lock:
-        if _stats_hardware_metadata_initialized:
-            return dict(_stats_hardware_metadata_cache)
-        metadata = stats_macos_hardware_metadata() if sys.platform == "darwin" else {}
-        _stats_hardware_metadata_cache.clear()
-        _stats_hardware_metadata_cache.update(metadata)
-        _stats_hardware_metadata_initialized = True
-        return dict(_stats_hardware_metadata_cache)
-
-
-def stats_gpu_metrics() -> dict[str, Any]:
-    hardware = stats_host_hardware_metadata()
-    gpu = stats_GPU_gpu_metrics() if sys.platform != "darwin" else stats_macos_gpu_metrics(hardware.get("gpu_label", ""))
-    return {
-        "gpu_devices": gpu.get("devices", {}) if isinstance(gpu, dict) else {},
-        "gpu_util_processes": {},
-        "gpu_memory_processes": {},
-    }
+# The GPU/hardware wrappers that used to sit here (`stats_GPU_gpu_metrics`,
+# `stats_macos_gpu_metrics`, `stats_macos_hardware_metadata`, `stats_host_hardware_metadata` with
+# its module-level cache, and `stats_gpu_metrics`) existed only to feed the unregistered
+# `collect_current_stats_gpu` below. They were one-line re-wrappings of
+# `yolomux_lib/stats_current/host_collectors.py`, which is the owner statsd actually calls, so
+# removing the unwired collector left them with no caller. Their parsing coverage moved with them:
+# the tests now drive `host_collectors.generic_gpu_devices` / `gpu_devices` /
+# `macos_hardware_metadata` directly.
 
 
 TMUX_SIGNAL_SNAPSHOT_TTL_SECONDS = 1.009
@@ -1063,6 +1126,27 @@ SERVER_CPU_BUDGET_PERCENT = 30.0
 # the warning must say so instead of letting the top row read as the cause.
 SERVER_CPU_BUDGET_ATTRIBUTION_MIN_PERCENT = 50.0
 SERVER_CPU_BUDGET_SUSTAINED_SECONDS = 300.0
+# The one reason the web process's own CPU/memory numbers are absent. `stats_cpu_sample` is
+# their only writer, so before statsd's first accepted push nothing has measured this process.
+# This is a STRUCTURAL absence, not a failure, and it must never be spelled `0`.
+STATS_SAMPLE_NOT_PUSHED_REASON_CODE = "cpu_sample_not_pushed"
+STATS_SAMPLE_NOT_PUSHED_REASON = (
+    "statsd has not pushed a CPU sample to this web process yet, so its CPU and memory have not been measured"
+)
+# A sample that ARRIVED and then stopped. Distinct from never-pushed: delivery worked once, so the
+# operator is looking for a stall, not a wiring problem. Freezing the last value instead would let
+# a dead sampler read as a healthy idle process indefinitely.
+STATS_SAMPLE_STALE_REASON_CODE = "cpu_sample_stale"
+STATS_SAMPLE_STALE_REASON = (
+    "the last CPU sample statsd pushed is {seconds}s old, so this process's CPU and memory are no longer being measured"
+)
+# A pushed sample carrying no timestamp. Every real producer stamps `time`, so this is a
+# malformed record rather than a lifecycle state -- but its age is unknowable, and an unknowable
+# age must not be rendered as a number.
+STATS_SAMPLE_UNDATED_REASON_CODE = "cpu_sample_undated"
+STATS_SAMPLE_UNDATED_REASON = (
+    "the last CPU sample statsd pushed carries no timestamp, so it cannot be shown to describe the present"
+)
 BACKGROUND_REFRESH_EVENT_LOG_SAMPLE_EVERY = 25
 BACKGROUND_CLIENT_EVENTS_PATH = default_background_client_events_path()
 # The event's storage owner determines whether another server must be notified immediately.
@@ -1215,8 +1299,17 @@ class FilesystemOperationHttpResponse:
 
 @dataclass(frozen=True)
 class FilesystemWatchBatchProduct:
+    """One child batch of a partitioned watch-diff request.
+
+    ``root_offset`` is the index of this chunk's first root inside the parent root list.  jobd
+    numbers each batch's responses from zero, so the offset is what lets independently completing
+    children merge back onto parent root order without colliding.
+    """
+
     producer: JobdProductOperation
     ready_product: dict[str, Any] | None = None
+    root_offset: int = 0
+    root_count: int = 0
 
 
 @dataclass
@@ -1765,6 +1858,48 @@ def filesystem_watch_batch_submission(
     return canonical_payload, product_key
 
 
+def filesystem_watch_request_product_key(roots: list[str], identity_seed: str) -> str:
+    """Key the retained product of one whole watch-diff request, however many batches it took.
+
+    Chunk keys come from ``filesystem_watch_batch_submission`` and are bounded by the per-job
+    request limit.  A request of 65-128 roots has no single submission payload, so its retained
+    product needs its own identity derived from the parent root list.
+    """
+    identity = hashlib.sha256(json.dumps(
+        {"identity_seed": str(identity_seed), "roots": [str(root) for root in roots]},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()[:24]
+    return f"fs-watch-request:{identity}"
+
+
+def filesystem_watch_product_at_offset(product: dict[str, Any], offset: int) -> dict[str, Any]:
+    """Re-base one child batch product's response ids onto the parent root window.
+
+    jobd numbers each submitted batch's responses from zero.  A partitioned watch-diff merges the
+    children by response id, so every child but the first has to be shifted by the index of its
+    first root before the merge, or later chunks would overwrite earlier ones.
+    """
+    if not offset:
+        return product
+    responses = product.get("responses")
+    if not isinstance(responses, list):
+        return product
+    shifted: list[Any] = []
+    for response in responses:
+        if not isinstance(response, dict) or isinstance(response.get("id"), bool):
+            shifted.append(response)
+            continue
+        try:
+            response_id = int(response.get("id"))
+        except (TypeError, ValueError):
+            shifted.append(response)
+            continue
+        shifted.append({**response, "id": response_id + int(offset)})
+    return {**product, "responses": shifted}
+
+
 def filesystem_signature_entry_map(signature: tuple[Any, ...] | None) -> dict[str, tuple[str, int, int]]:
     if not isinstance(signature, tuple) or len(signature) < 5 or signature[1] != "dir":
         return {}
@@ -2054,6 +2189,43 @@ for _yoagent_global_callable in YoagentAppDeps.global_callables:
 del _yoagent_app_field, _yoagent_global_callable
 
 
+class LocalServiceRecoveryControl:
+    """The ONE object the backend-health observer may touch to recover a service.
+
+    The observer holds no recovery primitive of its own: it calls ``retry(resource)`` on an
+    injected control and nothing else (`backend_health/observer.py:_issue_retry`). This is that
+    control, and its whole public surface is `retry`, so a `stop`, `restart`, `signal`,
+    `unlink`, `reclaim` or `adopt` is not something the recovery path can reach even by
+    accident. `tests/test_backend_health_recovery_wiring.py` asserts that surface and drives a
+    client double that raises on every other attribute.
+
+    It is a DISPATCHER, never a second recovery primitive. Every entrypoint it can reach is one
+    of the client `retry` wrappers `tests/test_backend_health_catalog.py` already pins, and each
+    of those bottoms out in `LocalServiceRegistry.retry`; this class adds no ladder, no backoff
+    and no start of its own -- `ServiceRecoveryPlanner` owns when, and the client wrapper owns
+    how. A service that is not in the map is not recoverable from here and says so by returning
+    False rather than reaching for a registry the census does not know about.
+
+    The map is resolved per call, not captured at construction, for the same reason
+    `local_services_row_producers()` is: tests and runtime both replace client objects on the
+    app, and a control bound once at boot would keep retrying the client that existed then.
+    """
+
+    def __init__(self, entrypoints: Callable[[], Mapping[str, Callable[[], bool]]]) -> None:
+        self._entrypoints = entrypoints
+
+    def retry(self, resource: str) -> bool:
+        """Ask ONE named service's own client to clear its latched failure and come back."""
+
+        entrypoint = self._entrypoints().get(str(resource))
+        if entrypoint is None:
+            # indexd is the one inventory service with no client-level retry wrapper. Reaching
+            # into its registry from here would create a recovery entrypoint outside the wrapper
+            # set the catalog pins, so recovery is simply not available for it.
+            return False
+        return bool(entrypoint())
+
+
 class TmuxWebtermApp:
     def __init__(self, sessions: list[str], dangerously_yolo: bool = False, *, status_service_mode: bool = False):
         self.sessions = sessions
@@ -2112,6 +2284,10 @@ class TmuxWebtermApp:
         self.metadata_badge_records: dict[str, MetadataBadgeRecord] = {}
         self.stats_collection_state = StatsCollectionState()
         self.stats_current_transcript_usage = StatsCurrentTranscriptUsageScanner()
+        # M8: the live retained-health store, attached by whoever started this port's
+        # observer. `None` until then, and the projection says `observer_unattached`
+        # rather than publishing zeros. See `attach_backend_health_store`.
+        self.backend_health_store: Any | None = None
         self.job_client = JobClient()
         self.jobd_operation_service = JobdOperationService()
         self.upload_retention_sweeper = UploadRetentionSweeper()
@@ -2237,8 +2413,14 @@ class TmuxWebtermApp:
         label = f"yolomux.py :{port}" if port else f"yolomux.py PID {pid}"
         return key, label, port
 
-    def stats_current_collector_context(self) -> dict[str, int]:
-        """Expose only the elected web identity; statsd reads mutable inputs itself."""
+    def stats_current_collector_context(self) -> dict[str, Any]:
+        """Expose the elected web identity AND where to reach it; statsd reads the rest itself.
+
+        The control socket is part of this handshake because this process is the only one
+        that authoritatively knows it. statsd used to look the address up in the background
+        owner ELECTION record, which a managed instance never writes -- so its CPU/memory
+        sample was produced every second and silently dropped for the life of the process.
+        """
 
         _source_id, _label, port = self.stats_current_process_identity()
         generation = self.stats_current_owner_generation()
@@ -2248,6 +2430,7 @@ class TmuxWebtermApp:
             "pid": os.getpid(),
             "port": port,
             "owner_generation": generation,
+            "control_socket": str(self.control_server.path),
         }
 
     def tmux_ai_status_empty(self) -> dict[str, Any]:
@@ -2613,23 +2796,13 @@ class TmuxWebtermApp:
             "observation_receipts": response.get("observation_receipts", []),
         }, HTTPStatus.OK
 
-    def collect_current_stats_cpu(
-        self,
-        attempt: Any,
-    ) -> stats_current_collectors.CollectorFacts:
-        sample, _recorded = self.current_stats_sample(force=True)
-        self.update_server_cpu_budget(sample)
-        process_id, _label, _port = self.stats_current_process_identity()
-        return stats_current_collectors.cpu_success(
-            epoch_id=attempt.epoch_id,
-            epoch_started_at=attempt.epoch_started_at,
-            observed_at=attempt.scheduled_at,
-            cadence_seconds=attempt.cadence_seconds,
-            owner_generation=attempt.owner_generation,
-            source_id=process_id,
-            process_percent=float(sample["cpu_percent"]),
-            system_percent=float(sample["system_cpu_percent"]),
-        )
+    # `collect_current_stats_cpu` used to live here. It was NEVER registered in the collector
+    # registry above, so it had no production call site and only two tests referenced it -- which
+    # is why the "no push has landed yet, append nothing" guard it carried never ran, and statsd's
+    # real producer (`StatsCurrentService._collect_host_facts_if_due`) went on writing a fabricated
+    # first `0.0`. The guard now lives at the root owner, `host_collectors.CpuSampler.sample`, in
+    # the one process that knows whether it had a baseline. A second, unreachable CPU producer in
+    # the web process is what made the defect invisible, so it is not kept.
 
     def collect_current_stats_agent_status(
         self,
@@ -2674,64 +2847,33 @@ class TmuxWebtermApp:
             snapshot_revision=snapshot_revision,
         )
 
-    def collect_current_stats_gpu(
-        self,
-        attempt: Any,
-    ) -> stats_current_collectors.CollectorFacts:
-        devices = stats_gpu_metrics().get("gpu_devices")
-        if not isinstance(devices, dict):
-            return stats_current_collectors.CollectorFacts()
-        samples = []
-        for source_id, row in devices.items():
-            if not isinstance(row, dict):
-                continue
-            util = row.get("util_percent")
-            used = row.get("memory_used_bytes")
-            capacity = row.get("memory_capacity_bytes")
-            if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (util, used, capacity)):
-                continue
-            samples.append(stats_current_collectors.GpuDeviceSample(
-                str(source_id),
-                float(util),
-                float(used),
-                float(capacity),
-                str(row.get("label") or source_id),
-            ))
-        return stats_current_collectors.gpu_devices_success(
-            samples,
-            epoch_id=attempt.epoch_id,
-            epoch_started_at=attempt.epoch_started_at,
-            observed_at=attempt.scheduled_at,
-            cadence_seconds=attempt.cadence_seconds,
-            owner_generation=attempt.owner_generation,
-        )
+    # `collect_current_stats_gpu` used to live here, unregistered and unreferenced in the same way
+    # and for the same family statsd already collects inline from `host_collectors.gpu_devices()`.
+    # It is removed with the CPU one: an unwired second producer cannot be verified and is exactly
+    # where a guard goes to be silently skipped.
 
     def collect_current_stats_service_load(
         self,
         attempt: Any,
     ) -> stats_current_collectors.CollectorFacts:
-        # The CPU family is the single owner of the yolomux.py web-process metric. Keeping
-        # it out of Services avoids rendering one PID twice at different collector cadences.
-        rows = [
-            row for row in self.runtime_local_services().get("services") or []
-            if isinstance(row, dict) and str(row.get("service") or "").strip() != "web"
-        ]
+        # The CPU family is the single owner of the yolomux.py web-process metric, so this
+        # family must never carry a "web" row and render one PID twice at two cadences. That
+        # exclusion is now structural rather than a filter here: LocalServicesCollector
+        # rejects any producer outside the six-service inventory, so a "web" row cannot reach
+        # this loop at all. The filter that used to sit here matched a row the projection
+        # could not produce.
+        #
+        # This periodic sampler and the System projection read the SAME collector snapshot.
+        # It used to call runtime_local_services() and re-derive running/cpu/rss out of the
+        # rendered HTTP payload, which meant a second parse of a projection it did not own;
+        # the typed rows already carry exactly these three fields.
         samples = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            source_id = str(row.get("service") or "").strip()
-            if not source_id:
-                continue
-            resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
-            cpu = resources.get("cpu_percent")
-            rss = resources.get("rss_bytes")
-            running = isinstance(row.get("pid"), int) and row["pid"] > 0
+        for row in self.local_services_snapshot().rows:
             samples.append(stats_current_collectors.ServiceLoadSample(
-                source_id,
-                running,
-                max(0.0, float(cpu)) if isinstance(cpu, (int, float)) and not isinstance(cpu, bool) else 0.0,
-                max(0.0, float(rss)) if running and isinstance(rss, (int, float)) and not isinstance(rss, bool) else None,
+                row.service,
+                row.running,
+                max(0.0, row.cpu_percent) if row.cpu_percent is not None else 0.0,
+                max(0.0, float(row.rss_bytes)) if row.running and row.rss_bytes is not None else None,
             ))
         return stats_current_collectors.service_load_success(
             samples,
@@ -2828,17 +2970,36 @@ class TmuxWebtermApp:
         )
 
     def latest_stats_sample(self) -> dict[str, Any]:
-        """Read the last scheduler-owned CPU sample without collecting in an API thread."""
+        """Read the last scheduler-owned CPU sample without collecting in an API thread.
+
+        The three sampled fields are ABSENT (``None``) until statsd pushes, never ``0``.
+        `stats_cpu_sample` is their only writer, so before the first push nothing has
+        measured this process -- and the previous hand-built record answered "is this
+        value absent, or is it zero?" with a confident zero that reached the Daemons
+        panel stamped ``measured`` and was summed into the roster's Memory total while a
+        real ~160MB RSS went missing from it. ``pid`` and ``started_at`` are read here
+        directly, not sampled, so they stay real.
+
+        There is no ``uptime_seconds`` in this record any more. It used to be synthesized
+        here and stamped onto every push, which made the panel's uptime a CACHED value: it
+        froze at the last delivered sample -- still labeled ``measured`` -- exactly when
+        delivery broke. It is derived at render time from this process's own clock in
+        ``system_status_server_block``, which is now its only owner.
+        """
 
         with self.stats_collection_state.sample_lock:
             cached = self.stats_collection_state.sample_record.cached_payload
             if cached is not None:
                 return dict(cached)
-        now = time.time()
         return {
-            "time": now, "pid": os.getpid(), "started_at": SERVER_STARTED_AT,
-            "uptime_seconds": max(0.0, now - SERVER_STARTED_AT), "cpu_percent": 0.0,
-            "system_cpu_percent": 0.0, "rss_bytes": 0,
+            # No `time`: a push timestamp would be a fourth fabricated fact, and every reader
+            # here already treats an absent/zero `time` as "never pushed". Synthesizing one made
+            # this record look freshly delivered to the CPU-budget reader.
+            "pid": os.getpid(), "started_at": SERVER_STARTED_AT,
+            "cpu_percent": None,
+            "system_cpu_percent": None, "rss_bytes": None,
+            "reason_code": STATS_SAMPLE_NOT_PUSHED_REASON_CODE,
+            "reason": STATS_SAMPLE_NOT_PUSHED_REASON,
         }
 
     def current_stats_sample(self, *, force: bool = False) -> tuple[dict[str, Any], bool]:
@@ -3009,13 +3170,10 @@ class TmuxWebtermApp:
             "warnings": copy.deepcopy(warnings or []),
         }
 
-    @staticmethod
-    def operation_failed_result(request_id: str, failure: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "state": "failed",
-            "request": {"id": str(request_id)},
-            **copy.deepcopy(failure),
-        }
+    # `operation_failed_result` used to live here: an unreferenced second constructor of the
+    # `state: failed` envelope that spread a caller dict straight into the result, so it could
+    # produce a canonical failure with no causal stack and no producer would notice.  Canonical
+    # failures are built only by `common.error_payload(canonical=True)`, which validates the stack.
 
     @staticmethod
     def typed_filesystem_operation_failure(failure: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus] | None:
@@ -3033,6 +3191,45 @@ class TmuxWebtermApp:
         return terminal_error, status
 
     @staticmethod
+    def refused_filesystem_operation_request(
+        operation: str,
+        path: str,
+        args: dict[str, Any],
+    ) -> tuple[dict[str, Any], HTTPStatus] | None:
+        """Refuse a filesystem request the web thread can already prove the worker will reject.
+
+        Acceptance is what makes this necessary rather than cosmetic.  A single filesystem request
+        is answered with a 202 receipt and completed in the jobd operation pool, so a descriptor
+        that cannot succeed -- an empty, relative or NUL/newline path, or a rename to an empty or
+        illegal child name -- would otherwise reserve a bounded completion slot, submit a job, and
+        terminalize `invalid_request` after the caller has already read its response.  That
+        terminal failure is recorded as an operator-visible server error nothing can correlate
+        back to the request that caused it.
+
+        These are the only two refusals decidable without a descriptor, so they are the whole
+        class.  Both rules are applied through their existing owners -- the worker reaches
+        `validate_request_path_lexical` through `parsed_request_path`/`safe_path`/`safe_parent` and
+        calls `validated_child_name` from `rename_path` -- so refusal and execution cannot
+        disagree, and the refusal payload is identical to the typed failure the worker would have
+        produced.  `jobd._filesystem_operation_untyped` coerces `new_name` with `str(... or "")`,
+        so the same coercion is applied here rather than a second reading of the same argument.
+
+        Acceptance calls the LEXICAL owner only, never `parsed_request_path`.  Expanding `~user`
+        is an NSS/passwd lookup that can block on a networked passwd source, and the web process
+        answers every request on this thread, so one stalled lookup would stall all of them.
+        """
+
+        try:
+            filesystem.validate_request_path_lexical(path)
+            if operation == "rename":
+                filesystem.validated_child_name(str(args.get("new_name") or ""))
+        except filesystem.FilesystemError as error:
+            refusal = dict(error.payload(path=path))
+            refusal["terminal"] = True
+            return refusal, HTTPStatus(int(error.status))
+        return None
+
+    @staticmethod
     def typed_filesystem_operation_failed_result(
         request_id: str,
         filesystem_error: dict[str, Any],
@@ -3047,6 +3244,11 @@ class TmuxWebtermApp:
         if not isinstance(descriptor, dict):
             descriptor = {}
         status_codes = {
+            # `FilesystemError.os_error` raises 403 for a PermissionError and nothing else does, so
+            # naming it is what makes a denied read distinguishable from a request the worker judged
+            # malformed.  Without this it fell through to `invalid_request`, which told an operator
+            # the browser had sent something illegal when the file was simply not readable.
+            HTTPStatus.FORBIDDEN: "permission_denied",
             HTTPStatus.NOT_FOUND: "path_not_found",
             HTTPStatus.CONFLICT: "conflict",
             HTTPStatus.REQUEST_ENTITY_TOO_LARGE: "request_too_large",
@@ -3193,11 +3395,22 @@ class TmuxWebtermApp:
         )
 
     def record_operation_failure(self, operation_id: str, result: dict[str, Any]) -> None:
+        """Record one terminal operation failure at the severity its cause earns.
+
+        An accepted operation is completed off the request thread, so the caller's outcome is
+        recorded here rather than by ``write_api_response``.  Browsing to a directory that no
+        longer exists is an ordinary outcome of that browsing -- a 404 to one caller, nothing an
+        operator can act on -- and recording it as an error fills release-blocking evidence with
+        rows produced by correct operation.  ``failure_record_level`` is the one owner of that
+        distinction and the synchronous writer asks it the same question; a genuine dependency
+        failure, an abandoned producer and a malformed failure record all still record an error.
+        """
+
         error = result.get("error") if isinstance(result.get("error"), dict) else {}
         details = error.get("details") if isinstance(error.get("details"), dict) else {}
         service = str(details.get("service") or "jobd")
         emit_server_log(
-            "error",
+            failure_record_level(error),
             f"{service}-operation",
             json.dumps({
                 "request": result.get("request"),
@@ -5746,7 +5959,12 @@ class TmuxWebtermApp:
         settings = settings_payload().get("settings", {})
         file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
         indexed_dirs = list(self.indexed_repo_discovery_dirs(file_explorer))
-        skip_dirs = sorted(filesystem.search._configured_search_skip_dirs(file_explorer if isinstance(file_explorer, dict) else {}))
+        # Same shared policy owner the Finder index and Differ ask; the watch daemon needs only its
+        # directory-name half.
+        skip_dirs = sorted(exclusions.ExclusionPolicy.from_settings(
+            file_explorer if isinstance(file_explorer, dict) else {},
+            session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES,
+        ).skip_dir_names)
         configured_roots = [str(root) for root in filesystem._configured_fs_roots()]
         with self.session_files_service.cache_lock:
             repo_roots = sorted(self.session_files_service.repo_dirty_generations)
@@ -6094,28 +6312,60 @@ class TmuxWebtermApp:
                     record.filesystem_healthy = False
 
     def watchd_runtime_status(self) -> dict[str, Any]:
-        """Return the bridge mirror without making a status route call watchd."""
+        """Return the bridge mirror without making a status route call watchd.
+
+        The rule that governs this row is unchanged and must stay: `WatchClient.runtime_status`
+        exists, and calling it from here would issue a `status` RPC, which demand-starts a
+        demand-scoped service from a diagnostics path. Nothing below issues any RPC.
+
+        What changed in M2 is where the row's identity comes from. It used to be the bridge
+        mirror alone, which knows a lease PID but no birth time, so `started_at` was hardcoded
+        0.0 and the System view's Uptime cell was permanently blank, and `resources` was
+        hardcoded {} so watchd was the one service with no CPU/memory at all. Both now come from
+        the durable service record the registry already writes -- one file read plus a /proc
+        read, identity-fenced against this host and boot, and no traffic to the daemon.
+
+        The registry record is the identity owner, so its PID is the one this row reports and
+        samples. When the bridge holds a lease whose PID the record cannot verify, that
+        disagreement is published under `identity` rather than papered over by preferring
+        whichever number looks healthier.
+        """
         with self.client_watch_service.lock:
             record = self.client_watch_service.event_watcher_record
-            return {
-                "service": "watchd",
-                "pid": record.watchd_pid,
-                "started_at": 0.0,
-                "version": 1,
-                "healthy": record.watchd_state in {"ready", "polling"},
-                "clients": 1 if record.watchd_lease_id else 0,
-                "queues": {"depth": 0},
-                "cache": {"ready": record.watchd_revision > 0},
-                "epoch": record.watchd_epoch,
-                "revision": record.watchd_revision,
-                "fallback": record.watchd_state == "polling",
-                # watchd is spawned when a client attaches a watch and retires when the
-                # last one detaches. "Absent" is its correct resting state, so it must not
-                # read as an outage; only last_failure below can make it one.
-                "demand_started": True,
-                "last_failure": "" if record.watchd_state in {"starting", "ready", "polling"} else record.watchd_state,
-                "resources": {},
-            }
+            state = record.watchd_state
+            lease_id = record.watchd_lease_id
+            epoch = record.watchd_epoch
+            revision = record.watchd_revision
+            bridge_pid = int(record.watchd_pid or 0)
+        identity = local_service_projection.registry_process_identity(self.watch_client.registry)
+        return {
+            "service": "watchd",
+            "pid": identity.pid,
+            "started_at": identity.started_at,
+            "version": identity.protocol_version,
+            "healthy": state in {"ready", "polling"},
+            "clients": 1 if lease_id else 0,
+            "queues": {"depth": 0},
+            "cache": {"ready": revision > 0},
+            "epoch": epoch,
+            "revision": revision,
+            "fallback": state == "polling",
+            # watchd is spawned when a client attaches a watch and retires when the
+            # last one detaches. "Absent" is its correct resting state, so it must not
+            # read as an outage; only last_failure below can make it one. This is the ONE
+            # owner of that rule -- ESSENTIAL_LOCAL_SERVICES deliberately no longer repeats it.
+            "demand_started": True,
+            "identity": {
+                **identity.as_dict(),
+                "source": "service_record",
+                "bridge_pid": bridge_pid,
+                # True only when the bridge names a PID the durable record does not confirm.
+                # A bridge with no lease yet is not a disagreement, it is just not started.
+                "bridge_pid_unverified": bridge_pid > 0 and bridge_pid != identity.pid,
+            },
+            "last_failure": "" if state in {"starting", "ready", "polling"} else state,
+            "resources": self.watch_client.registry.resources(identity.pid),
+        }
 
     def start_watchd_revision_watcher(self, record: ClientEventWatcherRecord) -> bool:
         with self.client_watch_service.lock:
@@ -6275,11 +6525,38 @@ class TmuxWebtermApp:
         *,
         delivery: str = "receipt",
     ) -> tuple[FilesystemWatchBatchProduct, ...]:
+        """Partition one bounded root list into jobd batches and submit each exactly once.
+
+        This is the only place watch roots are split.  Each chunk is a consecutive slice of the
+        caller's root order, so chunk ``n`` owns roots ``[offset, offset + len(chunk))`` and its
+        product response ids are re-based onto that window when the children are resolved.  Roots
+        are never truncated or dropped: every accepted root reaches exactly one child batch.
+        """
+        batches: list[FilesystemWatchBatchProduct] = []
+        for offset in range(0, len(roots), filesystem.MAX_BATCH_REQUESTS):
+            chunk = roots[offset:offset + filesystem.MAX_BATCH_REQUESTS]
+            batches.append(self.submit_filesystem_watch_batch(
+                chunk,
+                f"{identity_seed}#{offset}" if offset else identity_seed,
+                offset=offset,
+                delivery=delivery,
+            ))
+        return tuple(batches)
+
+    def submit_filesystem_watch_batch(
+        self,
+        roots: list[str],
+        identity_seed: str,
+        *,
+        offset: int = 0,
+        delivery: str = "receipt",
+    ) -> FilesystemWatchBatchProduct:
+        """Submit one jobd batch for a chunk that already fits the per-job request limit."""
         if len(roots) > filesystem.MAX_BATCH_REQUESTS:
             raise JobdOperationUnavailable(
-                f"filesystem watch roots must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
                 {
-                    "error": f"filesystem watch roots must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
+                    "error": f"filesystem watch batch must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
                     "status": "invalid_request",
                     "roots": len(roots),
                     "maximum": filesystem.MAX_BATCH_REQUESTS,
@@ -6312,10 +6589,12 @@ class TmuxWebtermApp:
                 {"error": "receipt-only filesystem watch batch unexpectedly returned product bytes"},
             )
         ready_product = self.decode_filesystem_watch_batch_product(body) if body else None
-        return (FilesystemWatchBatchProduct(
+        return FilesystemWatchBatchProduct(
             producer=JobdProductOperation(job_id=job_id, product_key=product_key, generation=1),
             ready_product=ready_product,
-        ),)
+            root_offset=int(offset),
+            root_count=len(roots),
+        )
 
     def filesystem_watch_batch_identity_seed(
         self,
@@ -6360,7 +6639,7 @@ class TmuxWebtermApp:
     ) -> dict[str, Any]:
         signature = filesystem_watch_product_signature(roots, products)
         token = self.record_filesystem_watch_snapshot(signature)
-        _payload, token_product_key = filesystem_watch_batch_submission(roots, token)
+        token_product_key = filesystem_watch_request_product_key(roots, token)
         self.cache_filesystem_watch_products(products, {*product_keys, token_product_key})
         return self.filesystem_watch_payload_from_products(
             {**copy.deepcopy(base_payload), "token": token},
@@ -6375,10 +6654,18 @@ class TmuxWebtermApp:
         *,
         cancel_event: threading.Event | None = None,
     ) -> list[dict[str, Any]]:
+        """Resolve every child batch under one shared deadline and re-base it onto parent roots.
+
+        Children may complete in any order; the merged product order is always the submission
+        order, and each response keeps its own per-root cause because only its ``id`` is shifted.
+        """
         products: list[dict[str, Any]] = []
         for batch in batches:
             if batch.ready_product is not None:
-                products.append(copy.deepcopy(batch.ready_product))
+                products.append(filesystem_watch_product_at_offset(
+                    copy.deepcopy(batch.ready_product),
+                    batch.root_offset,
+                ))
                 continue
             product = self.wait_for_jobd_operation_product(
                 batch.producer,
@@ -6390,7 +6677,7 @@ class TmuxWebtermApp:
                     "malformed completed filesystem batch product",
                     {"error": "malformed completed filesystem batch product", "status": "malformed_product"},
                 )
-            products.append(product)
+            products.append(filesystem_watch_product_at_offset(product, batch.root_offset))
         return products
 
     @staticmethod
@@ -6426,11 +6713,15 @@ class TmuxWebtermApp:
                 deadline_at,
                 cancel_event=receipt_fence.cancelled,
             )
+            # The HTTP path looks the retained product up under the whole-request key, so a
+            # partitioned request has to publish that key beside its per-chunk keys or the next
+            # identical request would resubmit every child batch.
+            request_product_key = filesystem_watch_request_product_key(roots, identity_seed)
             data = self.materialize_filesystem_watch_products(
                 base_payload,
                 roots,
                 products,
-                product_keys={batch.producer.product_key for batch in batches},
+                product_keys={request_product_key, *(batch.producer.product_key for batch in batches)},
             )
         except JobdOperationUnavailable as error:
             failure = (error.failure, operation, error.status, error.code)
@@ -6468,6 +6759,9 @@ class TmuxWebtermApp:
         identity_seed: str,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
+        # The receipt is the only place the caller learns how much bounded work it is waiting on.
+        # Submission itself stays on the completion worker, so this is a count, not a wait.
+        batch_count = math.ceil(len(roots) / filesystem.MAX_BATCH_REQUESTS)
         receipt_fence = FilesystemWatchReceiptFence()
         submitted = self.jobd_operation_service.submit_reserved(
             self.complete_filesystem_watch_diff_operation,
@@ -6495,6 +6789,7 @@ class TmuxWebtermApp:
                     "phase": "refreshing_snapshot" if not base_payload.get("token") else "waiting_for_product",
                     "producer": "jobd",
                     "producer_state": "submitting",
+                    "batches_total": batch_count,
                 },
                 producer={
                     "service": "jobd",
@@ -6506,7 +6801,7 @@ class TmuxWebtermApp:
                     "token": str(base_payload.get("token") or ""),
                     "since": str(base_payload.get("since") or ""),
                     "roots": len(roots),
-                    "batches": 1,
+                    "batches": batch_count,
                 },
             )
         except Exception:
@@ -6526,19 +6821,28 @@ class TmuxWebtermApp:
         base_payload, roots = self.filesystem_watch_diff_plan(since_token, force_full)
         if not roots:
             return base_payload, HTTPStatus.OK
-        if len(roots) > filesystem.MAX_BATCH_REQUESTS:
+        # The watch-root contract is CLIENT_WATCH_ROOT_LIMIT, not the per-job batch size: a
+        # snapshot of 65-128 roots is accepted upstream by SharedWatchRootIndex and is split into
+        # jobd batches of at most MAX_BATCH_REQUESTS by submit_filesystem_watch_batches().
+        if len(roots) > CLIENT_WATCH_ROOT_LIMIT:
             return common.error_payload(
-                f"filesystem watch roots must contain at most {filesystem.MAX_BATCH_REQUESTS} items",
-                message_key="request.error.list",
+                f"filesystem watch roots must contain at most {CLIENT_WATCH_ROOT_LIMIT} items",
+                message_key="request.error.tooManyItems",
+                message_params={"field": "roots", "max": CLIENT_WATCH_ROOT_LIMIT},
                 canonical=True,
                 code="invalid_request",
                 origin="server.http",
                 retryable=False,
-                details={"roots": len(roots), "maximum": filesystem.MAX_BATCH_REQUESTS},
+                details={"roots": len(roots), "maximum": CLIENT_WATCH_ROOT_LIMIT},
+                stack=[{
+                    "component": "server.http",
+                    "operation": "GET /api/fs/watch-diff",
+                    "code": "invalid_request",
+                }],
                 request_id=request_id,
             ), HTTPStatus.BAD_REQUEST
         identity_seed = self.filesystem_watch_batch_identity_seed(base_payload, roots)
-        _batch_payload, product_key = filesystem_watch_batch_submission(roots, identity_seed)
+        product_key = filesystem_watch_request_product_key(roots, identity_seed)
         cached_products = self.cached_filesystem_watch_products(product_key)
         if cached_products is not None:
             return self.materialize_filesystem_watch_products(
@@ -6639,7 +6943,9 @@ class TmuxWebtermApp:
         base_payload = {"mode": "full", "token": token, "removed_roots": []}
         if all(batch.ready_product is not None for batch in batches):
             self.jobd_operation_service.release_reservation()
-            products = [copy.deepcopy(batch.ready_product) for batch in batches if batch.ready_product is not None]
+            # Warm children still go through the one resolver, so their responses are re-based
+            # onto parent root order by the same owner that handles cold children.
+            products = self.resolve_filesystem_watch_batches(batches, time.time())
             payload = self.materialize_filesystem_watch_products(
                 base_payload,
                 roots,
@@ -7320,6 +7626,17 @@ class TmuxWebtermApp:
         while len(cache) > limit:
             cache.pop(next(iter(cache)))
 
+    def session_files_exclusion_policy(self) -> exclusions.ExclusionPolicy:
+        """Snapshot the configured Differ exclusion policy in the WEB process.
+
+        Settings are read here and nowhere below: the snapshot is signed into the cache identity
+        and shipped in the jobd task payload, so a worker judging paths can never be judging by a
+        different policy than the one the cached answer is keyed on.
+        """
+
+        settings = self.settings_payload().get("settings", {}).get("file_explorer", {})
+        return exclusions.ExclusionPolicy.from_settings(settings, session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
+
     def session_files_cache_key(
         self,
         kind: str,
@@ -7360,6 +7677,11 @@ class TmuxWebtermApp:
             str(from_ref or ""),
             str(to_ref or ""),
             repo_refs_cache_signature(repo_refs),
+            # The exclusion policy decides which files the answer CONTAINS, so it belongs in the
+            # identity of that answer. Without it, editing Preferences leaves every cached payload
+            # -- memory, disk and the jobd coalesce key derived from this tuple -- serving rows the
+            # new policy excludes.
+            self.session_files_exclusion_policy().signature,
             tuple((name, session_info_cache_signature(info)) for name, info in sorted(infos.items())),
             tuple(repo_signatures),
         )
@@ -8178,6 +8500,8 @@ class TmuxWebtermApp:
             "include_cross_session_attribution": not bool(session),
             "source": self.session_files_jobd_source_profile(cache_key, requester),
             "repository_states": self.session_files_jobd_repository_states(cache_key),
+            # Serializable policy, not a lookup: the worker applies exactly this at both doors.
+            "exclusion_policy": self.session_files_exclusion_policy().as_payload(),
         }
         response = self.job_client.submit(
             "session_files_view",
@@ -10164,8 +10488,14 @@ class TmuxWebtermApp:
         """Advance the sustained-CPU warning without adding another sampler."""
 
         sample_time = float(now if now is not None else sample.get("time") or time.time())
-        cpu_percent = max(0.0, self.float_value(sample.get("cpu_percent"), 0.0))
         record = self.stats_collection_state.cpu_budget_record
+        # An ABSENT sample is not a 0% sample. Reading it as 0.0 would have cleared
+        # `exceeded_since`/`warning_emitted`/`top_consumers` below -- silently cancelling a
+        # breach in progress because nobody measured, which is the same fabricated zero as
+        # the panel's, with state-machine consequences.
+        if sample.get("cpu_percent") is None:
+            return self.server_cpu_budget_payload()
+        cpu_percent = max(0.0, self.float_value(sample.get("cpu_percent"), 0.0))
         record.current_percent = cpu_percent
         previous_sample_at = record.last_sample_at
         record.last_sample_at = sample_time
@@ -10174,7 +10504,7 @@ class TmuxWebtermApp:
             record.warning_emitted = False
             record.top_consumers = []
             record.cpu_ms_since_exceeded = 0.0
-            return self.server_cpu_budget_payload(now=sample_time)
+            return self.server_cpu_budget_payload(now=sample_time, advancing=True)
         if record.exceeded_since <= 0:
             record.exceeded_since = sample_time
             record.cpu_ms_since_exceeded = 0.0
@@ -10228,23 +10558,46 @@ class TmuxWebtermApp:
                     "top_consumers": json.dumps(record.top_consumers, separators=(",", ":")),
                 },
             )
-        return self.server_cpu_budget_payload(now=sample_time)
+        return self.server_cpu_budget_payload(now=sample_time, advancing=True)
 
-    def server_cpu_budget_payload(self, *, now: float | None = None) -> dict[str, Any]:
+    def server_cpu_budget_payload(
+        self,
+        *,
+        now: float | None = None,
+        advancing: bool = False,
+        sample: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish the CPU budget.
+
+        `now` is only a CLOCK and `advancing` is only "I just advanced the record with a fresh
+        sample, so do not call it stale". They used to be one parameter, which meant a caller
+        could not supply a consistent read timestamp without also suppressing the staleness
+        test -- exactly what a single-snapshot response needs to do.
+
+        `sample` lets a caller hand in the reading it has already taken, so one response cannot
+        read the cache twice and publish two different answers about the same sample's age.
+        """
+
         record = self.stats_collection_state.cpu_budget_record
-        sample_time = float(now if now is not None else time.time())
-        sustained_seconds = max(0.0, sample_time - record.exceeded_since) if record.exceeded_since > 0 else 0.0
-        with self.stats_collection_state.sample_lock:
-            cached = self.stats_collection_state.sample_record.cached_payload or {}
-        pushed_at = float(cached.get("time") or 0.0)
-        sample_age_seconds = max(0.0, sample_time - pushed_at) if pushed_at > 0 else None
-        # Callers that advance the record supply that sample's timestamp. They
-        # are not a daemon-health read and must retain the just-computed state.
-        stale = now is None and (sample_age_seconds is None or sample_age_seconds > 3.0)
+        read_at = float(now if now is not None else time.time())
+        sustained_seconds = max(0.0, read_at - record.exceeded_since) if record.exceeded_since > 0 else 0.0
+        if sample is None:
+            with self.stats_collection_state.sample_lock:
+                sample = dict(self.stats_collection_state.sample_record.cached_payload or {})
+        sample_age_seconds = stats_current_host_collectors.host_cpu_sample_age_seconds(sample, read_at)
+        # The staleness threshold is NOT a literal here any more. It was a bare `3.0` while the
+        # producer's cadence lived in stats_current as `1.0`: two copies of one policy, either of
+        # which could move without the other noticing.
+        stale = not advancing and stats_current_host_collectors.host_cpu_sample_is_stale(sample_age_seconds)
         status = "stale" if stale else ("warning" if record.warning_emitted else ("watching" if record.exceeded_since > 0 else "ok"))
+        # `CpuBudgetRecord.current_percent` defaults to 0.0, so a server that has never
+        # received a push published a confident `0.0%` that no sample stands behind. No
+        # push ever arrived means `pushed_at == 0`, which is exactly `sample_age_seconds
+        # is None` -- so the absence the record cannot express is recoverable here.
+        never_sampled = sample_age_seconds is None
         return {
             "status": status,
-            "current_percent": round(record.current_percent, 3),
+            "current_percent": None if never_sampled else round(record.current_percent, 3),
             "budget_percent": SERVER_CPU_BUDGET_PERCENT,
             "sustained_budget_seconds": SERVER_CPU_BUDGET_SUSTAINED_SECONDS,
             "sustained_seconds": round(sustained_seconds, 3),
@@ -10507,29 +10860,40 @@ class TmuxWebtermApp:
         missing_reason_code: str,
         missing_reason: str,
     ) -> dict[str, object]:
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-            return {"state": "measured", "value": value, "reason_code": "", "reason": ""}
-        if not running:
-            return {
-                "state": "not_running",
-                "value": None,
-                "reason_code": "not_started",
-                "reason": "Service is not running",
-            }
-        return {
-            "state": missing_state,
-            "value": None,
-            "reason_code": missing_reason_code,
-            "reason": missing_reason,
-        }
+        # One envelope owner (`local_service_projection.measurement`), two callers: these
+        # three process metrics and the M8 health metrics. The dict used to be built here,
+        # which meant the health block would have been a second copy of the same shape.
+        if running:
+            return local_service_projection.measurement(
+                value,
+                state=missing_state,
+                reason_code=missing_reason_code,
+                reason=missing_reason,
+            )
+        return local_service_projection.measurement(
+            value,
+            state="not_running",
+            reason_code="not_started",
+            reason="Service is not running",
+        )
 
-    def system_status_service(self, row: dict[str, Any]) -> dict[str, Any]:
+    def system_status_service(
+        self,
+        row: dict[str, Any],
+        *,
+        health: local_service_projection.RetainedHealth | None = None,
+    ) -> dict[str, Any]:
         service_id = str(row.get("service") or "").strip()
         labels = {
             "indexd": "Quick Open index",
             "statsd": "YO!stats",
             "jobd": "Filesystem jobs",
             "statusd": "Tmux status",
+            # watchd had no entry, so the indicator and System row named it "watchd" -- the raw
+            # id -- while every other service got a capability name. local_services_alert copies
+            # this label verbatim into the persistent UI indicator, so a missing entry is a
+            # user-visible defect, not a cosmetic one.
+            "watchd": "File watching",
             "approvald": "Auto-approval",
         }
         pid = int(row.get("pid") or 0)
@@ -10541,11 +10905,38 @@ class TmuxWebtermApp:
         # This used to be keyed off `healthy is not False`, but every runtime_status coerces
         # healthy to a bool, so the idle branch was unreachable and a legitimately-absent
         # watchd classified exactly like a broken daemon.
+        #
+        # ONE DERIVATION, TWO VOCABULARIES -- THE RECORDED DECISION
+        # ---------------------------------------------------------
+        # This panel used to decide `running`/`idle`/`issue`/`unavailable` from the row itself,
+        # in parallel with `backend_health.observer.observed_health` deciding
+        # `ready`/`starting`/`degraded`/`down` from the same row. Two classifiers, one fact:
+        # an absent jobd on a process that lost the scheduler lease read `unavailable` and
+        # `alerting` here while the topbar indicator read `starting` and stayed quiet, because
+        # only the observer knew about `absence_expected_reason`.
+        #
+        # The single owner is `observed_health`. It is the typed reducer the health contract
+        # names, it is what the retained store and the topbar indicator already consume, and it
+        # is the one that reads all five distinct absence causes. The panel consumes it here and
+        # is NOT a second copy: this method still owns only the RENDERING vocabulary -- which of
+        # its four display states, which bounded `reason_code`, and which human sentence -- so
+        # the existing System/API contract is unchanged while the decision behind it is shared.
+        # Copying `observed_health`'s branches into this file was the rejected alternative; that
+        # is a third copy, not a fix.
+        #
+        # `demand_started` is still read here, before `essential`, exactly as before: the
+        # ordering assertion in tests/test_backend_health_catalog.py pins that absence-by-design
+        # is classified before essentiality is consulted, and the sentence a demand-scoped
+        # service shows ("Starts on demand") is a different sentence from a pending pin.
         demand_started = row.get("demand_started") is True
-        if running and row.get("healthy") is not False and not transport_reason:
+        health_state, _health_reason_code = observed_health(row)
+        if health_state == "ready":
             state, reason_code, reason = "running", "", ""
-        elif not running and not transport_reason and not last_failure and demand_started:
-            state, reason_code, reason = "idle", "not_started", "Starts on demand"
+        elif health_state == "starting":
+            # Not serving, and not a failure: absent by design, or a named owner in this process
+            # is still bringing it up. Neither is an alert.
+            state, reason_code = "idle", "not_started"
+            reason = "Starts on demand" if demand_started else "Starting"
         else:
             state = "issue" if running else "unavailable"
             reason_code = "transport_failed" if transport_reason else "service_unavailable"
@@ -10593,6 +10984,14 @@ class TmuxWebtermApp:
                     missing_reason="The service start time is unavailable",
                 ),
             },
+            # M8. The retained observation this row could not carry before: typed state and
+            # reason, when that state started, the bounded transition history, how complete
+            # each aggregate is, and the restart/request/error/latency numbers. `metrics`
+            # above is left at exactly its three process measurements -- the panel and
+            # `tests/test_gate_panels.py:164` pin that set, and the retained numbers have a
+            # different source and a different denominator, so they are published here with
+            # their own coverage rather than smuggled into it.
+            "health": (health if health is not None else local_service_projection.RetainedHealth()).service(service_id),
             "details": details,
         }
 
@@ -10621,9 +11020,14 @@ class TmuxWebtermApp:
             })
         return events[:16]
 
-    def runtime_local_services(self) -> dict[str, Any]:
-        """Return bounded worker diagnostics without exposing service payloads."""
-        indexd = self.search_indexer.runtime_status()
+    def statsd_runtime_status(self) -> dict[str, Any]:
+        """Build statsd's whole row, the same way the other five services build theirs.
+
+        Until M3 this was an inline dict literal inside `runtime_local_services()`, so
+        statsd's row shape lived in two places -- its client's projection and the composed
+        projection -- and only statsd's did. It is now one named row producer like every
+        other service, which is what lets the collector treat all six identically.
+        """
         current_runtime = self.stats_current_runtime.status()
         current_service = current_runtime.get("service") if isinstance(current_runtime.get("service"), dict) else {}
         current_service = self.stats_current_client.runtime_status(current_service)
@@ -10641,7 +11045,7 @@ class TmuxWebtermApp:
             token_cadence,
             sampler_families=current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
         )
-        statsd = {
+        return {
             "service": "statsd",
             "pid": int(current_service.get("pid") or 0),
             "started_at": float(current_service.get("started_at") or 0.0),
@@ -10656,42 +11060,160 @@ class TmuxWebtermApp:
             "sampler_families": current_runtime.get("families") if isinstance(current_runtime.get("families"), dict) else {},
             "usage": usage,
             "last_failure": str(migration.get("failure") or build.get("last_failure") or ""),
+            # The one excuse statsd may state, and only while this process is mid-flight taking
+            # the pin. `observed_health` reads it AFTER `last_failure`/`transport_reason`, so a
+            # statsd that recorded a real failure alarms whether or not the pin is pending.
+            "absence_expected_reason": STATSD_ABSENT_WHILE_PIN_PENDING if statsd_pin_pending(current_runtime) else "",
             "resources": current_service.get("resources") if isinstance(current_service.get("resources"), dict) else {},
         }
-        jobd = self.job_client.runtime_status()
-        statusd = self.status_client.runtime_status()
-        watchd = self.watchd_runtime_status()
-        approvald = self.approval_client.runtime_status()
-        rows = [indexd, statsd, jobd, statusd, watchd, approvald]
-        totals = {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
-        now = time.time()
-        for row in rows:
-            # Derive per-service uptime once, here, from the started_at each
-            # runtime_status already reports — one owner for the Local-services
-            # table's Uptime cell instead of adding the field to five
-            # per-service status builders.
-            started_at = float(row.get("started_at") or 0.0)
-            row["uptime_seconds"] = max(0.0, now - started_at) if int(row.get("pid") or 0) > 0 and started_at > 0 else None
-            if int(row.get("pid") or 0) > 0:
-                totals["processes"] += 1
-            resources = row.get("resources") if isinstance(row.get("resources"), dict) else {}
-            cpu_percent = resources.get("cpu_percent")
-            rss_bytes = resources.get("rss_bytes")
-            if isinstance(cpu_percent, (int, float)):
-                totals["cpu_percent"] += float(cpu_percent)
-            if isinstance(rss_bytes, int):
-                totals["rss_bytes"] += rss_bytes
-        inventory = ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
-        services = [self.system_status_service(row) for row in rows]
+
+    def local_services_row_producers(self) -> dict[str, Callable[[], dict[str, Any]]]:
+        """The one map from service id to the callable that owns its whole row.
+
+        Resolved per collection, not cached: tests and runtime both replace client
+        objects on this app, and a producer bound once at construction would keep
+        calling the client that existed then.
+        """
         return {
-            "schema_version": 1,
-            "inventory": inventory,
-            "services": services,
-            "alert": local_services_alert(services),
-            "totals": totals,
-            "ledger": self.runtime_process_ledger(),
-            "recovery_events": self.stats_current_recovery_events(migration),
+            "indexd": self.search_indexer.runtime_status,
+            "statsd": self.statsd_runtime_status,
+            "jobd": self.job_client.runtime_status,
+            "statusd": self.status_client.runtime_status,
+            "watchd": self.watchd_runtime_status,
+            "approvald": self.approval_client.runtime_status,
         }
+
+    def local_services_recovery_entrypoints(self) -> dict[str, Callable[[], bool]]:
+        """The one map from service id to that service's OWN client `retry` wrapper.
+
+        The recovery mirror of `local_services_row_producers()` above, and deliberately the same
+        shape: one owner, one map, resolved per call so a replaced client is the one retried. No
+        caller may retry a service any other way -- a per-service retry scattered across the
+        recovery path is how two callers end up with two ladders for one service.
+
+        Five of the six inventory services are here. indexd is absent because
+        `SearchIndexerClient` is not a `LocalServiceClient` and declares no retry wrapper at all;
+        that gap is the catalog's `recovery_client_entrypoint == ""` row, and
+        `tests/test_backend_health_catalog.py` derives this map's key set from it rather than
+        letting the two lists drift.
+
+        Every value below is a client wrapper that clears the latched failure through
+        `LocalServiceRegistry.retry` and then asks for a start. None of them stops, signals or
+        reclaims anything, which is what makes `LocalServiceRecoveryControl` non-destructive by
+        construction rather than by review.
+        """
+        return {
+            "statsd": self.stats_current_client.retry,
+            "jobd": self.job_client.retry,
+            "statusd": self.status_client.retry,
+            "watchd": self.watch_client.retry,
+            "approvald": self.approval_client.retry,
+        }
+
+    def local_services_recovery_control(self) -> LocalServiceRecoveryControl:
+        """The control the backend-health observer is constructed with (`cli.py`).
+
+        Handed the bound map method, not the map, so the control resolves clients at the moment
+        it retries. This is the only production place a recovery control is built.
+        """
+
+        return LocalServiceRecoveryControl(self.local_services_recovery_entrypoints)
+
+    def local_services_recovery_events(self, rows: Mapping[str, Mapping[str, Any]]) -> list[dict[str, str]]:
+        """Derive the statsd recovery banner from the collected row, not a second read.
+
+        The migration status used to be captured in the projection's own body because the
+        statsd row was built there. Reading it back off the collected row keeps exactly one
+        statsd status read per collection.
+        """
+        statsd_row = rows.get("statsd") or {}
+        migration = statsd_row.get("migration")
+        return self.stats_current_recovery_events(migration if isinstance(migration, Mapping) else {})
+
+    def local_services_snapshot(self) -> local_service_projection.LocalServicesSnapshot:
+        """Collect the one immutable local-services snapshot.
+
+        This is the single owner. `runtime_local_services()` renders it for HTTP, and the
+        `service_load` stats collector samples it; neither builds rows of its own. No call
+        below issues a start: every producer reads status or a persisted record, so a full
+        projection starts zero demand-scoped services.
+        """
+        collector = local_service_projection.LocalServicesCollector(
+            self.local_services_row_producers,
+            ledger=self.runtime_process_ledger,
+            recovery_events=self.local_services_recovery_events,
+        )
+        return collector.collect()
+
+    def attach_backend_health_store(self, store: Any) -> None:
+        """Hold this port's live retained-health store so the projection never reads its file.
+
+        RECORDED DECISION (M8) -- how a System row reaches the retained history.
+
+        The store is PUSHED in here, once, by whoever armed this port's observer
+        (`cli.start_backend_health_observer`). The HTTP request thread then reads the
+        document the observing process already holds in memory. It never opens
+        `STATE_DIR/backend-health/<port>.json`.
+
+        The rejected alternative was for the projection to construct its own store and call
+        `load()`. That is one directory `file_lock`, one open, one read and one JSON parse on
+        every `/api/system-status`, contending with the observer's own 2-second locked write,
+        to reproduce a document this process already has. It also cannot see the live
+        persistence state at all: a store that is failing to write says so only in memory
+        (`BackendHealthStore.persistence_status`), so a file reader would report a healthy
+        monitor that has not published in an hour.
+
+        The cost of the push is stated rather than hidden: `BackendHealthStore.status()`
+        round-trips the document through `json.dumps`/`json.loads`, so each
+        `/api/system-status` pays one bounded deep copy -- six resources, at most 128
+        retained transition rows each -- in CPU, with no I/O and no lock. It is taken ONCE
+        per projection, not once per row. `record()` rebinds `_document` to a freshly built
+        dict and mutates no part of the previous one, so this read needs no lock to be
+        consistent.
+
+        When nothing is attached -- any process that never armed an observer, and every unit
+        test that does not ask for one -- the projection publishes
+        `reason_code: "observer_unattached"` and null metrics. It does not render zeros.
+        """
+        self.backend_health_store = store
+
+    # Set by `cli.start_backend_health_observer` once the observer exists. `None` in every process
+    # and every unit test that never armed one, which the projection reports as `observer_unattached`.
+    backend_health_liveness_provider: Any = None
+
+    def attach_backend_health_observer(self, observer: Any) -> None:
+        """Hold the observer's liveness reader beside its history store."""
+        self.backend_health_liveness_provider = observer.liveness
+
+    def retained_backend_health(self) -> local_service_projection.RetainedHealth:
+        """Collect the two in-memory retained-health inputs ONCE per projection.
+
+        Both reads are process-local: the observer's published document, and this web
+        process's own RPC ledger. Neither opens a socket, starts a service, or touches disk.
+        """
+        store = self.backend_health_store
+        document = store.status() if store is not None else {}
+        # Liveness comes from the OBSERVER, not the store: only it knows the cadence and owns the
+        # thread whose survival is the question, and it answers on the monotonic clock it
+        # schedules on rather than a wall clock that can step.
+        provider = self.backend_health_liveness_provider
+        liveness = provider() if provider is not None else {}
+        return local_service_projection.RetainedHealth(
+            document=document if isinstance(document, dict) else {},
+            liveness=liveness if isinstance(liveness, dict) else {},
+            traffic=local_service_traffic_snapshot(),
+            now=time.time(),
+            web_process_started_at=SERVER_STARTED_AT,
+        )
+
+    def runtime_local_services(self) -> dict[str, Any]:
+        """Return bounded worker diagnostics without exposing service payloads."""
+        health = self.retained_backend_health()
+        return self.local_services_snapshot().payload(
+            lambda row: self.system_status_service(row, health=health),
+            local_services_alert,
+            health=health,
+        )
 
     def runtime_process_ledger(self) -> dict[str, Any]:
         """Bounded identity-verified process-group ledger for System diagnostics.
@@ -10867,25 +11389,96 @@ class TmuxWebtermApp:
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }
 
+    def system_status_server_block(self, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
+        """Publish the web process's own row through the ONE metric-envelope owner.
+
+        `local_service_projection.measurement` already publishes every local service's
+        CPU/memory/uptime as a typed envelope. This block used to be the one exception --
+        plain floats built with `float(sample.get(...) or 0.0)` -- which is why an unpushed
+        sample arrived at the panel as a finite `0` and was stamped `measured`. It is the
+        same divergent-copy defect the panel's own comments forbid, so the web process now
+        goes through the same envelope as the six services beside it: a value nobody
+        sampled is `{"state": "unavailable", "value": None, "reason_code": ...}`, and the
+        roster's Memory/CPU totals skip it exactly as they already skip every other
+        unmeasured row.
+
+        `version`, `pid` and `started_at` are NOT measurements -- they are read here, are
+        always known, and stay plain scalars.
+        """
+
+        reason_code = str(sample.get("reason_code") or STATS_SAMPLE_NOT_PUSHED_REASON_CODE)
+        reason = str(sample.get("reason") or STATS_SAMPLE_NOT_PUSHED_REASON)
+        # A sample that stopped arriving is not a current measurement. `cpu_budget` already aged
+        # its own copy of this record and said `stale`, but these envelopes carried no age at all,
+        # so a frozen sample kept rendering as `measured` at its last value forever -- the last way
+        # this panel could present something unmeasured as measured.
+        read_at = float(now if now is not None else time.time())
+        age_seconds = stats_current_host_collectors.host_cpu_sample_age_seconds(sample, read_at)
+        if sample.get("cpu_percent") is not None:
+            if age_seconds is None:
+                # A value with no push timestamp. Its currency cannot be checked, and the one
+                # thing this must not do is invent an age: `STATS_SAMPLE_STALE_REASON.format(
+                # seconds=int(age_seconds or 0))` would have printed a confident "is 0s old"
+                # about a sample whose age is exactly what is unknown.
+                reason_code = STATS_SAMPLE_UNDATED_REASON_CODE
+                reason = STATS_SAMPLE_UNDATED_REASON
+                sample = {**sample, "cpu_percent": None, "system_cpu_percent": None, "rss_bytes": None}
+            elif stats_current_host_collectors.host_cpu_sample_is_stale(age_seconds):
+                reason_code = STATS_SAMPLE_STALE_REASON_CODE
+                reason = STATS_SAMPLE_STALE_REASON.format(seconds=int(age_seconds))
+                sample = {**sample, "cpu_percent": None, "system_cpu_percent": None, "rss_bytes": None}
+
+        def envelope(value: object) -> dict[str, Any]:
+            return local_service_projection.measurement(
+                value, state="unavailable", reason_code=reason_code, reason=reason,
+            )
+
+        return {
+            "version": YOLOMUX_VERSION,
+            # These two fall back to a locally KNOWN truth, not to zero, which is why they
+            # keep their `or`: this process's pid and start time are never unknown here.
+            "pid": int(sample.get("pid") or os.getpid()),
+            "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
+            # Uptime is DERIVED HERE, from this process's own start time and the one moment this
+            # response describes. The comment above this line used to say exactly that while the
+            # code published `envelope(sample["uptime_seconds"])` -- a value written only when a
+            # statsd CPU push arrived. So when delivery broke, CPU and RSS correctly went
+            # `unavailable` past the stale window while uptime sat FROZEN at the last push and
+            # stayed stamped `measured`: a number that stops advancing, presented as current,
+            # precisely when the reader is looking at the panel to find out what broke. A live
+            # smoke could not see it, because a healthy push made the frozen field advance.
+            #
+            # There is no cached copy left to disagree with this one: `handle_control_request` no
+            # longer writes `uptime_seconds` into the sample, and `latest_stats_sample` no longer
+            # synthesizes one. One field, one source, and it cannot freeze because nothing outside
+            # this process feeds it.
+            "uptime_seconds": envelope(max(0.0, read_at - SERVER_STARTED_AT)),
+            "cpu_percent": envelope(sample.get("cpu_percent")),
+            "system_cpu_percent": envelope(sample.get("system_cpu_percent")),
+            "rss_bytes": envelope(sample.get("rss_bytes")),
+        }
+
     def system_status_payload(self) -> dict[str, Any]:
         """Return bounded live diagnostics for the YO!stats System view."""
         # Diagnostics are a reader. Only the CPU family worker may advance the
         # process/host baselines; otherwise a System refresh can consume the
         # next one-second observation and leave no durable bucket for it.
+        # Assemble the SLOW runtime data FIRST, then take exactly one reading of the CPU sample
+        # and one timestamp, and render the whole response from that single moment.
+        #
+        # The old order read the sample, then did the slow work, then rendered the now-aged
+        # sample while `cpu_budget` re-read the cache and saw a newer push. One live response
+        # reported `server` stale at 5s and `cpu_budget.sample_age_seconds` 0.358 at the same
+        # time: the response manufactured its own staleness and flipped the row to an em dash
+        # for a reason that had nothing to do with statsd.
+        runtime_report = self.runtime_report_payload(force_transcripts=False)
+        generated_at = time.time()
         sample = self.latest_stats_sample()
         return {
-            **self.runtime_report_payload(force_transcripts=False),
-            "generated_at": time.time(),
-            "server": {
-                "version": YOLOMUX_VERSION,
-                "pid": int(sample.get("pid") or os.getpid()),
-                "started_at": float(sample.get("started_at") or SERVER_STARTED_AT),
-                "uptime_seconds": float(sample.get("uptime_seconds") or 0.0),
-                "cpu_percent": float(sample.get("cpu_percent") or 0.0),
-                "system_cpu_percent": float(sample.get("system_cpu_percent") or 0.0),
-                "rss_bytes": int(sample.get("rss_bytes") or 0),
-            },
-            "cpu_budget": self.server_cpu_budget_payload(),
+            **runtime_report,
+            "generated_at": generated_at,
+            "server": self.system_status_server_block(sample, now=generated_at),
+            "cpu_budget": self.server_cpu_budget_payload(now=generated_at, sample=sample),
             # System mirrors the same canonical matrix used by the current
             # capabilities endpoint; there is no diagnostic-only policy copy.
             "resolution_capabilities": stats_resolution.wire_capabilities(),
@@ -12364,7 +12957,10 @@ class TmuxWebtermApp:
             if normalized["pid"] != os.getpid():
                 return {"ok": False, "error": "stats CPU sample PID mismatch"}
             normalized["started_at"] = SERVER_STARTED_AT
-            normalized["uptime_seconds"] = max(0.0, normalized["time"] - SERVER_STARTED_AT)
+            # No `uptime_seconds` here. A push used to stamp one, which made the panel's uptime a
+            # CACHED value that froze at the last delivered sample while still reading `measured`.
+            # Uptime is derived at render time in `system_status_server_block` from this process's
+            # own clock; a delivered sample has nothing to say about how long this process has run.
             with self.stats_collection_state.sample_lock:
                 record = self.stats_collection_state.sample_record
                 record.cached_monotonic = time.monotonic()
@@ -13745,6 +14341,43 @@ class TmuxWebtermApp:
             materialized.append(response)
         return {**copy.deepcopy(product), "responses": materialized}
 
+    def fs_batch_invalid_request_result(
+        self,
+        payload: dict[str, Any],
+        error: ValueError,
+    ) -> dict[str, Any]:
+        """Build the one typed rejection for a malformed Finder batch.
+
+        ``filesystem.validated_batch_requests`` stays the only owner of what is acceptable; this
+        is the only owner of how that rejection reaches the browser, so the HTTP handler and the
+        app payload cannot disagree about the message, the code, or the causal frame.
+        """
+        requests = payload.get("requests", [])
+        if isinstance(requests, list):
+            message_key = "request.error.tooManyItems"
+            message_params = {"field": "requests", "max": filesystem.MAX_BATCH_REQUESTS}
+            details = {"requests": len(requests), "maximum": filesystem.MAX_BATCH_REQUESTS}
+        else:
+            message_key = "request.error.list"
+            message_params = {"field": "requests"}
+            details = {"requests_type": type(requests).__name__}
+        return common.error_payload(
+            str(error),
+            message_key=message_key,
+            message_params=message_params,
+            canonical=True,
+            code="invalid_request",
+            origin="server.http",
+            retryable=False,
+            details=details,
+            stack=[{
+                "component": "server.http",
+                "operation": "POST /api/fs/batch",
+                "code": "invalid_request",
+            }],
+            request_id=self.new_api_request_id(),
+        )
+
     def fs_batch_http_payload(
         self,
         payload: dict[str, Any],
@@ -13755,15 +14388,7 @@ class TmuxWebtermApp:
         try:
             requests = filesystem.validated_batch_requests(payload)
         except ValueError as error:
-            return common.error_payload(
-                str(error),
-                message_key="request.error.list",
-                canonical=True,
-                code="invalid_request",
-                origin="server.http",
-                retryable=False,
-                request_id=self.new_api_request_id(),
-            ), HTTPStatus.BAD_REQUEST
+            return self.fs_batch_invalid_request_result(payload, error), HTTPStatus.BAD_REQUEST
         if not self.jobd_operation_service.reserve():
             request_id = self.new_api_request_id()
             result = self.jobd_operation_failure_result(
@@ -14011,6 +14636,10 @@ class TmuxWebtermApp:
         scope: str = "local",
     ) -> FilesystemOperationHttpResponse:
         """Submit one filesystem descriptor and persist a cold-operation receipt."""
+        operation_args = dict(args or {})
+        refusal = self.refused_filesystem_operation_request(operation, path, operation_args)
+        if refusal is not None:
+            return FilesystemOperationHttpResponse(*refusal)
         request_id = self.new_api_request_id()
         if not self.jobd_operation_service.reserve():
             result = self.jobd_operation_failure_result(
@@ -14022,7 +14651,6 @@ class TmuxWebtermApp:
             )
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
-        operation_args = dict(args or {})
         priority = filesystem_operation_priority(operation)
         generation = self.filesystem_operation_product_generation()
         uncoalesced_reason = ""

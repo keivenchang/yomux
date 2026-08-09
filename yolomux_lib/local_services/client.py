@@ -16,6 +16,7 @@ from .registry import LocalServiceRegistry
 from .registry import LocalServiceSpec
 from .rpc import LOCAL_RPC_DEADLINE_REASONS
 from .rpc import LOCAL_RPC_VERSION
+from .rpc import LOCAL_SERVICE_ERROR_BUSY
 from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request as local_service_request
@@ -52,7 +53,7 @@ def local_service_failure_is_transient(response: Mapping[str, object]) -> bool:
         status = int(response.get("status") or 0)
     except (TypeError, ValueError):
         status = 0
-    return status == HTTPStatus.SERVICE_UNAVAILABLE or error in {"refreshing", "service busy"}
+    return status == HTTPStatus.SERVICE_UNAVAILABLE or error in {"refreshing", LOCAL_SERVICE_ERROR_BUSY}
 
 
 class LocalServiceClient:
@@ -75,6 +76,8 @@ class LocalServiceClient:
         payload: dict[str, Any],
         timeout: float,
         request_binary: bytes = b"",
+        *,
+        probe: bool = False,
     ) -> tuple[dict[str, Any], bytes, TransportFailure | None]:
         action = str(payload.get("action") or "request")
         request_id = ""
@@ -82,12 +85,16 @@ class LocalServiceClient:
         try:
             envelope = new_envelope(self.service, action, payload, timeout_seconds=timeout)
             request_id = envelope.request_id
+            # The transport owns the retained per-service request/error/latency aggregate;
+            # `probe` only forwards the caller's explicit classification for a monitoring
+            # probe that cannot run inside `local_service_probe_scope()`.
             response, binary = local_service_request(
                 self.socket_path,
                 envelope,
                 binary=request_binary,
                 timeout_seconds=timeout,
                 fallback_legacy=True,
+                probe=probe,
             )
         except (OSError, LocalRpcError) as exc:
             self.registry.note_rpc_failure(type(exc).__name__)
@@ -155,8 +162,10 @@ class LocalServiceClient:
         payload: dict[str, Any],
         timeout: float = 0.5,
         request_binary: bytes = b"",
+        *,
+        probe: bool = False,
     ) -> tuple[dict[str, Any], bytes]:
-        response, binary, error = self._request_once(payload, timeout, request_binary)
+        response, binary, error = self._request_once(payload, timeout, request_binary, probe=probe)
         # A missing or refused socket is a demand against a service that may
         # have completed idle shutdown while its launcher still owns an
         # unreaped child. The shared registry is the only lifecycle owner: it
@@ -179,13 +188,13 @@ class LocalServiceClient:
             if error is not None:
                 self._emit_transport_error(error)
             return response, binary
-        response, binary, retry_error = self._request_once(payload, timeout, request_binary)
+        response, binary, retry_error = self._request_once(payload, timeout, request_binary, probe=probe)
         if retry_error is not None:
             self._emit_transport_error(retry_error)
         return response, binary
 
-    def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
-        response, _binary = self.request_with_binary(payload, timeout=timeout)
+    def request(self, payload: dict[str, Any], timeout: float = 0.5, *, probe: bool = False) -> dict[str, Any]:
+        response, _binary = self.request_with_binary(payload, timeout=timeout, probe=probe)
         return response
 
     def ensure_started(self) -> bool:

@@ -199,6 +199,17 @@ function costPricingProfileChoices(path) {
   }));
 }
 
+// The offered cleanup times come from the server (prune_schedule owns the list);
+// the client never spells its own copy of them.
+function statsPruneLocalTimeChoices() {
+  const payloadChoices = clientSettingsPayload?.choices?.['stats.prune_at_local_time'];
+  const catalogChoices = settingCatalogEntry('stats.prune_at_local_time').choices;
+  const values = Array.isArray(payloadChoices) && payloadChoices.length
+    ? payloadChoices
+    : Array.isArray(catalogChoices) ? catalogChoices : [];
+  return values.map(value => ({value, label: value}));
+}
+
 function yoagentModelPreferenceChoicesForBackend(backend) {
   return backend === 'claude' ? yoagentClaudeModelPreferenceChoices() : backend === 'codex' ? yoagentCodexModelPreferenceChoices() : [];
 }
@@ -369,6 +380,7 @@ function preferenceSections() {
       preferenceSettingItem('performance.popover_show_delay_ms', {type: 'number', min: 0, max: 3000, step: 50, suffix: 'ms'}),
       preferenceSettingItem('performance.popover_hide_delay_ms', {type: 'number', min: 0, max: 1000, step: 20, suffix: 'ms'}),
       preferenceSettingItem('performance.remote_resize_delay_ms', {type: 'number', min: 50, max: 2000, step: 10, suffix: 'ms'}),
+      preferenceSettingItem('stats.prune_at_local_time', {type: 'select', choices: statsPruneLocalTimeChoices()}),
     ]},
     {id: PREFERENCE_SECTION_IDS.cost, title: t('pref.section.cost'), items: [
       preferenceSettingItem('cost.openai_pricing_profile', {type: 'radio', choices: costPricingProfileChoices('cost.openai_pricing_profile')}),

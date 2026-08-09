@@ -1070,7 +1070,9 @@ def test_browser_diagnostics_queries_need_no_optional_sqlite_json_or_window_feat
 
 
 def test_browser_diagnostics_indexes_follow_duplicates_reopen_and_prune(tmp_path):
-    now = 100_000.0
+    # Retention-relative so the retained window can grow without pushing the
+    # oldest fixture row to a negative timestamp.
+    now = RETENTION_SECONDS + 100_000.0
     cutoff = now - RETENTION_SECONDS
     path = tmp_path / DATABASE_FILENAME
     old_failure = Observation(

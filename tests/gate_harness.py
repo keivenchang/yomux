@@ -50,6 +50,7 @@ from yolomux_lib.infra.inotify_capacity import INOTIFY_MAX_USER_WATCHES_PATH
 from yolomux_lib.infra.inotify_capacity import inotify_instance_census
 from yolomux_lib.infra.inotify_capacity import process_fd_owners
 from yolomux_lib.infra.inotify_capacity import read_kernel_limit
+from yolomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
 from yolomux_lib.local_services.registry import bounded_process_table
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import SpawnProcessOwnership
@@ -678,22 +679,40 @@ def retire_expected_fixture_typed_api_failure(
     source: str,
     code: str,
 ) -> dict[str, Any]:
-    """Correlate and retire one browser-observed typed failure from the fixture ring."""
+    """Correlate and retire one browser-observed typed caller outcome from the fixture ring.
+
+    ``code`` names an EXPECTED outcome of what the fixture asked for -- a file the test itself
+    deleted, a directory the user browsed to that is not there.  ``failure_record_level``
+    (``yolomux_lib/observability/failure_severity.py``) is the one owner of that distinction and
+    records such a row at ``info``, because ``{"warning", "error"}`` is the release-blocking set the
+    live soak and every retirement helper here collect.  So this retires an INFO row, and it holds
+    the rule from both sides: the transition must contain no release-blocking row at all, and it
+    must contain exactly one info row carrying this source, category and code, correlated to the
+    browser's own API event.  An expected outcome that silently becomes an error again fails the
+    first check; a genuine fault that appears alongside it fails the same check; a fault downgraded
+    into this fixture's window arrives as a second info row and fails the second.
+    """
 
     start = validate_server_log_ring_payload(server._fixture_server_log_boundary)
     current = validate_server_log_ring_payload(SERVER_LOGS.payload())
     transition = validate_server_log_ring_transition(start, current)
-    failures = [
+    blocking = [
         entry
         for entry in transition["newLogs"]
         if str(entry.get("level") or "").lower() in {"warning", "error"}
     ]
-    if len(failures) != 1 or transition["droppedCount"]:
+    outcomes = [
+        entry
+        for entry in transition["newLogs"]
+        if str(entry.get("level") or "").lower() == EXPECTED_OUTCOME_LOG_LEVEL
+        and (str(entry.get("source") or ""), str(entry.get("category") or "")) == (source, "operation")
+    ]
+    if blocking or len(outcomes) != 1 or transition["droppedCount"]:
         raise AssertionError(
-            "typed API failure retirement requires exactly one retained server failure: "
-            f"{json.dumps({'failures': failures, **dict(transition)}, sort_keys=True)}"
+            "typed API outcome retirement requires exactly one retained info row and no release-blocking row: "
+            f"{json.dumps({'blocking': blocking, 'outcomes': outcomes, **dict(transition)}, sort_keys=True)}"
         )
-    entry = failures[0]
+    entry = outcomes[0]
     payload = json.loads(str(entry.get("message") or ""))
     request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
     stack = payload.get("stack") if isinstance(payload.get("stack"), list) else []
@@ -710,18 +729,14 @@ def retire_expected_fixture_typed_api_failure(
             "typed API failure browser/server correlation mismatch: "
             f"{json.dumps({'apiEvent': dict(api_event), 'serverEntry': entry}, sort_keys=True)}"
         )
-    retired = consume_only_expected_server_log_errors(
-        driver,
-        ({
-            "level": entry.get("level"),
-            "source": entry.get("source"),
-            "category": entry.get("category"),
-            "message": entry.get("message"),
-        },),
-        server_log_boundary=start,
-    )
-    if len(retired) != 1 or retired[0].get("id") != entry.get("id"):
-        raise AssertionError("typed API failure did not retire exactly one correlated server entry")
+    # Nothing is consumed here: an info row is not release-blocking, so it never had to be excused.
+    # Asking the browser-visible ring for an EMPTY exact list is what proves that -- it fails if any
+    # unconsumed warning/error row reached /api/logs in this window, including one produced by the
+    # very outcome being retired, which is the check the ring at /api/logs and this transition would
+    # otherwise be able to disagree about.
+    unretired = consume_only_expected_server_log_errors(driver, (), server_log_boundary=start)
+    if unretired:
+        raise AssertionError(f"typed API outcome retirement consumed unexpected rows: {unretired!r}")
     server._fixture_server_log_boundary = current
     driver._yolomux_server_log_boundary = current
     return dict(entry)

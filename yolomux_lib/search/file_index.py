@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
@@ -31,6 +32,7 @@ from typing import Callable
 from ..common import STATE_DIR
 from ..common import start_thread_with_rollback
 from ..infra.filesystem_preflight import preflight_mutable_roots
+from ..infra.host_identity import process_start_identity
 from ..infra.host_partition import host_partitioned_state_dir
 
 
@@ -65,6 +67,32 @@ PERSIST_DEBOUNCE_SECONDS = 2.0
 INDEX_TTL_SECONDS = 30.0 * 60.0
 # C11: bump when the on-disk storage shape changes so old/incompatible indexes rebuild for a clear reason.
 INDEX_FORMAT_VERSION = 4
+# M11 freshness proof.  A shape-matched snapshot says nothing about whether the
+# single writer that produced it still exists, and age alone is wrong in both
+# directions: a 40-minute-old snapshot from a healthy idle producer is current,
+# while a 10-second-old snapshot whose producer died 5 seconds later is not.
+# The producer therefore stamps its own `(pid, process start time)` epoch into
+# the snapshot metadata and refreshes a per-root heartbeat without rebuilding;
+# a reader proves custody from /proc, never with a per-query RPC to the writer.
+PRODUCER_HEARTBEAT_INTERVAL_SECONDS = 5.0
+# The heartbeat (or a newer build) must be this recent for a live producer to
+# still be vouching for the root it owns.  It bounds only producer custody, not
+# snapshot content age, so an idle producer's older snapshot stays authoritative.
+PRODUCER_VOUCH_MAX_AGE_SECONDS = 120.0
+# One /proc probe per epoch per interval.  Quick Open queries per keystroke, and
+# on platforms without /proc the identity reader falls back to `ps`.
+PRODUCER_LIVENESS_CACHE_SECONDS = 2.0
+# How long an accepted owner refresh may be reported as still in flight.
+REFRESH_INFLIGHT_MAX_SECONDS = 60.0
+
+FRESHNESS_FRESH = "fresh"
+FRESHNESS_STALE = "stale"
+FRESHNESS_ORPHANED = "orphaned"
+FRESHNESS_MISSING = "missing"
+
+PRODUCER_RUNNING = "running"
+PRODUCER_NOT_RUNNING = "not_running"
+PRODUCER_UNRECORDED = "unrecorded"
 _BACKGROUND_OWNER_CHECKER: Callable[[str], bool] | None = None
 _BACKGROUND_OWNER_REFRESH_REQUESTER: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
 _BACKGROUND_INDEX_SEARCH_REQUESTER: Callable[[dict[str, Any]], dict[str, Any]] | None = None
@@ -283,8 +311,13 @@ def background_owner_can_build() -> bool:
 
 def request_background_owner_refresh(payload: dict[str, Any]) -> dict[str, Any]:
     if _BACKGROUND_OWNER_REFRESH_REQUESTER is None:
+        # No owner is wired at all, so nothing accepted this refresh. Callers used
+        # to read the falsy `fallback` here as "someone else is refreshing".
+        record_accepted_refresh(str(payload.get("root") or ""), False)
         return {"ok": False, "accepted": False, "fallback": False, "error": "no background owner refresh requester"}
-    return _BACKGROUND_OWNER_REFRESH_REQUESTER(SEARCH_INDEX_ROLE, payload)
+    result = _BACKGROUND_OWNER_REFRESH_REQUESTER(SEARCH_INDEX_ROLE, payload)
+    record_accepted_refresh(str(payload.get("root") or ""), bool(result.get("accepted")))
+    return result
 
 
 def record_search_index_bytes_written(byte_count: int) -> None:
@@ -344,6 +377,13 @@ def _build_lock_path(root: Path) -> Path:
     return INDEX_DIR / f"{digest}.lock"
 
 
+def _producer_heartbeat_path(root: Path) -> Path:
+    # M11: the producer's live custody claim for one root. Written by the single
+    # writer only, read by followers with a file read instead of an RPC.
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+    return INDEX_DIR / f"{digest}.producer.json"
+
+
 def _tombstone_path(root: Path) -> Path:
     # C11: written on unindex so a SECOND server process (sharing STATE_DIR) that still holds a ready
     # in-memory copy drops it instead of serving deleted-file results indefinitely.
@@ -366,6 +406,151 @@ def _clear_tombstone(root: Path) -> None:
         pass
     except OSError:
         pass
+
+
+_LIVENESS_LOCK = threading.Lock()
+_LIVENESS_CACHE: dict[str, tuple[float, bool]] = {}
+_ACCEPTED_REFRESH_LOCK = threading.Lock()
+_ACCEPTED_REFRESHES: dict[str, float] = {}
+_HEARTBEAT_LOCK = threading.Lock()
+_HEARTBEAT_WRITTEN_AT: dict[str, float] = {}
+_SELF_PROCESS_EPOCH = ""
+
+
+def process_epoch(pid: int) -> str:
+    """Return one `(pid, process start time)` identity, or "" when unavailable.
+
+    This is the same epoch identity the local-service registry fences persisted
+    process records with; a bare PID is not an identity because PIDs are reused.
+    """
+    clean_pid = int(pid)
+    identity = process_start_identity(clean_pid)
+    return f"{clean_pid}:{identity}" if identity else ""
+
+
+def self_process_epoch() -> str:
+    """Return this process's epoch, resolved once (it cannot change while we run)."""
+    global _SELF_PROCESS_EPOCH
+    if not _SELF_PROCESS_EPOCH:
+        _SELF_PROCESS_EPOCH = process_epoch(os.getpid())
+    return _SELF_PROCESS_EPOCH
+
+
+def _pid_exists(pid: int) -> bool:
+    """Signal-0 existence probe, so a DEAD producer costs one syscall and no more.
+
+    `process_start_identity` falls back to spawning `ps` when it cannot read the
+    process table entry, which is exactly what happens for a PID that is gone.
+    Quick Open asks this per query, so that fallback must never be reached for the
+    common "producer exited" case.
+    """
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        # Present but not ours to signal; let the identity read decide.
+        return True
+    return True
+
+
+def process_epoch_is_live(epoch: str, *, monotonic_now: float | None = None) -> bool:
+    """Prove one recorded producer epoch is still the process running under that PID."""
+    text = str(epoch or "")
+    pid_text, separator, recorded_identity = text.partition(":")
+    if not separator or not recorded_identity:
+        return False
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    if pid <= 1:
+        return False
+    now = time.monotonic() if monotonic_now is None else float(monotonic_now)
+    with _LIVENESS_LOCK:
+        cached = _LIVENESS_CACHE.get(text)
+        if cached is not None and now - cached[0] < PRODUCER_LIVENESS_CACHE_SECONDS:
+            return cached[1]
+    live = _pid_exists(pid)
+    if live:
+        # A live PID whose start identity differs is a REUSED pid, not our producer.
+        observed = process_start_identity(pid)
+        live = bool(observed) and str(observed) == recorded_identity
+    with _LIVENESS_LOCK:
+        if len(_LIVENESS_CACHE) > 64:
+            _LIVENESS_CACHE.clear()
+        _LIVENESS_CACHE[text] = (now, live)
+    return live
+
+
+def reset_producer_liveness_cache() -> None:
+    with _LIVENESS_LOCK:
+        _LIVENESS_CACHE.clear()
+
+
+def touch_producer_heartbeat(root: Path, *, force: bool = False) -> None:
+    """Record that this writer still owns `root`, without rebuilding anything.
+
+    Only the process that may build calls this. It is one small atomic write at
+    most every PRODUCER_HEARTBEAT_INTERVAL_SECONDS per root, which is what lets a
+    reader tell "idle producer still watching" from "producer gone".
+    """
+    if not background_owner_can_build():
+        return
+    key = str(root)
+    now = time.monotonic()
+    with _HEARTBEAT_LOCK:
+        written_at = _HEARTBEAT_WRITTEN_AT.get(key)
+        if not force and written_at is not None and now - written_at < PRODUCER_HEARTBEAT_INTERVAL_SECONDS:
+            return
+        _HEARTBEAT_WRITTEN_AT[key] = now
+    epoch = self_process_epoch()
+    if not epoch:
+        return
+    path = _producer_heartbeat_path(root)
+    payload = json.dumps({"producer_epoch": epoch, "at": float(time.time()), "root": key}, sort_keys=True, separators=(",", ":"))
+    try:
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        # Retry on the next tick rather than silently claiming a fresh heartbeat.
+        with _HEARTBEAT_LOCK:
+            _HEARTBEAT_WRITTEN_AT.pop(key, None)
+
+
+def _read_producer_heartbeat(root: Path) -> tuple[str, float]:
+    payload = read_json_file(_producer_heartbeat_path(root), None)
+    if not isinstance(payload, dict):
+        return "", 0.0
+    try:
+        recorded_at = float(payload.get("at") or 0.0)
+    except (TypeError, ValueError):
+        recorded_at = 0.0
+    return str(payload.get("producer_epoch") or ""), recorded_at
+
+
+def record_accepted_refresh(root: str, accepted: bool) -> None:
+    """Remember that an owner accepted a refresh for `root`, with its wall time."""
+    key = str(root or "")
+    if not key:
+        return
+    with _ACCEPTED_REFRESH_LOCK:
+        if accepted:
+            _ACCEPTED_REFRESHES[key] = time.time()
+        else:
+            _ACCEPTED_REFRESHES.pop(key, None)
+
+
+def accepted_refresh_at(root: Path | str) -> float:
+    with _ACCEPTED_REFRESH_LOCK:
+        return float(_ACCEPTED_REFRESHES.get(str(root), 0.0))
+
+
+def clear_accepted_refreshes() -> None:
+    with _ACCEPTED_REFRESH_LOCK:
+        _ACCEPTED_REFRESHES.clear()
 
 
 def walk_root(
@@ -493,13 +678,15 @@ def _sqlite_storage_size(root: Path) -> int:
 
 
 def _drop_persisted_index(root: Path) -> None:
-    for path in [*_sqlite_paths(root), _index_manifest_path(root)]:
+    for path in [*_sqlite_paths(root), _index_manifest_path(root), _producer_heartbeat_path(root)]:
         try:
             path.unlink()
         except FileNotFoundError:
             pass
         except OSError:
             pass
+    with _HEARTBEAT_LOCK:
+        _HEARTBEAT_WRITTEN_AT.pop(str(root), None)
 
 
 def _connect_sqlite_index(root: Path) -> sqlite3.Connection:
@@ -554,6 +741,7 @@ def _write_manifest(root: Path, metadata: dict[str, str]) -> None:
         "truncated": metadata["truncated"] == "1",
         "entry_count": int(metadata["entry_count"]),
         "entries_signature": metadata["entries_signature"],
+        "producer_epoch": metadata["producer_epoch"],
     }
     manifest_tmp = _index_manifest_path(root).with_suffix(".manifest.json.tmp")
     manifest_tmp.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8")
@@ -671,6 +859,10 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
             "truncated": "1" if ri.truncated else "0",
             "entry_count": str(len(entries)),
             "entries_signature": entries_signature,
+            # M11: the writer names itself in the same atomic metadata dict that
+            # already reaches both sqlite and the manifest, so a reader can tell
+            # whether the process that produced these rows still exists.
+            "producer_epoch": self_process_epoch(),
         }
         before_size = _sqlite_storage_size(ri.root)
         with _connect_sqlite_index(ri.root) as conn:
@@ -712,6 +904,7 @@ def _persist(ri: RootIndex, skip_dirs: set[str], exclude_signature: str = "", *,
         ri.last_persisted_at = now
         ri.cache_bytes = after_size
         _clear_pending_delta(ri)
+        touch_producer_heartbeat(ri.root, force=True)
     except (OSError, sqlite3.DatabaseError):
         pass
 
@@ -751,11 +944,168 @@ def _load_disk(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> 
 
 
 def _sqlite_metadata_matches(metadata: dict[str, Any], root: Path, skip_dirs: set[str], exclude_signature: str = "") -> bool:
+    """Shape only: can these rows be read as this root's index at all?
+
+    This deliberately has no freshness term. It answers readability, and a stale
+    snapshot must stay READABLE - refusing to answer is worse than answering with
+    a label. Whether the rows may be called authoritative is a different question,
+    answered by `index_freshness` below.
+    """
     return (
         metadata.get("root") == str(root)
         and metadata.get("version") == str(INDEX_FORMAT_VERSION)
         and metadata.get("storage") == "sqlite"
         and metadata.get("skip_signature") == _disk_skip_signature(root, skip_dirs, exclude_signature)
+    )
+
+
+@dataclass(frozen=True)
+class SnapshotFreshness:
+    """The one freshness verdict for one root: shape, producer custody, and age.
+
+    Every `index_state`, `index_coverage` and `refreshing_elsewhere` value in the
+    search payloads is derived from this record so the two files cannot grow
+    divergent copies of the same judgement.
+    """
+
+    state: str
+    reason: str
+    built_at: float
+    snapshot_age_seconds: float | None
+    producer_epoch: str
+    producer_state: str
+    vouched_age_seconds: float | None
+    shape_matches: bool
+    refresh_accepted: bool
+
+    @property
+    def authoritative(self) -> bool:
+        """Ready/full may be claimed only with BOTH proofs, never with one."""
+        return self.state == FRESHNESS_FRESH
+
+    @property
+    def producer_alive(self) -> bool:
+        return self.producer_state == PRODUCER_RUNNING
+
+    @property
+    def refreshing_elsewhere(self) -> bool:
+        """A live producer AND an accepted refresh it has not yet completed."""
+        return bool(self.producer_alive and self.refresh_accepted)
+
+    def payload_fields(self) -> dict[str, Any]:
+        return {
+            "freshness": self.state,
+            "freshness_reason": self.reason,
+            "producer_state": self.producer_state,
+            "snapshot_age_seconds": self.snapshot_age_seconds,
+            "stale": self.state in {FRESHNESS_STALE, FRESHNESS_ORPHANED},
+            "refresh_requested": self.refresh_accepted,
+            "refreshing_elsewhere": self.refreshing_elsewhere,
+        }
+
+
+def _metadata_built_at(metadata: dict[str, Any] | None) -> float:
+    if not metadata:
+        return 0.0
+    try:
+        return float(metadata.get("built_at") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _disk_snapshot_metadata(root: Path, skip_dirs: set[str], exclude_signature: str = "") -> dict[str, Any] | None:
+    """Read this root's snapshot metadata, manifest first, sqlite as the fallback."""
+    manifest = _load_disk_metadata(root, skip_dirs, exclude_signature)
+    if manifest is not None:
+        return manifest
+    opened = _read_sqlite_index(root, skip_dirs, exclude_signature)
+    if opened is None:
+        return None
+    conn, metadata = opened
+    conn.close()
+    return metadata
+
+
+def index_freshness(
+    index: RootIndex | None,
+    root: Path,
+    skip_dirs: set[str],
+    exclude_signature: str = "",
+    *,
+    metadata: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> SnapshotFreshness:
+    """Return the single freshness record for `root`, using no RPC to the producer.
+
+    Liveness comes from /proc via the recorded producer epoch, and custody comes
+    from the per-root heartbeat the writer refreshes without rebuilding. A build
+    owner is its own producer, so its ready in-memory index needs no disk proof.
+    """
+    wall_now = time.time() if now is None else float(now)
+    owner_process = background_owner_can_build()
+    accepted_at = accepted_refresh_at(root)
+    if index is not None and index.ready and owner_process:
+        built_at = float(index.built_at or 0.0)
+        return SnapshotFreshness(
+                state=FRESHNESS_FRESH,
+            reason="own_index",
+            built_at=built_at,
+            snapshot_age_seconds=max(0.0, wall_now - built_at) if built_at else None,
+            producer_epoch=self_process_epoch(),
+            producer_state=PRODUCER_RUNNING,
+            vouched_age_seconds=0.0,
+            shape_matches=True,
+            # This process IS the producer, so its own build is here, not elsewhere.
+            refresh_accepted=False,
+        )
+    if metadata is None:
+        metadata = _disk_snapshot_metadata(root, skip_dirs, exclude_signature)
+    shape_matches = metadata is not None
+    built_at = _metadata_built_at(metadata)
+    heartbeat_epoch, heartbeat_at = _read_producer_heartbeat(root)
+    metadata_epoch = str((metadata or {}).get("producer_epoch") or "")
+    producer_epoch = ""
+    producer_state = PRODUCER_UNRECORDED
+    vouched_at = 0.0
+    for candidate_epoch, candidate_at in ((heartbeat_epoch, heartbeat_at), (metadata_epoch, built_at)):
+        if not candidate_epoch:
+            continue
+        if not producer_epoch:
+            producer_epoch = candidate_epoch
+        if process_epoch_is_live(candidate_epoch):
+            producer_epoch = candidate_epoch
+            producer_state = PRODUCER_RUNNING
+            vouched_at = max(candidate_at, built_at)
+            break
+        producer_state = PRODUCER_NOT_RUNNING
+    vouched_age = max(0.0, wall_now - vouched_at) if vouched_at else None
+    if not shape_matches:
+        state, reason = FRESHNESS_MISSING, "no_matching_snapshot"
+    elif producer_state == PRODUCER_UNRECORDED:
+        state, reason = FRESHNESS_ORPHANED, "producer_epoch_unrecorded"
+    elif producer_state == PRODUCER_NOT_RUNNING:
+        state, reason = FRESHNESS_ORPHANED, "producer_not_running"
+    elif vouched_age is None or vouched_age > PRODUCER_VOUCH_MAX_AGE_SECONDS:
+        state, reason = FRESHNESS_STALE, "producer_vouch_expired"
+    else:
+        state, reason = FRESHNESS_FRESH, ""
+    return SnapshotFreshness(
+        state=state,
+        reason=reason,
+        built_at=built_at,
+        snapshot_age_seconds=max(0.0, wall_now - built_at) if built_at else None,
+        producer_epoch=producer_epoch,
+        producer_state=producer_state,
+        vouched_age_seconds=vouched_age,
+        shape_matches=shape_matches,
+        # An owner's refresh runs in this process; only a follower's accepted
+        # request is evidence that another process is refreshing this root.
+        refresh_accepted=bool(
+            not owner_process
+            and accepted_at
+            and wall_now - accepted_at <= REFRESH_INFLIGHT_MAX_SECONDS
+            and built_at < accepted_at
+        ),
     )
 
 
@@ -1086,6 +1436,10 @@ def schedule_refreshes(now: float | None = None) -> int:
         indexes = list(_REGISTRY.values())
     started = 0
     for ri in indexes:
+        # M11: the owner's cheap custody claim. This is the tick that lets a
+        # reader distinguish "idle producer still watching this root" from
+        # "producer gone", and it rebuilds nothing.
+        touch_producer_heartbeat(ri.root)
         with ri.lock:
             should_flush = ri.persist_pending and monotonic_now - ri.last_persisted_at >= PERSIST_DEBOUNCE_SECONDS
             freshness_anchor = ri.last_full_build_at or ri.built_at
@@ -1334,6 +1688,9 @@ def _start_build(
     # transition through its 1.5-second repair poll. The completion callback
     # publishes the matching ready state after the new index is readable.
     notify_background_owner_done({"root": str(ri.root), "state": "building", "generation": generation})
+    # Claim custody before the first persist, so a reader of an older snapshot
+    # sees a live producer as soon as this build starts rather than after it ends.
+    touch_producer_heartbeat(ri.root, force=True)
 
     def rollback() -> None:
         with ri.lock:

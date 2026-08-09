@@ -1379,10 +1379,18 @@ def test_follower_activity_payload_uses_bounded_fallback_when_owner_unresponsive
 
 
 def test_search_index_follower_does_not_walk_missing_index(monkeypatch, tmp_path):
+    # M11: this test used to assert `refreshing_elsewhere is True` with the refresh
+    # requester set to None. That pinned the defect: with no requester wired,
+    # `request_background_owner_refresh` returns {"accepted": False, "fallback": False},
+    # so the old `not refresh_result.get("fallback")` guard passed with NO OWNER AT ALL and
+    # the follower claimed someone else was refreshing. The rule this test owns - a
+    # follower never walks a missing index - is unchanged and still asserted; only the
+    # unproven claim is inverted.
     (tmp_path / "target.py").write_text("print('x')\n", encoding="utf-8")
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY.clear()
+    file_index.clear_accepted_refreshes()
     file_index.set_background_owner_checker(lambda _role: False)
     file_index.set_background_owner_refresh_requester(None)
     monkeypatch.setattr(filesystem.search, "_search_full_tree", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not walk full roots")))
@@ -1391,11 +1399,46 @@ def test_search_index_follower_does_not_walk_missing_index(monkeypatch, tmp_path
         status = filesystem.index_status(str(tmp_path))
     finally:
         file_index.set_background_owner_checker(None)
+        file_index.clear_accepted_refreshes()
 
     assert payload["index_state"] == "follower"
-    assert payload["refreshing_elsewhere"] is True
     assert payload["files"] == []
     assert status["state"] == "follower"
+    assert payload["refreshing_elsewhere"] is False
+    assert payload["refresh_requested"] is False
+    assert status["refreshing_elsewhere"] is False
+
+
+def test_search_index_follower_reports_refreshing_elsewhere_once_an_owner_accepts(monkeypatch, tmp_path):
+    """The other half of the flag above: with both proofs it must still read True."""
+    (tmp_path / "target.py").write_text("print('x')\n", encoding="utf-8")
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
+    with file_index._REGISTRY_LOCK:
+        file_index._REGISTRY.clear()
+    file_index.clear_accepted_refreshes()
+    file_index.set_background_owner_checker(lambda _role: False)
+    file_index.set_background_owner_refresh_requester(lambda _role, _payload: {"ok": True, "accepted": True, "fallback": False})
+    # The owner names itself in the per-root heartbeat it refreshes without rebuilding.
+    heartbeat = file_index._producer_heartbeat_path(tmp_path)
+    heartbeat.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat.write_text(
+        json.dumps({"producer_epoch": file_index.self_process_epoch(), "at": time.time(), "root": str(tmp_path)}),
+        encoding="utf-8",
+    )
+    file_index.reset_producer_liveness_cache()
+    monkeypatch.setattr(filesystem.search, "_search_full_tree", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("follower must not walk full roots")))
+    try:
+        payload = filesystem.search_files(str(tmp_path), query="target", recursive=True)
+        status = filesystem.index_status(str(tmp_path))
+    finally:
+        file_index.set_background_owner_checker(None)
+        file_index.set_background_owner_refresh_requester(None)
+        file_index.clear_accepted_refreshes()
+
+    assert payload["index_state"] == "follower"
+    assert payload["refresh_requested"] is True
+    assert payload["producer_state"] == file_index.PRODUCER_RUNNING
+    assert payload["refreshing_elsewhere"] is True
     assert status["refreshing_elsewhere"] is True
 
 

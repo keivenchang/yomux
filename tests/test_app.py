@@ -1,3 +1,4 @@
+import argparse
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -12,6 +13,7 @@ import stat
 import threading
 import time
 from types import SimpleNamespace
+from typing import Any
 from urllib.parse import parse_qs
 from urllib.parse import urlparse
 
@@ -20,7 +22,9 @@ import yaml
 
 from yolomux_lib import activity_summary
 from yolomux_lib import app as app_module
+from yolomux_lib import cli as cli_module
 from yolomux_lib.stats_current import host_collectors
+from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib import common
 from yolomux_lib import jobd
 from yolomux_lib import metadata
@@ -32,6 +36,11 @@ from yolomux_lib.common import AgentInfo
 from yolomux_lib.common import PaneInfo
 from yolomux_lib.common import SessionInfo
 from yolomux_lib.common import UploadedFile
+from yolomux_lib.backend_health.observer import BACKEND_HEALTH_DEGRADED_STATES
+from yolomux_lib.backend_health.observer import observed_health
+from yolomux_lib.backend_health.store import BackendHealthStore
+from yolomux_lib.backend_health.store import HealthSnapshot
+from yolomux_lib.backend_health.store import ResourceObservation
 from yolomux_lib.local_services.rpc import encode_metadata
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
 from yolomux_lib.local_services.rpc import new_envelope
@@ -513,6 +522,46 @@ def test_runtime_report_exposes_shared_local_service_lifecycle_clients(monkeypat
     assert services["totals"] == {"processes": 0, "cpu_percent": 0.0, "rss_bytes": 0}
 
 
+def test_the_recovery_map_resolves_on_a_real_app_and_starts_nothing():
+    """M9: the recovery map names client attributes a REAL `TmuxWebtermApp` actually has.
+
+    `tests/test_backend_health_catalog.py` reads the map by AST and pins each expression; that
+    catches a service dropped from the map, but an AST expression naming `self.watch_clientt`
+    would still parse. This resolves the map on a live app and asserts each value is the bound
+    `retry` of that app's own client object.
+
+    Nothing here calls a retry: `LocalServiceClient.retry` clears the latched failure and then
+    calls `ensure_started`, so calling one would spawn a real daemon out of a unit test. Binding
+    is what is under test, and binding starts nothing.
+    """
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        entrypoints = webapp.local_services_recovery_entrypoints()
+        assert tuple(entrypoints) == ("statsd", "jobd", "statusd", "watchd", "approvald")
+        owners = {
+            "statsd": webapp.stats_current_client,
+            "jobd": webapp.job_client,
+            "statusd": webapp.status_client,
+            "watchd": webapp.watch_client,
+            "approvald": webapp.approval_client,
+        }
+        for service, entrypoint in entrypoints.items():
+            assert entrypoint.__self__ is owners[service], service
+            assert entrypoint.__func__ is type(owners[service]).retry, service
+        # indexd is not in the map because its client has no wrapper to map to.
+        assert not hasattr(webapp.search_indexer, "retry")
+
+        control = webapp.local_services_recovery_control()
+        assert isinstance(control, app_module.LocalServiceRecoveryControl)
+        # The one resolution that must NOT reach a client: an unmapped service returns False
+        # rather than reaching into a registry, so this is safe to call for real.
+        assert control.retry("indexd") is False
+        assert control.retry("") is False
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+
 def test_runtime_local_services_derives_uptime_for_running_services(monkeypatch):
     webapp = app_module.TmuxWebtermApp([])
     try:
@@ -690,6 +739,222 @@ def test_runtime_local_services_exposes_bounded_stats_usage_health(monkeypatch):
     }
 
 
+# --------------------------------------------------------------------------------------
+# M8 of DOIT.p0.daemon-monitor -- the retained health reaches the System row, and does NOT
+# reach it by reading a file on the HTTP request thread.
+# --------------------------------------------------------------------------------------
+
+
+def _stub_local_service_rows(monkeypatch, webapp) -> None:
+    """Six cheap rows, so these tests measure the health join and nothing else."""
+    monkeypatch.setattr(webapp.search_indexer, "runtime_status", lambda: {"service": "indexd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp, "statsd_runtime_status", lambda: {"service": "statsd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.job_client, "runtime_status", lambda: {"service": "jobd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.status_client, "runtime_status", lambda: {"service": "statusd", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp.approval_client, "runtime_status", lambda: {"service": "approvald", "pid": 0, "resources": {}})
+    monkeypatch.setattr(webapp, "runtime_process_ledger", lambda: {})
+
+
+def _recorded_health_store(tmp_path, port: int = 7802):
+    """A real store with real retained history for jobd, and for no other service.
+
+    The other five stay unrecorded on purpose, so the same fixture proves both halves: a
+    row that has retained health, and a row that must say it has none.
+    """
+    store = BackendHealthStore(port, state_dir=tmp_path)
+    store.record(HealthSnapshot(observed_at=100.0, resources=(
+        ResourceObservation(resource="jobd", state="starting", reason_code="none", pid=4242, process_start_identity="proc:98"),
+    )))
+    store.record(HealthSnapshot(observed_at=102.0, resources=(
+        ResourceObservation(resource="jobd", state="down", reason_code="exited", pid=0, process_start_identity=""),
+    )))
+    return store
+
+
+def test_the_system_status_row_publishes_the_retained_health_it_was_attached_to(monkeypatch, tmp_path):
+    """M8's user-visible outcome: the System row carries the retained observation."""
+    store = _recorded_health_store(tmp_path)
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert payload["schema_version"] == 2, payload["schema_version"]
+    assert payload["health"]["available"] is True and payload["health"]["revision"] == 2
+    assert payload["health"]["port"] == 7802 and payload["health"]["reason_code"] == ""
+    rows = {row["id"]: row for row in payload["services"]}
+    jobd_health = rows["jobd"]["health"]
+    assert (jobd_health["state"], jobd_health["reason_code"]) == ("down", "exited")
+    assert jobd_health["since_revision"] == 2
+    assert [entry["new_state"] for entry in jobd_health["transitions"]] == ["starting", "down"]
+    # Every row keeps the three bounded process metrics it published before M8, unchanged.
+    for row in payload["services"]:
+        assert set(row["metrics"]) == {"cpu_now_percent", "rss_bytes", "uptime_seconds"}, row["id"]
+        assert set(row["health"]["metrics"]) == {
+            "restart_count", "observations", "request_count", "error_count",
+            "completed_count", "latency_average_ms", "latency_max_ms",
+        }, row["id"]
+    # A service the observer never recorded says so; it does not borrow jobd's numbers.
+    assert rows["statusd"]["health"]["unavailable_reason_code"] == "resource_unobserved"
+
+
+def test_the_row_reaches_the_retained_health_without_reading_its_file(monkeypatch, tmp_path):
+    """PERMANENT NEGATIVE CONTROL: no per-request read of the backend-health document.
+
+    The recorded M8 decision is that the observing process pushes its live store in and the
+    HTTP thread reads the in-memory document. This proves it two ways at once. The document
+    is DELETED from disk before the projection runs, so a payload that still carries revision
+    2 cannot have come from the file; and `BackendHealthStore.load` -- the only method that
+    opens it -- is replaced with a failure, so reintroducing a `load()` on the request path
+    fails here instead of quietly adding a locked read to every `/api/system-status`.
+    """
+    store = _recorded_health_store(tmp_path, port=7803)
+    document_path = store.document_path
+    assert document_path.is_file()
+    document_path.unlink()
+
+    def refuse_load(self):
+        raise AssertionError("the System projection read the backend-health file on the request thread")
+
+    monkeypatch.setattr(BackendHealthStore, "load", refuse_load)
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        first = webapp.runtime_local_services()
+        second = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert first["health"]["revision"] == 2 and second["health"]["revision"] == 2
+    assert not document_path.exists(), document_path
+    for payload in (first, second):
+        jobd_health = next(row for row in payload["services"] if row["id"] == "jobd")["health"]
+        assert jobd_health["state"] == "down" and jobd_health["transitions_total"] == 2
+
+
+def test_the_retained_store_is_read_once_per_projection_not_once_per_row(monkeypatch, tmp_path):
+    """Six rows, one read. `status()` deep-copies a bounded document; six copies is six times
+    the cost of the one this projection needs."""
+    store = _recorded_health_store(tmp_path, port=7804)
+    reads: list[int] = []
+    real_status = store.status
+
+    def counted_status():
+        reads.append(1)
+        return real_status()
+
+    monkeypatch.setattr(store, "status", counted_status)
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert len(payload["services"]) == 6
+    assert sum(reads) == 1, sum(reads)
+
+
+def test_an_app_with_no_observer_attached_says_so_instead_of_publishing_zeros(monkeypatch):
+    """Every process that never armed an observer -- and every test -- renders honestly."""
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        assert webapp.backend_health_store is None
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert payload["health"] == {
+        "available": False,
+        "reason_code": "observer_unattached",
+        "schema_version": 0,
+        "port": 0,
+        "observer_epoch": "",
+        "observer_epoch_started_at": 0.0,
+        "revision": 0,
+        "written_at": 0.0,
+        "age_seconds": None,
+        "history_coverage": "",
+        "history_reset_reason": "",
+        "persistence_state": "",
+        "persistence_reason_code": "",
+        "resources": 0,
+        # The four liveness fields, and why each one is shaped the way it is when NOTHING is
+        # attached. They are published rather than omitted so the block has one stable shape for
+        # every consumer, but not one of them may carry a measurement nobody took:
+        #   observer_alive        -- None, not False. False reads as "we looked and it is dead";
+        #                            nobody looked. `available: False` above already carries
+        #                            absence, and a derived boolean beside it is a second, weaker
+        #                            copy a consumer can misread as an observation.
+        #   observer_cycles       -- None, not 0. A bare 0 cannot be told apart from an ATTACHED
+        #                            observer that has genuinely completed no cycle yet, which is
+        #                            a real separate state with its own reason code.
+        #   observer_cycle_age_seconds -- None, because zero seconds since the last probe would
+        #                            read as "probed this instant".
+        #   observer_liveness_reason_code -- the honest one, and the reason the other three are
+        #                            absent. This is the field a reader can act on.
+        "observer_alive": None,
+        "observer_cycles": None,
+        "observer_cycle_age_seconds": None,
+        "observer_liveness_reason_code": "observer_unattached",
+    }
+    # NEGATIVE CONTROL: the failure mode this test is named for is a zero coming back. Any of the
+    # three absent fields turning into `0`/`False` re-publishes a measurement nobody took, and the
+    # exact-dict assertion above would still pass if a future field were added carrying one.
+    for key in ("observer_alive", "observer_cycles", "observer_cycle_age_seconds"):
+        assert payload["health"][key] is None, (key, payload["health"][key])
+    # Every NUMERIC zero in the block, named. These six are structural facts about a document that
+    # was never written -- not measurements -- and the census fails the moment a new field arrives
+    # carrying a zero, which the exact-dict assertion above cannot do on its own.
+    zeros = {
+        key: value
+        for key, value in payload["health"].items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    }
+    assert set(zeros) == {
+        "schema_version", "port", "revision", "written_at", "resources", "observer_epoch_started_at",
+    }, zeros
+    for row in payload["services"]:
+        assert row["health"]["unavailable_reason_code"] == "observer_unattached", row["id"]
+        assert row["health"]["metrics"]["restart_count"]["value"] is None, row["id"]
+
+
+def test_a_degraded_writer_is_visible_on_the_snapshot_health_block(monkeypatch, tmp_path):
+    """A store that cannot write says so in memory only, which is why the row reads memory."""
+    def refuse_write(*args, **kwargs):
+        raise OSError("no space left on device")
+
+    store = BackendHealthStore(7805, state_dir=tmp_path, writer=refuse_write)
+    result = store.record(HealthSnapshot(observed_at=100.0, resources=(
+        ResourceObservation(resource="jobd", state="ready", reason_code="none", pid=42, process_start_identity="proc:98"),
+    )))
+    assert result.published is False
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        _stub_local_service_rows(monkeypatch, webapp)
+        webapp.attach_backend_health_store(store)
+        payload = webapp.runtime_local_services()
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert payload["health"]["persistence_state"] == "degraded", payload["health"]
+    assert payload["health"]["persistence_reason_code"] == "write_failed", payload["health"]
+
+
 def test_session_http_guards_use_shared_decorator():
     source = Path(app_module.__file__).read_text(encoding="utf-8")
 
@@ -739,7 +1004,13 @@ def test_darwin_cpu_path_uses_native_ticks_before_ps_fallback(monkeypatch):
     assert app_module.current_system_cpu_times() == (200.0, 80.0)
 
 
-def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monkeypatch):
+# These four used to drive one-line `app_module` wrappers over `host_collectors`. The wrappers fed
+# only the unregistered `collect_current_stats_gpu`, so they were removed with it; the parsing they
+# covered belongs to `host_collectors`, which is the owner statsd actually calls, and that is what
+# these now drive directly.
+
+
+def test_generic_gpu_devices_use_aggregate_devices_without_process_scans(monkeypatch):
     responses = iter([SimpleNamespace(returncode=0, stdout="0, GPU Model A, 75, 4000, 8000\n")])
     calls = []
 
@@ -749,52 +1020,50 @@ def test_stats_GPU_gpu_metrics_uses_aggregate_devices_without_process_scans(monk
 
     monkeypatch.setattr(host_collectors.subprocess, "run", run)
 
-    metrics = app_module.stats_GPU_gpu_metrics()
+    devices = host_collectors.generic_gpu_devices()
 
-    assert metrics["devices"]["gpu:0"]["util_percent"] == 75.0
-    assert metrics["devices"]["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
-    assert metrics["devices"]["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
-    assert metrics["devices"]["gpu:0"]["label"] == "GPU 0 (GPU Model A)"
-    assert metrics == {"devices": metrics["devices"]}
+    assert devices["gpu:0"]["util_percent"] == 75.0
+    assert devices["gpu:0"]["memory_used_bytes"] == 4000 * 1024 * 1024
+    assert devices["gpu:0"]["memory_capacity_bytes"] == 8000 * 1024 * 1024
+    assert devices["gpu:0"]["label"] == "GPU 0 (GPU Model A)"
+    assert list(devices) == ["gpu:0"]
     assert calls == [["gpu-info", "--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"]]
 
 
-def test_stats_macos_gpu_metrics_read_ioreg_activity_and_unified_memory(monkeypatch):
+def test_macos_gpu_devices_read_ioreg_activity_and_unified_memory(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"GPU Activity(%)": 44, "In use system memory": 2 * 1024 * 1024},
     }])
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
+    devices = host_collectors.gpu_devices()
 
-    assert metrics["devices"]["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 0}
-    assert metrics == {"devices": metrics["devices"]}
+    assert devices["gpu:0"] == {"label": "GPU 0", "util_percent": 44.0, "memory_used_bytes": 2 * 1024 * 1024, "memory_capacity_bytes": 0}
+    assert list(devices) == ["gpu:0"]
 
 
-def test_stats_macos_gpu_metrics_reads_current_device_utilization_key(monkeypatch):
+def test_macos_gpu_devices_read_the_current_device_utilization_key(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"Device Utilization %": 8, "In use system memory": 2 * 1024 * 1024},
     }])
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    metrics = app_module.stats_macos_gpu_metrics("Apple M4 Pro")
-
-    assert metrics["devices"]["gpu:0"]["util_percent"] == 8.0
+    assert host_collectors.gpu_devices()["gpu:0"]["util_percent"] == 8.0
 
 
-def test_stats_macos_gpu_metrics_drops_records_without_utilization(monkeypatch):
+def test_macos_gpu_devices_drop_records_without_utilization(monkeypatch):
     payload = host_collectors.plistlib.dumps([{
         "PerformanceStatistics": {"In use system memory": 2 * 1024 * 1024},
     }])
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    assert app_module.stats_macos_gpu_metrics("Apple M4 Pro") == {}
+    assert host_collectors.gpu_devices() == {}
 
 
-def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
+def test_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeypatch):
     payload = json.dumps({
         "SPHardwareDataType": [{"chip_type": "Apple M4 Pro", "number_processors": "proc 14:10:4:0"}],
         "SPMemoryDataType": [{"dimm_type": "LPDDR5"}],
@@ -803,7 +1072,7 @@ def test_stats_macos_hardware_metadata_labels_cpu_gpu_and_unified_memory(monkeyp
     monkeypatch.setattr(host_collectors.sys, "platform", "darwin")
     monkeypatch.setattr(host_collectors.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=payload))
 
-    assert app_module.stats_macos_hardware_metadata() == {
+    assert host_collectors.macos_hardware_metadata() == {
         "cpu_label": "Apple M4 Pro · 14 cores (10 performance + 4 efficiency)",
         "gpu_label": "Apple M4 Pro",
         "system_memory_label": "LPDDR5 unified memory",
@@ -875,6 +1144,301 @@ def test_cpu_budget_marks_a_missing_statsd_push_stale():
     assert payload["source"] == "statsd_push"
     assert payload["sample_age_seconds"] is None
     assert payload["stale"] is True
+
+
+# -- a value nobody sampled is ABSENT, not 0 -------------------------------------------------------
+#
+# Found in a real browser against a live dev server: the Daemons panel's "Web process" row printed
+# `Memory 0.0B`, `CPU 0%` and `System CPU 0%`, all stamped data-metric-state="measured", while
+# /proc/1492916/status said VmRSS 166028 kB and ps said %CPU 10.5. `stats_cpu_sample` is the only
+# writer of that cache and it had never fired -- the same payload's cpu_budget said
+# "sample_age_seconds": null, "stale": true. Every layer on the path turned that absence into a
+# confident zero, and the roster then summed the fabricated 0 into a Memory total it presented as
+# complete, silently dropping ~163MB of real RSS.
+
+
+def test_an_unpushed_stats_sample_is_absent_not_zero():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    sample = webapp.latest_stats_sample()
+
+    assert sample["cpu_percent"] is None
+    assert sample["system_cpu_percent"] is None
+    assert sample["rss_bytes"] is None
+    assert sample["reason_code"] == app_module.STATS_SAMPLE_NOT_PUSHED_REASON_CODE
+    assert sample["reason"]
+    # pid/started_at are read here, not sampled, so they stay real.
+    assert sample["pid"] == os.getpid()
+    # Uptime is NOT in this record. A copy here would be a second owner that freezes at the last
+    # delivered push while still reading `measured`; it is derived at render time instead.
+    assert "uptime_seconds" not in sample
+
+
+def test_the_system_status_server_block_publishes_typed_absences_not_zeros():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    block = webapp.system_status_server_block(webapp.latest_stats_sample())
+
+    for key in ("cpu_percent", "system_cpu_percent", "rss_bytes"):
+        assert block[key]["state"] == "unavailable", key
+        assert block[key]["value"] is None, key
+        assert block[key]["reason_code"] == app_module.STATS_SAMPLE_NOT_PUSHED_REASON_CODE, key
+        assert block[key]["reason"], key
+    # Uptime is always known, so it is measured beside the three that are not.
+    assert block["uptime_seconds"]["state"] == "measured"
+    assert block["pid"] == os.getpid()
+
+
+def test_the_system_status_server_block_publishes_a_real_push_as_measured():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": time.time(), "pid": os.getpid(), "cpu_percent": 15.8, "system_cpu_percent": 4.0, "rss_bytes": 163 * 1024 * 1024},
+    })
+
+    block = webapp.system_status_server_block(webapp.latest_stats_sample())
+
+    assert block["rss_bytes"] == {"state": "measured", "value": 163 * 1024 * 1024, "reason_code": "", "reason": ""}
+    assert block["cpu_percent"]["state"] == "measured"
+    assert block["cpu_percent"]["value"] == 15.8
+    # A genuinely measured 0.0 is still a measurement; only an absent value is unavailable.
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": time.time(), "pid": os.getpid(), "cpu_percent": 0.0, "system_cpu_percent": 0.0, "rss_bytes": 1},
+    })
+    assert webapp.system_status_server_block(webapp.latest_stats_sample())["cpu_percent"] == {
+        "state": "measured", "value": 0.0, "reason_code": "", "reason": "",
+    }
+
+
+def test_a_sample_for_another_process_is_refused_by_the_receiver():
+    """Where the wrong-process guarantee actually lives.
+
+    statsd no longer reads the shared background-owner ELECTION record to find the web
+    process; the address is handed to it by that process over its own control channel. The
+    protection against a sample landing in the WRONG web process is therefore this check, at
+    the receiver, which cannot be forged by a stale or hostile file: a sample whose pid is not
+    this process's pid is refused and never reaches the cache.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+
+    response = webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": 100.0, "pid": os.getpid() + 1, "cpu_percent": 99.0, "system_cpu_percent": 99.0, "rss_bytes": 1},
+    })
+
+    assert response == {"ok": False, "error": "stats CPU sample PID mismatch"}
+    # ...and nothing was written, so the panel still reports the honest absence.
+    assert webapp.latest_stats_sample()["rss_bytes"] is None
+    assert webapp.system_status_server_block(webapp.latest_stats_sample())["rss_bytes"]["state"] == "unavailable"
+
+
+def test_a_frozen_cpu_sample_stops_being_measured_instead_of_freezing():
+    """A sample that ARRIVED and then stopped is not a current measurement.
+
+    `cpu_budget` already aged its own copy of this record and reported `stale`, but the
+    `server` envelopes carried no age, so a stalled sampler kept rendering its last value
+    as `measured` forever -- a dead sampler reading as a healthy idle process.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+    pushed_at = 1000.0
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": pushed_at, "pid": os.getpid(), "cpu_percent": 15.8, "system_cpu_percent": 4.0, "rss_bytes": 163 * 1024 * 1024},
+    })
+    sample = webapp.latest_stats_sample()
+    stale_after = host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS
+
+    fresh = webapp.system_status_server_block(sample, now=pushed_at + stale_after)
+    assert fresh["rss_bytes"]["state"] == "measured"
+    assert fresh["cpu_percent"]["value"] == 15.8
+
+    frozen = webapp.system_status_server_block(sample, now=pushed_at + stale_after + 0.001)
+    for key in ("cpu_percent", "system_cpu_percent", "rss_bytes"):
+        assert frozen[key]["state"] == "unavailable", key
+        assert frozen[key]["value"] is None, key
+        assert frozen[key]["reason_code"] == app_module.STATS_SAMPLE_STALE_REASON_CODE, key
+        assert "no longer being measured" in frozen[key]["reason"], key
+    # A stale sample is a DIFFERENT fact from one that never arrived: delivery worked once.
+    assert frozen["rss_bytes"]["reason_code"] != app_module.STATS_SAMPLE_NOT_PUSHED_REASON_CODE
+    # Uptime is a function of this process's start time, not a sampled quantity, so it survives.
+    assert frozen["uptime_seconds"]["state"] == "measured"
+
+
+def test_uptime_keeps_advancing_while_a_stalled_cpu_sample_goes_unavailable(monkeypatch):
+    """Uptime must come from THIS process's clock, not from the last delivered push.
+
+    The block's comment said uptime was derived from `SERVER_STARTED_AT`, but it published
+    `envelope(sample["uptime_seconds"])`, and that field was only written when a statsd CPU
+    push arrived. So when delivery stalled, CPU and RSS correctly turned `unavailable` past
+    the stale window while uptime FROZE at its last pushed value and stayed labeled
+    `measured` -- a number that had stopped moving, presented as current, at exactly the
+    moment the reader opened the panel to find out what had broken.
+
+    A live smoke could not catch it: pushes were healthy the whole time, so the cached
+    uptime advanced (8m 5s -> 8m 14s) and looked right. It only freezes when delivery does.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.update_server_cpu_budget = lambda sample: {}
+    started_at = 500.0
+    monkeypatch.setattr(app_module, "SERVER_STARTED_AT", started_at)
+    pushed_at = 1000.0
+    webapp.handle_control_request({
+        "action": "stats_cpu_sample",
+        "sample": {"time": pushed_at, "pid": os.getpid(), "cpu_percent": 15.8, "system_cpu_percent": 4.0, "rss_bytes": 163 * 1024 * 1024},
+    })
+    # ONE sample, delivered once and never again. Everything below renders that same record.
+    sample = webapp.latest_stats_sample()
+    stale_after = host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS
+
+    earlier = webapp.system_status_server_block(sample, now=pushed_at + stale_after + 10.0)
+    later = webapp.system_status_server_block(sample, now=pushed_at + stale_after + 70.0)
+
+    # The sampled metrics are correctly unavailable at both moments: statsd stopped.
+    for block in (earlier, later):
+        assert block["cpu_percent"]["state"] == "unavailable"
+        assert block["rss_bytes"]["state"] == "unavailable"
+    # Uptime is still measured -- and it MOVED, by exactly the wall time between the two
+    # renders. A frozen uptime would report the same number twice.
+    assert earlier["uptime_seconds"]["state"] == "measured"
+    assert later["uptime_seconds"]["state"] == "measured"
+    assert later["uptime_seconds"]["value"] - earlier["uptime_seconds"]["value"] == 60.0
+    assert earlier["uptime_seconds"]["value"] == pushed_at + stale_after + 10.0 - started_at
+    # ...and there is only ONE owner of that number, so nothing can freeze it again.
+    assert "uptime_seconds" not in sample, "a delivered sample must not carry a second uptime owner"
+
+
+def test_one_response_cannot_answer_sample_freshness_two_ways(monkeypatch):
+    """A response must describe ONE moment.
+
+    Found by auditing a live smoke artifact: a single `/api/system-status` body reported
+    `server.cpu_percent` as `cpu_sample_stale` "5s old" while the SAME body's `cpu_budget`
+    said `sample_age_seconds: 0.358, stale: False`. Two answers to one question.
+
+    The cause is read ordering, not delivery: the sample was read BEFORE the slow
+    `runtime_report_payload` work and rendered after it, so it aged during assembly, while
+    `cpu_budget` re-read the cache afterwards and saw a newer push. A response that takes
+    long enough to build manufactures its own staleness and flips the row to an em dash for
+    a reason that has nothing to do with statsd.
+    """
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        def push(at, rss):
+            webapp.handle_control_request({"action": "stats_cpu_sample", "sample": {
+                "time": at, "pid": os.getpid(), "cpu_percent": 10.0,
+                "system_cpu_percent": 5.0, "rss_bytes": rss,
+            }})
+
+        # What statsd had pushed when the request arrived: already older than the window.
+        push(time.time() - 4.0, 1234)
+
+        def slow_report(force_transcripts=False):
+            # statsd keeps pushing on its 1s cadence while the report is assembled.
+            push(time.time(), 4321)
+            return {"ok": True}
+
+        monkeypatch.setattr(webapp, "runtime_report_payload", slow_report)
+        payload = webapp.system_status_payload()
+    finally:
+        webapp.control_server.stop()
+
+    budget = payload["cpu_budget"]
+    server = payload["server"]
+    assert budget["stale"] is False and budget["sample_age_seconds"] < 3.0
+
+    # ...so the same response must not simultaneously call that sample stale.
+    assert server["cpu_percent"]["state"] == "measured", server["cpu_percent"]
+    assert server["rss_bytes"]["value"] == 4321, "the response must render the sample it judged"
+
+
+def test_a_sample_with_no_timestamp_never_reports_an_invented_age():
+    """An unknowable age must not be rendered as a number.
+
+    The first cut of the staleness check reached for `int(age_seconds or 0)`, which turned a
+    sample whose age is exactly what is unknown into a confident "is 0s old" -- the same
+    fabricated measurement this whole branch exists to remove, reintroduced by the fix for it.
+    """
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    with webapp.stats_collection_state.sample_lock:
+        webapp.stats_collection_state.sample_record.cached_payload = {
+            "pid": os.getpid(), "started_at": 100.0,
+            "cpu_percent": 3.5, "system_cpu_percent": 12.0, "rss_bytes": 4096,
+        }
+
+    block = webapp.system_status_server_block(webapp.latest_stats_sample())
+
+    assert block["rss_bytes"]["state"] == "unavailable"
+    assert block["rss_bytes"]["reason_code"] == app_module.STATS_SAMPLE_UNDATED_REASON_CODE
+    assert "0s old" not in block["rss_bytes"]["reason"]
+    assert "no timestamp" in block["rss_bytes"]["reason"]
+
+
+def test_the_cpu_sample_staleness_policy_has_exactly_one_owner():
+    """The reader's "recent" and the producer's "how often" must be one policy.
+
+    They were a bare `3.0` in app.py and `HOST_CPU_CADENCE_SECONDS = 1.0` in stats_current.
+    """
+
+    assert host_collectors.HOST_CPU_SAMPLE_STALE_AFTER_SECONDS == (
+        host_collectors.HOST_CPU_CADENCE_SECONDS
+        * host_collectors.HOST_CPU_SAMPLE_STALE_CADENCES
+    )
+    assert stats_current_service.HOST_CPU_CADENCE_SECONDS == host_collectors.HOST_CPU_CADENCE_SECONDS
+    # The retired literal must not come back in either staleness site.
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+    assert "sample_age_seconds > 3.0" not in source
+
+
+def test_a_never_sampled_cpu_budget_has_no_current_percent():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+
+    payload = webapp.server_cpu_budget_payload(now=None)
+
+    # `CpuBudgetRecord.current_percent` defaults to 0.0. Publishing it as a number claimed a
+    # measurement that the same payload's `sample_age_seconds: None` says was never taken.
+    assert payload["current_percent"] is None
+    assert payload["stale"] is True
+    assert payload["budget_percent"] == app_module.SERVER_CPU_BUDGET_PERCENT
+
+
+def test_an_absent_sample_does_not_cancel_a_cpu_budget_breach():
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.stats_collection_state = state_services.StatsCollectionState()
+    webapp.server_cpu_budget_top_consumers = lambda **options: []
+    breaching = app_module.SERVER_CPU_BUDGET_PERCENT + 20.0
+    webapp.update_server_cpu_budget({"time": 100.0, "cpu_percent": breaching})
+    assert webapp.stats_collection_state.cpu_budget_record.exceeded_since == 100.0
+
+    # Reading the absence as 0.0% would fall into the "under budget" branch and clear the breach.
+    webapp.update_server_cpu_budget({"time": 101.0, "cpu_percent": None})
+
+    assert webapp.stats_collection_state.cpu_budget_record.exceeded_since == 100.0
+    assert webapp.stats_collection_state.cpu_budget_record.current_percent == breaching
+
+
+# `test_the_cpu_collector_appends_nothing_when_no_sample_was_pushed` used to sit here. It exercised
+# `TmuxWebtermApp.collect_current_stats_cpu`, which the collector registry never registered, so the
+# guard it asserted had no production call site and the live producer kept fabricating a first
+# `0.0`. The collector is gone and the contract moved to the root owner: see
+# `tests/test_stats_current_service.py::test_the_first_cpu_sample_reports_absence_because_it_had_no_baseline`
+# and `::test_the_first_host_cpu_cycle_appends_nothing_and_pushes_nothing`, which drive the REAL
+# `host_collectors.CpuSampler` rather than a fake that returns non-zero.
 
 
 def test_background_status_includes_performance_summary():
@@ -1374,9 +1938,13 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
     monkeypatch.setattr(webapp, "transcripts_payload", lambda force=False: transcript_forces.append(force) or {"sessions": {}, "cache": {"hit": True}})
     monkeypatch.setattr(webapp, "current_stats_sample", lambda: pytest.fail("System diagnostics must not collect CPU"))
     monkeypatch.setattr(webapp, "latest_stats_sample", lambda: {
+        # Every real producer stamps `time`; without it this fixture described a sample that
+        # cannot occur, and the payload's currency could not be judged at all.
+        "time": time.time(),
         "pid": 321,
         "started_at": 100.0,
-        "uptime_seconds": 25.0,
+        # No `uptime_seconds`: a delivered sample has nothing to say about how long THIS
+        # process has run, and a copy here froze the panel's uptime at the last push.
         "cpu_percent": 3.5,
         "system_cpu_percent": 12.0,
         "rss_bytes": 4096,
@@ -1389,14 +1957,20 @@ def test_system_status_payload_is_live_and_does_not_force_transcript_refresh(mon
     assert transcript_forces == [False]
     assert payload["ok"] is True
     assert payload["generated_at"] > 0
+    # The three sampled metrics are typed envelopes from `local_service_projection.measurement`,
+    # the same shape every local service publishes -- not the plain floats this block used to be.
+    # Uptime is the same shape but a DIFFERENT source: this process's own clock, measured against
+    # the moment the response describes, so it cannot be frozen by a stalled sampler.
+    uptime = payload["server"].pop("uptime_seconds")
+    assert uptime["state"] == "measured"
+    assert uptime["value"] == payload["generated_at"] - app_module.SERVER_STARTED_AT
     assert payload["server"] == {
         "version": app_module.YOLOMUX_VERSION,
         "pid": 321,
         "started_at": 100.0,
-        "uptime_seconds": 25.0,
-        "cpu_percent": 3.5,
-        "system_cpu_percent": 12.0,
-        "rss_bytes": 4096,
+        "cpu_percent": {"state": "measured", "value": 3.5, "reason_code": "", "reason": ""},
+        "system_cpu_percent": {"state": "measured", "value": 12.0, "reason_code": "", "reason": ""},
+        "rss_bytes": {"state": "measured", "value": 4096, "reason_code": "", "reason": ""},
     }
     assert payload["tmux_signal_watcher"] == {
         "state": "never-started",
@@ -8201,8 +8775,79 @@ def test_filesystem_watch_diff_completion_worker_start_failure_is_a_produce_fail
     assert result["error"]["stack"][-1]["operation"] == "jobd.produce"
 
 
-def test_filesystem_watch_diff_rejects_105_roots_without_partial_or_multi_job_submission(monkeypatch):
+def test_filesystem_watch_diff_accepts_105_roots_and_partitions_them_without_dropping_any(monkeypatch, tmp_path):
+    """105 roots is inside the 128-root client contract, so it is accepted and split, not rejected.
+
+    This used to assert a 400 with `maximum: 64`, which made the accepted 65-128 range fail by
+    construction; the malformed 400 then reached the browser as an HTTP 500.
+    """
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     roots = [f"/repo-{index:03d}" for index in range(105)]
+    submitted = []
+
+    class RecordingBatchJob:
+        def produce(self, task, payload, **kwargs):
+            submitted.append((task, payload, kwargs))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": f"job-{len(submitted)}", "status": "queued", "generation": kwargs["generation"]},
+                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+            }, b""
+
+    class CapturingCompletionService:
+        stop_event = threading.Event()
+        submission = None
+
+        def reserve(self):
+            return True
+
+        def release_reservation(self):
+            raise AssertionError("an accepted operation owns its completion reservation")
+
+        def submit_reserved(self, function, *args):
+            self.submission = (function, args)
+            return True
+
+        def stop(self):
+            self.stop_event.set()
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RecordingBatchJob()
+    webapp.jobd_operation_service = CapturingCompletionService()
+    monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
+    try:
+        payload, status = webapp.filesystem_watch_diff_http_payload(
+            force_full=True,
+            request_id="r-web-105-roots",
+        )
+        submitted_during_acceptance = list(submitted)
+        completion, completion_args = webapp.jobd_operation_service.submission
+        batches = webapp.submit_filesystem_watch_batches(completion_args[3], completion_args[5])
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["state"] == "queued"
+    assert payload["request"]["id"] == "r-web-105-roots"
+    assert payload["operation"]["context"]["roots"] == 105
+    assert payload["operation"]["context"]["batches"] == 2
+    assert completion == webapp.complete_filesystem_watch_diff_operation
+    assert completion_args[3] == roots
+    assert submitted_during_acceptance == [], "acceptance must not submit any job on the request thread"
+    assert [len(batch_payload["requests"]) for _task, batch_payload, _kwargs in submitted] == [64, 41]
+    assert [
+        str(request["path"])
+        for _task, batch_payload, _kwargs in submitted
+        for request in batch_payload["requests"]
+    ] == roots
+    assert [batch.root_offset for batch in batches] == [0, 64]
+
+
+def test_filesystem_watch_diff_rejects_more_roots_than_the_client_watch_contract_admits(monkeypatch):
+    roots = [f"/repo-{index:03d}" for index in range(app_module.CLIENT_WATCH_ROOT_LIMIT + 1)]
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "client_watch_roots_snapshot", lambda: roots)
     monkeypatch.setattr(
@@ -8213,17 +8858,22 @@ def test_filesystem_watch_diff_rejects_105_roots_without_partial_or_multi_job_su
     try:
         payload, status = webapp.filesystem_watch_diff_http_payload(
             force_full=True,
-            request_id="r-web-105-roots",
+            request_id="r-web-over-contract-roots",
         )
     finally:
         webapp.control_server.stop()
 
     assert status == HTTPStatus.BAD_REQUEST
     assert payload["state"] == "failed"
-    assert payload["request"]["id"] == "r-web-105-roots"
+    assert payload["request"]["id"] == "r-web-over-contract-roots"
     assert payload["error"]["code"] == "invalid_request"
-    assert payload["error"]["details"]["roots"] == 105
-    assert payload["error"]["details"]["maximum"] == 64
+    assert payload["error"]["details"]["roots"] == len(roots)
+    assert payload["error"]["details"]["maximum"] == app_module.CLIENT_WATCH_ROOT_LIMIT
+    assert payload["error"]["stack"] == [{
+        "component": "server.http",
+        "operation": "GET /api/fs/watch-diff",
+        "code": "invalid_request",
+    }]
 
 
 def test_filesystem_watch_diff_releases_completion_reservation_when_operation_acceptance_fails(monkeypatch):
@@ -8987,6 +9637,126 @@ def _filesystem_json_product(body: bytes) -> dict[str, object]:
     }
 
 
+# Every lexical shape `filesystem.validate_request_path_lexical` refuses, one row per rule it owns.
+# `POST /api/fs/mkdir {}` is the observed case: the browser and the route sweep both send a body
+# with no path, and the web thread can prove that request cannot succeed without touching the
+# filesystem.  Accepting it anyway returns 202, burns a bounded jobd operation slot, and
+# terminalizes `invalid_request` out of band -- after the response the caller already read, so
+# the failure surfaces as an unattributable server-log error instead of this request's 400.
+INVALID_FILESYSTEM_OPERATION_REQUESTS = (
+    ("POST /api/fs/mkdir", "mkdir", "", {}, "fs.error.pathRequired"),
+    ("POST /api/fs/write", "write", "", {"content": ""}, "fs.error.pathRequired"),
+    ("POST /api/fs/delete", "delete", "", {}, "fs.error.pathRequired"),
+    ("POST /api/fs/rename", "rename", "", {"new_name": "kept.txt"}, "fs.error.pathRequired"),
+    ("POST /api/fs/unindex", "unindex", "", {}, "fs.error.pathRequired"),
+    ("GET /api/fs/read", "read", "relative/note.txt", {}, "fs.error.pathAbsolute"),
+    ("GET /api/fs/list", "list", "/repo/bad\nname", {}, "fs.error.pathIllegal"),
+    # `new_name` is the only other refusal decidable without a descriptor, and jobd coerces it
+    # with `str(... or "")`, so `None` and `""` are the same request to the worker.
+    ("POST /api/fs/rename", "rename", "/repo/note.txt", {"new_name": ""}, "fs.error.nameRequired"),
+    ("POST /api/fs/rename", "rename", "/repo/note.txt", {"new_name": None}, "fs.error.nameRequired"),
+    ("POST /api/fs/rename", "rename", "/repo/note.txt", {"new_name": "../escape"}, "fs.error.nameIllegal"),
+)
+
+
+@pytest.mark.parametrize(
+    ("route", "operation", "path", "operation_args", "message_key"),
+    INVALID_FILESYSTEM_OPERATION_REQUESTS,
+)
+def test_filesystem_operation_refuses_an_invalid_path_before_accepting_it(
+    monkeypatch,
+    tmp_path,
+    route,
+    operation,
+    path,
+    operation_args,
+    message_key,
+):
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    submissions = []
+
+    class RecordingFilesystemJob:
+        def produce(self, task, payload, **kwargs):
+            submissions.append(("produce", task, payload))
+            return {
+                "ok": True,
+                "state": "queued",
+                "job": {"job_id": "job-invalid-path", "status": "queued", "generation": kwargs["generation"]},
+            }, b""
+
+        def product(self, product_key):
+            submissions.append(("product", product_key))
+            return {"ok": True, "state": "none", "inflight": True, "generation": 0}, b""
+
+        def result(self, job_id):
+            submissions.append(("result", job_id))
+            return {"ok": True, "job": {"job_id": job_id, "status": "running"}}
+
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = RecordingFilesystemJob()
+    server_logs.SERVER_LOGS.clear()
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route=route,
+            operation=operation,
+            path=path,
+            args=dict(operation_args),
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert response.status == HTTPStatus.BAD_REQUEST, response
+    assert response.product is None and response.body == b"", response
+    # No job submitted, no receipt persisted, and no completion slot held.
+    assert submissions == [], submissions
+    assert webapp.queued_delivery_ledger.open_operations() == []
+    assert webapp.jobd_operation_service.futures == set()
+    assert response.payload["user_message"]["key"] == message_key, response.payload
+    assert response.payload["terminal"] is True, response.payload
+    assert response.payload["path"] == path, response.payload
+    # The refusal is this request's answer, not an operator-visible server failure.
+    failures = [
+        entry
+        for entry in server_logs.SERVER_LOGS.payload()["logs"]
+        if str(entry.get("level") or "") in {"warning", "error"}
+    ]
+    assert failures == [], failures
+
+
+def test_filesystem_acceptance_never_expands_a_user_name_on_the_request_thread(monkeypatch):
+    """Acceptance owns the lexical rule only, because expanding `~user` can block the web process.
+
+    `os.path.expanduser("~alice/repo")` is an NSS/passwd lookup.  On a networked passwd source
+    (LDAP/NIS/SSSD) that lookup can hang for the name-service timeout, and this process answers
+    every HTTP request on one thread, so a single stalled lookup stalls all of them -- precisely
+    the blocking work the jobd operation queue exists to keep off the request thread.  The
+    expansion belongs to `filesystem.parsed_request_path`, which only the worker calls.
+    """
+
+    def refuse(path):
+        raise AssertionError(f"HTTP acceptance expanded a user name on the request thread: {path!r}")
+
+    monkeypatch.setattr(os.path, "expanduser", refuse)
+    accept = app_module.TmuxWebtermApp.refused_filesystem_operation_request
+    # A valid `~user/...` descriptor is accepted without ever consulting the name service.
+    assert accept("mkdir", "~alice/repo/new", {}) is None
+    assert accept("read", "~alice/repo/note.txt", {}) is None
+    assert accept("rename", "~alice/repo/note.txt", {"new_name": "kept.txt"}) is None
+    # And the refusals still fire on the same thread, from the same lexical owner.
+    for operation, path, args, message_key in (
+        ("mkdir", "", {}, "fs.error.pathRequired"),
+        ("list", "relative/note.txt", {}, "fs.error.pathAbsolute"),
+        ("list", "~alice/bad\nname", {}, "fs.error.pathIllegal"),
+        ("rename", "~alice/repo/note.txt", {"new_name": "../escape"}, "fs.error.nameIllegal"),
+    ):
+        refusal = accept(operation, path, args)
+        assert refusal is not None, (operation, path)
+        payload, status = refusal
+        assert status == HTTPStatus.BAD_REQUEST
+        assert payload["user_message"]["key"] == message_key, payload
+
+
 def test_filesystem_operation_cold_receipt_leaves_request_thread_before_worker_finishes(monkeypatch, tmp_path):
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     actions = []
@@ -9220,6 +9990,202 @@ def test_filesystem_operation_cold_failure_replay_preserves_typed_status(monkeyp
     assert replay == published[-1]
     assert replay["result"] == result
     assert replay["status"] == status
+
+
+class _TerminalFailureFilesystemJob:
+    """One jobd client that drives a filesystem operation to the failure under test.
+
+    ``worker_failure`` is the typed filesystem failure the worker reports through ``result`` --
+    the ordinary outcome of touching a path.  ``product_failure`` is the daemon failing instead:
+    a non-transient product read, which is how a jobd that died mid-operation reaches the app.
+    """
+
+    def __init__(self, *, worker_failure=None, product_failure=None):
+        self.worker_failure = worker_failure
+        self.product_failure = product_failure
+
+    def produce(self, _task, _payload, **kwargs):
+        return {
+            "ok": True,
+            "state": "queued",
+            "job": {"job_id": "job-fs-terminal", "status": "running", "generation": kwargs["generation"]},
+            "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
+        }, b""
+
+    def product(self, _product_key):
+        if self.product_failure is not None:
+            return dict(self.product_failure), b""
+        return {"ok": True, "state": "none", "generation": 0, "inflight": False}, b""
+
+    def result(self, job_id):
+        assert job_id == "job-fs-terminal"
+        return {
+            "ok": False,
+            "job": {"job_id": job_id, "status": "failed", "failure": dict(self.worker_failure)},
+        }
+
+
+def _run_terminal_filesystem_operation(monkeypatch, tmp_path, job_client):
+    """Accept one filesystem operation, let it terminalize, and return the new server-log rows."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    terminal = threading.Event()
+    webapp = app_module.TmuxWebtermApp([])
+    webapp.job_client = job_client
+
+    def capture_event(event_type, payload=None, **_kwargs):
+        del payload
+        if event_type == "operation_terminal":
+            terminal.set()
+
+    monkeypatch.setattr(webapp, "publish_client_event", capture_event)
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+    try:
+        response = webapp.filesystem_operation_http_payload(
+            route="GET /api/fs/list",
+            operation="list",
+            path="/tmp/yo-deleted-worktree",
+        )
+        assert response.status == HTTPStatus.ACCEPTED, response.payload
+        assert terminal.wait(5.0), "the operation never terminalized"
+        operation_id = response.payload["operation"]["id"]
+        result, status = webapp.operation_status_payload(operation_id)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    rows = [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before]
+    return result, status, rows
+
+
+@pytest.mark.parametrize(
+    ("case", "status", "message_key", "expected_level", "expected_code"),
+    (
+        ("path-not-found", HTTPStatus.NOT_FOUND, "common.pathNotFound", "info", "path_not_found"),
+        ("permission-denied", HTTPStatus.FORBIDDEN, "fs.error.operationFailed", "info", "permission_denied"),
+    ),
+)
+def test_expected_filesystem_outcome_is_not_recorded_as_an_operator_error(
+    monkeypatch,
+    tmp_path,
+    case,
+    status,
+    message_key,
+    expected_level,
+    expected_code,
+):
+    """Browsing to a path that is gone or unreadable is the caller's outcome, not a server error.
+
+    The user's Differ session pointed at a worktree that had been deleted, so every listing
+    produced a genuine 404 -- and each one was written to the operator log at ``level=error``,
+    which is release-blocking evidence.  ``{"warning", "error"}`` is the blocking set, so the
+    record has to land below both while staying byte-identical for correlation and dedupe.
+    """
+
+    worker_failure = {
+        "filesystem_error": {
+            "error": f"typed filesystem failure {int(status)}",
+            "user_message": {"key": message_key, "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "typed failure"},
+            "status": int(status),
+            "path": "/tmp/yo-deleted-worktree",
+        },
+        "status": int(status),
+    }
+    result, result_status, rows = _run_terminal_filesystem_operation(
+        monkeypatch,
+        tmp_path,
+        _TerminalFailureFilesystemJob(worker_failure=worker_failure),
+    )
+
+    assert result_status == status, result
+    assert result["error"]["code"] == expected_code, result
+    operation_rows = [entry for entry in rows if entry["source"] == "jobd-operation"]
+    assert len(operation_rows) == 1, rows
+    assert operation_rows[0]["level"] == expected_level, operation_rows
+    assert operation_rows[0]["category"] == "operation", operation_rows
+    assert json.loads(operation_rows[0]["message"])["code"] == expected_code, operation_rows
+    # `{"warning", "error"}` is what the live browser soak collects as `serverLogErrors` and what
+    # every gate retirement helper filters on, so the outcome has to land outside both.
+    blocking = [
+        entry for entry in rows
+        if entry["level"] in {"warning", "error"} and entry["source"] in {"jobd-operation", "api-response"}
+    ]
+    assert blocking == [], rows
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_code"),
+    (
+        ("daemon-died", "service_unavailable"),
+        ("dependency-failed", "dependency_failed"),
+    ),
+)
+def test_genuine_operation_fault_is_still_recorded_as_an_operator_error(monkeypatch, tmp_path, case, expected_code):
+    """The direction that matters more: a component that failed still writes an error row."""
+
+    if case == "daemon-died":
+        job_client = _TerminalFailureFilesystemJob(product_failure={
+            "ok": False,
+            "terminal": True,
+            "error": "jobd exited while the operation was running",
+        })
+    else:
+        # A worker failure the filesystem itself could not explain: `os_error` keeps a bare OSError
+        # at 500, and `typed_filesystem_operation_failed_result` names anything >= 500
+        # `dependency_failed`.
+        job_client = _TerminalFailureFilesystemJob(worker_failure={
+            "filesystem_error": {
+                "error": "filesystem operation failed",
+                "user_message": {"key": "fs.error.operationFailed", "params": {}, "fallback": "filesystem operation failed"},
+                "status": int(HTTPStatus.INTERNAL_SERVER_ERROR),
+                "path": "/tmp/yo-deleted-worktree",
+            },
+            "status": int(HTTPStatus.INTERNAL_SERVER_ERROR),
+        })
+
+    result, result_status, rows = _run_terminal_filesystem_operation(monkeypatch, tmp_path, job_client)
+
+    assert int(result_status) >= 500, result
+    assert result["error"]["code"] == expected_code, result
+    operation_rows = [entry for entry in rows if entry["source"] == "jobd-operation"]
+    assert len(operation_rows) == 1, rows
+    assert operation_rows[0]["level"] == "error", operation_rows
+    assert json.loads(operation_rows[0]["message"])["code"] == expected_code, operation_rows
+
+
+def test_malformed_failure_record_carrying_an_outcome_code_is_still_an_error(monkeypatch, tmp_path):
+    """A producer that emitted a half-built record is itself the fault, so it buys no downgrade."""
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
+    webapp = app_module.TmuxWebtermApp([])
+    well_formed = webapp.typed_filesystem_operation_failed_result(
+        "r-fixture",
+        {
+            "error": "path not found: /tmp/yo-deleted-worktree",
+            "user_message": {"key": "common.pathNotFound", "params": {"path": "/tmp/yo-deleted-worktree"}, "fallback": "File not found"},
+            "status": int(HTTPStatus.NOT_FOUND),
+            "path": "/tmp/yo-deleted-worktree",
+        },
+        HTTPStatus.NOT_FOUND,
+        route="GET /api/fs/list",
+        operation_id="op-fixture",
+    )
+    malformed = copy.deepcopy(well_formed)
+    malformed["error"]["stack"] = []
+    truncated = copy.deepcopy(well_formed)
+    truncated["error"]["details"] = {}
+
+    before = server_logs.SERVER_LOGS.payload()["sequence"]
+    try:
+        webapp.record_operation_failure("op-fixture", well_formed)
+        webapp.record_operation_failure("op-malformed", malformed)
+        webapp.record_operation_failure("op-truncated", truncated)
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    rows = [entry for entry in server_logs.SERVER_LOGS.payload()["logs"] if entry["id"] > before]
+
+    assert [entry["level"] for entry in rows] == ["info", "error", "error"], rows
+    assert {entry["source"] for entry in rows} == {"jobd-operation"}, rows
 
 
 @pytest.mark.parametrize(
@@ -15950,3 +16916,297 @@ def test_stale_session_files_survive_a_failing_refresh_and_never_go_empty(monkey
         assert cached is not None and cached[0]["files"] == populated["files"]
     finally:
         webapp.control_server.stop()
+
+
+# =======================================================================================
+# DOIT.p0.daemon-monitor -- the boot-time statsd flash, and the two classifiers that
+# disagreed about the same row.
+# =======================================================================================
+
+
+def _statsd_pin_status(**supervisor: Any) -> dict[str, Any]:
+    """A `StatsCurrentRuntime.status()` shaped like a process taking the statsd pin."""
+
+    fields = {"alive": True, "phase": "acquiring_lease", "failure_count": 0}
+    fields.update(supervisor)
+    return {
+        "leased": False,
+        "families": {},
+        "supervisor": fields,
+        "service": {"ok": False, "pid": 0, "started_at": 0.0, "migration": {}},
+    }
+
+
+def _classify_service(row: dict[str, Any]) -> dict[str, Any]:
+    """The one server-side owner that renders a service row for the System panel."""
+
+    return app_module.TmuxWebtermApp.system_status_service(app_module.TmuxWebtermApp, dict(row))
+
+
+def _statsd_projection(monkeypatch, runtime_status: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, str], dict[str, Any]]:
+    """Build statsd's real row, then read it through BOTH consumers of that row."""
+
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        monkeypatch.setattr(webapp.stats_current_runtime, "status", lambda: runtime_status)
+        row = webapp.statsd_runtime_status()
+    finally:
+        webapp.control_server.stop()
+    return row, observed_health(row), _classify_service(row)
+
+
+def test_statsd_absence_is_excused_only_while_this_process_is_taking_the_pin():
+    """The exact bound on the one excuse statsd may state.
+
+    Every `is False` below is a hole this predicate must not open: each one is a state in which
+    an absent statsd is a real outage, and excusing it would make the indicator permanently
+    silent about the service the whole monitor was built for.
+    """
+    taking = _statsd_pin_status()
+    assert app_module.statsd_pin_pending(taking) is True
+    for phase in sorted(app_module.STATSD_PIN_PENDING_PHASES):
+        assert app_module.statsd_pin_pending(_statsd_pin_status(phase=phase)) is True, phase
+
+    # The pin landed: statsd exists from here on, so absence is an outage.
+    assert app_module.statsd_pin_pending({**taking, "leased": True}) is False
+    # No pin owner in this process at all -- it lost the election, and the winner is supposed to
+    # be keeping statsd up. An absent statsd here is the winner's outage, not routine idleness.
+    assert app_module.statsd_pin_pending(_statsd_pin_status(alive=False, phase="stopped")) is False
+    # The pin owner recorded a failure. This is the boot-time dead-statsd case.
+    assert app_module.statsd_pin_pending(_statsd_pin_status(failure_count=1)) is False
+    # Phases that are not on the way to a lease: stopped, demoted, backing off, already running.
+    for phase in ("stopped", "starting_pin", "waiting_owner", "demoting", "stopping", "backoff", "blocked", "running", ""):
+        assert app_module.statsd_pin_pending(_statsd_pin_status(phase=phase)) is False, phase
+    # A status that cannot state the fact does not get to imply it.
+    assert app_module.statsd_pin_pending({}) is False
+    assert app_module.statsd_pin_pending({"leased": False}) is False
+    assert app_module.statsd_pin_pending({"leased": False, "supervisor": "acquiring_lease"}) is False
+    assert app_module.statsd_pin_pending("acquiring_lease") is False
+
+
+def test_an_absent_statsd_reads_starting_while_this_process_is_still_taking_its_pin(monkeypatch):
+    """The boot flash. Measured before this fix on a real isolated start (port 17781):
+
+        +0.632s  background-owner generation created -- the election is DECIDED
+        +0.635s  observer's first cycle -> statsd published `down` / `service_absent`
+        +1.622s  statsd actually began serving
+        +4.696s  statsd published `ready`
+
+    4.06 seconds of "YO!stats is not running" at every boot, for a statsd that was never down.
+    This is the row-level half: whenever a cycle lands inside the pin window, statsd states why
+    it is absent instead of the observer inventing an outage. See `app.STATSD_ABSENT_WHILE_PIN_
+    PENDING` for the ablation showing what each half of the fix is actually doing.
+    """
+    row, health, panel = _statsd_projection(monkeypatch, _statsd_pin_status())
+
+    assert row["pid"] == 0, row
+    assert row["absence_expected_reason"] == app_module.STATSD_ABSENT_WHILE_PIN_PENDING, row
+    assert health == ("starting", app_module.STATSD_ABSENT_WHILE_PIN_PENDING), health
+    assert health[0] not in BACKEND_HEALTH_DEGRADED_STATES, health
+    assert panel["state"] == "idle", panel
+    assert panel["alerting"] is False, panel
+    assert app_module.local_services_alert([panel]) == {}
+
+
+def test_a_statsd_that_is_genuinely_dead_at_boot_is_never_excused(monkeypatch):
+    """The safety direction, and the one that matters more than the flash.
+
+    A statsd that fails to come up makes its pin owner record a failure and leave the
+    lease-taking phases. Both are checked, so both spellings of the same outage still alarm.
+    """
+    for runtime_status in (
+        # `acquire_lease` failed and the supervisor is backing off.
+        _statsd_pin_status(phase="backoff", failure_count=1),
+        # The failure is recorded but the phase has not moved yet.
+        _statsd_pin_status(failure_count=1),
+        # The supervisor gave up entirely (terminal, e.g. UpgradeRequired).
+        _statsd_pin_status(alive=False, phase="blocked", failure_count=3),
+    ):
+        row, health, panel = _statsd_projection(monkeypatch, runtime_status)
+        assert row["absence_expected_reason"] == "", (runtime_status, row)
+        assert health == ("down", "service_absent"), (runtime_status, health)
+        assert panel["state"] == "unavailable", (runtime_status, panel)
+        assert panel["alerting"] is True, (runtime_status, panel)
+        assert app_module.local_services_alert([panel])["count"] == 1
+
+
+def test_a_process_that_does_not_own_the_statsd_pin_still_reports_it_down(monkeypatch):
+    """A losing or demoted process must not go quiet about the statsd the owner should be running."""
+    for runtime_status in (
+        # Never elected: `stats_current_runtime.start()` was never called.
+        _statsd_pin_status(alive=False, phase="stopped"),
+        # Demoted: the supervisor is alive but has no valid owner generation.
+        _statsd_pin_status(phase="waiting_owner"),
+        _statsd_pin_status(phase="demoting"),
+    ):
+        row, health, panel = _statsd_projection(monkeypatch, runtime_status)
+        assert row["absence_expected_reason"] == "", (runtime_status, row)
+        assert health == ("down", "service_absent"), (runtime_status, health)
+        assert panel["alerting"] is True, (runtime_status, panel)
+
+
+def test_a_recorded_statsd_failure_alarms_even_while_the_pin_is_pending(monkeypatch):
+    """Ordering property: the excuse is read LAST, after every recorded failure.
+
+    Without this, a statsd that broke during the boot window would be silenced by the very
+    excuse that exists to describe a healthy boot.
+    """
+    pending_with_failure = _statsd_pin_status()
+    pending_with_failure["service"] = {
+        "ok": False,
+        "pid": 0,
+        "started_at": 0.0,
+        "migration": {"state": "failed", "failure": "stats database migration failed"},
+    }
+    row, health, panel = _statsd_projection(monkeypatch, pending_with_failure)
+
+    assert app_module.statsd_pin_pending(pending_with_failure) is True, "the pin really is pending"
+    assert row["absence_expected_reason"] == app_module.STATSD_ABSENT_WHILE_PIN_PENDING, row
+    assert row["last_failure"] == "stats database migration failed", row
+    assert health == ("down", "exited"), health
+    assert panel["state"] == "unavailable", panel
+    assert panel["alerting"] is True, panel
+    assert panel["reason"] == "stats database migration failed", panel
+
+
+def test_the_health_observer_is_armed_after_the_election_and_never_depends_on_winning(monkeypatch, capsys):
+    """The observer arms after the election is DECIDED, whatever it decided.
+
+    A monitor that only runs on the process that won the background-owner election would be a
+    worse defect than the flash it was reordered for, so both outcomes are proven here.
+    """
+    for acquired in (True, False):
+        order: list[str] = []
+
+        class FakeApp:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start_background_owner(self, **_kwargs):
+                order.append("election")
+                return acquired
+
+            def start_yoagent_backend_prewarm(self, **_kwargs):
+                return {"ok": True}, 202
+
+            def restore_auto_approve(self):
+                return []
+
+            def stop_auto_approve_all(self):
+                pass
+
+        class FakeServer:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def serve_forever(self):
+                order.append("serve")
+
+            def server_close(self):
+                pass
+
+        stopped: list[str] = []
+        observer = SimpleNamespace(stop=lambda: stopped.append("stop"))
+
+        def arm(port, app):
+            order.append("observer")
+            return observer
+
+        args = argparse.Namespace(
+            host="127.0.0.1",
+            port=19771,
+            sessions=[],
+            dangerously_yolo=False,
+            self_signed=False,
+            http=True,
+            cert=None,
+            key=None,
+            print_transcripts=False,
+            print_background_owner=False,
+            print_runtime_report=False,
+            dev=False,
+        )
+        monkeypatch.setattr(cli_module, "parse_args", lambda: args)
+        monkeypatch.setattr(cli_module, "tls_context_for_args", lambda _args: (None, ""))
+        monkeypatch.setattr(cli_module, "TmuxWebtermApp", FakeApp)
+        monkeypatch.setattr(cli_module, "TmuxWebtermHTTPServer", FakeServer)
+        monkeypatch.setattr(cli_module, "start_backend_health_observer", arm)
+        monkeypatch.setattr(cli_module, "startup_path_line", lambda _port: "YOLOmux paths: test")
+        monkeypatch.setattr(cli_module, "acquire_server_port_lease", lambda _port: SimpleNamespace(release=lambda: None))
+        monkeypatch.setattr(cli_module, "set_local_service_launch_context", lambda _port: None)
+        monkeypatch.setattr(cli_module, "start_startup_overload_watchdog", lambda _port: None)
+        monkeypatch.setattr(cli_module, "auth_setup_required", lambda: False)
+        monkeypatch.setattr(cli_module, "report_worktree_writer_warning", lambda: True)
+
+        assert cli_module.main() == 0
+        capsys.readouterr()
+
+        assert order == ["election", "observer", "serve"], (acquired, order)
+        # Armed on the losing process too, and still stopped before the backend clients close.
+        assert stopped == ["stop"], (acquired, stopped)
+
+
+def test_the_system_panel_and_the_health_indicator_never_disagree_about_one_row():
+    """Defect 2: one row, one derivation.
+
+    `system_status_service` used to decide `running`/`idle`/`issue`/`unavailable` from the row
+    on its own, in parallel with `observed_health` deciding `ready`/`starting`/`degraded`/`down`
+    from the same row -- and only the observer read `absence_expected_reason`. The panel now
+    consumes the observer's typed state, so the two cannot answer differently. The invariant is
+    exact: the panel alarms if and only if the typed state is a degraded one.
+    """
+    rows = [
+        {"service": "statsd", "pid": 4242, "healthy": True},
+        {"service": "statsd", "pid": 4242, "healthy": False},
+        {"service": "statusd", "pid": 4242, "transport_reason": "connection refused"},
+        {"service": "indexd", "pid": 0, "demand_started": True},
+        {"service": "indexd", "pid": 0, "demand_started": True, "last_failure": "indexd exited (1)"},
+        {"service": "indexd", "pid": 0, "demand_started": True, "restart_backoff_seconds": 4.0},
+        {"service": "watchd", "pid": 0, "demand_started": True, "healthy": False},
+        {"service": "approvald", "pid": 0},
+        {"service": "approvald", "pid": 0, "terminal_failure": True},
+        {"service": "jobd", "pid": 0, "absence_expected_reason": jobd.JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE},
+        {"service": "jobd", "pid": 4242, "healthy": True, "absence_expected_reason": jobd.JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE},
+        {"service": "jobd", "pid": 0, "absence_expected_reason": "scheduler_not_owned", "last_failure": "jobd exited (1)"},
+        # Both excuses at once, and an unreadable one: contract errors that must fail closed.
+        {"service": "jobd", "pid": 0, "demand_started": True, "absence_expected_reason": "scheduler_not_owned"},
+        {"service": "jobd", "pid": 0, "absence_expected_reason": "NOT A TOKEN"},
+        {"service": "statsd", "pid": 0, "upgrade_required": {"required_protocol_version": 24}},
+        {"service": "statsd", "pid": 0},
+    ]
+    for row in rows:
+        state, _reason = observed_health(row)
+        panel = _classify_service(row)
+        degraded = state in BACKEND_HEALTH_DEGRADED_STATES
+        assert panel["alerting"] is degraded, (row, state, panel)
+        assert (panel["state"] == "running") is (state == "ready"), (row, state, panel)
+        assert (panel["state"] == "idle") is (state == "starting"), (row, state, panel)
+        # A row nobody alarms on must not reach the persistent topbar indicator either.
+        assert (app_module.local_services_alert([panel]) != {}) is degraded, (row, state, panel)
+
+
+def test_an_absent_jobd_without_the_scheduler_lease_is_quiet_in_both_owners():
+    """The exact divergence reported: same fact, two answers, two owners.
+
+    Before the fix, this row made the System panel say `unavailable` and alarm while the topbar
+    observer said `starting` and stayed silent, because `absence_expected_reason` landed in the
+    observer only. jobd is not demand-scoped -- it is pinned by the scheduler lease -- so the
+    static `demand_started` excuse would have been the wrong fix and would have silenced a real
+    jobd outage on the owning process.
+    """
+    row = {"service": "jobd", "pid": 0, "absence_expected_reason": jobd.JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE}
+
+    assert observed_health(row) == ("starting", "scheduler_not_owned")
+    panel = _classify_service(row)
+    assert panel["state"] == "idle", panel
+    assert panel["reason_code"] == "not_started", panel
+    assert panel["alerting"] is False, panel
+    assert panel["essential"] is True, panel
+    assert app_module.local_services_alert([panel]) == {}
+    # And the other side of the same lease still alarms: this process owns scheduling, so an
+    # absent jobd is a verified outage rather than an expected absence.
+    owning = {"service": "jobd", "pid": 0, "absence_expected_reason": ""}
+    assert observed_health(owning) == ("down", "service_absent")
+    owning_panel = _classify_service(owning)
+    assert owning_panel["state"] == "unavailable", owning_panel
+    assert owning_panel["alerting"] is True, owning_panel

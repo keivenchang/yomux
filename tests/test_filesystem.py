@@ -2254,3 +2254,56 @@ def test_list_directory_flags_symlinks_with_target(tmp_path):
 
     assert by_name["real_file.txt"]["is_symlink"] is False
     assert "symlink_target" not in by_name["real_file.txt"]
+
+
+def test_lexical_path_rule_and_worker_parse_are_one_rule_split_at_the_thread_boundary(monkeypatch):
+    """One rule, two entry points: the lexical half is web-safe, the parse half may block.
+
+    `os.path.expanduser` on `~user/...` is an NSS/passwd lookup that can hang on a networked
+    passwd source, so it belongs to the worker.  `parsed_request_path` is the only caller that
+    adds it, and it reaches the refusals through `validate_request_path_lexical` rather than
+    restating them, so acceptance and execution cannot disagree.
+    """
+
+    expansions = []
+    real_expanduser = os.path.expanduser
+
+    def recording_expanduser(path):
+        expansions.append(path)
+        return real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", recording_expanduser)
+
+    # The lexical half returns the request string untouched and consults no name service.
+    assert filesystem_paths.validate_request_path_lexical("~alice/repo/note.txt") == "~alice/repo/note.txt"
+    assert filesystem_paths.validate_request_path_lexical("/repo/note.txt") == "/repo/note.txt"
+    assert expansions == [], expansions
+
+    # The worker half applies the same rule, then expands.
+    assert filesystem_paths.parsed_request_path("~/repo/note.txt") == Path(real_expanduser("~/repo/note.txt"))
+    assert expansions == ["~/repo/note.txt"], expansions
+
+    # Every refusal is decided before the expansion, by the shared owner.
+    expansions.clear()
+    for raw, message_key in (
+        ("", "fs.error.pathRequired"),
+        (None, "fs.error.pathRequired"),
+        ("~alice/bad\nname", "fs.error.pathIllegal"),
+        ("~alice/bad\x00name", "fs.error.pathIllegal"),
+        ("relative/note.txt", "fs.error.pathAbsolute"),
+    ):
+        for entry_point in (filesystem_paths.validate_request_path_lexical, filesystem_paths.parsed_request_path):
+            with pytest.raises(FilesystemError) as refusal:
+                entry_point(raw)
+            assert refusal.value.message_key == message_key, (entry_point.__name__, raw)
+    assert expansions == [], "a refused request must never reach the name service"
+
+    # The rule has exactly one implementation: only the lexical owner raises these three.
+    source = Path(filesystem_paths.__file__).read_text(encoding="utf-8")
+    for message_key in ("fs.error.pathRequired", "fs.error.pathIllegal", "fs.error.pathAbsolute"):
+        assert source.count(message_key) == 1, f"{message_key} has a second implementation"
+    # Compiled names, not source text: the lexical owner cannot reach a name-service call at all,
+    # and the expansion exists in exactly one function.
+    assert "expanduser" not in filesystem_paths.validate_request_path_lexical.__code__.co_names
+    assert "expanduser" in filesystem_paths.parsed_request_path.__code__.co_names
+    assert "validate_request_path_lexical" in filesystem_paths.parsed_request_path.__code__.co_names

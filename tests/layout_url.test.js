@@ -25,12 +25,18 @@ const allSuiteFiles = [
   'tests/stats_current_panel.test.js',
   'tests/tabber.test.js',
   'tests/layout_async.test.js',
+  'tests/backend_health_indicator.test.js',
+  'tests/system_health_panel.test.js',
   'tests/gate_panels.test.js',
 ];
+// Keep this in step with NODE_LAYOUT_EXCLUDED_FILES in tools/test_catalog.py, which is what the gate
+// actually passes as argv; tests/test_check_runner.py pins the two sets equal. share_theme.test.js was
+// excluded here because the YO!share FEATURE is quarantined, but the shard is not a share shard: it
+// also owns quick-open, Finder, Differ, editor, terminal, and layout, so quarantining one feature
+// dropped ~2,700 assertions over five other subsystems out of the gate.
 const defaultGateExcludedSuiteFiles = new Set([
-  // YO!share is quarantined; retain its shard for an eventual revival, but do not run it in default lanes.
-  'tests/share_theme.test.js',
-  // Gate panels are not implemented yet; retain the placeholder outside default lanes until their browser harness exists.
+  // gate_panels pins the decorator prose of tests/test_gate_panels.py, whose own xfail(strict=True)
+  // markers already own that guarantee. It is written to go red when F9 SubsystemSpec lands.
   'tests/gate_panels.test.js',
 ]);
 const suiteFiles = process.argv.length > 2

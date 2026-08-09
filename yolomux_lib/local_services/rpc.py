@@ -14,7 +14,12 @@ import json
 import os
 import socket
 import sys
+import threading
 import uuid
+from collections.abc import Iterator
+from collections.abc import Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import monotonic as monotonic_clock
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +52,299 @@ LOCAL_RPC_DEADLINE_REASONS = frozenset({
     "unattributed_latency",
     "response exceeded deadline",
 })
+
+# The exact refusal strings the shared listener writes on the wire.  A caller classifies
+# against them, so one constant owns each spelling: a hand-copied literal on either side
+# silently reclassifies real overload as a generic service error, which is the collapse the
+# health contract forbids.
+LOCAL_SERVICE_ERROR_BUSY = "service busy"
+LOCAL_SERVICE_ERROR_INVALID_REQUEST = "invalid request"
+LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH = "peer uid mismatch"
+LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE = "response too large"
+
+
+# --- Retained per-service request/error/latency accounting -------------------------------
+#
+# One owner for all six services, chosen over normalizing statsd's and jobd's bespoke
+# in-service metrics.  See `LocalServiceTrafficLedger` for the recorded reason.
+LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION = 1
+LOCAL_SERVICE_TRAFFIC_WORK = "work"
+LOCAL_SERVICE_TRAFFIC_PROBE = "probe"
+LOCAL_SERVICE_TRAFFIC_CLASSES = (LOCAL_SERVICE_TRAFFIC_WORK, LOCAL_SERVICE_TRAFFIC_PROBE)
+LOCAL_SERVICE_TRAFFIC_LATENCIES = ("client_latency_ms", "service_latency_ms", "queue_wait_ms")
+LOCAL_SERVICE_TRAFFIC_MAX_SERVICES = 32
+LOCAL_SERVICE_TRAFFIC_MAX_REASONS = 16
+LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE = "other"
+# `ping` and `status` carry no product semantics: they are the liveness/diagnostic reads the
+# registry and the health observer issue.  Classifying them by method keeps demand-path health
+# checks out of the user-work aggregate without editing every lifecycle owner that sends them.
+LOCAL_SERVICE_PROBE_METHODS = frozenset({"ping", "status"})
+
+LOCAL_SERVICE_REASON_ABSENT = "absent"
+LOCAL_SERVICE_REASON_REFUSED = "refused"
+LOCAL_SERVICE_REASON_TIMEOUT = "timeout"
+LOCAL_SERVICE_REASON_DEADLINE_HANDLER = "deadline_peer_handler_slow"
+LOCAL_SERVICE_REASON_DEADLINE_UNATTRIBUTED = "deadline_unattributed"
+LOCAL_SERVICE_REASON_OVERLOAD = "overload"
+LOCAL_SERVICE_REASON_IDENTITY_MISMATCH = "identity_mismatch"
+LOCAL_SERVICE_REASON_REVISION_MISMATCH = "revision_mismatch"
+LOCAL_SERVICE_REASON_PROTOCOL = "protocol_error"
+LOCAL_SERVICE_REASON_TRANSPORT = "transport_error"
+LOCAL_SERVICE_REASON_SERVICE_ERROR = "service_error"
+LOCAL_SERVICE_REASON_OTHER = "other"
+
+_LISTENER_ERROR_REASONS = {
+    LOCAL_SERVICE_ERROR_BUSY: LOCAL_SERVICE_REASON_OVERLOAD,
+    LOCAL_SERVICE_ERROR_INVALID_REQUEST: "invalid_request",
+    LOCAL_SERVICE_ERROR_PEER_UID_MISMATCH: "peer_uid_mismatch",
+    LOCAL_SERVICE_ERROR_RESPONSE_TOO_LARGE: "response_too_large",
+}
+
+_PROBE_DEPTH: ContextVar[int] = ContextVar("yolomux_local_service_probe_depth", default=0)
+
+
+@contextmanager
+def local_service_probe_scope() -> Iterator[None]:
+    """Attribute every local RPC issued inside this scope to observer probe traffic.
+
+    The health observer probes all six services every two seconds and reaches them through
+    owners it does not control -- ``LocalServiceRegistry.healthy()`` sends its own RPCs.  A
+    per-call flag would have to be threaded through each of those owners and would be missed
+    by exactly one of them.  A context-scoped depth counter is read at the single place every
+    local RPC attempt already passes through, so nested probe traffic cannot leak into the
+    user-work aggregate.  Contexts are per-thread: probe work fanned out to a worker thread
+    must re-enter this scope there, or pass ``probe=True`` explicitly.
+    """
+
+    token = _PROBE_DEPTH.set(_PROBE_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        _PROBE_DEPTH.reset(token)
+
+
+def local_service_traffic_class(method: str = "", probe: bool = False) -> str:
+    """Return the aggregate a single RPC attempt belongs to."""
+
+    if probe or _PROBE_DEPTH.get() > 0 or str(method or "") in LOCAL_SERVICE_PROBE_METHODS:
+        return LOCAL_SERVICE_TRAFFIC_PROBE
+    return LOCAL_SERVICE_TRAFFIC_WORK
+
+
+def local_service_failure_reason(error: BaseException) -> str:
+    """Return one typed reason a local RPC attempt failed.
+
+    Absence, refusal, deadline expiry before the handler, deadline expiry attributed to the
+    handler, identity mismatch, and revision mismatch are separate outcomes with separate
+    recoveries; collapsing them into one unavailable string is the defect the health contract
+    names explicitly.
+    """
+
+    if isinstance(error, TimeoutError):
+        return LOCAL_SERVICE_REASON_TIMEOUT
+    if isinstance(error, LocalRpcError):
+        text = str(error)
+        if text == "peer_handler_slow":
+            return LOCAL_SERVICE_REASON_DEADLINE_HANDLER
+        if text in LOCAL_RPC_DEADLINE_REASONS:
+            return LOCAL_SERVICE_REASON_DEADLINE_UNATTRIBUTED
+        if text == "response request_id mismatch":
+            return LOCAL_SERVICE_REASON_IDENTITY_MISMATCH
+        if text == "unsupported RPC version":
+            return LOCAL_SERVICE_REASON_REVISION_MISMATCH
+        return LOCAL_SERVICE_REASON_PROTOCOL
+    if isinstance(error, OSError):
+        if error.errno == errno.ENOENT:
+            return LOCAL_SERVICE_REASON_ABSENT
+        if error.errno == errno.ECONNREFUSED:
+            return LOCAL_SERVICE_REASON_REFUSED
+    return LOCAL_SERVICE_REASON_TRANSPORT
+
+
+def _bounded_reason_slug(value: object) -> str:
+    text = "".join(character if character.isalnum() else "_" for character in str(value).strip().lower())
+    return text.strip("_")[:48] or LOCAL_SERVICE_REASON_SERVICE_ERROR
+
+
+def local_service_response_reason(payload: Mapping[str, Any]) -> str:
+    """Return the typed reason a delivered response is a failure, or ``""`` when it is not.
+
+    Only ``ok is False`` proves failure.  A payload without ``ok`` cannot be shown to have
+    failed, and inventing an error for it would make the completed count a guess.
+    """
+
+    if payload.get("ok") is not False:
+        return ""
+    if payload.get("capacity_rejected") is True:
+        return LOCAL_SERVICE_REASON_OVERLOAD
+    error_code = payload.get("error_code")
+    if error_code == "upgrade_required" or payload.get("status") == "upgrade_required":
+        return LOCAL_SERVICE_REASON_REVISION_MISMATCH
+    error_text = str(payload.get("error") or "")
+    if error_text in _LISTENER_ERROR_REASONS:
+        return _LISTENER_ERROR_REASONS[error_text]
+    if isinstance(error_code, str) and error_code:
+        # `error_code` is a service-owned vocabulary; the free-form `error` text is not
+        # retained because it can carry paths and other unbounded material.
+        return _bounded_reason_slug(error_code)
+    return LOCAL_SERVICE_REASON_SERVICE_ERROR
+
+
+def _new_latency() -> dict[str, float]:
+    return {"count": 0, "total_ms": 0.0, "max_ms": 0.0}
+
+
+def _new_class_counters() -> dict[str, Any]:
+    counters: dict[str, Any] = {"accepted": 0, "completed": 0, "errors": 0, "errors_by_reason": {}}
+    counters.update({name: _new_latency() for name in LOCAL_SERVICE_TRAFFIC_LATENCIES})
+    return counters
+
+
+def _publish_latency(values: Mapping[str, float]) -> dict[str, float]:
+    count = int(values["count"])
+    total_ms = round(float(values["total_ms"]), 3)
+    return {
+        "count": count,
+        "total_ms": total_ms,
+        "max_ms": round(float(values["max_ms"]), 3),
+        "avg_ms": round(total_ms / count, 3) if count else 0.0,
+    }
+
+
+class LocalServiceTrafficLedger:
+    """The one retained request/error/latency aggregate for one local service.
+
+    Decision (M6): one common aggregator for all six services, not a normalized projection
+    over the bespoke metrics statsd and jobd already keep.  Three reasons.  First, uniform
+    accepted/completed/error/latency exit criteria are required, and statusd, watchd, indexd
+    and approvald expose no RPC ledger at all -- a projection would have to invent four of the
+    six rows.  Second, an in-service counter is destroyed by the service restart the monitor
+    exists to report, so it can never answer "how many requests since this web process
+    started"; this ledger lives in the web process and is naturally cumulative across a peer
+    restart, which is also what the port-scoped retained store needs.  Third, only the client
+    side observes attempts that never reached the service at all -- absent socket, refused
+    connection, deadline expiry -- and those are precisely the failures the monitor reports.
+
+    Only completions contribute latency, because the published average is
+    ``total_ms / completed_count``; individual samples are never retained.
+    """
+
+    def __init__(self, service: str):
+        self.service = str(service)[:64]
+        self._lock = threading.Lock()
+        self._epoch = ""
+        self._epoch_changes = 0
+        self._classes = {name: _new_class_counters() for name in LOCAL_SERVICE_TRAFFIC_CLASSES}
+
+    def _counters(self, traffic_class: str) -> dict[str, Any]:
+        return self._classes.get(traffic_class) or self._classes[LOCAL_SERVICE_TRAFFIC_WORK]
+
+    @staticmethod
+    def _add_sample(values: dict[str, float], sample: float) -> None:
+        amount = float(sample)
+        if not amount > 0.0:
+            # Rejects negatives and NaN alike; a clock that went backwards is not a duration.
+            amount = 0.0
+        values["count"] += 1
+        values["total_ms"] += amount
+        values["max_ms"] = max(values["max_ms"], amount)
+
+    def note_epoch(self, epoch: str) -> None:
+        """Record the observed peer process identity, counting only proven changes.
+
+        A restart is only provable once a prior identity was observed, so the first identity
+        establishes the baseline and never increments the change count.
+        """
+
+        text = str(epoch or "")[:64]
+        if not text:
+            return
+        with self._lock:
+            if self._epoch and self._epoch != text:
+                self._epoch_changes += 1
+            self._epoch = text
+
+    def record_completion(
+        self,
+        traffic_class: str,
+        *,
+        client_elapsed_ms: float = 0.0,
+        service_duration_ms: float = 0.0,
+        queue_wait_ms: float = 0.0,
+    ) -> None:
+        counters = self._counters(traffic_class)
+        samples = (client_elapsed_ms, service_duration_ms, queue_wait_ms)
+        with self._lock:
+            counters["accepted"] += 1
+            counters["completed"] += 1
+            for name, sample in zip(LOCAL_SERVICE_TRAFFIC_LATENCIES, samples):
+                self._add_sample(counters[name], sample)
+
+    def record_failure(self, traffic_class: str, reason: str) -> None:
+        counters = self._counters(traffic_class)
+        key = str(reason or LOCAL_SERVICE_REASON_SERVICE_ERROR)[:48]
+        with self._lock:
+            counters["accepted"] += 1
+            counters["errors"] += 1
+            reasons = counters["errors_by_reason"]
+            if key not in reasons and len(reasons) >= LOCAL_SERVICE_TRAFFIC_MAX_REASONS:
+                # Fold into one named bucket rather than dropping the event: the reason
+                # vocabulary is bounded, the total is not allowed to lose a request.
+                key = LOCAL_SERVICE_REASON_OTHER
+            reasons[key] = reasons.get(key, 0) + 1
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            result: dict[str, Any] = {
+                "schema_version": LOCAL_SERVICE_TRAFFIC_SCHEMA_VERSION,
+                "service": self.service,
+                "epoch": self._epoch,
+                "epoch_changes": self._epoch_changes,
+            }
+            for name, counters in self._classes.items():
+                published = {
+                    "accepted": int(counters["accepted"]),
+                    "completed": int(counters["completed"]),
+                    "errors": int(counters["errors"]),
+                    "errors_by_reason": dict(sorted(counters["errors_by_reason"].items())),
+                }
+                published.update({latency: _publish_latency(counters[latency]) for latency in LOCAL_SERVICE_TRAFFIC_LATENCIES})
+                result[name] = published
+            return result
+
+
+_TRAFFIC_LOCK = threading.Lock()
+_TRAFFIC_LEDGERS: dict[str, LocalServiceTrafficLedger] = {}
+
+
+def local_service_traffic_ledger(service: str) -> LocalServiceTrafficLedger:
+    """Return the process-wide ledger for one service, bounded by service count."""
+
+    name = str(service or "")[:64] or LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE
+    with _TRAFFIC_LOCK:
+        ledger = _TRAFFIC_LEDGERS.get(name)
+        if ledger is None and len(_TRAFFIC_LEDGERS) >= LOCAL_SERVICE_TRAFFIC_MAX_SERVICES:
+            name = LOCAL_SERVICE_TRAFFIC_OTHER_SERVICE
+            ledger = _TRAFFIC_LEDGERS.get(name)
+        if ledger is None:
+            ledger = LocalServiceTrafficLedger(name)
+            _TRAFFIC_LEDGERS[name] = ledger
+        return ledger
+
+
+def local_service_traffic_snapshot() -> dict[str, dict[str, Any]]:
+    """Return every retained per-service aggregate for the status projection."""
+
+    with _TRAFFIC_LOCK:
+        ledgers = sorted(_TRAFFIC_LEDGERS.items())
+    return {name: ledger.snapshot() for name, ledger in ledgers}
+
+
+def reset_local_service_traffic() -> None:
+    """Drop every retained aggregate. Test and process-teardown seam only."""
+
+    with _TRAFFIC_LOCK:
+        _TRAFFIC_LEDGERS.clear()
 
 
 @dataclass(frozen=True)
@@ -317,6 +615,72 @@ def encode_metadata(
     ).encode("utf-8")
 
 
+def _record_delivered_response(
+    ledger: LocalServiceTrafficLedger,
+    traffic_class: str,
+    envelope: LocalRpcEnvelope,
+    response_envelope: LocalRpcEnvelope | None,
+    payload: Mapping[str, Any],
+    elapsed_ms: float,
+) -> None:
+    """Account one delivered response, typed by its own outcome."""
+
+    reason = local_service_response_reason(payload)
+    if reason:
+        ledger.record_failure(traffic_class, reason)
+        return
+    if envelope.method in LOCAL_SERVICE_PROBE_METHODS:
+        pid = payload.get("pid")
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 1:
+            ledger.note_epoch(f"pid:{pid}")
+    ledger.record_completion(
+        traffic_class,
+        client_elapsed_ms=elapsed_ms,
+        service_duration_ms=response_envelope.service_duration_ms if response_envelope is not None else 0.0,
+        queue_wait_ms=response_envelope.queue_wait_ms if response_envelope is not None else 0.0,
+    )
+
+
+def _legacy_fallback(
+    ledger: LocalServiceTrafficLedger,
+    traffic_class: str,
+    socket_path: str | Path,
+    envelope: LocalRpcEnvelope,
+    timeout_seconds: float,
+    started: float,
+) -> tuple[None, dict[str, Any], bytes]:
+    """Renegotiate one attempt over the former protocol, still accounted exactly once."""
+
+    try:
+        payload = legacy_request(socket_path, envelope.payload, timeout_seconds=timeout_seconds)
+    except (OSError, LocalRpcError) as exc:
+        ledger.record_failure(traffic_class, local_service_failure_reason(exc))
+        raise
+    _record_delivered_response(ledger, traffic_class, envelope, None, payload, (monotonic_clock() - started) * 1000)
+    return None, payload, b""
+
+
+def _response_written_before_close(
+    client: socket.socket,
+    write_error: OSError,
+) -> tuple[LocalRpcEnvelope | None, dict[str, Any], bytes, bool]:
+    """Return the response a peer delivered before closing, or re-raise *write_error*.
+
+    A peer at its handler limit refuses on accept: it writes the typed refusal and closes
+    without ever reading the request.  Our send then fails with EPIPE while a complete
+    refusal already sits in this socket's receive queue.  The refusal is the authoritative
+    outcome of the attempt, so discarding it would both lose the response the caller is
+    entitled to and reclassify proven overload as a transport error -- the exact collapse
+    the health contract forbids.  A peer that wrote nothing leaves the write failure as the
+    only outcome, and it is re-raised unchanged with the read failure kept as its context.
+    """
+
+    try:
+        return read_message(client)
+    except (OSError, LocalRpcError):
+        raise write_error
+
+
 def request_with_envelope(
     socket_path: str | Path,
     envelope: LocalRpcEnvelope,
@@ -324,41 +688,71 @@ def request_with_envelope(
     binary: bytes = b"",
     timeout_seconds: float = 2.0,
     fallback_legacy: bool = False,
+    probe: bool = False,
 ) -> tuple[LocalRpcEnvelope | None, dict[str, Any], bytes]:
-    """Send one request and retain the peer phase envelope with its payload and bytes."""
+    """Send one request and retain the peer phase envelope with its payload and bytes.
+
+    This is the one place every local RPC attempt issued by this process passes through --
+    ``request``, ``LocalServiceClient``, statsd's own ``_wire_rpc``, and the registry's
+    ``ping``/``status`` -- so it also owns the retained traffic aggregate.  Recording one
+    level higher would miss a caller and produce a second, divergent count of the same
+    requests.  Every exit records exactly once.
+    """
+    ledger = local_service_traffic_ledger(envelope.service)
+    traffic_class = local_service_traffic_class(envelope.method, probe)
     started = monotonic_clock()
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout_seconds)
             client.connect(str(socket_path))
-            write_message(client, envelope, envelope.payload, binary)
-            response_envelope, payload, response_binary, legacy = read_message(client)
-    except TimeoutError:
+            try:
+                write_message(client, envelope, envelope.payload, binary)
+            except ConnectionError as write_error:
+                # The peer closed mid-send.  It may still have written a complete typed
+                # response first -- the capacity refusal is written and closed on accept,
+                # before the request is ever read -- so read it rather than lose it.
+                response_envelope, payload, response_binary, legacy = _response_written_before_close(client, write_error)
+            else:
+                response_envelope, payload, response_binary, legacy = read_message(client)
+    except TimeoutError as exc:
         # A current peer that accepted but missed its deadline is busy.  A
         # second legacy request would duplicate the queued work and amplify
         # overload; legacy fallback is only for an immediate protocol/connect
         # incompatibility during a rolling restart.
+        ledger.record_failure(traffic_class, local_service_failure_reason(exc))
         raise
     except OSError as exc:
         # A missing or refused socket proves there is no peer to negotiate with.
         # Let the lifecycle-owning client start or replace it; replaying via the
         # legacy protocol only creates a second identical connection failure.
         if exc.errno in {errno.ENOENT, errno.ECONNREFUSED} or not fallback_legacy or binary:
+            ledger.record_failure(traffic_class, local_service_failure_reason(exc))
             raise
-        return None, legacy_request(socket_path, envelope.payload, timeout_seconds=timeout_seconds), b""
-    except LocalRpcError:
+        return _legacy_fallback(ledger, traffic_class, socket_path, envelope, timeout_seconds, started)
+    except LocalRpcError as exc:
         if not fallback_legacy or binary:
+            ledger.record_failure(traffic_class, local_service_failure_reason(exc))
             raise
-        return None, legacy_request(socket_path, envelope.payload, timeout_seconds=timeout_seconds), b""
+        return _legacy_fallback(ledger, traffic_class, socket_path, envelope, timeout_seconds, started)
     if legacy or response_envelope is None:
+        _record_delivered_response(ledger, traffic_class, envelope, None, payload, (monotonic_clock() - started) * 1000)
         return None, payload, response_binary
     if response_envelope.request_id != envelope.request_id:
-        raise LocalRpcError("response request_id mismatch")
+        mismatch = LocalRpcError("response request_id mismatch")
+        ledger.record_failure(traffic_class, local_service_failure_reason(mismatch))
+        raise mismatch
     elapsed_ms = (monotonic_clock() - started) * 1000
     if elapsed_ms > envelope.deadline_ms:
+        # Reuse the measured elapsed time rather than reading the clock again: this branch
+        # is the only place that can separate expiry attributed to the handler from expiry
+        # that happened before it ever ran.
         if response_envelope.service_duration_ms > envelope.deadline_ms:
-            raise LocalRpcError("peer_handler_slow")
-        raise LocalRpcError("unattributed_latency")
+            expired = LocalRpcError("peer_handler_slow")
+        else:
+            expired = LocalRpcError("unattributed_latency")
+        ledger.record_failure(traffic_class, local_service_failure_reason(expired))
+        raise expired
+    _record_delivered_response(ledger, traffic_class, envelope, response_envelope, payload, elapsed_ms)
     return response_envelope, payload, response_binary
 
 
@@ -369,6 +763,7 @@ def request(
     binary: bytes = b"",
     timeout_seconds: float = 2.0,
     fallback_legacy: bool = False,
+    probe: bool = False,
 ) -> tuple[dict[str, Any], bytes]:
     """Send one request while preserving the established payload/binary API."""
     _response_envelope, payload, response_binary = request_with_envelope(
@@ -377,6 +772,7 @@ def request(
         binary=binary,
         timeout_seconds=timeout_seconds,
         fallback_legacy=fallback_legacy,
+        probe=probe,
     )
     return payload, response_binary
 

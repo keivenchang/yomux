@@ -44,6 +44,10 @@ class RepoPayload(TypedDict, total=False):
     error_message: dict[str, Any]
     ahead: int
     behind: int
+    # A session root that no longer exists. It has no working tree to compare, so it carries no
+    # refs and no error -- `touched_count` is how many remembered paths it held, which is what
+    # keeps one gone row from silently standing in for hundreds of files.
+    missing: bool
 
 
 class SessionFilesPayload(TypedDict, total=False):

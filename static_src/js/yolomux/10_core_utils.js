@@ -1,23 +1,179 @@
-const backendHealthState = {consecutiveFailures: 0};
+// The ONE topbar health indicator: one state object, one DOM node, one insertion point
+// (.topbar-right-tools). Two independent signals feed it:
+//   * this browser cannot reach the server at all (consecutive apiFetch transport failures), and
+//   * the server told us, over the pushed `backend_health_changed` event on the existing `core`
+//     client-event channel, that one of its own services is down or degraded.
+// It is push-fed on purpose. Nothing here polls /api/system-status: the whole point is that a dead
+// service becomes visible without the System panel being open.
 const backendHealthFailureThreshold = 3;
+// The observer already debounces its own transitions; this debounces the CLEAR in the browser. One
+// healthy revision after an outage is a sample, not a recovery, so the warning survives it.
+const backendHealthRecoveryRevisions = 2;
+// Bounded twice: we retain at most this many degraded resources, and we NAME at most one of them.
+// Six service names in a topbar chip is a wall nobody reads; "and 2 more" is the readable form.
+const backendHealthResourceLimit = 8;
+const backendHealthNamedResourceLimit = 1;
+// The states the observer publishes (yolomux_lib/backend_health/store.py BACKEND_HEALTH_STATES).
+// `starting` and `ready` are not failures and must never raise the indicator, or every page load
+// during startup shows a warning. Everything else is a failure at one of two severities.
+const backendHealthDownStates = Object.freeze(['down', 'upgrade_required']);
+const backendHealthDegradedStates = Object.freeze(['degraded', 'backoff', 'unknown']);
+// Precedence, highest first. A browser talking to nothing must not be described as "one service is
+// slow", and a service outage must not be hidden because the last request happened to succeed.
+const backendHealthSeverityRank = Object.freeze({'': 0, degraded: 1, down: 2, unresponsive: 3});
 
-function syncBackendHealthIndicator() {
-  if (!topbar) return;
-  let indicator = topbar.querySelector('[data-backend-health]');
-  const host = topbar.querySelector('.topbar-right-tools') || topbar;
-  const degraded = backendHealthState.consecutiveFailures >= backendHealthFailureThreshold;
-  if (!degraded) {
+const backendHealthState = {
+  consecutiveFailures: 0,
+  epoch: '',
+  revision: -1,
+  serviceSeverity: '',
+  resources: [],
+  resourceCount: 0,
+  healthyRevisions: 0,
+};
+
+function backendHealthStateSeverity(state) {
+  const value = String(state ?? '');
+  if (backendHealthDownStates.includes(value)) return 'down';
+  if (backendHealthDegradedStates.includes(value)) return 'degraded';
+  return '';
+}
+
+function backendHealthResourcesFromPayload(resources) {
+  if (!Array.isArray(resources)) return [];
+  const failing = [];
+  for (const entry of resources) {
+    if (!entry || typeof entry !== 'object') continue;
+    const severity = backendHealthStateSeverity(entry.state);
+    if (!severity) continue;
+    failing.push({
+      id: String(entry.id ?? ''),
+      // The server owns the human name. `id` is a process name (watchd, indexd) and is kept only for
+      // diagnostics — it must never reach the rendered text, which is why the renderer reads `label`
+      // and falls back to a generic translated noun rather than to `id`.
+      label: String(entry.label ?? '').trim(),
+      severity,
+      reasonCode: String(entry.reason_code ?? ''),
+    });
+  }
+  // Worst first, so the one resource we name is the one that matters most.
+  failing.sort((left, right) => backendHealthSeverityRank[right.severity] - backendHealthSeverityRank[left.severity]);
+  return failing;
+}
+
+function backendHealthPayloadSeverity(overallState, resources) {
+  let severity = backendHealthStateSeverity(overallState);
+  for (const resource of resources) {
+    if (backendHealthSeverityRank[resource.severity] > backendHealthSeverityRank[severity]) severity = resource.severity;
+  }
+  return severity;
+}
+
+// Apply one `backend_health_changed` payload: {epoch, revision, overall_state, degraded_resources}.
+// Returns false for a stale or replayed revision so a reconnect replay cannot walk the state backwards.
+function applyBackendHealthPayload(payload = {}) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const revision = Number(source.revision);
+  if (!Number.isFinite(revision)) return false;
+  const epoch = String(source.epoch ?? '');
+  if (epoch === backendHealthState.epoch && revision <= backendHealthState.revision) return false;
+  if (epoch !== backendHealthState.epoch) {
+    // A new observer epoch restarts the revision counter, so a partial recovery count from the
+    // previous epoch means nothing here: start counting healthy revisions again.
+    backendHealthState.epoch = epoch;
+    backendHealthState.healthyRevisions = 0;
+  }
+  backendHealthState.revision = revision;
+  const resources = backendHealthResourcesFromPayload(source.degraded_resources);
+  const severity = backendHealthPayloadSeverity(source.overall_state, resources);
+  if (severity) {
+    backendHealthState.serviceSeverity = severity;
+    backendHealthState.resources = resources.slice(0, backendHealthResourceLimit);
+    backendHealthState.resourceCount = resources.length;
+    backendHealthState.healthyRevisions = 0;
+  } else {
+    backendHealthState.healthyRevisions += 1;
+    if (backendHealthState.healthyRevisions >= backendHealthRecoveryRevisions) {
+      backendHealthState.serviceSeverity = '';
+      backendHealthState.resources = [];
+      backendHealthState.resourceCount = 0;
+    }
+  }
+  syncBackendHealthIndicator();
+  return true;
+}
+
+// The rendered model, or null when there is nothing to show. This is where precedence lives:
+// `unresponsive` outranks `down` outranks `degraded`, and it is decided in exactly one place.
+function backendHealthIndicatorModel() {
+  if (backendHealthState.consecutiveFailures >= backendHealthFailureThreshold) {
+    return {
+      severity: 'unresponsive',
+      text: `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`,
+      reasonCode: '',
+    };
+  }
+  const severity = backendHealthState.serviceSeverity;
+  if (severity !== 'down' && severity !== 'degraded') return null;
+  const named = backendHealthState.resources.find(resource => resource.label) || null;
+  const label = named ? named.label : t('backendHealth.service');
+  const count = Math.max(0, backendHealthState.resourceCount - backendHealthNamedResourceLimit);
+  let text;
+  if (severity === 'down') {
+    text = count > 0 ? t('backendHealth.down.multiple', {label, count}) : t('backendHealth.down.single', {label});
+  } else {
+    text = count > 0 ? t('backendHealth.degraded.multiple', {label, count}) : t('backendHealth.degraded.single', {label});
+  }
+  return {severity, text, reasonCode: named ? named.reasonCode : ''};
+}
+
+// The System view is the YO!stats/Debug pane's `system` sub-tab. This is the same pair of calls its
+// own tab button makes (85_debug_panel.js bindDebugPanel -> setDebugSubTab), not a second route in.
+async function openBackendHealthDetails() {
+  await selectSession(debugPaneItemId, {userInitiated: true});
+  setDebugSubTab('system');
+  return true;
+}
+
+function backendHealthIndicatorHost() {
+  if (!topbar) return null;
+  return topbar.querySelector('.topbar-right-tools') || topbar;
+}
+
+function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
+  if (!host) return null;
+  // Look the existing node up across the whole topbar, not just the host: if .topbar-right-tools
+  // appears after the first render, a host-scoped lookup would build a second indicator.
+  const scope = topbar || host;
+  let indicator = scope.querySelector('[data-backend-health]');
+  const model = backendHealthIndicatorModel();
+  if (!model) {
     indicator?.remove();
-    return;
+    return null;
   }
   if (!indicator) {
     indicator = document.createElement('span');
     indicator.className = 'backend-health-indicator';
-    indicator.dataset.backendHealth = 'unresponsive';
     indicator.setAttribute('role', 'status');
+    const message = document.createElement('span');
+    message.className = 'backend-health-indicator-text';
+    indicator.append(message, makeButton({
+      className: 'backend-health-indicator-details',
+      label: t('common.details'),
+      ariaLabel: t('backendHealth.detailsAria'),
+      onClick: () => {
+        openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
+      },
+    }));
     host.prepend(indicator);
   }
-  indicator.textContent = `${t('common.requestFailed')} · ${t('tmuxWall.status.disconnectedRetrying')}`;
+  indicator.dataset.backendHealth = model.severity;
+  if (model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
+  else delete indicator.dataset.backendHealthReason;
+  // The severity is carried by the WORDS ("is not running" vs "is degraded"), not by the colour the
+  // data-backend-health token selects, so the warning survives a monochrome or high-contrast theme.
+  indicator.querySelector('.backend-health-indicator-text').textContent = model.text;
+  return indicator;
 }
 
 function noteBackendHealthFailure() {

@@ -320,6 +320,27 @@ class LocalProcessDiagnostic:
             LocalProcessReason.PROCESS_IDENTITY_REUSED,
         }
 
+    @property
+    def may_remove_unidentifiable_record(self) -> bool:
+        """Whether the record file alone may be discarded, with no process action.
+
+        `INVALID_PID` means the record's own PID is 0 or 1.  Zero is not a
+        process ID at all and 1 is init/launchd, which this code never spawns,
+        so such a record cannot name any service process: it cannot be
+        signalled, adopted, matched against a process group, or used to decide
+        that a socket is inert.  Deleting the file therefore cannot orphan or
+        kill anything -- it only stops the unusable identity from blocking
+        every future start on this host and boot, which is how a single lost
+        status RPC used to brick a service permanently.
+
+        This is deliberately NOT folded into `may_remove_stale_record`.  That
+        property authorizes callers (preflight, background owner, server lease)
+        that go on to act on the record's other process fields -- a poisoned
+        record still carries a real `pgid` -- so its authority must stay
+        limited to records whose PID was proven dead or reused.
+        """
+        return self.same_host_and_boot and self.reason is LocalProcessReason.INVALID_PID
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "current": self.current,
@@ -334,7 +355,9 @@ class LocalProcessDiagnostic:
         }
 
 
-def _recorded_start_identity(record: Mapping[str, Any]) -> str:
+def recorded_start_identity(record: Mapping[str, Any]) -> str:
+    """Return the process-birth identity a persisted record carries, if any."""
+
     value = str(record.get("process_start_identity") or "").strip()
     if value:
         return value
@@ -385,7 +408,7 @@ def is_current_local_process(
         return result(LocalProcessReason.PREVIOUS_BOOT)
     if pid <= 1:
         return result(LocalProcessReason.INVALID_PID)
-    recorded_start = _recorded_start_identity(record)
+    recorded_start = recorded_start_identity(record)
     if not recorded_start:
         return result(LocalProcessReason.MISSING_PROCESS_START_IDENTITY)
     read_start_identity = start_identity_reader or process_start_identity

@@ -48,6 +48,15 @@ function sourceFunction(name, nextName) {
   return source.slice(start, end);
 }
 
+// A bounded region between two literal needles, for the constants a sliced function depends on.
+function slice(text, startNeedle, endNeedle) {
+  const start = text.indexOf(startNeedle);
+  assert.notEqual(start, -1, `${startNeedle} exists`);
+  const end = text.indexOf(endNeedle, start);
+  assert.notEqual(end, -1, `${endNeedle} follows ${startNeedle}`);
+  return text.slice(start, end);
+}
+
 const clientCapabilityGuardSource = bootstrapSource.slice(
   bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()'),
   bootstrapSource.indexOf('\nconst shareToken =', bootstrapSource.indexOf('function clientCanUseUnscopedHostRequests()')),
@@ -444,22 +453,27 @@ test('one shared spike-compression descriptor preserves token behavior and makes
   assert.match(source, /data-js-debug-chart-axis-break/);
 });
 
-test('a live service transport failure keeps its typed reason and operator-specific label', () => {
-  const start = source.indexOf('function debugSystemServiceState(');
-  const end = source.indexOf('\nconst DEBUG_SYSTEM_SERVICE_FRESH_MS', start);
-  assert.notEqual(start, -1, 'service-state owner exists');
-  assert.notEqual(end, -1, 'service-state owner has a bounded source region');
-  const functionText = source.slice(start, end);
-  const context = {Number, String, result: null, t: key => key};
-  vm.runInNewContext(`${functionText}\nresult = debugSystemServiceState({pid: 42, healthy: false, transport_reason: 'rpc_refused', last_failure: 'status transport refused'});`, context);
-  assert.equal(context.result.reason, 'rpc_refused');
-  assert.match(context.result.label, /transport/i);
-  assert.doesNotMatch(context.result.label, /not running/i);
-  assert.equal(context.result.tone, 'bad');
-});
+// The transport-failure classification used to be re-derived here, in JavaScript, from
+// `pid`/`healthy`/`transport_reason` -- a second copy of the rule
+// `yolomux_lib/app.py:system_status_service` owns. That classifier is retired. The behaviour it
+// pinned now has two owners' worth of coverage on the surviving path:
+//   * the backend rule and its published row -- tests/test_gate_contract.py
+//     `test_m3_live_daemon_transport_failure_is_not_reported_as_process_down`;
+//   * the rendered roster row -- tests/system_health_panel.test.js
+//     `a running daemon whose transport failed is an issue with its typed reason, not "down"`.
+
+// The sampler block renders an unpublished field as the panel's ONE unmeasured spelling -- an em
+// dash carrying its reason. That spelling has a single owner, so these tests run the REAL
+// `debugSystemScalar` and the REAL reason table rather than stubbing them: a stub here would let
+// the sampler drift back to "not available" or to a `|| 0` zero while the test stayed green.
+const SAMPLER_ABSENCE_SOURCE = [
+  slice(source, 'const DEBUG_SYSTEM_HEALTH_REASON_TEXT', '\nconst DEBUG_SYSTEM_STATE_TONES'),
+  sourceFunction('debugSystemHealthReasonText', 'debugSystemScalar'),
+  sourceFunction('debugSystemScalar', 'debugSystemHealthReasonListText'),
+].join('\n');
 
 test('the System sampler renders stalled usage as an explicit bounded warning', () => {
-  const functionText = sourceFunction('debugSystemStatsSamplerCardHtml', 'debugSystemCpuBudgetCardHtml');
+  const functionText = sourceFunction('debugSystemStatsSamplerBodyHtml', 'debugSystemWebProcessDetailHtml');
   const context = {result: null};
   vm.runInNewContext(`
     function esc(value) { return String(value); }
@@ -467,9 +481,10 @@ test('the System sampler renders stalled usage as an explicit bounded warning', 
     function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
     function debugSystemRowsHtml() { return '<dl></dl>'; }
     function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
-    function debugSystemCardHtml(_title, body) { return body; }
+    function t(key) { return key; }
+    ${SAMPLER_ABSENCE_SOURCE}
     ${functionText}
-    result = debugSystemStatsSamplerCardHtml([{service: 'statsd', usage: {
+    result = debugSystemStatsSamplerBodyHtml([{service: 'statsd', usage: {
       quarantined_conflict_count: 2,
       health: {state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 125},
     }}], 1000);
@@ -477,12 +492,15 @@ test('the System sampler renders stalled usage as an explicit bounded warning', 
   assert.match(context.result, /data-js-debug-usage-health="warning"/);
   assert.match(context.result, /role="alert"/);
   assert.match(context.result, /transcripts are advancing but usage atoms are stale/);
-  assert.match(context.result, /Quarantined conflicts 2/);
+  assert.match(context.result, /Quarantined conflicts <span>2<\/span>/);
+  assert.match(context.result, /Last accepted <span>125000ms<\/span>/);
   assert.doesNotMatch(context.result, /payload|quantity|token values/);
+  // A published count carries no reason, because there is nothing to explain.
+  assert.doesNotMatch(context.result, /data-value-reason/);
 });
 
-test('the System sampler reuses the same warning block for sustained collector failure loops', () => {
-  const functionText = sourceFunction('debugSystemStatsSamplerCardHtml', 'debugSystemCpuBudgetCardHtml');
+test('an unpublished usage figure is an em dash with its reason, never "not available"', () => {
+  const functionText = sourceFunction('debugSystemStatsSamplerBodyHtml', 'debugSystemWebProcessDetailHtml');
   const context = {result: null};
   vm.runInNewContext(`
     function esc(value) { return String(value); }
@@ -490,9 +508,35 @@ test('the System sampler reuses the same warning block for sustained collector f
     function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
     function debugSystemRowsHtml() { return '<dl></dl>'; }
     function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
-    function debugSystemCardHtml(_title, body) { return body; }
+    function t(key) { return key; }
+    ${SAMPLER_ABSENCE_SOURCE}
     ${functionText}
-    result = debugSystemStatsSamplerCardHtml([{service: 'statsd', usage: {
+    result = debugSystemStatsSamplerBodyHtml([{service: 'statsd', usage: {
+      health: {state: 'idle', reason: 'no usage health evidence'},
+    }}], 1000);
+  `, context);
+  // NEGATIVE CONTROL: the stubbed `debugSystemNumber` returns 'N/A' for an absent value -- exactly
+  // the shape of the old defect, where an unpublished count printed a word instead of the panel's
+  // em dash. The absence must never reach that formatter.
+  assert.doesNotMatch(context.result, /N\/A/, 'an absent count must not reach the number formatter');
+  assert.doesNotMatch(context.result, /not available/);
+  assert.match(context.result, /Quarantined conflicts <span title="the usage store has not published a quarantined-conflict count" data-value-reason="[^"]+">—<\/span>/);
+  assert.match(context.result, /Last accepted <span title="no usage atom has been accepted since this process started" data-value-reason="[^"]+">—<\/span>/);
+});
+
+test('the System sampler reuses the same warning block for sustained collector failure loops', () => {
+  const functionText = sourceFunction('debugSystemStatsSamplerBodyHtml', 'debugSystemWebProcessDetailHtml');
+  const context = {result: null};
+  vm.runInNewContext(`
+    function esc(value) { return String(value); }
+    function debugSystemNumber(value) { return Number.isFinite(Number(value)) ? String(value) : 'N/A'; }
+    function debugGraphTerseTimeText(value) { return String(value) + 'ms'; }
+    function debugSystemRowsHtml() { return '<dl></dl>'; }
+    function debugSystemSamplerFamiliesHtml() { return '<table></table>'; }
+    function t(key) { return key; }
+    ${SAMPLER_ABSENCE_SOURCE}
+    ${functionText}
+    result = debugSystemStatsSamplerBodyHtml([{service: 'statsd', usage: {
       quarantined_conflict_count: 0,
       health: {
         state: 'warning',
@@ -524,7 +568,11 @@ test('System renders bounded recurring-work diagnostics without client identity 
   assert.match(context.result, /4 \/ 4 \/ 0 \/ 0/);
   assert.match(context.result, /10 ago/);
   assert.doesNotMatch(context.result, /client_id|payload|request/);
-  assert.match(source, /debugSystemCardHtml\('Recurring work', debugSystemRecurringWorkHtml\(recurringWork\), \{wide: true\}\)/);
+  // Recurring work is a logical diagnostic, not a daemon: it lives in the collapsed Advanced
+  // diagnostics section and never above the service roster.
+  assert.match(source, /debugSystemCardHtml\('Recurring work', debugSystemRecurringWorkHtml\(Array\.isArray\(refresh\.recurring_work\) \? refresh\.recurring_work : \[\]\), \{wide: true\}\)/);
+  const advanced = sourceFunction('debugSystemAdvancedHtml', 'debugSystemRegionHtml');
+  assert.match(advanced, /Recurring work/, 'recurring work belongs to Advanced diagnostics');
 });
 
 test('the exact current snapshot feeds the established renderer without legacy APIs', () => {

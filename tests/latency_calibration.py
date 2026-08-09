@@ -761,6 +761,58 @@ def fixed_ceiling_verdict(*, label: str, raw_measured_ms: float, ceiling_ms: flo
     }
 
 
+# ---------------------------------------------------------------------------
+# Probe sensitivity
+# ---------------------------------------------------------------------------
+
+# The probe must read higher with independent renderer pressure applied than without it. The margin
+# is unchanged from the unit that used to compute this inline; only the two statistics it compares.
+CALIBRATION_PRESSURE_MOVE_RATIO = 1.15
+
+
+def calibration_pressure_verdict(
+    *,
+    quiet_samples_ms: list[float],
+    busy_samples_ms: list[float],
+    move_ratio: float = CALIBRATION_PRESSURE_MOVE_RATIO,
+) -> dict[str, Any]:
+    """Judge whether the probe moved when the renderer was put under independent pressure.
+
+    ONE statistic, the median, on BOTH sides. This unit asks only whether the central reading moves;
+    it is not a ceiling and it never decides how slow the product may be, so an extreme order
+    statistic is the wrong instrument for it. Comparing a maximum-over-rounds on the quiet side with
+    a single round's p75 on the busy side, as this comparison used to, is not a comparison at all:
+    on a contended host the quiet side then reports the machine's worst preemption while the busy
+    side reports its own middle, and the ratio inverts with the product unchanged.
+
+    Measured 2026-08-09 on keivenc-linux1, headless Chromium at 1200x700, 42 samples per side. Idle
+    host: quiet median 16.6 ms, quiet maximum 20.0 ms, busy median 28.6 ms. Same box under 32
+    concurrent CPU burners: quiet median 16.6 ms -- unchanged -- quiet maximum 41.9 ms, busy median
+    34.2 ms, busy minimum 28.0 ms. The signal survives a saturated host at every matched statistic,
+    and only the quiet tail moves, which is why the tail may not be the statistic.
+    """
+
+    if not quiet_samples_ms or not busy_samples_ms:
+        raise ValueError("the pressure verdict needs samples on both sides")
+    quiet_median_ms = float(median(quiet_samples_ms))
+    busy_median_ms = float(median(busy_samples_ms))
+    if not all(math.isfinite(value) and value > 0 for value in (quiet_median_ms, busy_median_ms)):
+        raise ValueError(f"pressure verdict medians must be finite and positive: {(quiet_median_ms, busy_median_ms)!r}")
+    ratio = busy_median_ms / quiet_median_ms
+    return {
+        "statistic": "median",
+        "quiet_median_ms": round(quiet_median_ms, 6),
+        "busy_median_ms": round(busy_median_ms, 6),
+        "ratio": ratio,
+        "move_ratio": float(move_ratio),
+        "quiet_sample_count": len(quiet_samples_ms),
+        "busy_sample_count": len(busy_samples_ms),
+        "quiet_samples_ms": list(quiet_samples_ms),
+        "busy_samples_ms": list(busy_samples_ms),
+        "passed": ratio >= float(move_ratio),
+    }
+
+
 def _latency_evidence_root(explicit_root: Path | None = None) -> Path:
     root = explicit_root or Path(os.environ.get("YOLOMUX_E2E_EVIDENCE_DIR", "/tmp/yolomux-latency-evidence"))
     resolved = root.resolve()

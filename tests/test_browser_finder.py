@@ -1,7 +1,15 @@
+import json
+import re
+
 from selenium.webdriver.common.by import By
+
+from yolomux_lib import filesystem
+from yolomux_lib import web
 
 from tests.browser_helpers.browser_layout import *  # noqa: F401,F403
 from tests.browser_helpers.browser_layout import _reset_browser_state  # noqa: F401
+
+_BOOTSTRAP_SCRIPT_RE = re.compile(r'<script id="yolomux-bootstrap"[^>]*>(.*?)</script>', re.DOTALL)
 
 
 def test_finder_parent_collapse_converges_all_surfaces_before_reexpand(browser, tmp_path):
@@ -172,6 +180,44 @@ def test_finder_64_item_batch_settles_from_operation_terminal_event(browser, tmp
     assert len(metrics["resultPaths"]) == 64
     assert metrics["errors"] == []
     assert metrics["rejections"] == []
+
+
+def test_live_bundle_batches_at_the_bound_a_real_boot_page_states(browser, tmp_path):
+    """The size the flush splits at must be the bound a REAL rendered page states.
+
+    `fileExplorerFsBatchRequestLimit` is what /api/fs/batch posts are chunked at, and it fails
+    closed to one item when the boot payload states no bound — so a page that does not deliver
+    `filesystemBatchLimits`, or a bundle that reads it before `bootstrap` exists, turns every
+    Finder listing into one HTTP request per entry while every payload-level assertion stays
+    green. Take the bound from the production `html_page` render (parsed, not grepped) and
+    require the const a live bundle actually batches with to equal it.
+    """
+    rendered = web.html_page(["1"], "admin")
+    stated = json.loads(_BOOTSTRAP_SCRIPT_RE.search(rendered).group(1)).get("filesystemBatchLimits")
+    assert stated == {
+        "maxRequests": filesystem.MAX_BATCH_REQUESTS,
+        "triggerCountLimit": filesystem.BATCH_TRIGGER_COUNT_LIMIT,
+    }, stated
+
+    load_live_runtime_boot_fixture(
+        browser,
+        tmp_path,
+        "?sessions=files,1&layout=left&tabs=left:files",
+        fs_entries={"/home/test": []},
+    )
+    live = browser.execute_script(
+        """
+        return {
+          maxRequests: fileExplorerFsBatchRequestLimit,
+          triggerCountLimit: fileExplorerFsBatchTriggerCountLimit,
+          bootstrapType: typeof bootstrap,
+          payload: (typeof bootstrap === 'object' && bootstrap && bootstrap.filesystemBatchLimits) || null,
+        };
+        """
+    )
+    assert live["bootstrapType"] == "object", live
+    assert live["payload"] == stated, live
+    assert {"maxRequests": live["maxRequests"], "triggerCountLimit": live["triggerCountLimit"]} == stated, live
 
 
 def test_file_tree_disclosure_chevron_scales_and_rotates_from_row_font(browser, tmp_path):

@@ -591,23 +591,66 @@ def test_m2_api_fetch_applies_timeout_and_abort_signal(browser, gate_live_server
 @pytest.mark.browser
 @pytest.mark.socket
 def test_m3_live_daemon_transport_failure_is_not_reported_as_process_down(browser, gate_live_server):
+    """A running daemon whose transport failed is `issue` + `transport_failed`, never down.
+
+    This used to call `debugSystemServiceState` in the browser -- a JavaScript re-derivation of a
+    rule `yolomux_lib/app.py:system_status_service` already owned, from `pid`/`healthy`/
+    `transport_reason`. Two classifiers for one rule, and the panel-side copy was the one the
+    contract watched. The classifier is retired, so the contract now runs the WHOLE path it cares
+    about: the live server classifies a transport-failed row, and the live browser renders that
+    exact published row through the roster.
+
+    The distinction being protected is a real operator decision. A process that is not running is
+    something to start; a process that IS running and cannot be reached is something to
+    investigate, and reporting the second as the first sends the reader to the wrong place.
+    """
     load_gate_browser(browser, gate_live_server)
-    state = browser.execute_script(
+
+    # PRODUCER. The live server's own classifier, on a row whose process is up and whose transport
+    # is refusing -- the exact shape the retired JavaScript branch existed for.
+    published = gate_live_server.app.system_status_service({
+        "service": "statsd",
+        "pid": os.getpid(),
+        "launcher_pid": os.getpid(),
+        "healthy": False,
+        "transport_reason": "rpc_refused",
+        "last_failure": "status transport refused",
+    })
+    assert published["state"] == "issue", published
+    assert published["reason_code"] == "transport_failed", published
+    assert published["reason"] == "rpc_refused", published
+    # The two readings this contract exists to prevent, at the producer.
+    assert published["state"] != "unavailable", published
+    assert published["state"] != "not_running", published
+
+    # CONSUMER. That published row, rendered by the live bundle's one roster renderer. Nothing is
+    # re-derived here: the row goes in as the backend emitted it.
+    rendered = browser.execute_script(
         """
-        return debugSystemServiceState({
-          service: 'daemon',
-          pid: arguments[0],
-          launcher_pid: arguments[0],
-          healthy: false,
-          transport_reason: 'rpc_refused',
-          last_failure: 'status transport refused',
-        });
+        const published = arguments[0];
+        const html = debugSystemRosterHtml({
+          local_services: {schema_version: 2, inventory: ['statsd'], services: [published]},
+        }, {nowSeconds: 0});
+        const host = document.createElement('div');
+        host.innerHTML = html;
+        const row = host.querySelector('[data-subsystem-row][data-subsystem-id="statsd"]');
+        return {
+          state: row.dataset.subsystemState,
+          tone: row.querySelector('[data-subsystem-tone]').dataset.subsystemTone,
+          label: row.querySelector('[data-subsystem-state-label]').textContent.trim(),
+          reason: row.querySelector('[data-subsystem-reason]').textContent.trim(),
+        };
         """,
-        os.getpid(),
+        published,
     )
-    assert state["reason"] == "rpc_refused", state
-    assert "transport" in state["label"].lower(), state
-    assert "not running" not in state["label"].lower(), state
+    assert rendered["state"] == "issue", rendered
+    assert rendered["tone"] == "bad", rendered
+    assert rendered["reason"] == "rpc_refused", rendered
+    # The label a reader sees says the service has a problem; it must not say the process is gone
+    # or that it is idle, which are the two wrong destinations.
+    assert "not running" not in rendered["label"].lower(), rendered
+    assert "idle" not in rendered["label"].lower(), rendered
+    assert rendered["tone"] not in {"muted", "good"}, rendered
 
 
 def test_m4_ready_queued_and_typed_errors_keep_distinct_http_schemas(gate_live_server, monkeypatch):

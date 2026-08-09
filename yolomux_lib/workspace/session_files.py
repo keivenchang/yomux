@@ -43,6 +43,9 @@ from ..infra.filesystem_preflight import classify_filesystem
 from ..infra.host_partition import host_partitioned_state_dir
 from ..filesystem import FilesystemError
 from ..filesystem import git_root_for_path
+from ..filesystem.exclusions import CompiledExclusionPolicy
+from ..filesystem.exclusions import ExclusionPolicy
+from ..filesystem.exclusions import default_exclusion_policy
 from ..filesystem.io_ops import read_json_file
 from ..filesystem.git_ops import diff_refs
 from ..filesystem.git_ops import git_branch_name
@@ -50,6 +53,8 @@ from ..filesystem.git_ops import git_ref_exists
 from ..filesystem.git_ops import normal_ref  # noqa: F401 - compatibility export for session-file consumers
 from ..filesystem.git_ops import refs_requested
 from .locales import message_descriptor
+from .settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
+from .settings import DEFAULT_INDEX_EXCLUDE_PATHS
 from .locales import user_message_payload
 from ..tmux import sessions as sessions_module
 from ..tmux.sessions import claude_transcript_family_paths
@@ -630,9 +635,25 @@ def classify_change(markers: set[str]) -> str:
     return "M"
 
 
+# Shell/template syntax that nothing expanded.  A transcript records the SOURCE TEXT of a tool
+# call, not the value the runtime produced from it, so a Codex `apply_patch` body written as a JS
+# template literal arrives as `${d}/reply-prose.out` and a heredoc arrives with `$(date)` intact.
+UNEXPANDED_PATH_MARKERS = ("${", "$(")
+
+
 def resolved_change_path(raw_path: str, cwd: str | None) -> Path | None:
+    """Resolve one transcript-recorded change path, or None when it cannot name a file.
+
+    Every transcript-derived path crosses this function -- Claude edits, Codex patch headers,
+    Codex shell argv -- so refusing unexpanded syntax here refuses it once instead of in four
+    scanners.  Without it, `${d}/reply-prose.out` was joined to the session cwd and recorded as
+    `/home/keivenc/dev/yolomux.dev7771/${d}/reply-prose.out`, a path that can never resolve.
+    """
+
     text = str(raw_path or "").strip()
     if not text:
+        return None
+    if any(marker in text for marker in UNEXPANDED_PATH_MARKERS):
         return None
     path = Path(text).expanduser()
     if not path.is_absolute():
@@ -3161,22 +3182,58 @@ def repo_relative_path(path: Path, repo: Path) -> str | None:
         return None
 
 
-def session_git_root(path: Path, warnings: list[str | dict[str, Any]] | None = None) -> str:
-    """Resolve a session path's repository without letting a retired root kill the whole view."""
+def longest_containing_root(path_text: str, roots: list[str]) -> str:
+    """Return the deepest root in ``roots`` that contains ``path_text``, or "".
+
+    Containment is asked of ``path_is_under_text`` and depth is measured on the canonical
+    spelling, so a symlinked or ``..``-spelled candidate matches the same way it does in the
+    cache key and the repository snapshot identity.
+    """
+
+    best = ""
+    best_depth = -1
+    for root in roots:
+        depth = len(canonical_repository_path(root))
+        if depth > best_depth and path_is_under_text(path_text, root):
+            best, best_depth = root, depth
+    return best
+
+
+def session_repository_resolution(
+    path: Path,
+    live_roots: list[str] | None = None,
+    absent_roots: list[str] | None = None,
+) -> tuple[str, str]:
+    """Return ``(repo_root, absent_root)`` for one remembered path; at most one is non-empty.
+
+    Order matters, and getting it wrong loses a live repo.  ``git_root_for_path`` probes only the
+    missing file's DIRECT parent, so ``repo/nested/deep.txt`` after ``nested/`` was removed made
+    it declare the whole repository absent.  Matching the session's already-resolved live repo
+    roots FIRST answers that case without ever probing a path that is gone; only a path in some
+    other still-live repo needs the git probe.  A retired root is claimed last and only when a
+    real session candidate is itself absent -- a missing path under no repository is one deleted
+    file, not evidence that its parent used to be a repository.
+    """
+
+    path_text = str(path)
+    live = longest_containing_root(path_text, live_roots or [])
+    if live:
+        return live, ""
     try:
-        return git_root_for_path(path)
+        resolved = git_root_for_path(path)
     except FilesystemError as error:
         if error.status != 404:
             raise
-        if warnings is not None:
-            warning = message_descriptor(
-                "common.pathNotFound",
-                f"root gone: {path}",
-                {"path": str(path), "reason_code": "root_gone"},
-            )
-            if warning not in warnings:
-                warnings.append(warning)
-        return ""
+        resolved = ""
+    if resolved:
+        return resolved, ""
+    return "", longest_containing_root(path_text, absent_roots or [])
+
+
+def session_git_root(path: Path) -> str:
+    """Resolve a session path's repository without letting a retired root kill the whole view."""
+    repo, _absent_root = session_repository_resolution(path)
+    return repo
 
 
 def configured_session_repo_candidate(info: SessionInfo) -> str | None:
@@ -3191,34 +3248,79 @@ def configured_session_repo_candidate(info: SessionInfo) -> str | None:
     return str(configured)
 
 
-def session_candidate_repo_roots(info: SessionInfo, warnings: list[str | dict[str, Any]] | None = None) -> list[str]:
-    roots: list[str] = []
+def deduped_session_candidates(values: list[str]) -> list[str]:
+    """Return the candidate working directories once each, in first-seen order.
+
+    The same cwd reaches Differ through the agent, the selected pane and the pane list.  Counting
+    it three times inflated the remembered-file total on a retired root, so the dedupe happens
+    here, once, rather than in each consumer.
+    """
+
+    seen: list[str] = []
+    canonical: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        # `canonical_repository_path` is the module's identity owner; deduping on a raw spelling
+        # would let two names for one worktree disagree with the cache key about being the same.
+        key = canonical_repository_path(candidate)
+        if key not in canonical:
+            canonical.add(key)
+            seen.append(candidate)
+    return seen
+
+
+def session_live_pane_candidates(info: SessionInfo) -> list[str]:
     candidates: list[str] = []
-    candidates.extend(str(agent.cwd) for agent in info.agents if agent.cwd)
     if info.selected_pane is not None and info.selected_pane.current_path:
         candidates.append(info.selected_pane.current_path)
     candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
     configured = configured_session_repo_candidate(info)
     if configured:
         candidates.append(configured)
-    for value in candidates:
-        repo = session_git_root(Path(value).expanduser(), warnings)
+    return deduped_session_candidates(candidates)
+
+
+def session_repo_candidates(info: SessionInfo) -> list[str]:
+    """Every working directory this session names, once each. Agent cwds first, then the panes."""
+
+    return deduped_session_candidates([
+        *(str(agent.cwd) for agent in info.agents if agent.cwd),
+        *session_live_pane_candidates(info),
+    ])
+
+
+def session_absent_repo_candidates(info: SessionInfo) -> list[str]:
+    """Return the session's own working directories that no longer exist.
+
+    This is the only thing allowed to claim a retired root.  A directory tmux or an agent reported
+    as its cwd was a real working root; that it is gone is a fact about the session, not a guess
+    made by walking ancestors of some arbitrary remembered path.
+    """
+
+    absent = [candidate for candidate in session_repo_candidates(info) if not Path(candidate).exists()]
+    # A retired worktree and a retired directory inside it are ONE gone worktree. Keeping both
+    # would split one root into two rows, each holding part of the same remembered file list.
+    return [
+        candidate for candidate in absent
+        if not any(other != candidate and path_is_under_text(candidate, other) for other in absent)
+    ]
+
+
+def session_candidate_repo_roots(info: SessionInfo) -> list[str]:
+    roots: list[str] = []
+    for value in session_repo_candidates(info):
+        repo = session_git_root(Path(value))
         if repo and repo not in roots:
             roots.append(repo)
     return roots
 
 
-def session_live_pane_repo_roots(info: SessionInfo, warnings: list[str | dict[str, Any]] | None = None) -> list[str]:
+def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
     roots: list[str] = []
-    candidates: list[str] = []
-    if info.selected_pane is not None and info.selected_pane.current_path:
-        candidates.append(info.selected_pane.current_path)
-    candidates.extend(pane.current_path for pane in info.panes if pane.current_path)
-    configured = configured_session_repo_candidate(info)
-    if configured:
-        candidates.append(configured)
-    for value in candidates:
-        repo = session_git_root(Path(value).expanduser(), warnings)
+    for value in session_live_pane_candidates(info):
+        repo = session_git_root(Path(value))
         if repo and repo not in roots:
             roots.append(repo)
     return roots
@@ -3379,7 +3481,12 @@ def merge_agent_window_lists(*window_lists: list[dict[str, Any]]) -> list[dict[s
     return merged
 
 
-def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str | dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
+def touched_files_for_info(
+    info: SessionInfo,
+    cutoff: float,
+    warnings: list[str | dict[str, Any]] | None = None,
+    exclusion_policy: ExclusionPolicy | None = None,
+) -> dict[str, dict[str, Any]]:
     touched: dict[str, dict[str, Any]] = {}
     for agent in info.agents:
         if not agent.transcript:
@@ -3411,7 +3518,67 @@ def touched_files_for_info(info: SessionInfo, cutoff: float, warnings: list[str 
             entry["agents"].append("codex")
         entry["status"] = str(metadata.get("status") or "M")
         entry["mtime"] = max(float(entry.get("mtime") or 0.0), float(metadata.get("mtime") or 0.0))
-    return touched
+    return admitted_touched_files(touched, session_repo_candidates(info), exclusion_policy)
+
+
+# Differ renders `.uploads` on purpose -- `changes.uploaded`, and the tree auto-collapses it -- so
+# it is the one documented exception Differ takes to the configured policy.
+DIFFER_RENDERED_DIRECTORY_NAMES = frozenset({".uploads"})
+# What "unconfigured" means: the shipped Preferences defaults, built through the same one owner as
+# a user's real configuration -- never a second hardcoded list.
+DEFAULT_EXCLUSION_POLICY = default_exclusion_policy(DEFAULT_INDEX_EXCLUDE_DIR_NAMES, DEFAULT_INDEX_EXCLUDE_PATHS)
+
+
+def differ_exclusion_policy(policy: ExclusionPolicy | None = None) -> ExclusionPolicy:
+    """Return the policy Differ admits by, with its one documented exception applied.
+
+    The policy is DATA supplied by the caller that read the settings -- the web process, or the
+    ``jobd`` task payload.  Nothing here looks a setting up, so the worker judges paths by exactly
+    the policy the cache identity was computed from.  ``None`` means "no configuration was
+    supplied", which resolves to the shipped defaults rather than to no policy at all.
+    """
+
+    resolved = policy if policy is not None else DEFAULT_EXCLUSION_POLICY
+    return resolved.without_directory_names(DIFFER_RENDERED_DIRECTORY_NAMES)
+
+
+def differ_admits_path(compiled: CompiledExclusionPolicy, path: Path) -> bool:
+    """Whether one path may appear in Differ, decided by the repository's one exclusion owner.
+
+    Differ has TWO admission doors -- transcript-attributed paths and untracked rows from the Git
+    snapshot -- and filtering one leaves `.cache` and `node_modules` pouring through the other.
+    Both ask this.
+    """
+
+    return not compiled.excluded(path)
+
+
+def admitted_touched_files(
+    touched: dict[str, dict[str, Any]],
+    roots: list[str],
+    policy: ExclusionPolicy | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Apply the Differ admission rule to the transcript door.
+
+    Both transcript producers -- the live agents and the historical Codex rollouts -- funnel into
+    ``touched``, so this is that door's single boundary.
+    """
+
+    differ_policy = differ_exclusion_policy(policy)
+    # Compile once per owning root, not once per path: compiling resolves every configured rule.
+    compiled_by_root: dict[str, CompiledExclusionPolicy] = {}
+    admitted: dict[str, dict[str, Any]] = {}
+    for path_text, metadata in touched.items():
+        # Scope the check below the session root that owns the path: a working root the user chose
+        # may itself sit under an ignored directory name, and that is not an ignored subtree.
+        root = longest_containing_root(path_text, roots)
+        compiled = compiled_by_root.get(root)
+        if compiled is None:
+            compiled = differ_policy.compiled_for(Path(root) if root else Path(path_text).anchor or "/")
+            compiled_by_root[root] = compiled
+        if differ_admits_path(compiled, Path(path_text)):
+            admitted[path_text] = metadata
+    return admitted
 
 
 def historical_codex_changes_for_info(info: SessionInfo, cutoff: float) -> dict[str, dict[str, Any]]:
@@ -3511,16 +3678,22 @@ def historical_codex_candidate_cwds(info: SessionInfo) -> list[str]:
         text = str(value or "").strip()
         if not text:
             continue
-        repo = git_root_for_path(Path(text).expanduser())
+        # The shared owner, not a raw probe: a candidate whose own parent is gone raises 404 from
+        # `git_root_for_path`, and that used to kill the whole payload before classification ran.
+        repo = session_git_root(Path(text).expanduser())
         if repo and repo not in unique:
             unique.append(repo)
     return unique
 
 
-def agent_attribution_by_path(infos: dict[str, SessionInfo], cutoff: float) -> dict[str, list[str]]:
+def agent_attribution_by_path(
+    infos: dict[str, SessionInfo],
+    cutoff: float,
+    exclusion_policy: ExclusionPolicy | None = None,
+) -> dict[str, list[str]]:
     attribution: dict[str, list[str]] = {}
     for info in infos.values():
-        for path_text, metadata in touched_files_for_info(info, cutoff).items():
+        for path_text, metadata in touched_files_for_info(info, cutoff, None, exclusion_policy).items():
             attribution[path_text] = merge_agent_lists(attribution.get(path_text, []), metadata.get("agents", []))
     return attribution
 
@@ -3535,6 +3708,7 @@ def session_files_payload_for_info(
     agent_attribution: dict[str, list[str]] | None = None,
     git_snapshot_provider: GitSnapshotProvider | None = None,
     phase_recorder: SessionFilesPhaseRecorder | None = None,
+    exclusion_policy: ExclusionPolicy | None = None,
 ) -> SessionFilesPayload:
     # C6: `repo_refs` carries per-repo FROM/TO overrides ({repo_path: {"from","to"}}); a SHA chosen for
     # one repo no longer leaks into another. The scalar from_ref/to_ref stay as the global default applied
@@ -3547,23 +3721,33 @@ def session_files_payload_for_info(
     # single inactive agent's missing transcript does not read as a session-level Differ failure.
     warnings: list[str | dict[str, Any]] = []
     phase_started = time.perf_counter()
-    touched = touched_files_for_info(info, cutoff, warnings)
+    differ_policy = differ_exclusion_policy(exclusion_policy)
+    touched = touched_files_for_info(info, cutoff, warnings, exclusion_policy)
     record_session_files_phase(phase_recorder, "transcript-attribution", phase_started, {"session": info.session, "paths": len(touched)})
 
     phase_started = time.perf_counter()
     repos: dict[str, set[str]] = {}
     outside_repo_paths: set[str] = set()
+    # Resolve the session's own roots BEFORE classifying remembered paths: a live root answers a
+    # deleted nested directory without probing anything that is gone, and an absent root is the
+    # only thing allowed to absorb hundreds of remembered paths into one row.
+    candidate_repo_roots = session_candidate_repo_roots(info)
+    live_pane_repo_root_list = session_live_pane_repo_roots(info)
+    absent_candidates = session_absent_repo_candidates(info)
+    absent_root_paths: dict[str, set[str]] = {}
     for path_text, metadata in touched.items():
-        path = Path(path_text)
-        repo_text = session_git_root(path, warnings)
+        repo_text, absent_root = session_repository_resolution(
+            Path(path_text), candidate_repo_roots, absent_candidates,
+        )
         if repo_text:
             repos.setdefault(repo_text, set()).add(path_text)
+        elif absent_root:
+            absent_root_paths.setdefault(absent_root, set()).add(path_text)
         else:
             outside_repo_paths.add(path_text)
-    candidate_repo_roots = set(session_candidate_repo_roots(info, warnings))
     for repo_text in candidate_repo_roots:
         repos.setdefault(repo_text, set())
-    live_pane_repo_roots = set(session_live_pane_repo_roots(info, warnings))
+    live_pane_repo_roots = set(live_pane_repo_root_list)
     record_session_files_phase(phase_recorder, "repository-discovery", phase_started, {"session": info.session, "repos": len(repos)})
 
     phase_started = time.perf_counter()
@@ -3582,9 +3766,13 @@ def session_files_payload_for_info(
             if git_snapshot_provider is not None
             else build_git_snapshot(repo, repo_from, repo_to)
         )
+        repo_exclusions = differ_policy.compiled_for(repo)
         statuses = {
             str(path): str(status)
             for path, status in snapshot.get("statuses", {}).items()
+            # `git status` lists untracked `.cache`/`node_modules` rows that never went through the
+            # transcript door, so the SAME compiled policy is applied here rather than only there.
+            if differ_admits_path(repo_exclusions, repo / str(path))
         }
         numstat = {
             str(path): dict(counts)
@@ -3672,6 +3860,21 @@ def session_files_payload_for_info(
             repo_payload.update({str(key): int(value) for key, value in ahead_behind.items() if isinstance(value, int)})
         repo_payloads.append(repo_payload)
 
+    for absent_root in sorted(absent_root_paths):
+        # A retired worktree is ONE row. There is no working tree to compare, so it carries no
+        # FROM/TO refs and no error: it is not a failure, it is a repository that is gone.
+        repo_payloads.append({
+            "repo": absent_root,
+            "missing": True,
+            "count": 0,
+            "touched_count": len(absent_root_paths[absent_root]),
+            "added": 0,
+            "removed": 0,
+            "from_ref": "",
+            "to_ref": "",
+            "error": "",
+        })
+
     outside_entries: list[SessionFileEntry] = []
     if outside_repo_paths and not refs_active:
         for path_text in sorted(outside_repo_paths):
@@ -3736,10 +3939,11 @@ def session_files_payload(
     include_cross_session_attribution: bool = True,
     git_snapshot_provider: GitSnapshotProvider | None = None,
     phase_recorder: SessionFilesPhaseRecorder | None = None,
+    exclusion_policy: ExclusionPolicy | None = None,
 ) -> tuple[SessionFilesPayload, HTTPStatus]:
     now = time.time()
     cutoff = session_files_cutoff(hours, now)
-    attribution = agent_attribution_by_path(infos, cutoff) if include_cross_session_attribution else {}
+    attribution = agent_attribution_by_path(infos, cutoff, exclusion_policy) if include_cross_session_attribution else {}
     if session:
         info = infos.get(session)
         if info is None:
@@ -3755,6 +3959,7 @@ def session_files_payload(
             agent_attribution=attribution,
             git_snapshot_provider=git_snapshot_provider,
             phase_recorder=phase_recorder,
+            exclusion_policy=exclusion_policy,
         )
         return payload, HTTPStatus.OK
 
@@ -3774,6 +3979,7 @@ def session_files_payload(
             agent_attribution=attribution,
             git_snapshot_provider=git_snapshot_provider,
             phase_recorder=phase_recorder,
+            exclusion_policy=exclusion_policy,
         )
         files.extend(payload["files"])
         errors.extend(payload["errors"])
@@ -3781,7 +3987,12 @@ def session_files_payload(
         refs_by_repo.update(payload.get("refs_by_repo", {}))
         for repo in payload["repos"]:
             key = repo["repo"]
-            existing = repos.setdefault(key, {"repo": key, "count": 0, "touched_count": 0, "added": 0, "removed": 0})
+            existing = repos.setdefault(key, {"repo": key, "count": 0, "touched_count": 0, "added": 0, "removed": 0, "missing": True})
+            # LIVE EVIDENCE WINS. Two sessions can contribute the same repo key -- one holding it
+            # live, one remembering it from a retired root -- and marking the merged row missing
+            # would hide the live session's real changes. A row is missing only when every
+            # contributing row was.
+            existing["missing"] = bool(existing["missing"]) and repo.get("missing") is True
             existing["count"] += repo["count"]
             existing["touched_count"] += repo["touched_count"]
             existing["added"] += repo.get("added", 0)
@@ -3790,6 +4001,10 @@ def session_files_payload(
             existing.setdefault("branch", repo.get("branch", ""))
             existing.setdefault("from_ref", repo.get("from_ref", "default"))
             existing.setdefault("to_ref", repo.get("to_ref", "base"))
+            if not existing["missing"]:
+                # A live contributor supplies the refs a gone row never had.
+                existing["from_ref"] = existing["from_ref"] or repo.get("from_ref", "default")
+                existing["to_ref"] = existing["to_ref"] or repo.get("to_ref", "base")
             existing.setdefault("error", repo.get("error", ""))
             if "error_message" in repo:
                 existing.setdefault("error_message", repo["error_message"])
@@ -3861,6 +4076,13 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
     raw_repo_refs = payload.get("repo_refs")
     repo_refs = canonical_repository_refs(raw_repo_refs if isinstance(raw_repo_refs, dict) else None)
     include_cross = bool(payload.get("include_cross_session_attribution", not bool(session)))
+    # The worker has no settings access and looks nothing up: the policy the web owner signed the
+    # cache identity with is the policy this task judges by, or the answer could disagree with its
+    # own key.  When it did not arrive, fall back to the shipped defaults -- never to an empty
+    # policy, which would admit everything -- and say so in the product so the fallback is
+    # visible instead of silently reverting Differ to the behaviour that was rejected.
+    exclusion_policy = ExclusionPolicy.from_payload(payload.get("exclusion_policy"))
+    exclusion_policy_source = "payload" if exclusion_policy is not None else "default"
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
     raw_repository_states = payload.get("repository_states")
     repository_generations: dict[str, int] = {}
@@ -3911,6 +4133,7 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
         include_cross_session_attribution=include_cross,
         git_snapshot_provider=provider,
         phase_recorder=phase_recorder,
+        exclusion_policy=exclusion_policy,
     )
     if include_cross:
         phase_samples.append(("cross-session-attribution", max(0.0, (time.perf_counter() - attribution_started) * 1000)))
@@ -3926,6 +4149,7 @@ def session_files_view_result(payload: dict[str, Any], *, max_bytes: int) -> dic
             # for another Git subprocess snapshot.
             "git_snapshots": git_snapshot_builds,
             "git_snapshot_cache_hits": git_snapshot_cache_hits,
+            "exclusion_policy_source": exclusion_policy_source,
         },
         # The web process supplies digests/counts only.  No path, ref, transcript, or agent text
         # crosses this worker boundary merely for diagnostics.

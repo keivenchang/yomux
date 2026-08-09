@@ -319,7 +319,14 @@ class StatsCurrentRuntime:
             pid = int(context["pid"])
             port = int(context["port"])
             owner_generation = int(context["owner_generation"])
+            # Where statsd pushes this process's own CPU sample. Missing or blank is a broken
+            # handshake, not a degraded one: statsd would run its 1s sampler and drop every
+            # sample, which is the failure this field exists to remove.
+            control_socket = str(context["control_socket"]).strip()
         except (KeyError, TypeError, ValueError):
+            self._record_failure("InvalidCollectorContext")
+            return False
+        if not control_socket:
             self._record_failure("InvalidCollectorContext")
             return False
         if owner_generation != generation:
@@ -327,7 +334,7 @@ class StatsCurrentRuntime:
             return False
         try:
             response = self.client.register_collector_context(
-                pid=pid, port=port, owner_generation=owner_generation,
+                pid=pid, port=port, owner_generation=owner_generation, control_socket=control_socket,
             )
         except EXPECTED_SUPERVISOR_ERRORS as error:
             self._record_failure(type(error).__name__)

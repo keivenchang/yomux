@@ -34,6 +34,8 @@ SECRET_DIR_COMPONENTS = paths.SECRET_DIR_COMPONENTS
 SECRET_DIR_SUFFIXES = paths.SECRET_DIR_SUFFIXES
 SECRET_FILE_NAMES = paths.SECRET_FILE_NAMES
 SECRET_FILE_SUFFIXES = paths.SECRET_FILE_SUFFIXES
+parsed_request_path = paths.parsed_request_path
+validate_request_path_lexical = paths.validate_request_path_lexical
 
 MAX_DIRECTORY_ENTRIES = listing.MAX_DIRECTORY_ENTRIES
 REPO_MARKERS = listing.REPO_MARKERS
@@ -117,7 +119,7 @@ _refs_requested = git_ops.refs_requested
 
 _mtime_matches_expected = io_ops._mtime_matches_expected
 _sniff_raw_mime = io_ops._sniff_raw_mime
-_validated_child_name = io_ops._validated_child_name
+validated_child_name = io_ops.validated_child_name
 
 
 def _sync_package_overrides() -> None:

@@ -23,24 +23,29 @@ from types import MappingProxyType
 
 from yolomux_lib import common
 from yolomux_lib.control import send_yolomux_control_request
-from yolomux_lib.filesystem.io_ops import read_json_file
-from yolomux_lib.infra.background_owner import BACKGROUND_OWNER_DIR
 from yolomux_lib.local_services.rpc import safe_socket_path
 from yolomux_lib.local_services.runtime import acquire_client_lease, reap_dead_client_leases, release_client_lease
 from yolomux_lib.local_services.runtime import run_local_rpc_service
-from yolomux_lib.stats_current import collectors, families, host_collectors, identity, materializer, migration, observations, pricing, protocol, resolution as stats_resolution, revision, storage, usage
+from yolomux_lib.settings import stats_prune_local_time
+from yolomux_lib.stats_current import collectors, families, host_collectors, identity, materializer, migration, observations, pricing, protocol, prune_schedule, resolution as stats_resolution, revision, storage, usage
 
 SERVICE_NAME = "statsd"
 SOCKET_FILENAME = storage.SOCKET_FILENAME
 MAX_ID_BYTES = 512
 MAX_SAFE_INTEGER = (1 << 53) - 1
 DEFAULT_IDLE_SECONDS = 60.0
-FULL_RECONCILE_SECONDS = 300.0
+# Retention cleanup is nightly (prune_schedule), not periodic. This is only how
+# often the daemon asks the schedule "is tonight's prune still owed?" -- a cheap
+# localtime comparison plus one preference read, off the request path. It bounds
+# how late a due prune can start, including the catch-up case where the machine
+# was asleep at the configured time.
+PRUNE_CHECK_SECONDS = 60.0
 # Ten seconds keeps the 10-second views at most one bucket behind durable ingest.
 # A 60-second writer cadence would make that view trail by as many as six buckets.
 RING_FLUSH_SECONDS = 10.0
 BROWSER_FAILURE_LOG_MAX_BYTES = 1 * 1024 * 1024
-HOST_CPU_CADENCE_SECONDS = 1.0
+# One owner, in host_collectors, beside the sampler that sets it. See its comment there.
+HOST_CPU_CADENCE_SECONDS = host_collectors.HOST_CPU_CADENCE_SECONDS
 HOST_GPU_CADENCE_SECONDS = 10.0
 # VACUUM rewrites the SQLite file, so it is intentionally maintenance rather
 # than part of startup, ingest, or request handling. A small per-daemon jitter
@@ -105,7 +110,7 @@ CONTROL_FIELDS = {
     "release": FENCE_FIELDS | {"lease_id"},
     # The elected web owner may identify the process it owns, but statsd must
     # resolve roster, paths, pricing, and all measured facts itself.
-    "collector_context": FENCE_FIELDS | {"pid", "port", "owner_generation"},
+    "collector_context": FENCE_FIELDS | {"pid", "port", "owner_generation", "control_socket"},
     "usage_atom_backfill": FENCE_FIELDS | {"state", "sources", "missing", "scan"},
     "delta": FENCE_FIELDS | protocol.DELTA_REQUEST_FIELDS,
 }
@@ -1008,6 +1013,7 @@ class StatsCurrentService:
         randomizer: Callable[[], float] = random.random,
         price_resolver: materializer.PriceResolver | None = None,
         migration_runner: Callable[..., migration.MigrationReport] = migration.migrate,
+        prune_time_reader: Callable[[], str] = stats_prune_local_time,
     ):
         self.socket_path = safe_socket_path(socket_path, prefix="yolomux-statsd")
         self.lock_path = self.socket_path.with_suffix(".lock")
@@ -1023,6 +1029,8 @@ class StatsCurrentService:
         self.work_lock, self.cache_lock, self.trace_lock = threading.Lock(), threading.Lock(), threading.Lock()
         self.writer: storage.Store | None = None
         self.collector_context: dict[str, int] | None = None
+        # Where to push the web process's CPU sample, supplied by that process itself.
+        self.collector_control_socket: str = ""
         self._host_cpu_sampler = host_collectors.CpuSampler()
         self._next_host_cpu_at = self.monotonic()
         self._next_host_gpu_at = self.monotonic()
@@ -1032,6 +1040,17 @@ class StatsCurrentService:
         self._host_gpu_roster_owner_generation: int | None = None
         self._host_collector_failures = 0
         self._last_host_collector_error = ""
+        # The web process's CPU/memory sample is pushed from here on a 1.0s cadence and it is the
+        # ONLY writer of that metric. Every skip used to be silent -- no counter, no reason, and
+        # `failures` stayed 0 because a skipped push never raised -- so a web row that read
+        # "never measured" for the life of the process carried no evidence of why. These four
+        # make the delivery path observable: attempted vs delivered is the rate, and the typed
+        # reason says which gate stopped it.
+        self._host_cpu_push_attempts = 0
+        self._host_cpu_push_delivered = 0
+        self._host_cpu_push_last_reason = ""
+        self._host_cpu_push_last_reason_at = 0.0
+        self._host_cpu_push_last_delivered_at = 0.0
         self.worker: threading.Thread | None = None
         self.leases: dict[str, object] = {}
         self.started_at, self.last_client_at = self.clock(), self.monotonic()
@@ -1075,10 +1094,15 @@ class StatsCurrentService:
         self._delta_revisions: dict[DeltaKey, int] = {}
         self._encoded_cost_reports_generation = -1
         self._encoded_cost_reports: Mapping[tuple[int, int], dict[str, object]] = MappingProxyType({})
-        self._next_reconcile_at = self.monotonic() + FULL_RECONCILE_SECONDS
-        self._reconciliations = 0
-        self._last_reconcile_at = 0.0
-        self._last_reconcile_seconds = 0.0
+        self._prune_time_reader = prune_time_reader
+        self._prune_time = prune_schedule.resolve_local_time(prune_schedule.DEFAULT_PRUNE_LOCAL_TIME)
+        self._prune_preference_error = ""
+        self._next_prune_check_at = self.monotonic()
+        self._last_pruned_at = 0.0
+        self._prunes = 0
+        self._last_prune_at = 0.0
+        self._last_prune_seconds = 0.0
+        self._last_prune_due_at = 0.0
         self._last_vacuumed_at = 0.0
         self._last_vacuum_seconds = 0.0
         self._vacuum_count = 0
@@ -1200,7 +1224,11 @@ class StatsCurrentService:
         self._next_vacuum_at = self.monotonic() + remaining
         self.worker = threading.Thread(target=self._worker_loop, name="yolomux-stats-materializer", daemon=True)
         self.worker.start()
-        self._next_reconcile_at = self.monotonic() + FULL_RECONCILE_SECONDS
+        # Read the persisted prune time before the first check: a restart must not
+        # re-run last night's prune, and a daemon that lives less than a day must
+        # still catch up a night that was missed while the machine was off.
+        self._last_pruned_at = self.writer.last_pruned_at()
+        self._next_prune_check_at = self.monotonic()
         self.work_event.set()
 
     def _vacuum_jitter(self) -> float:
@@ -1589,15 +1617,40 @@ class StatsCurrentService:
                 self._pending_coverage_refresh = True
         self.work_event.set()
 
-    def _matching_web_owner(self, context: Mapping[str, int]) -> dict[str, object] | None:
-        record = read_json_file(BACKGROUND_OWNER_DIR / "owner.json", None)
-        if not isinstance(record, dict):
-            return None
-        if (record.get("pid"), record.get("port"), record.get("started_at_ns")) != (
-            context["pid"], context["port"], context["owner_generation"],
-        ):
-            return None
-        return record
+    def _web_push_target(self) -> tuple[dict[str, object] | None, str]:
+        """Resolve where to push this process's CPU sample, and say WHY when there is nowhere.
+
+        The address comes from the `collector_context` handshake -- the web process tells this
+        statsd, over this statsd's own control channel, both which process it serves and where
+        to reach it. It used to be re-discovered from `BACKGROUND_OWNER_DIR/owner.json`, which
+        is the distributed-ELECTION record and answers a different question. A managed instance
+        runs `DisabledBackgroundOwner` and holds no election, so no record was ever written and
+        the push was skipped forever: the whole reason the Daemons web row read "never measured"
+        for the life of the process.
+
+        This does not weaken who may receive a sample. The address is no longer read from a
+        shared mutable file any co-rooted server can write; it is stated by the target process
+        itself. The identity is carried in the sample (`sample["pid"]` is `context["pid"]`) and
+        the RECEIVER refuses any sample whose pid is not its own -- see
+        `TmuxWebtermApp.handle_control_request`, "stats CPU sample PID mismatch". That check is
+        unforgeable and is covered by its own test.
+        """
+
+        if not self.collector_control_socket:
+            return None, "web_owner_no_control_socket"
+        return {"control_socket": self.collector_control_socket}, ""
+
+    def _record_host_cpu_push(self, reason: str) -> None:
+        """One recorder for the outcome of every attempted CPU-sample push."""
+
+        if not reason:
+            self._host_cpu_push_delivered += 1
+            self._host_cpu_push_last_delivered_at = self.clock()
+            self._host_cpu_push_last_reason = ""
+            self._host_cpu_push_last_reason_at = 0.0
+            return
+        self._host_cpu_push_last_reason = reason[:120]
+        self._host_cpu_push_last_reason_at = self.clock()
 
     def _host_coverage_epoch(
         self,
@@ -1647,28 +1700,57 @@ class StatsCurrentService:
             if now_monotonic >= self._next_host_cpu_at:
                 self._next_host_cpu_at = now_monotonic + HOST_CPU_CADENCE_SECONDS
                 sample = self._host_cpu_sampler.sample(context["pid"])
-                epoch_id, epoch_started_at = self._host_coverage_epoch(
-                    publisher,
-                    context=context,
-                    family="cpu",
-                    source_id=source_id,
-                    cadence_seconds=HOST_CPU_CADENCE_SECONDS,
-                    observed_at=now,
-                )
-                facts = collectors.cpu_success(
-                    epoch_id=epoch_id,
-                    epoch_started_at=epoch_started_at,
-                    observed_at=now,
-                    cadence_seconds=HOST_CPU_CADENCE_SECONDS,
-                    owner_generation=context["owner_generation"],
-                    source_id=source_id,
-                    process_percent=float(sample["cpu_percent"]),
-                    system_percent=float(sample["system_cpu_percent"]),
-                )
-                self._append_host_facts(publisher, facts)
-                owner = self._matching_web_owner(context)
-                if owner is not None:
-                    send_yolomux_control_request(owner, {"action": "stats_cpu_sample", "sample": sample}, timeout=0.25)
+                # The sampler differences two readings, so its FIRST call after every statsd start
+                # has nothing to difference and reports `None` rather than `0.0`. This cycle then
+                # publishes nothing at all -- the "nothing to report this cycle" shape the GPU and
+                # service-load collectors already use -- because `cpu_success(0.0, 0.0)` would
+                # write a fabricated measurement into 48-hour history where it owns the whole 1s
+                # bucket at the default five-minute view.
+                #
+                # The push is SKIPPED, not sent with `None`: the receiver does
+                # `float(sample["cpu_percent"])` and would reject it as "invalid stats CPU sample",
+                # inflating the rejection counter with a self-inflicted error. One second of
+                # structural absence is correct, and `latest_stats_sample` already renders it.
+                # The skip is still counted with its reason, because a skipped push that leaves no
+                # evidence is the defect this gate was built for.
+                if sample["cpu_percent"] is None or sample["system_cpu_percent"] is None:
+                    self._host_cpu_push_attempts += 1
+                    self._record_host_cpu_push("cpu_sample_no_baseline")
+                else:
+                    epoch_id, epoch_started_at = self._host_coverage_epoch(
+                        publisher,
+                        context=context,
+                        family="cpu",
+                        source_id=source_id,
+                        cadence_seconds=HOST_CPU_CADENCE_SECONDS,
+                        observed_at=now,
+                    )
+                    facts = collectors.cpu_success(
+                        epoch_id=epoch_id,
+                        epoch_started_at=epoch_started_at,
+                        observed_at=now,
+                        cadence_seconds=HOST_CPU_CADENCE_SECONDS,
+                        owner_generation=context["owner_generation"],
+                        source_id=source_id,
+                        process_percent=float(sample["cpu_percent"]),
+                        system_percent=float(sample["system_cpu_percent"]),
+                    )
+                    self._append_host_facts(publisher, facts)
+                    # The sole producer of the web process's own CPU/memory metric. It is
+                    # fire-and-forget by design (a slow web process must not stall statsd's
+                    # cadence), but fire-and-forget must still mean OBSERVED-and-forget: the
+                    # outcome of every attempt is counted and the failing gate is named.
+                    owner, push_reason = self._web_push_target()
+                    self._host_cpu_push_attempts += 1
+                    if owner is None:
+                        self._record_host_cpu_push(push_reason)
+                    else:
+                        response = send_yolomux_control_request(
+                            owner, {"action": "stats_cpu_sample", "sample": sample}, timeout=0.25,
+                        )
+                        accepted = isinstance(response, dict) and response.get("ok") is True
+                        error = str(response.get("error") or "") if isinstance(response, dict) else "invalid control response"
+                        self._record_host_cpu_push("" if accepted else f"push_rejected: {error or 'unknown error'}")
             if now_monotonic >= self._next_host_gpu_at:
                 self._next_host_gpu_at = now_monotonic + HOST_GPU_CADENCE_SECONDS
                 if self._host_gpu_roster_owner_generation != context["owner_generation"]:
@@ -2773,6 +2855,17 @@ class StatsCurrentService:
             if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
                 raise ValueError(f"invalid collector context {name}")
             values[name] = value
+        # The ADDRESS, deliberately outside `values`.
+        #
+        # `values` is the source IDENTITY, and the block below invalidates every host coverage
+        # epoch whenever it changes -- correct, because a different pid/port/generation is a
+        # different source lifecycle. A control socket is only where to reach that same process.
+        # Folding it into `values` would make mere re-addressing look like a new source and reset
+        # epochs that are still valid, so it is stored separately and compared by nobody.
+        socket_path = data["control_socket"]
+        if not isinstance(socket_path, str) or not socket_path.strip():
+            raise ValueError("invalid collector context control_socket")
+        self.collector_control_socket = socket_path.strip()
         previous = self.collector_context
         self.collector_context = values
         if previous != values:
@@ -3559,7 +3652,7 @@ class StatsCurrentService:
             if generation.source_generation > 0
         }
         warm_total = sum(1 + len(stats_resolution.explicit_resolutions(value)) for value in stats_resolution.RANGE_SECONDS)
-        next_reconcile_in = max(0.0, self._next_reconcile_at - self.monotonic())
+        next_prune_check_in = max(0.0, self._next_prune_check_at - self.monotonic())
         next_vacuum_in = max(0.0, self._next_vacuum_at - self.monotonic())
         next_ring_in = (
             None
@@ -3735,13 +3828,28 @@ class StatsCurrentService:
                 "entries": delta_entries,
                 "max_entries_per_key": MAX_DELTA_RING_ENTRIES,
             },
-            "reconciliation": {
-                "interval_seconds": FULL_RECONCILE_SECONDS,
-                "count": self._reconciliations,
-                "last_at": self._last_reconcile_at,
-                "last_seconds": round(self._last_reconcile_seconds, 6),
-                "next_at": self.clock() + next_reconcile_in,
-                "next_in_seconds": round(next_reconcile_in, 3),
+            "retention_prune": {
+                "retention_seconds": storage.RETENTION_SECONDS,
+                "display_window_seconds": stats_resolution.MAX_RANGE_SECONDS,
+                "at_local_time": self._prune_time.text,
+                "configured_local_time": self._prune_time.configured,
+                # A preference that could not be used says so here. Cleanup keeps
+                # running on the default schedule either way.
+                "preference_fell_back": self._prune_time.fell_back,
+                "preference_error": self._prune_preference_error,
+                "check_interval_seconds": PRUNE_CHECK_SECONDS,
+                "next_check_at": self.clock() + next_prune_check_in,
+                "next_check_in_seconds": round(next_prune_check_in, 3),
+                "next_at": prune_schedule.next_occurrence(self.clock(), self._prune_time),
+                "due_at": prune_schedule.most_recent_occurrence(self.clock(), self._prune_time),
+                "last_pruned_at": self._last_pruned_at,
+                "overdue": prune_schedule.is_due(
+                    self.clock(), self._last_pruned_at, self._prune_time
+                ),
+                "count": self._prunes,
+                "last_at": self._last_prune_at,
+                "last_seconds": round(self._last_prune_seconds, 6),
+                "last_due_at": self._last_prune_due_at,
             },
             "vacuum": {
                 "interval_seconds": VACUUM_INTERVAL_SECONDS,
@@ -3763,6 +3871,18 @@ class StatsCurrentService:
                 "context": None if self.collector_context is None else dict(self.collector_context),
                 "failures": self._host_collector_failures,
                 "last_error": self._last_host_collector_error,
+                # `failures` counts raised exceptions only, and a skipped push never raises.
+                # Delivery of the web process's own CPU/memory sample needs its own evidence:
+                # `attempted` without `delivered` is exactly the state that renders the Daemons
+                # web row "never measured", and `last_reason` names the gate that stopped it.
+                "cpu_push": {
+                    "attempted": self._host_cpu_push_attempts,
+                    "delivered": self._host_cpu_push_delivered,
+                    "skipped": max(0, self._host_cpu_push_attempts - self._host_cpu_push_delivered),
+                    "last_reason": self._host_cpu_push_last_reason,
+                    "last_reason_at": self._host_cpu_push_last_reason_at,
+                    "last_delivered_at": self._host_cpu_push_last_delivered_at,
+                },
             },
         }
 
@@ -3834,18 +3954,50 @@ class StatsCurrentService:
             return protocol.unsupported_response(str(error)), b""
 
     def _on_client(self) -> None:
+        # Deliberately does NOT prune. Retention cleanup is nightly maintenance,
+        # and running it here would charge one unlucky browser request the whole
+        # delete while the observer's next sample waits on the same writer lock.
         self.last_client_at = self.monotonic()
-        self._reconcile_if_due()
 
-    def _reconcile_if_due(self) -> bool:
+    def _resolved_prune_time(self) -> prune_schedule.PruneTime:
+        """Re-read the preference so a change takes effect without a restart."""
+
+        try:
+            configured = self._prune_time_reader()
+        except OSError as error:
+            # The preference is unreadable, not absent. Keep cleaning up on the
+            # default schedule and name the failure in status; a cleanup that
+            # stops because a file could not be read is invisible until the disk
+            # is full.
+            self._prune_preference_error = type(error).__name__[:64]
+            return prune_schedule.resolve_local_time(prune_schedule.DEFAULT_PRUNE_LOCAL_TIME)
+        self._prune_preference_error = ""
+        return prune_schedule.resolve_local_time(configured)
+
+    def _prune_if_due(self) -> bool:
+        """Run the once-a-night retention prune when the last one is still owed.
+
+        This is the ONLY pruner. It runs on the listener's accept-timeout idle
+        hook, never on a request, and asks the schedule at most once per
+        PRUNE_CHECK_SECONDS.
+        """
+
         now_monotonic = self.monotonic()
-        if now_monotonic < self._next_reconcile_at or self.writer is None:
+        if now_monotonic < self._next_prune_check_at or self.writer is None:
             return False
-        started = now_monotonic
+        self._next_prune_check_at = now_monotonic + PRUNE_CHECK_SECONDS
+        self._prune_time = self._resolved_prune_time()
+        now = self.clock()
+        # prune_schedule owns the rule; the daemon must not re-spell it.
+        if not prune_schedule.is_due(now, self._last_pruned_at, self._prune_time):
+            return False
+        due_at = prune_schedule.most_recent_occurrence(now, self._prune_time)
+        started = self.monotonic()
         with self.work_lock:
             previous_source_generation = self._latest_source_generation
-            prune_now = self.clock()
-            result = self.writer.prune(now=prune_now)
+            # One timestamp decides due-ness, the cutoff, and what is persisted,
+            # so the three can never disagree.
+            result = self.writer.prune(now=now)
             self._latest_source_generation = max(
                 self._latest_source_generation,
                 result.source_generation,
@@ -3867,7 +4019,7 @@ class StatsCurrentService:
                 or result.unavailable_spans_deleted
                 or result.unavailable_spans_clipped
             ):
-                cutoff = prune_now - storage.RETENTION_SECONDS
+                cutoff = now - storage.RETENTION_SECONDS
                 cutoff_dirty = {
                     materializer.DirtyCell(
                         resolution, math.floor(cutoff / resolution) * resolution
@@ -3876,15 +4028,18 @@ class StatsCurrentService:
                 }
                 self._pending_dirty.update(cutoff_dirty)
                 self._stage_ring_cells_locked(cutoff_dirty, result.source_generation)
-        self._reconciliations += 1
-        self._last_reconcile_at = self.clock()
-        self._last_reconcile_seconds = max(0.0, self.monotonic() - started)
-        self._next_reconcile_at = self.monotonic() + FULL_RECONCILE_SECONDS
+        self._prunes += 1
+        self._last_prune_at = self.clock()
+        self._last_prune_seconds = max(0.0, self.monotonic() - started)
+        self._last_prune_due_at = due_at
+        # The store persisted this same instant, so a restart reads back one
+        # answer rather than two that can disagree.
+        self._last_pruned_at = now
         self.work_event.set()
         return True
 
     def _idle(self) -> bool:
-        self._reconcile_if_due()
+        self._prune_if_due()
         reap_dead_client_leases(self.leases)
         with self.work_lock:
             pending = (

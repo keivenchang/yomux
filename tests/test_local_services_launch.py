@@ -864,11 +864,15 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     )
     requests = []
 
+    # A service answers with its own live pid; a pid that names no process
+    # cannot publish an identity record, so the fixture uses a real one.
+    service_pid = os.getpid()
+
     def fake_request(_path, envelope, **_kwargs):
         requests.append(envelope.method)
         if envelope.method == "ping":
-            return {"ok": True, "version": 5, "pid": 42}, b""
-        return {"ok": True, "version": 5, "pid": 42, "started_at": 1}, b""
+            return {"ok": True, "version": 5, "pid": service_pid}, b""
+        return {"ok": True, "version": 5, "pid": service_pid, "started_at": 1}, b""
 
     monkeypatch.setattr("yolomux_lib.local_services.registry.request", fake_request)
 
@@ -879,6 +883,223 @@ def test_registry_recent_health_cache_removes_per_action_ping_status_fanout(tmp_
     now[0] += 1.1
     assert registry.ensure_started() is True
     assert requests.count("ping") == 2
+
+
+class _NeverExitingProcess:
+    """A spawn stand-in with no pid, so `_spawn` returns it before ownership capture."""
+
+    def poll(self):
+        return None
+
+
+def _publication_registry(tmp_path, *, clock, spawned, protocol_version=1):
+    return LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec("fixture", "tests.fixture", "fixture.sock", protocol_version),
+        clock=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+        popen=lambda *args, **kwargs: spawned.append(True) or _NeverExitingProcess(),
+    )
+
+
+def test_registry_never_publishes_a_record_from_a_lost_post_ping_status(tmp_path, monkeypatch):
+    """One dropped status RPC after a successful ping must not brick the service.
+
+    Shipping 0.7.0 wrote `_record_from_status({})` -- a durable record carrying
+    pid 0 -- and still told the caller the service had started.  `invalid_pid`
+    is not removable on the same host and boot, so every later start was
+    refused by `remove_stale_record` forever.  The publication validator must
+    refuse that record, invalidate health, and continue through bounded startup.
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    live = [True]
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        if not live[0]:
+            return {}
+        if method == "ping":
+            return {"ok": True, "version": 1, "pid": 4242}
+        return {}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    first = registry.ensure_started()
+    published = registry._read_record()
+    # The daemon that answered ping is gone; only the durable record survives.
+    live[0] = False
+    registry.invalidate_rpc_health()
+    second = registry.ensure_started()
+    failure_reason = registry.status()["failure_reason"]
+
+    measured = {
+        "first_reported_started": first,
+        "record_published": registry.record_path.exists(),
+        "record_pid": int(published.get("pid") or 0),
+        "second_reported_started": second,
+        "permanently_blocked": "blocked by remove_stale_record" in failure_reason,
+    }
+    assert measured == {
+        "first_reported_started": False,
+        "record_published": False,
+        "record_pid": 0,
+        "second_reported_started": False,
+        "permanently_blocked": False,
+    }, {**measured, "failure_reason": failure_reason}
+    assert spawned == [True]
+
+
+def test_registry_recovers_a_lost_status_on_the_next_attempt_with_a_real_record(tmp_path, monkeypatch):
+    """A transient status loss costs one attempt, never the service."""
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    status_losses = [1]
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        if method == "ping":
+            return {"ok": True, "version": 1, "pid": os.getpid()}
+        if status_losses[0] > 0:
+            status_losses[0] -= 1
+            return {}
+        return {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 1.0}
+
+    monkeypatch.setattr(registry, "_request", fake_request)
+
+    assert registry.ensure_started() is True
+    record = registry._read_record()
+    assert record["pid"] == os.getpid()
+    assert record["service"] == "fixture"
+    assert record["protocol_version"] == 1
+    assert registry._record_process_diagnostic(record).current is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        {},
+        {"ok": False, "version": 1, "pid": os.getpid()},
+        {"ok": True, "version": 1, "pid": 0},
+        {"ok": True, "version": 1, "pid": 1},
+        {"ok": True, "version": 2, "pid": os.getpid()},
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": "jobd"},
+        {"ok": True, "version": 1, "pid": 4242},
+    ),
+    ids=(
+        "lost_status",
+        "status_not_ok",
+        "invalid_pid_zero",
+        "invalid_pid_init",
+        "wrong_protocol_version",
+        "wrong_service_name",
+        "unusable_start_identity",
+    ),
+)
+def test_registry_publication_validator_refuses_every_unprovable_status(tmp_path, status):
+    """No unprovable status may reach the durable record, and none may report success."""
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+
+    assert registry._publish_record(status) is False
+    assert registry.record_path.exists() is False
+    assert registry.recently_healthy() is False
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        {"ok": True, "version": 1, "pid": os.getpid(), "started_at": 2.0},
+        # statsd reports a nested `service` diagnostics object, not a service name.
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": {"pid": os.getpid(), "healthy": True}},
+        {"ok": True, "version": 1, "pid": os.getpid(), "service": "fixture"},
+    ),
+    ids=("plain", "statsd_shaped_service_object", "matching_service_name"),
+)
+def test_registry_publication_validator_accepts_a_proven_status(tmp_path, status):
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+
+    assert registry._publish_record(status) is True
+    record = registry._read_record()
+    assert record["pid"] == os.getpid()
+    assert record["service"] == "fixture"
+    assert registry._record_process_diagnostic(record).current is True
+
+
+def test_registry_writes_the_service_record_through_exactly_one_validator(tmp_path):
+    """Divergent copies of this write are the defect; keep one publication owner."""
+    source = (REPO_ROOT / "yolomux_lib" / "local_services" / "registry.py").read_text(encoding="utf-8")
+    call_lines = [
+        line.strip()
+        for line in source.splitlines()
+        if "_write_record(" in line and "def _write_record" not in line
+    ]
+    assert call_lines == ["self._write_record(record)"]
+    assert source.count("def _publish_record(") == 1
+
+
+def test_registry_reclaims_a_poisoned_invalid_pid_record_as_record_only_cleanup(tmp_path, monkeypatch):
+    """Already-poisoned 0.7.0 installs must recover without any process action.
+
+    A pid of 0 or 1 cannot name a service process, so discarding the record can
+    neither orphan nor kill anything: no signal, no adoption, no socket unlink.
+    """
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    registry._write_record({
+        **current_host_identity().process_record_fields(pid=0, start_identity=""),
+        "service": "fixture",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    })
+    registry.socket_path.parent.mkdir(parents=True, exist_ok=True)
+    registry.socket_path.touch()
+    signals = []
+    monkeypatch.setattr(registry_mod.os, "kill", lambda pid, signum: signals.append((pid, signum)))
+    monkeypatch.setattr(registry, "_request", lambda *args, **kwargs: {})
+
+    assert registry._remove_stale_record() is True
+    assert registry.record_path.exists() is False
+    assert registry.socket_path.exists() is True
+    assert signals == []
+
+    assert registry.ensure_started() is False
+    assert spawned == [True]
+    assert "blocked by remove_stale_record" not in registry.status()["failure_reason"]
+
+
+def test_registry_never_reclaims_a_genuinely_live_service_record(tmp_path, monkeypatch):
+    """Safety control: a current record must stay, whatever the reclaim path allows."""
+    now = [100.0]
+    spawned = []
+    registry = _publication_registry(tmp_path, clock=now, spawned=spawned)
+    record = {
+        **current_host_identity().process_record_fields(
+            pid=os.getpid(),
+            start_identity=registry_mod.process_start_identity(os.getpid()),
+        ),
+        "service": "fixture",
+        "socket": str(registry.socket_path),
+        "protocol_version": 1,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+    }
+    registry._write_record(record)
+    signals = []
+    monkeypatch.setattr(registry_mod.os, "kill", lambda pid, signum: signals.append((pid, signum)))
+
+    diagnostic = registry._record_process_diagnostic(record)
+    assert diagnostic.current is True
+    assert diagnostic.may_remove_stale_record is False
+    assert diagnostic.may_remove_unidentifiable_record is False
+    assert registry._remove_stale_record() is False
+    assert registry._read_record()["pid"] == os.getpid()
+    # Signal 0 is the liveness probe; nothing may deliver a real signal here.
+    assert [item for item in signals if item[1] != 0] == []
 
 
 def test_registry_does_not_retire_or_replace_a_newer_service(tmp_path, monkeypatch):
@@ -918,13 +1139,14 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
         LocalServiceSpec("statsd", "yolomux_lib.stats_current.service", "statsd.sock", 21),
         popen=lambda *args, **kwargs: spawned.append((args, kwargs)) or FakeProcess(),
     )
-    stale_pid, dead_launcher = 4242, 1111
+    stale_pid, dead_launcher, replacement_pid = 4242, 1111, 5252
     registry._write_record({
         **_process_record(stale_pid),
         "service": "statsd", "pgid": stale_pid,
         "socket": str(registry.socket_path), "launcher_pid": dead_launcher,
     })
-    alive = {stale_pid: True, dead_launcher: False}
+    # The replacement daemon is live: its record cannot be published otherwise.
+    alive = {stale_pid: True, dead_launcher: False, replacement_pid: True}
     actions = []
 
     def fake_request(method, payload=None, timeout=0.2):
@@ -933,7 +1155,7 @@ def test_registry_reclaims_newer_service_left_by_a_dead_web_launcher(tmp_path, m
             alive[stale_pid] = False
             return {"ok": True}
         if spawned:
-            return {"ok": True, "version": 21, "pid": 5252, "started_at": 1}
+            return {"ok": True, "version": 21, "pid": replacement_pid, "started_at": 1}
         return {"ok": False, "error_code": "upgrade_required", "version": 22, "pid": stale_pid}
 
     monkeypatch.setattr(registry, "_request", fake_request)

@@ -20,6 +20,8 @@ from ..infra.common import DEFAULT_UPLOAD_FILENAME_TEMPLATE
 from ..infra.common import UPDATE_NOTIFY_LEVELS
 from ..infra.common import UPLOAD_MAX_BYTES
 from ..infra.shared_config_lock import shared_config_lock
+from ..prune_policy import DEFAULT_PRUNE_LOCAL_TIME
+from ..prune_policy import PRUNE_LOCAL_TIME_CHOICES
 from .locales import LANGUAGE_PREFERENCES
 from .locales import LANGUAGE_VALUE_ALIASES
 from .locales import SYSTEM_LOCALE_PREFERENCE
@@ -221,6 +223,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     },
     "chat": {
         "retention_days": 7,
+    },
+    # YO!stats keeps two days of original facts on disk and shows 24 hours. The
+    # nightly cleanup that enforces that runs once at this local wall-clock time;
+    # a night the machine misses is caught up on the next run, never skipped.
+    "stats": {
+        "prune_at_local_time": DEFAULT_PRUNE_LOCAL_TIME,
     },
     # PRs to watch independently of any open session's branch. Each entry is "owner/repo#N" or
     # a full https://github.com/owner/repo/pull/N URL (normalized when polled).
@@ -436,6 +444,7 @@ SETTING_CHOICES: dict[tuple[str, str], set[str]] = {
     ("appearance", "terminal_theme"): {"dark", "light", "follow-app"},
     ("appearance", "tmux_status_bar"): {"off", "top", "bottom"},
     ("appearance", "date_time_hour_cycle"): {"24", "12"},
+    ("stats", "prune_at_local_time"): set(PRUNE_LOCAL_TIME_CHOICES),
     ("share", "view_fit"): {"cover", "contain"},
     ("appearance", "editor_color_scheme"): {
         "dark",
@@ -497,6 +506,7 @@ SETTING_PAYLOAD_CHOICE_ORDER: dict[tuple[str, str], tuple[str, ...]] = {
     ("summary", "backend"): ("codex", "disabled"),
     ("summary", "codex_model"): YOAGENT_CODEX_MODEL_CHOICES,
     ("summary", "codex_effort"): YOAGENT_CODEX_EFFORT_CHOICES,
+    ("stats", "prune_at_local_time"): PRUNE_LOCAL_TIME_CHOICES,
     ("summary", "codex_service_tier"): SUMMARY_CODEX_SERVICE_TIER_CHOICES,
     ("updates", "notify_level"): UPDATE_NOTIFY_LEVELS,
     ("yoagent", "claude_model"): YOAGENT_CLAUDE_MODEL_CHOICES,
@@ -538,6 +548,7 @@ SETTING_COMMENTS: dict[tuple[str, str], str] = {
     ("appearance", "terminal_theme"): "dark | light | follow-app. Terminal color theme. Defaults to follow-app (matches the global color theme); a light terminal raises xterm minimumContrastRatio so dark-tuned agent output stays legible.",
     ("appearance", "tmux_status_bar"): "off | top | bottom. Native tmux status bar position for new sessions. The YOLOmux Info Bar remains at the top of each pane.",
     ("appearance", "date_time_hour_cycle"): "24 | 12. Controls date/time displays in Finder/File Explorer and Differ. Default 24.",
+    ("stats", "prune_at_local_time"): "Local wall-clock time, on the half hour, for the once-a-night YO!stats cleanup. Default 02:30. YO!stats keeps 2 days of history and charts the last 24 hours; this is when the older facts are deleted. If the machine is asleep or the server is down at this time, the cleanup runs at the next opportunity instead of skipping the night.",
     ("appearance", "ui_font_size"): "Pixels, 6-20. Drives tab and compact UI text.",
     ("appearance", "terminal_font_size"): "Pixels, 6-28. Applied live to xterm.js terminals.",
     ("appearance", "editor_font_size"): "Pixels, 6-28. Applied live to editor and preview panes.",
@@ -698,6 +709,9 @@ SETTING_GUI_SECTIONS: dict[tuple[str, str], str] = {
     ("performance", "popover_hide_delay_ms"): "Performance",
     ("performance", "remote_resize_delay_ms"): "Performance",
     ("performance", "session_files_max_workers"): "Performance",
+    # The File menu already routes the YO!stats pane to the Performance section
+    # (FILE_MENU_PANEL_DEFINITIONS); its cleanup schedule belongs in the same place.
+    ("stats", "prune_at_local_time"): "Performance",
     ("github", "watched_prs"): "GitHub",
     ("performance", "auto_approve_interval_seconds"): "YOLO",
     ("yolo", "rule_file_path"): "YOLO",
@@ -1209,6 +1223,23 @@ def read_settings_file(path: Path = SETTINGS_PATH) -> tuple[dict[str, Any], str]
         return _read_settings_file_unlocked(path)
     with locked_settings_file(path):
         return _read_settings_file_unlocked(path)
+
+
+def stats_prune_local_time(path: Path = SETTINGS_PATH) -> str:
+    """Return the configured nightly YO!stats cleanup time for the statsd daemon.
+
+    statsd is a separate process from the server, so it reads the preference file
+    itself rather than being told. A missing or unreadable file resolves to the
+    default; it never resolves to "do not prune", because a cleanup that silently
+    stops is invisible until the disk fills.
+    """
+
+    if not path.exists():
+        return DEFAULT_PRUNE_LOCAL_TIME
+    settings, error = read_settings_file(path)
+    if error:
+        return DEFAULT_PRUNE_LOCAL_TIME
+    return str(settings["stats"]["prune_at_local_time"])
 
 
 def _settings_payload_unlocked(path: Path = SETTINGS_PATH) -> dict[str, Any]:

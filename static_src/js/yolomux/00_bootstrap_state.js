@@ -729,7 +729,7 @@ let fileExplorerSelectionLead = null;   // keyboard cursor (File-Explorer "lead"
 let fileExplorerViewSettings = readStoredFileExplorerViewSettings();
 let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
-const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'too_large' | 'error'
+const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'stale' | 'too_large' | 'error'
 const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
@@ -766,6 +766,9 @@ const fileQuickOpenState = {
   candidates: [],
   loading: false,
   indexWarming: false,
+  // The worst freshness record any answering search root returned, from the one derivation in
+  // fileIndexFreshnessFromPayload(). Null means every answering root vouched for its snapshot.
+  freshness: null,
   error: '',
   requestId: 0,
   debounce: null,

@@ -18,6 +18,10 @@ from typing import Any
 from typing import Mapping
 
 from .app import TmuxWebtermApp
+from .backend_health.observer import BACKEND_HEALTH_OBSERVE_SECONDS
+from .backend_health.observer import BackendHealthObserver
+from .backend_health.store import BackendHealthDiagnostic
+from .backend_health.store import BackendHealthStore
 from .infra.background_owner import background_owner_priority
 from .infra.background_owner import read_background_owner_debug_status
 from .infra.common import _YOLOMUX_ROOTS
@@ -430,6 +434,103 @@ def start_startup_overload_watchdog(port: int) -> threading.Thread | None:
     return thread
 
 
+BACKEND_HEALTH_OBSERVE_SECONDS_ENV = "YOLOMUX_BACKEND_HEALTH_OBSERVE_SECONDS"
+
+
+def backend_health_label_source(app: TmuxWebtermApp) -> Any:
+    """Return the callable that names a service the way the System row names it.
+
+    Deliberately NOT a label map of its own. `system_status_service` (`app.py:10664`) owns the
+    id -> capability-name table, `local_services_alert` already copies its output into the
+    persistent indicator, and a second table here is precisely the divergent copy that made
+    watchd show up as the raw id in one place and "File watching" in another. The call is a pure
+    function of the row it is handed; it reads no client and starts nothing.
+    """
+
+    def label(service: str) -> str:
+        row = app.system_status_service({"service": str(service)})
+        return str(row.get("label") or service)
+
+    return label
+
+
+def start_backend_health_observer(port: int, app: TmuxWebtermApp) -> BackendHealthObserver | None:
+    """Arm the continuous backend-health observer for this leased port.
+
+    Started here, after the port lease, because the retained history file is port-scoped and the
+    lease is what makes it single-writer. It deliberately does NOT depend on the background-owner
+    or stats-collector role, on an open System panel, or on any SSE subscriber: health has to be
+    observed while every diagnostics panel is hidden, which is the whole point of the milestone.
+    Set the env var to 0 to disable, matching the startup watchdog above.
+
+    `main()` calls this AFTER `start_background_owner()` returns, so the election is DECIDED --
+    either way -- and this process's statsd pin owner has been started, before the first cycle
+    reads a row. Armed first, the first cycle beat the election by 2.4ms and published a
+    `down` statsd that was simply not spawned yet; the measured ablation of both halves is in
+    `app.STATSD_ABSENT_WHILE_PIN_PENDING`.
+
+    The order is NOT conditional on the outcome. `start_background_owner()` returns True when
+    this process wins and False when it loses or is blocked by an unreachable owner, and the
+    observer is armed identically in every case, because a monitor that only runs on the
+    winning process would be a worse defect than the flash it was reordered for.
+    """
+
+    raw = os.environ.get(BACKEND_HEALTH_OBSERVE_SECONDS_ENV, "")
+    try:
+        seconds = float(raw) if raw else BACKEND_HEALTH_OBSERVE_SECONDS
+    except ValueError:
+        seconds = BACKEND_HEALTH_OBSERVE_SECONDS
+    if seconds <= 0:
+        return None
+
+    def report(diagnostic: BackendHealthDiagnostic) -> None:
+        # The store and the observer both deduplicate into episodes through the one shared
+        # `DiagnosticEpisodes`, so this is one row per episode and cannot become one row per
+        # observation interval. `detail_text` carries the cause when the producer caught an
+        # exception -- without it a monitor whose every cycle throws is a counter that only an
+        # authenticated status request, or a process dump, can read.
+        message = f"{diagnostic.code} ({diagnostic.detail_code or 'none'}) for port {diagnostic.port}"
+        if diagnostic.detail_text:
+            message = f"{message}\n{diagnostic.detail_text}"
+        emit_server_log(
+            "warning",
+            "backend-health",
+            message,
+            category="lifecycle",
+        )
+
+    store = BackendHealthStore(int(port), on_diagnostic=report)
+    # M8: the System projection reads this store's in-memory document instead of opening its
+    # file on the HTTP request thread. Attached before start() so the very first request
+    # after boot sees the loaded history rather than an unattached observer.
+    app.attach_backend_health_store(store)
+    observer = BackendHealthObserver(
+        row_producers=app.local_services_row_producers,
+        store=store,
+        publish=app.client_events.publish,
+        label_source=backend_health_label_source(app),
+        interval_seconds=seconds,
+        # The observer's supervisor boundary reports through the SAME reporter as the store's
+        # persistence diagnostics. Without this line a cycle that throws on every interval is
+        # recorded only in counters that `liveness()` reads, which is why the last one was found
+        # with a process dump instead of by reading the server log.
+        on_diagnostic=report,
+        # M9: the recovery planner exists and is tested, but an observer built without a control
+        # publishes `retry_blocked_no_control` for every verified-down service and never issues a
+        # retry -- which is what every live server did until this line. The app owns the one map
+        # from service id to that service's client `retry`; nothing here retries a service
+        # itself, and the control's whole public surface is `retry`, so the observer cannot
+        # reach a stop/restart/signal from the recovery path.
+        recovery_control=app.local_services_recovery_control(),
+    )
+    # The liveness reader is attached BEFORE start(), so the first request after boot sees a
+    # real "attached but no cycle completed yet" rather than "no observer at all" -- two facts
+    # the panel distinguishes.
+    app.attach_backend_health_observer(observer)
+    observer.start()
+    return observer
+
+
 def print_auth_setup_error() -> None:
     print(
         f"You need to set {AUTH_CONFIG_PATH} before using this program.",
@@ -519,6 +620,7 @@ def main() -> int:
 
     app: TmuxWebtermApp | None = None
     server: TmuxWebtermHTTPServer | None = None
+    backend_health: BackendHealthObserver | None = None
     try:
         app = TmuxWebtermApp(sessions, dangerously_yolo=args.dangerously_yolo)
 
@@ -528,11 +630,14 @@ def main() -> int:
                 return 2
             return print_transcripts(app)
 
+        # Unconditional and outcome-independent: the election is decided first only so the
+        # observer's first cycle cannot race it, never so the observer depends on winning it.
         app.start_background_owner(
             port=args.port,
             priority=background_owner_priority(args.port),
             managed_instance=is_managed_instance_port(args.port),
         )
+        backend_health = start_backend_health_observer(args.port, app)
         server = TmuxWebtermHTTPServer((args.host, args.port), app, tls_context=tls_context, dev=args.dev)
         if hasattr(app, "start_yoagent_backend_prewarm"):
             app.start_yoagent_backend_prewarm(reason="server_start")
@@ -570,19 +675,26 @@ def main() -> int:
         return 0
     finally:
         try:
-            if app is not None:
-                app.stop_auto_approve_all()
+            # Stopped FIRST, before any backend client is closed: a probe in flight against a
+            # client that is being torn down would report a failure the user never had, and the
+            # observer must not be the thing that keeps this process alive.
+            if backend_health is not None:
+                backend_health.stop()
         finally:
             try:
-                if server is not None:
-                    # server_close owns the client-event watcher and its RustNotify
-                    # thread. It must run even if an earlier app cleanup failed, or
-                    # CPython can finalize while that native thread is still alive.
-                    server.server_close()
-                elif app is not None:
-                    if hasattr(app, "background_owner"):
-                        app.background_owner.stop()
-                    if hasattr(app, "control_server"):
-                        app.control_server.stop()
+                if app is not None:
+                    app.stop_auto_approve_all()
             finally:
-                lease.release()
+                try:
+                    if server is not None:
+                        # server_close owns the client-event watcher and its RustNotify
+                        # thread. It must run even if an earlier app cleanup failed, or
+                        # CPython can finalize while that native thread is still alive.
+                        server.server_close()
+                    elif app is not None:
+                        if hasattr(app, "background_owner"):
+                            app.background_owner.stop()
+                        if hasattr(app, "control_server"):
+                            app.control_server.stop()
+                finally:
+                    lease.release()

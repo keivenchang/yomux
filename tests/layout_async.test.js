@@ -1365,6 +1365,175 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'error', error: 'walk failed'}), 'error');
   });
 
+  // M11: the live 7771 incident. A follower served a persisted snapshot whose `indexd` producer was
+  // dead; `ready_elsewhere` correctly went false, and the badge silently degraded to "building" -
+  // honest about readiness, silent about staleness. One derivation now answers both questions.
+  test('a snapshot whose producer is dead reads as stale, never as building or ready', () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const orphaned = {
+      state: 'follower',
+      ready: false,
+      ready_elsewhere: false,
+      freshness: 'orphaned',
+      freshness_reason: 'producer_not_running',
+      producer_state: 'not_running',
+      snapshot_age_seconds: 10800,
+      stale: true,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    };
+    assert.equal(api.fileIndexStatusFromPayloadForTest(orphaned), 'stale', 'a dead producer is stale, not building');
+    const derived = api.fileIndexFreshnessFromPayloadForTest(orphaned);
+    assert.equal(derived.stale, true, 'the one derivation reads the backend stale verdict');
+    assert.equal(derived.ageSeconds, 10800, 'the snapshot age survives the derivation for the age sentence');
+    assert.equal(
+      api.fileIndexFreshnessMessageForTest(derived),
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'the message states the age in words and names the dead producer',
+    );
+
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {...orphaned, generation: 11}), true);
+    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'stale', 'the one status map records stale for the Finder badge');
+    assert.equal(api.fileExplorerIndexBadgeText('/repo'), 'stale', 'the existing badge renderer says stale in words, not by colour');
+    assert.equal(api.fileExplorerIndexBadgeTitleForTest('/repo'), 'Index snapshot is out of date — newer files may be missing', 'the badge title explains the consequence');
+
+    const vouched = {
+      state: 'follower',
+      ready: false,
+      ready_elsewhere: true,
+      freshness: 'fresh',
+      freshness_reason: '',
+      producer_state: 'running',
+      snapshot_age_seconds: 12,
+      stale: false,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    };
+    assert.equal(api.fileIndexStatusFromPayloadForTest(vouched), 'ready', 'a vouched snapshot is still plainly ready');
+    assert.equal(api.fileIndexFreshnessMessageForTest(api.fileIndexFreshnessFromPayloadForTest(vouched)), '', 'a vouched snapshot says nothing at all');
+    assert.equal(api.fileIndexStatusFromPayloadForTest({state: 'building'}), 'building', 'a genuinely warming index keeps its building state');
+    assert.equal(
+      api.fileIndexStatusFromPayloadForTest({...orphaned, too_large: true}),
+      'too_large',
+      'partial coverage still wins, so the file-limit warning is not lost behind staleness',
+    );
+  });
+
+  // The user-visible half of the same incident: Quick Open kept answering from that snapshot and said
+  // nothing. Rows stay - stale beats nothing - but the palette now says how old they are and why.
+  test('quick open labels a stale snapshot inline, with its age, and keeps the rows usable', () => {
+    const staleApi = loadYolomux('', ['1']);
+    staleApi.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
+    staleApi.installCommandPaletteFixtureForTest();
+    staleApi.setCommandPaletteQueryForTest('2026.md');
+    const stale = staleApi.fileQuickOpenSearchPayloadResultForTest({
+      root: '/home/test/dynamo',
+      files: [{
+        name: '2026.md',
+        path: '/home/test/dynamo/notes/t5t/2026.md',
+        relative_path: 'notes/t5t/2026.md',
+        kind: 'file',
+      }],
+      index_state: 'follower-stale',
+      index_coverage: 'unverified',
+      freshness: 'orphaned',
+      freshness_reason: 'producer_not_running',
+      producer_state: 'not_running',
+      snapshot_age_seconds: 10800,
+      stale: true,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    }, '/home/test/dynamo');
+    assert.equal(stale.indexWarming, false, 'a stale snapshot is a completed answer, not a warming one');
+    assert.equal(stale.freshness.stale, true, 'quick open reads the same derivation as the Finder index badge');
+    staleApi.setFileQuickOpenCandidatesForTest(stale.root, stale.files);
+    staleApi.setFileQuickOpenFreshnessForTest(staleApi.fileQuickOpenWorstFreshnessForTest([stale.freshness]));
+    const staleText = staleApi.commandPaletteFreshnessTextForTest();
+    assert.equal(
+      staleText,
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'the palette states the age in plain words and names the reason',
+    );
+    assert.ok(/3 hours ago/.test(staleText), 'the age is words a non-engineer reads, never a raw snapshot_age_seconds');
+    const staleHtml = staleApi.commandPaletteStatusHtmlForTest();
+    assert.ok(staleHtml.includes('command-palette-freshness'), 'the sentence renders inline in the palette status row');
+    assert.ok(staleHtml.includes('3 hours ago'), 'the rendered row carries the age, not a bare colour change');
+    assert.ok(staleApi.commandPaletteStatusTextForTest().includes('3 hours ago'), 'the aria-label carries the same sentence for a screen reader');
+    assert.ok(
+      staleApi.fileQuickOpenItems().some(item => item.path === '/home/test/dynamo/notes/t5t/2026.md'),
+      'stale rows stay visible and openable - stale beats nothing',
+    );
+
+    // Reachable by a screen reader, and never by colour alone: the aria-live status row is visible,
+    // labelled with the same sentence, and marked by a class rather than a bare colour swap.
+    staleApi.renderCommandPaletteResultsForTest();
+    const staleStatus = staleApi.commandPaletteStateForTest().node.querySelector('.command-palette-status');
+    assert.equal(staleStatus.hidden, false, 'the stale sentence is actually shown, not computed and dropped');
+    assert.equal(
+      staleStatus.getAttribute('aria-label'),
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'the live region announces the whole sentence',
+    );
+    assert.ok(staleStatus.classList.names.has('stale'), 'the stale marker is a class, so the warning is not colour-only');
+    assert.ok(staleApi.commandPaletteStateForTest().node.querySelector('.command-palette-results').innerHTML.includes('2026.md'), 'the stale rows are still rendered beneath the warning');
+
+    const freshApi = loadYolomux('', ['1']);
+    freshApi.setFileExplorerIndexedDirsForTest(['/home/test/dynamo']);
+    freshApi.installCommandPaletteFixtureForTest();
+    freshApi.setCommandPaletteQueryForTest('2026.md');
+    const fresh = freshApi.fileQuickOpenSearchPayloadResultForTest({
+      root: '/home/test/dynamo',
+      files: [{name: '2026.md', path: '/home/test/dynamo/notes/t5t/2026.md', relative_path: 'notes/t5t/2026.md', kind: 'file'}],
+      index_state: 'follower-ready',
+      index_coverage: 'full',
+      freshness: 'fresh',
+      freshness_reason: '',
+      producer_state: 'running',
+      snapshot_age_seconds: 9,
+      stale: false,
+      refresh_requested: false,
+      refreshing_elsewhere: false,
+    }, '/home/test/dynamo');
+    freshApi.setFileQuickOpenCandidatesForTest(fresh.root, fresh.files);
+    freshApi.setFileQuickOpenFreshnessForTest(freshApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness]));
+    assert.equal(freshApi.commandPaletteFreshnessTextForTest(), '', 'a vouched snapshot adds no warning at all');
+    assert.equal(freshApi.commandPaletteStatusHtmlForTest(), '', 'a vouched snapshot leaves the palette status row hidden');
+
+    // Empty AND stale is a false negative, not a completed "No matches".
+    const emptyApi = loadYolomux('', ['1']);
+    emptyApi.installCommandPaletteFixtureForTest();
+    emptyApi.setCommandPaletteQueryForTest('2026.md');
+    emptyApi.setFileQuickOpenCandidatesForTest('/home/test/dynamo', []);
+    emptyApi.setFileQuickOpenFreshnessForTest(stale.freshness);
+    assert.equal(
+      emptyApi.commandPaletteEmptyTextForTest(),
+      'These results are from 3 hours ago and may be out of date. The file indexer is not running, so newer files are missing.',
+      'an empty stale search explains itself instead of claiming No matches',
+    );
+
+    // Several roots answer one blended list, so the worst freshness owns the sentence.
+    const unrecorded = {state: 'orphaned', reason: 'producer_epoch_unrecorded', producerState: 'unrecorded', ageSeconds: 90000, stale: true, refreshingElsewhere: false};
+    const behind = {state: 'stale', reason: 'producer_vouch_expired', producerState: 'running', ageSeconds: 600, stale: true, refreshingElsewhere: true};
+    assert.equal(staleApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness, behind, unrecorded]), unrecorded, 'an orphaned root outranks a merely lagging one');
+    assert.equal(staleApi.fileQuickOpenWorstFreshnessForTest([fresh.freshness]), null, 'all-vouched roots report no freshness problem');
+    assert.equal(
+      staleApi.fileIndexFreshnessMessageForTest(unrecorded),
+      'These results are from 1 day ago and may be out of date. No file indexer has claimed this folder, so newer files are missing.',
+      'an unrecorded producer is named as its own reason',
+    );
+    assert.equal(
+      staleApi.fileIndexFreshnessMessageForTest(behind),
+      'These results are from 10 minutes ago and may be out of date. The file indexer has not checked in recently, so newer files may be missing. A refresh is running now.',
+      'a lagging producer with an accepted refresh says both',
+    );
+    assert.equal(
+      staleApi.fileIndexFreshnessMessageForTest({...unrecorded, ageSeconds: null}),
+      'These results come from an older snapshot and may be out of date. No file indexer has claimed this folder, so newer files are missing.',
+      'an unknown age degrades to words, never to a blank or a raw number',
+    );
+  });
+
   test('search-index completion pushes its lifecycle snapshot without rereading the root', () => {
     const api = loadYolomux();
     const requests = [];
@@ -3050,10 +3219,126 @@ async function runLayoutAsyncSuite() {
     assert.ok(source.includes('function fileExplorerFsBatchClientMetadata()'), 'batch requests carry an opaque client revision and scope');
     assert.ok(source.includes('watch_token: watchToken.slice(0, 128)'), 'batch product identity follows the existing filesystem watch token so ready bytes retire after invalidation');
     assert.ok(source.includes('trigger_counts: item.triggerCounts') && source.includes('...fileExplorerFsBatchClientMetadata()'), 'each batch item carries bounded trigger counts while the request carries browser scope');
-    assert.ok(source.includes('fileExplorerFsBatchTriggerCountLimit = 64'), 'coalesced trigger counts have a fixed bounded ceiling');
+    // Both /api/fs/batch bounds are the server's, and it states them in the boot payload. A literal
+    // here would be a copy free to drift from filesystem.MAX_BATCH_REQUESTS, which is what let the
+    // flush post a body the server refuses.
+    assert.ok(source.includes("const fileExplorerFsBatchLimits = (typeof bootstrap === 'object' && bootstrap?.filesystemBatchLimits) || {};"), 'the batch bounds are read from the boot payload the server writes');
+    assert.ok(source.includes('const fileExplorerFsBatchRequestLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.maxRequests, 1);'), 'the flush splits at the request bound the server states');
+    assert.ok(source.includes('const fileExplorerFsBatchTriggerCountLimit = fileExplorerServerStatedLimit(fileExplorerFsBatchLimits.triggerCountLimit, 1);'), 'coalesced trigger counts are capped at the ceiling the server states');
+    assert.equal(/(?:fileExplorerFsBatchRequestLimit|fileExplorerFsBatchTriggerCountLimit)\s*=\s*\d/.test(source), false, 'neither batch bound may be a literal in the bundle');
     assert.ok(/catch \(error\)[\s\S]{0,260}trigger: 'watch-diff-fallback'/.test(source), 'watch-diff failure repairs remain attributable');
     assert.ok(source.includes("trigger: 'deferred-interaction'"), 'the deferred interaction repair is distinguishable from the watch fallback');
     assert.ok(actionsSource.includes('async function refreshFileExplorerIfChanged(options = {})') && actionsSource.includes('trigger: options.trigger'), 'the fallback owner forwards its trigger to the shared batch request');
+  });
+
+  await testAsync('a mass re-list is split at the bound the server states instead of posted whole and refused', async () => {
+    // Keiven's Differ pointed at a worktree deleted the day before, which re-lists every open
+    // directory at once. The flush drained the whole queue into ONE body, and the server refuses a
+    // body above filesystem.MAX_BATCH_REQUESTS with a 400 invalid_request, so the entire operation
+    // failed rather than being split. The stub refuses exactly the way the server does.
+    const api = loadYolomux();
+    const bodies = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      bodies.push(requests);
+      if (requests.length > 64) {
+        return Promise.resolve(jsonResponse({
+          state: 'failed',
+          request: {id: 'r-too-many'},
+          error: {code: 'invalid_request', message: {key: 'request.error.tooManyItems', fallback: 'too many items', params: {field: 'requests', max: 64}}},
+        }, 400));
+      }
+      return Promise.resolve(jsonResponse({
+        responses: requests.map(request => ({
+          id: request.id,
+          ok: true,
+          status: 200,
+          payload: {path: request.path, entries: [{name: `${request.id}.txt`, kind: 'file'}]},
+        })),
+      }));
+    });
+
+    const paths = Array.from({length: 130}, (_, index) => `/home/test/mass/${index}`);
+    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const flush = await api.flushFileExplorerFsBatchForTest();
+    assert.equal(flush.ok, true, 'a 130-path re-list succeeds instead of being refused');
+    assert.deepStrictEqual(bodies.map(requests => requests.length), [64, 64, 2], 'the queue is split into consecutive slices no larger than the stated bound');
+    assert.equal(bodies.some(requests => requests.length > 64), false, 'no body reaches the server above the bound it refuses');
+    assert.deepStrictEqual(bodies.flat().map(request => request.path), paths, 'chunking preserves queue order across chunk boundaries');
+    const entries = await Promise.all(listings);
+    assert.deepStrictEqual(
+      entries.map(entry => (Array.isArray(entry) ? entry.map(row => row.name) : entry)),
+      bodies.flat().map(request => [`${request.id}.txt`]),
+      'every queued path still gets its own per-item result',
+    );
+  });
+
+  await testAsync('a failing filesystem batch chunk settles only its own items and never discards its siblings', async () => {
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {filesystemBatchLimits: {maxRequests: 2, triggerCountLimit: 64}},
+    });
+    const posts = [];
+    const singles = [];
+    api.setFetchForTest((url, options = {}) => {
+      const text = String(url);
+      if (text.startsWith('/api/fs/batch')) {
+        const requests = JSON.parse(options.body || '{}').requests || [];
+        posts.push(requests.map(request => request.path));
+        // Only the FIRST chunk fails, at the transport, which is the case that used to be able to
+        // take a whole flush with it.
+        if (posts.length === 1) return Promise.reject(new Error('chunk transport failed'));
+        return Promise.resolve(jsonResponse({
+          responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: [{name: 'ok.txt', kind: 'file'}]}})),
+        }));
+      }
+      // The failed chunk falls back to one request per item; fail those too, so the two items it
+      // owns end in their error state and the assertion below is about the siblings only.
+      singles.push(text);
+      return Promise.reject(new Error('single-item fallback failed'));
+    });
+
+    const paths = ['/home/test/chunk/a', '/home/test/chunk/b', '/home/test/chunk/c', '/home/test/chunk/d', '/home/test/chunk/e'];
+    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    const flush = await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(posts, [
+      ['/home/test/chunk/a', '/home/test/chunk/b'],
+      ['/home/test/chunk/c', '/home/test/chunk/d'],
+      ['/home/test/chunk/e'],
+    ], 'the chunks after the failed one are still posted, in queue order');
+    assert.equal(flush.chunks, 3, 'the stated bound of 2 splits five queued paths into three chunks');
+    assert.equal(flush.ok, false, 'the flush reports the failed chunk rather than hiding it');
+    assert.equal(singles.length, 2, 'only the failed chunk falls back to per-item requests');
+    const entries = await Promise.all(listings);
+    assert.deepStrictEqual(
+      entries.map(entry => (Array.isArray(entry) ? entry.map(row => row.name) : entry)),
+      [null, null, ['ok.txt'], ['ok.txt'], ['ok.txt']],
+      'the failed chunk surfaces its own error while every sibling item still gets its result',
+    );
+  });
+
+  await testAsync('a boot payload that states no filesystem batch bound posts one item per request', async () => {
+    // Fail closed: a server that did not state a bound is one this bundle cannot promise a bounded
+    // body to, so it sends the only size no server can refuse for being too large.
+    const api = loadYolomux('', ['1', '2', '3', '4', '5', '6'], 'http:', 'Linux x86_64', 'admin', {
+      bootstrapOverrides: {filesystemBatchLimits: null},
+    });
+    const bodies = [];
+    api.setFetchForTest((url, options = {}) => {
+      assert.equal(String(url), '/api/fs/batch');
+      const requests = JSON.parse(options.body || '{}').requests || [];
+      bodies.push(requests.map(request => request.path));
+      return Promise.resolve(jsonResponse({
+        responses: requests.map(request => ({id: request.id, ok: true, status: 200, payload: {path: request.path, entries: [{name: 'ok.txt', kind: 'file'}]}})),
+      }));
+    });
+
+    const paths = ['/home/test/unstated/a', '/home/test/unstated/b', '/home/test/unstated/c'];
+    const listings = paths.map(path => api.fetchDirectoryForTest(path, {fresh: true}));
+    await api.flushFileExplorerFsBatchForTest();
+    assert.deepStrictEqual(bodies, [[paths[0]], [paths[1]], [paths[2]]], 'an unstated bound sends one item per request rather than a remembered 64');
+    const entries = await Promise.all(listings);
+    assert.deepStrictEqual(entries.map(entry => entry.map(row => row.name)), [['ok.txt'], ['ok.txt'], ['ok.txt']], 'every item still settles');
   });
 
   test('compact watchd push revisions cannot overwrite the watch-diff cursor', () => {

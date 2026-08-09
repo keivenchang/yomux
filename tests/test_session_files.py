@@ -1,3 +1,5 @@
+import copy as copy_module
+import dataclasses
 import json
 import os
 import time
@@ -38,6 +40,7 @@ from tests.browser_helpers.browser_layout import stop_browser_share_server
 from yolomux_lib.local_services.registry import process_state
 from yolomux_lib.observability.queued_delivery import QueuedDeliveryLedger
 from yolomux_lib.server_logs import SERVER_LOGS
+from yolomux_lib.filesystem import exclusions
 
 
 def agent(kind, transcript, cwd, session="s1"):
@@ -766,11 +769,21 @@ def test_session_files_public_deleted_root_cache_keeps_jobd_serving(monkeypatch,
             assert response.status == HTTPStatus.ACCEPTED
             terminal_status, terminal = operation_terminal_response(server, receipt["operation"]["status_url"])
             assert terminal_status == HTTPStatus.OK
-            assert any(
-                warning.get("key") == "common.pathNotFound"
-                and warning.get("params", {}).get("reason_code") == "root_gone"
-                for warning in terminal["data"]["warnings"]
-            )
+            data = terminal["data"]
+            # A retired worktree is Differ DATA, not a diagnostic. Assert the positive form: any
+            # future change routing this back to a warning, an error or a log record goes red here,
+            # on the real receipt -> operation -> terminal path rather than on a direct call.
+            assert data["warnings"] == [], data["warnings"]
+            assert data["errors"] == [], data["errors"]
+            assert data["files"] == [], data["files"]
+            assert len(data["repos"]) == 1, data["repos"]
+            gone = data["repos"][0]
+            assert gone["repo"] == str(retired_root)
+            assert gone["missing"] is True
+            assert gone["touched_count"] == 1
+            assert gone["from_ref"] == ""
+            assert gone["to_ref"] == ""
+            assert gone["error"] == ""
         pid = int(webapp.job_client.registry._read_record()["pid"])
         assert process_state(pid) != "Z"
         assert webapp.job_client.socket_path.exists()
@@ -3691,3 +3704,882 @@ def test_session_files_view_coalesce_identity_is_stable_and_source_scoped(tmp_pa
     finally:
         webapp_a.control_server.stop()
         webapp_b.control_server.stop()
+
+
+# --- Differ: a deleted file is diff content; a retired worktree is one fact ----------------------
+# Keiven opened Differ on `yo7771` and got ~900 identical `path not found` rows for a /tmp worktree
+# deleted the day before, which pushed the five repos that still existed off the pane.  The single
+# distinction these tests pin is `session_repository_resolution`: an EXISTING repo holding a missing
+# leaf keeps that leaf as an ordinary deleted child, while a root that is entirely gone collapses to
+# one entry that states its own count.
+
+def _claude_transcript_touching(path, targets):
+    """Write a Claude transcript whose Edit calls name ``targets``."""
+
+    path.write_text("".join(
+        json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {"file_path": str(target)}}]},
+        }) + "\n"
+        for target in targets
+    ), encoding="utf-8")
+    return path
+
+
+def _differ_payload(tmp_path, cwd, targets, session="s1"):
+    transcript = _claude_transcript_touching(tmp_path / f"{session}-transcript.jsonl", targets)
+    info = SessionInfo(session=session, panes=[], selected_pane=None, agents=[agent("claude", transcript, cwd, session=session)])
+    return session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+
+def _missing_repo_payloads(payload):
+    return [repo for repo in payload["repos"] if repo.get("missing") is True]
+
+
+def test_deleted_file_in_a_live_repo_stays_a_visible_deleted_child(tmp_path):
+    """An existing repo holding a missing file lists that file as a deleted child, not a warning."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "kept.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "gone.py").write_text("y = 2\n", encoding="utf-8")
+    git(repo, "add", "kept.py", "gone.py")
+    git(repo, "commit", "-m", "seed")
+    (repo / "gone.py").unlink()
+
+    payload = _differ_payload(tmp_path, repo, [repo / "gone.py"])
+
+    rows = {entry["path"]: entry for entry in payload["files"]}
+    assert "gone.py" in rows, payload["files"]
+    assert rows["gone.py"]["status"] == "D"
+    assert rows["gone.py"]["repo"] == str(repo)
+    assert rows["gone.py"]["missing"] is True
+    assert _missing_repo_payloads(payload) == []
+
+
+def test_every_deleted_file_in_a_live_repo_stays_visible(tmp_path):
+    """Many deletions do not collapse: the repo exists, so each deleted file is its own row."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    deleted = [repo / "src" / f"gone_{index}.py" for index in range(12)]
+    (repo / "src").mkdir()
+    for path in deleted:
+        path.write_text("x = 1\n", encoding="utf-8")
+    (repo / "live.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "seed")
+    for path in deleted:
+        path.unlink()
+    (repo / "live.py").write_text("x = 2\n", encoding="utf-8")
+
+    payload = _differ_payload(tmp_path, repo, [*deleted, repo / "live.py"])
+
+    statuses = {entry["path"]: entry["status"] for entry in payload["files"]}
+    assert sorted(path for path, status in statuses.items() if status == "D") == sorted(
+        f"src/gone_{index}.py" for index in range(12)
+    ), statuses
+    assert statuses["live.py"] == "M"
+    assert _missing_repo_payloads(payload) == []
+
+
+def test_absent_worktree_collapses_to_one_root_entry(tmp_path):
+    """A root that no longer exists reads as ONE entry carrying its count, not one row per file."""
+
+    retired = tmp_path / "yo7771-browser-p0-candidate"
+    (retired / "tests").mkdir(parents=True)
+    (retired / "yolomux_lib").mkdir()
+    remembered = [retired / "tests" / f"test_{index}.py" for index in range(120)]
+    remembered.append(retired / "yolomux_lib" / "app.py")
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", remembered)
+    assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
+    for path in remembered:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x = 1\n", encoding="utf-8")
+    for path in remembered:
+        path.unlink()
+    (retired / "tests").rmdir()
+    (retired / "yolomux_lib").rmdir()
+    retired.rmdir()
+
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, retired)])
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert payload["files"] == []
+    missing = _missing_repo_payloads(payload)
+    assert len(missing) == 1, payload["repos"]
+    assert missing[0]["repo"] == str(retired)
+    assert missing[0]["touched_count"] == len(remembered)
+    assert payload["warnings"] == []
+
+
+def test_absent_root_does_not_hide_the_repos_that_still_exist(tmp_path):
+    """One retired worktree may not cost the user the repos they opened Differ to see."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "live.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "live.py")
+    git(repo, "commit", "-m", "seed")
+    (repo / "live.py").write_text("x = 2\n", encoding="utf-8")
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    remembered = [retired / f"gone_{index}.py" for index in range(40)]
+    live_transcript = _claude_transcript_touching(tmp_path / "live.jsonl", [repo / "live.py"])
+    retired_transcript = _claude_transcript_touching(tmp_path / "retired.jsonl", remembered)
+    assert str(remembered[0]) in session_files.scan_claude_transcript(retired_transcript, str(retired))
+    retired.rmdir()
+
+    info = SessionInfo(
+        session="s1",
+        panes=[],
+        selected_pane=None,
+        agents=[agent("claude", live_transcript, repo), agent("claude", retired_transcript, retired)],
+    )
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert [entry["path"] for entry in payload["files"]] == ["live.py"]
+    assert [item["repo"] for item in payload["repos"] if not item.get("missing")] == [str(repo)]
+    missing = _missing_repo_payloads(payload)
+    assert len(missing) == 1, payload["repos"]
+    assert missing[0]["repo"] == str(retired)
+    assert missing[0]["touched_count"] == len(remembered)
+
+
+def test_unexpanded_template_paths_are_refused_at_the_recording_boundary(tmp_path):
+    """`${d}` and `$(...)` name no file, so they never become a change path."""
+
+    assert session_files.resolved_change_path("${d}/reply-prose.out", str(tmp_path)) is None
+    assert session_files.resolved_change_path("$(pwd)/tmux.log", str(tmp_path)) is None
+    assert session_files.resolved_change_path(f"{tmp_path}/${{d}}/tell-goal.out", None) is None
+    assert session_files.resolved_change_path("reply-prose.out", str(tmp_path)) == tmp_path / "reply-prose.out"
+
+
+def test_unexpanded_template_path_produces_no_repo_or_file_row(tmp_path):
+    """The transcript path Keiven saw yields no row and no invented absent root."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "live.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "live.py")
+    git(repo, "commit", "-m", "seed")
+    (repo / "live.py").write_text("x = 2\n", encoding="utf-8")
+
+    payload = _differ_payload(tmp_path, repo, ["${d}/reply-prose.out", "${d}/tmux.log", repo / "live.py"])
+
+    assert [entry["path"] for entry in payload["files"]] == ["live.py"]
+    assert all("${d}" not in entry["abs_path"] for entry in payload["files"]), payload["files"]
+    assert _missing_repo_payloads(payload) == []
+
+
+def test_file_deleted_between_transcript_scan_and_snapshot_is_a_deleted_child(tmp_path):
+    """A file that disappears after it was remembered stays attached to its still-existing repo."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "seed.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "seed.py")
+    git(repo, "commit", "-m", "seed")
+    scratch = repo / "scratch.py"
+    scratch.write_text("x = 1\n", encoding="utf-8")
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", [scratch])
+    assert str(scratch) in session_files.scan_claude_transcript(transcript, str(repo))
+    scratch.unlink()
+
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, repo)])
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    rows = {entry["path"]: entry for entry in payload["files"]}
+    assert rows["scratch.py"]["repo"] == str(repo)
+    assert rows["scratch.py"]["missing"] is True
+    assert _missing_repo_payloads(payload) == []
+
+
+def test_absent_root_counts_do_not_survive_repeated_or_concurrent_builds(tmp_path):
+    """Absent-root counting is per-build state: repeats do not accumulate and peers do not mix."""
+
+    def retired_case(name, count):
+        retired = tmp_path / name
+        retired.mkdir()
+        remembered = [retired / f"gone_{index}.py" for index in range(count)]
+        transcript = _claude_transcript_touching(tmp_path / f"{name}.jsonl", remembered)
+        assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
+        retired.rmdir()
+        return retired, SessionInfo(
+            session=name,
+            panes=[],
+            selected_pane=None,
+            agents=[agent("claude", transcript, retired, session=name)],
+        )
+
+    retired_a, info_a = retired_case("alpha", 7)
+    retired_b, info_b = retired_case("beta", 3)
+
+    def build(info):
+        return session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    repeats = [_missing_repo_payloads(build(info_a)) for _ in range(3)]
+    assert [rows[0]["touched_count"] for rows in repeats] == [7, 7, 7], repeats
+
+    results = {}
+    threads = [
+        threading_module.Thread(target=lambda name=name, info=info: results.__setitem__(name, build(info)))
+        for name, info in (("alpha", info_a), ("beta", info_b))
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert [row["repo"] for row in _missing_repo_payloads(results["alpha"])] == [str(retired_a)]
+    assert [row["repo"] for row in _missing_repo_payloads(results["beta"])] == [str(retired_b)]
+    assert _missing_repo_payloads(results["alpha"])[0]["touched_count"] == 7
+    assert _missing_repo_payloads(results["beta"])[0]["touched_count"] == 3
+
+
+def test_deleted_nested_directory_does_not_retire_its_live_repository(tmp_path):
+    """A repo stays a repo when a nested directory is deleted along with the file inside it.
+
+    `git_root_for_path` probes only the missing file's DIRECT parent. When `nested/` went with
+    `nested/deep.txt`, that probe failed and the classifier declared the whole repository absent,
+    collapsing a live repo -- and every real change in it -- into one gone row.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    nested = repo / "nested"
+    nested.mkdir()
+    (nested / "deep.txt").write_text("x\n", encoding="utf-8")
+    (repo / "live.py").write_text("x = 1\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-m", "seed")
+    (repo / "live.py").write_text("x = 2\n", encoding="utf-8")
+    (nested / "deep.txt").unlink()
+    nested.rmdir()
+
+    payload = _differ_payload(tmp_path, repo, [nested / "deep.txt", repo / "live.py"])
+
+    assert session_files.session_repository_resolution(nested / "deep.txt", [str(repo)]) == (str(repo), "")
+    rows = {entry["path"]: entry for entry in payload["files"]}
+    assert rows["nested/deep.txt"]["repo"] == str(repo)
+    assert rows["nested/deep.txt"]["status"] == "D"
+    assert rows["live.py"]["status"] == "M"
+    assert _missing_repo_payloads(payload) == []
+
+
+def test_duplicate_session_candidates_do_not_inflate_the_gone_repo_count(tmp_path):
+    """The same cwd arrives through the agent, the selected pane and the pane list exactly once."""
+
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    remembered = [retired / f"gone_{index}.py" for index in range(5)]
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", remembered)
+    assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
+    retired.rmdir()
+    pane = PaneInfo(
+        session="s1", window="0", pane="0", pane_id="%1", target="s1:0.0",
+        current_path=str(retired), command="zsh", active=True, window_active=True, title="", pid=11,
+    )
+    info = SessionInfo(
+        session="s1",
+        panes=[pane, pane],
+        selected_pane=pane,
+        agents=[agent("claude", transcript, retired)],
+    )
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    missing = _missing_repo_payloads(payload)
+    assert len(missing) == 1, payload["repos"]
+    assert missing[0]["repo"] == str(retired)
+    assert missing[0]["touched_count"] == len(remembered)
+
+
+def test_missing_file_outside_any_repo_stays_one_deleted_file(tmp_path):
+    """A remembered path under no repository is one deleted file, not proof of a retired repo.
+
+    The session ALSO has a genuinely retired root, and the orphan lives outside it. Without that,
+    there is no absent candidate for the orphan to be misattributed to, and this test cannot
+    detect a containment check that stopped working.
+    """
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    orphan = scratch / "notes.txt"
+    orphan.write_text("x\n", encoding="utf-8")
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    retired_file = retired / "gone.py"
+    orphan_transcript = _claude_transcript_touching(tmp_path / "orphan.jsonl", [orphan])
+    retired_transcript = _claude_transcript_touching(tmp_path / "retired.jsonl", [retired_file])
+    assert str(orphan) in session_files.scan_claude_transcript(orphan_transcript, str(scratch))
+    assert str(retired_file) in session_files.scan_claude_transcript(retired_transcript, str(retired))
+    orphan.unlink()
+    retired.rmdir()
+
+    info = SessionInfo(
+        session="s1",
+        panes=[],
+        selected_pane=None,
+        agents=[agent("claude", orphan_transcript, scratch), agent("claude", retired_transcript, retired)],
+    )
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    rows = {entry["abs_path"]: entry for entry in payload["files"]}
+    assert str(orphan) in rows, payload["files"]
+    assert rows[str(orphan)]["missing"] is True
+    assert rows[str(orphan)]["repo"] == ""
+    # The retired root exists as its own row and must NOT have absorbed the unrelated orphan.
+    missing = _missing_repo_payloads(payload)
+    assert [row["repo"] for row in missing] == [str(retired)], payload["repos"]
+    assert missing[0]["touched_count"] == 1, missing
+
+
+def test_missing_repo_row_carries_no_comparison_inputs_and_no_error(tmp_path):
+    """A gone repo is one plain row: nothing to compare, nothing to open, and not a failure."""
+
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    remembered = [retired / f"gone_{index}.py" for index in range(3)]
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", remembered)
+    assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
+    retired.rmdir()
+
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, retired)])
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    missing = _missing_repo_payloads(payload)
+    assert len(missing) == 1, payload["repos"]
+    assert missing[0]["from_ref"] == ""
+    assert missing[0]["to_ref"] == ""
+    assert missing[0]["error"] == ""
+    assert missing[0]["count"] == 0
+    assert "error_message" not in missing[0]
+    assert payload["errors"] == []
+    assert payload["warnings"] == []
+    assert payload["files"] == []
+
+
+def test_scope_all_merge_keeps_a_gone_repo_gone(tmp_path):
+    """The cross-session merge must not turn a retired root back into an ordinary empty repo."""
+
+    retired = tmp_path / "retired"
+    retired.mkdir()
+    remembered = [retired / "a.py", retired / "b.py"]
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", remembered)
+    assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
+    retired.rmdir()
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, retired)])
+
+    payload, status = session_files.session_files_payload(None, {"s1": info}, hours=24)
+
+    assert status == HTTPStatus.OK
+    missing = _missing_repo_payloads(payload)
+    assert len(missing) == 1, payload["repos"]
+    assert missing[0]["repo"] == str(retired)
+    assert missing[0]["touched_count"] == len(remembered)
+    assert missing[0]["from_ref"] == ""
+    assert missing[0]["to_ref"] == ""
+    assert payload["errors"] == []
+    assert payload["warnings"] == []
+
+
+def _prepared_repo_payload(session, repo, *, missing, count, touched_count):
+    return {
+        "session": session, "hours": 24.0, "files": [], "refs_by_repo": {},
+        "from_ref": "default", "to_ref": "base", "errors": [], "warnings": [],
+        "repos": [{
+            "repo": str(repo), "missing": missing, "count": count, "touched_count": touched_count,
+            "added": 0, "removed": 0,
+            "from_ref": "" if missing else "default", "to_ref": "" if missing else "base",
+            "error": "", "branch": "" if missing else "master",
+        }],
+    }
+
+
+@pytest.mark.parametrize("order", [("stale", "live"), ("live", "stale")])
+def test_scope_all_merge_lets_live_evidence_beat_a_missing_contributor(monkeypatch, tmp_path, order):
+    """The REAL all-sessions aggregator must let a live contributor outrank a missing one.
+
+    Both orders run: a merge rule that depends on which session is visited first is its own bug.
+    Marking the shared key missing would hide the live session's real changes, which is the more
+    dangerous direction of this defect.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    prepared = {
+        "stale": _prepared_repo_payload("stale", repo, missing=True, count=0, touched_count=2),
+        "live": _prepared_repo_payload("live", repo, missing=False, count=3, touched_count=5),
+    }
+    infos = {
+        name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[])
+        for name in order
+    }
+    monkeypatch.setattr(
+        session_files, "session_files_payload_for_info",
+        lambda info, *args, **kwargs: copy_module.deepcopy(prepared[info.session]),
+    )
+
+    payload, status = session_files.session_files_payload(None, infos, hours=24)
+
+    assert status == HTTPStatus.OK
+    assert len(payload["repos"]) == 1, payload["repos"]
+    merged = payload["repos"][0]
+    assert merged["missing"] is False, merged
+    assert merged["from_ref"] == "default" and merged["to_ref"] == "base", merged
+    # Each contributor is counted exactly once.
+    assert merged["count"] == 3
+    assert merged["touched_count"] == 7
+
+
+@pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
+def test_scope_all_merge_keeps_an_all_missing_key_missing(monkeypatch, tmp_path, order):
+    """When every contributing row is missing, the merged row stays missing in either order."""
+
+    repo = tmp_path / "retired"
+    prepared = {
+        "a": _prepared_repo_payload("a", repo, missing=True, count=0, touched_count=2),
+        "b": _prepared_repo_payload("b", repo, missing=True, count=0, touched_count=4),
+    }
+    infos = {name: SessionInfo(session=name, panes=[], selected_pane=None, agents=[]) for name in order}
+    monkeypatch.setattr(
+        session_files, "session_files_payload_for_info",
+        lambda info, *args, **kwargs: copy_module.deepcopy(prepared[info.session]),
+    )
+
+    payload, status = session_files.session_files_payload(None, infos, hours=24)
+
+    assert status == HTTPStatus.OK
+    merged = payload["repos"][0]
+    assert merged["missing"] is True, merged
+    assert merged["from_ref"] == "" and merged["to_ref"] == ""
+    assert merged["touched_count"] == 6
+
+
+def test_transcript_paths_route_through_the_one_exclusion_owner(tmp_path):
+    """Version-control metadata never reaches Differ, and Differ keeps its own uploads rows.
+
+    `path_exclusion_verdict` is the repository's single exclusion owner and its docstring is
+    explicit that there is no exception for Git control files. Differ deliberately stops at that
+    owner's unconditional floor: the Finder Quick Open policy layered on top of it also excludes
+    `.uploads`, `build`, `dist`, `target` and `venv`, and hiding an edit an agent really made is
+    the opposite of what this view is for.
+    """
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "src").mkdir()
+    (repo / ".uploads").mkdir()
+    touched_paths = [
+        repo / ".git" / "yolomux-probe.txt",   # harmless probe, never a real git control file
+        repo / ".cache" / "data",
+        repo / "node_modules" / "pkg.js",
+        repo / "__pycache__" / "x.pyc",
+        repo / "dist" / "bundle.js",
+        repo / ".uploads" / "shot.png",
+        repo / "src" / "live.py",
+    ]
+    for path in touched_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", touched_paths)
+    assert str(repo / ".git" / "yolomux-probe.txt") in session_files.scan_claude_transcript(transcript, str(repo))
+
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, repo)])
+    touched = session_files.touched_files_for_info(info, session_files.session_files_cutoff(24, time.time()))
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    # Assert ABSENCE explicitly on BOTH doors. A constructed-but-unasserted case is a check that
+    # cannot fail: these paths reach Differ through the transcript scan AND through `git status`
+    # as untracked rows, so each is checked in `touched` and in the rendered payload.
+    rendered = sorted(entry["path"] for entry in payload["files"])
+    for excluded in (".git/yolomux-probe.txt", ".cache/data", "node_modules/pkg.js", "__pycache__/x.pyc", "dist/bundle.js"):
+        assert not any(path.endswith("/" + excluded) for path in touched), (excluded, sorted(touched))
+        assert excluded not in rendered, (excluded, rendered)
+    # `.uploads` is Differ's one documented exception: it renders uploaded files on purpose.
+    assert ".uploads/shot.png" in rendered, rendered
+    assert "src/live.py" in rendered, rendered
+    assert _missing_repo_payloads(payload) == []
+
+
+def test_deleted_nested_agent_cwd_yields_one_collapsed_root_not_a_crash(tmp_path):
+    """A retired worktree whose nested agent cwd also vanished is one row, and never an exception.
+
+    `historical_codex_candidate_cwds` called `git_root_for_path` directly instead of the safe
+    resolution owner, so when a candidate cwd AND its parent were both gone the 404 escaped and
+    killed the whole payload before classification ran -- no rows at all, not even wrong ones.
+    Nested absent candidates are also ONE retired worktree, not one gone row per level.
+    """
+
+    retired = tmp_path / "retired"
+    (retired / "src").mkdir(parents=True)
+    remembered = [retired / "root.py", retired / "src" / "child.py"]
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", remembered)
+    assert str(remembered[0]) in session_files.scan_claude_transcript(transcript, str(retired))
+    (retired / "src").rmdir()
+    retired.rmdir()
+    info = SessionInfo(
+        session="s1",
+        panes=[],
+        selected_pane=None,
+        agents=[agent("claude", transcript, retired), agent("claude", transcript, retired / "src")],
+    )
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time())
+
+    assert payload["files"] == []
+    assert payload["warnings"] == []
+    assert payload["errors"] == []
+    missing = _missing_repo_payloads(payload)
+    assert [row["repo"] for row in missing] == [str(retired)], payload["repos"]
+    assert missing[0]["touched_count"] == len(remembered)
+
+
+def test_session_files_disk_cache_version_rejects_prior_records_and_round_trips_missing(monkeypatch, tmp_path):
+    """The record version gate must reject the old shape AND admit the new one unchanged.
+
+    `repos[].missing` changed what a serialized session-files record MEANS. A record written
+    before that could still satisfy the signature check, so a retired worktree would keep
+    rendering the pre-fix way for up to a week after the fix shipped -- correct code, stale
+    screen. A gate that never rejects is the same as no gate, so both directions are asserted.
+    """
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    webapp = TmuxWebtermApp([])
+    try:
+        key = ("payload", app_module.SESSION_FILES_CACHE_KEY_VERSION, "s1", 24.0, "", "", "", (), ())
+        payload = {
+            "session": "s1",
+            "files": [],
+            "repos": [{"repo": "/tmp/retired", "missing": True, "count": 0, "touched_count": 7,
+                       "added": 0, "removed": 0, "from_ref": "", "to_ref": "", "error": ""}],
+            "errors": [],
+            "warnings": [],
+        }
+        webapp.write_session_files_disk_cache(key, payload, HTTPStatus.OK)
+        restored = webapp.read_session_files_disk_cache(key)
+        assert restored is not None
+        assert restored[0]["repos"][0]["missing"] is True
+        assert restored[0]["repos"][0]["touched_count"] == 7
+
+        path, _signature = webapp.session_files_disk_cache_path(key)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        # Pin the BUMP itself, not just the gate: reverting the constant must go red, or nothing
+        # stops a future shape change from shipping behind a version an old record still matches.
+        assert app_module.SESSION_FILES_CACHE_VERSION >= 2, (
+            "repos[].missing changed the serialized record; the version must move with it"
+        )
+        assert record["version"] == app_module.SESSION_FILES_CACHE_VERSION
+        record["version"] = app_module.SESSION_FILES_CACHE_VERSION - 1
+        path.write_text(json.dumps(record), encoding="utf-8")
+        assert webapp.read_session_files_disk_cache(key) is None
+    finally:
+        webapp.control_server.stop()
+
+
+# --- Configured exclusion policy: Keivenc's "ALL ignore paths, not just git" ---------------------
+
+_POLICY_MATRIX_SETTINGS = {
+    "index_exclude_dir_names": [
+        ".git", ".cache", "node_modules",
+        "vendorcache",  # a configured directory NAME that is not in the shipped defaults
+        ".uploads",     # configured, but Differ's one documented exception
+    ],
+    "index_exclude_paths": [
+        "glob:**/generated/**",       # a configured GLOB rule
+        "regex:(^|/)snapshots(/|$)",  # a configured REGEX rule
+    ],
+}
+
+
+def _policy_from(settings):
+    return exclusions.ExclusionPolicy.from_settings(settings, ())
+
+
+def _empty_git_snapshot(repo, from_ref=None, to_ref=None):
+    """A snapshot provider that supplies NO rows, so only the transcript door can populate files."""
+
+    return {
+        "branch": "master", "statuses": {}, "numstat": {},
+        "selected_from": "", "selected_to": "", "status_error": "", "repo_error": "",
+        "repo_error_message": {"key": "", "params": {}, "fallback": ""},
+        "recent_refs": [], "ahead_behind": {},
+    }
+
+
+def _policy_matrix_repo(tmp_path):
+    """A repo holding one file per matrix rule, plus the exact-path rule that needs a real path."""
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    excluded_rel = [
+        # A harmless probe below `.git`, NOT a real git control file: writing over `.git/config`
+        # mutilated the very repository whose `git status` the git-door half of this matrix reads.
+        ".git/yolomux-probe.txt",   # built-in floor
+        ".cache/data",              # shipped default NAME
+        "node_modules/pkg.js",      # shipped default NAME
+        "vendorcache/blob.bin",     # configured NAME
+        "src/generated/api.py",     # configured GLOB rule
+        "snapshots/golden.json",    # configured REGEX rule
+        "secrets/exact.env",        # configured EXACT path rule
+    ]
+    admitted_rel = ["src/live.py", ".uploads/shot.png"]
+    for rel in [*excluded_rel, *admitted_rel]:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    settings = {
+        "index_exclude_dir_names": [".git", ".cache", "node_modules", "vendorcache", ".uploads"],
+        "index_exclude_paths": [
+            "glob:**/generated/**",
+            "regex:(^|/)snapshots(/|$)",
+            str(repo / "secrets"),  # an EXACT path rule
+        ],
+    }
+    # The fixture may not damage what it measures: prove the repo is still intact and usable.
+    assert git(repo, "config", "user.email").stdout.strip() == "test@example.com"
+    assert git(repo, "status", "--porcelain").returncode == 0
+    return repo, excluded_rel, admitted_rel, _policy_from(settings)
+
+
+def test_configured_exclusion_policy_applies_at_the_transcript_door(tmp_path):
+    """Door one in isolation: git supplies NOTHING, so every row here came from the transcript.
+
+    The earlier version wrote the candidates into one repo as untracked content, so `git status`
+    also produced them -- filtering either door alone made it green. An empty snapshot provider
+    removes the git door entirely, so this can only pass if the transcript door filters.
+    """
+
+    repo, excluded_rel, admitted_rel, policy = _policy_matrix_repo(tmp_path)
+    transcript = _claude_transcript_touching(
+        tmp_path / "transcript.jsonl", [repo / rel for rel in [*excluded_rel, *admitted_rel]],
+    )
+    assert str(repo / ".git" / "yolomux-probe.txt") in session_files.scan_claude_transcript(transcript, str(repo))
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, repo)])
+
+    payload = session_files.session_files_payload_for_info(
+        info, hours=24, now=time.time(),
+        git_snapshot_provider=_empty_git_snapshot,
+        exclusion_policy=policy,
+    )
+
+    rendered = sorted(entry["path"] for entry in payload["files"])
+    for rel in excluded_rel:
+        assert rel not in rendered, (rel, rendered)
+    for rel in admitted_rel:
+        assert rel in rendered, (rel, rendered)
+
+
+def test_configured_exclusion_policy_applies_at_the_git_status_door(tmp_path):
+    """Door two in isolation: the transcript supplies NOTHING, so every row came from git status."""
+
+    repo, excluded_rel, admitted_rel, policy = _policy_matrix_repo(tmp_path)
+    empty_transcript = tmp_path / "empty.jsonl"
+    empty_transcript.write_text("", encoding="utf-8")
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", empty_transcript, repo)])
+    assert session_files.touched_files_for_info(
+        info, session_files.session_files_cutoff(24, time.time()),
+    ) == {}, "this half must not receive any transcript-attributed path"
+    # Assert against the door's ACTUAL input -- what `git_name_status` hands the snapshot -- not
+    # raw `git status --porcelain`, which collapses untracked directories to `?? vendorcache/`
+    # and would make the excluded-file assertions below vacuous.
+    door_input = session_files.git_name_status(repo, None)[0]
+    assert "vendorcache/blob.bin" in door_input, door_input
+    assert "src/live.py" in door_input, door_input
+    # Git never reports paths inside `.git`, so that one row is structurally out of reach at THIS
+    # door. State it, rather than letting a vacuous assertion below imply it was observed here.
+    assert not any(rel.startswith(".git/") for rel in door_input), door_input
+
+    payload = session_files.session_files_payload_for_info(info, hours=24, now=time.time(), exclusion_policy=policy)
+
+    rendered = sorted(entry["path"] for entry in payload["files"])
+    for rel in excluded_rel:
+        assert rel not in rendered, (rel, rendered)
+    for rel in admitted_rel:
+        assert rel in rendered, (rel, rendered)
+
+
+def test_default_policy_admits_what_only_the_configured_policy_excludes(tmp_path):
+    """The matrix must fail for the right reason: these paths are excluded BY CONFIGURATION.
+
+    Without this, the door tests would still pass if the configured policy were ignored and only
+    the shipped defaults applied, because the defaults already cover `.git` and `.cache`.
+    """
+
+    repo, _excluded, _admitted, policy = _policy_matrix_repo(tmp_path)
+    configured_only = ["vendorcache/blob.bin", "src/generated/api.py", "snapshots/golden.json", "secrets/exact.env"]
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", [repo / rel for rel in configured_only])
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, repo)])
+
+    default_rendered = sorted(
+        entry["path"] for entry in
+        session_files.session_files_payload_for_info(info, hours=24, now=time.time())["files"]
+    )
+    configured_rendered = sorted(
+        entry["path"] for entry in
+        session_files.session_files_payload_for_info(info, hours=24, now=time.time(), exclusion_policy=policy)["files"]
+    )
+
+    for rel in configured_only:
+        assert rel in default_rendered, (rel, default_rendered)
+        assert rel not in configured_rendered, (rel, configured_rendered)
+
+
+def test_exclusion_policy_travels_from_the_real_submit_into_the_real_worker(monkeypatch, tmp_path):
+    """Capture what `submit_session_files_job` ACTUALLY sends, then feed it to the real worker.
+
+    The earlier version hand-built the payload and called the local builder, so it passed whether
+    or not submit included the policy and whether or not the worker read it. This asserts the
+    production producer and the production consumer, with nothing in between reimplemented.
+    """
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    repo, _excluded, _admitted, policy = _policy_matrix_repo(tmp_path)
+    transcript = _claude_transcript_touching(
+        tmp_path / "transcript.jsonl", [repo / "vendorcache" / "blob.bin", repo / "src" / "live.py"],
+    )
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, repo)])
+    configured = {
+        "index_exclude_dir_names": [".git", "vendorcache"],
+        "index_exclude_paths": ["glob:**/generated/**"],
+    }
+    monkeypatch.setattr(
+        app_module.TmuxWebtermApp, "settings_payload",
+        lambda self: {"settings": {"file_explorer": configured}},
+    )
+    webapp = TmuxWebtermApp([])
+    submitted: list[dict] = []
+    try:
+        monkeypatch.setattr(
+            webapp.job_client, "submit",
+            lambda kind, payload, **kwargs: submitted.append(copy_module.deepcopy(payload)) or {"ok": False},
+        )
+        cache_key = webapp.session_files_cache_key("payload", {"s1": info}, "s1", 24.0, None, None, None)
+        webapp.submit_session_files_job("s1", {"s1": info}, 24.0, None, None, None, cache_key)
+    finally:
+        webapp.control_server.stop()
+
+    assert len(submitted) == 1, submitted
+    shipped = submitted[0]
+    assert shipped["exclusion_policy"] == _policy_from(configured).as_payload(), shipped.get("exclusion_policy")
+
+    # The real worker entry point, fed exactly what the real submit produced.
+    result = session_files.session_files_view_result(copy_module.deepcopy(shipped), max_bytes=8 * 1024 * 1024)
+    assert result["status"] == 200
+    assert result["profile"]["work"]["exclusion_policy_source"] == "payload"
+    rendered = sorted(entry["path"] for entry in result["payload"]["files"])
+    assert "src/live.py" in rendered, rendered
+    assert "vendorcache/blob.bin" not in rendered, rendered
+
+
+def test_worker_falls_back_to_shipped_defaults_when_no_policy_arrives(tmp_path):
+    """A missing or malformed policy must fail CLOSED to the defaults, and say that it did.
+
+    An empty policy admits everything. An older queued job, a truncated payload or any
+    deserialization failure would otherwise revert Differ to listing `.cache` and `node_modules`
+    with nothing reporting it.
+    """
+
+
+    # The wrapper shapes.
+    for unusable in (None, {}, {"skip_dir_names": "oops"}, {"skip_dir_names": []}, []):
+        assert exclusions.ExclusionPolicy.from_payload(unusable) is None, unusable
+    # THE MEMBER shapes. Validating the container is not validating the value: a well-formed list
+    # holding one bad member used to drop it silently, leaving a MORE PERMISSIVE policy than the
+    # one the web owner signed -- so the worker's answer and its cache identity disagreed. Both
+    # fields go through the same validator, so both are enumerated.
+    bad_members = (123, None, "", "   ", ["nested"], {"a": 1}, True, b".git")
+    for member in bad_members:
+        assert exclusions.ExclusionPolicy.from_payload(
+            {"skip_dir_names": [member], "exclude_rules": []}
+        ) is None, ("skip_dir_names", member)
+        assert exclusions.ExclusionPolicy.from_payload(
+            {"skip_dir_names": [".git"], "exclude_rules": [member]}
+        ) is None, ("exclude_rules", member)
+    # One bad member poisons the whole payload; the good ones must NOT survive on their own.
+    assert exclusions.ExclusionPolicy.from_payload(
+        {"skip_dir_names": [".git", 123], "exclude_rules": []}
+    ) is None
+    # A bare string is a sequence; it must be refused, not iterated into characters.
+    for field in ("skip_dir_names", "exclude_rules"):
+        payload = {"skip_dir_names": [".git"], "exclude_rules": []}
+        payload[field] = ".git"
+        assert exclusions.ExclusionPolicy.from_payload(payload) is None, field
+    # A configuration that legitimately excludes nothing is still a policy, not an absence.
+    empty_but_real = exclusions.ExclusionPolicy.from_payload({"skip_dir_names": [], "exclude_rules": []})
+    assert empty_but_real == exclusions.ExclusionPolicy(), empty_but_real
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    for rel in (".cache/data", "node_modules/pkg.js", "src/live.py"):
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    transcript = _claude_transcript_touching(tmp_path / "transcript.jsonl", [repo / rel for rel in (".cache/data", "node_modules/pkg.js", "src/live.py")])
+    info = SessionInfo(session="s1", panes=[], selected_pane=None, agents=[agent("claude", transcript, repo)])
+    request = {
+        "session": "s1",
+        "infos": {"s1": dataclasses.asdict(info)},
+        "hours": 24.0,
+        "include_cross_session_attribution": False,
+    }
+
+    absent = session_files.session_files_view_result(dict(request), max_bytes=8 * 1024 * 1024)
+    malformed = session_files.session_files_view_result(
+        {**request, "exclusion_policy": {"skip_dir_names": "oops"}}, max_bytes=8 * 1024 * 1024,
+    )
+
+    for label, result in (("absent", absent), ("malformed", malformed)):
+        rendered = sorted(entry["path"] for entry in result["payload"]["files"])
+        assert ".cache/data" not in rendered, (label, rendered)
+        assert "node_modules/pkg.js" not in rendered, (label, rendered)
+        assert "src/live.py" in rendered, (label, rendered)
+        # The fallback is visible in the product, not silent.
+        assert result["profile"]["work"]["exclusion_policy_source"] == "default", (label, result["profile"]["work"])
+
+
+def test_changing_only_the_configured_policy_changes_the_cache_and_coalesce_identity(monkeypatch, tmp_path):
+    """A settings-only change must move the identity, or the old payload is served forever.
+
+    This is the same staleness class as the record-version defect: a correct new answer that
+    nobody asks for because the key still matches the old one.
+    """
+
+    monkeypatch.setattr(app_module, "SESSION_FILES_CACHE_DIR", tmp_path / "session-files-cache")
+    monkeypatch.setattr(app_module.TmuxWebtermApp, "warm_start_session_files_payload_cache", lambda self: None)
+    webapp = TmuxWebtermApp([])
+    try:
+        infos = {"s1": SessionInfo(session="s1", panes=[], selected_pane=None, agents=[])}
+
+        def use(settings):
+            monkeypatch.setattr(
+                app_module.TmuxWebtermApp, "settings_payload",
+                lambda self, _s=settings: {"settings": {"file_explorer": _s}},
+            )
+            return webapp.session_files_cache_key("payload", infos, "s1", 24.0, None, None, None)
+
+        baseline = use({"index_exclude_dir_names": [".git"], "index_exclude_paths": []})
+        same_again = use({"index_exclude_dir_names": [".git"], "index_exclude_paths": []})
+        more_names = use({"index_exclude_dir_names": [".git", "vendorcache"], "index_exclude_paths": []})
+        more_rules = use({"index_exclude_dir_names": [".git"], "index_exclude_paths": ["glob:**/generated/**"]})
+
+        assert baseline == same_again, "an unchanged policy must not churn the identity"
+        assert more_names != baseline, "a configured directory name must move the cache identity"
+        assert more_rules != baseline, "a configured path rule must move the cache identity"
+        assert more_names != more_rules
+
+        identities = {webapp.session_files_view_coalesce_identity(key)[0] for key in (baseline, more_names, more_rules)}
+        assert len(identities) == 3, identities
+    finally:
+        webapp.control_server.stop()

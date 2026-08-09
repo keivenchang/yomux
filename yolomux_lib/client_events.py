@@ -22,6 +22,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "background_owner_changed",
     "background_refresh_done",
     "background_refresh_requested",
+    "backend_health_changed",
     "pricing_catalog_changed",
     "chat_messages_changed",
     "chat_typing_changed",
@@ -60,6 +61,10 @@ CLIENT_EVENT_CHANNELS: frozenset[str] = frozenset({
 
 CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "activity_summary_ready": frozenset({"activity"}),
+    # M9 of DOIT.p0.daemon-monitor. Backend health is a topbar-indicator signal, so it rides the
+    # `core` channel every page subscribes to; putting it on `status` would tie it to the System
+    # panel and reproduce the defect that health is only computed while diagnostics are open.
+    "backend_health_changed": frozenset({"core"}),
     "attention_acks_changed": frozenset({"status", "attention"}),
     "auto_approve_changed": frozenset({"status", "attention"}),
     "background_owner_changed": frozenset({"core"}),
@@ -91,6 +96,15 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
 }
 
 CLIENT_EVENT_SNAPSHOT_CLIENT_LIMIT = 32
+
+# Event types whose LATEST event per resource is retained and replayed to a subscriber the moment
+# it connects. Every other type is a nudge to refetch, so a reconnecting page repairs itself by
+# asking; backend health has no endpoint the browser is allowed to poll on a timer, so the newest
+# revision has to be replayed here or a page that connects between two transitions would show
+# nothing at all until the next one.
+CLIENT_EVENT_RETAINED_TYPES: frozenset[str] = frozenset({"backend_health_changed"})
+# One retained event per resource, and the retained types own a fixed, tiny resource set.
+CLIENT_EVENT_RETAINED_LIMIT = 8
 
 
 def normalize_client_event_client_id(client_id: Any) -> str:
@@ -171,6 +185,9 @@ class ClientEventBroker:
         self.next_event_id = 1
         self.epoch = uuid.uuid4().hex
         self.resource_revisions: dict[str, int] = {}
+        # resource -> the newest event published for it, for the retained types only.
+        self.retained_events: dict[str, dict[str, Any]] = {}
+        self.replayed_events = 0
         self.subscribers: dict[int, ClientEventSubscriberRecord] = {}
         self.published_events = 0
         self.published_bytes = 0
@@ -196,12 +213,32 @@ class ClientEventBroker:
         with self.lock:
             subscriber_id = self.next_subscriber_id
             self.next_subscriber_id += 1
-            self.subscribers[subscriber_id] = ClientEventSubscriberRecord(
+            subscriber = ClientEventSubscriberRecord(
                 queue=subscriber_queue,
                 channels=channel_set,
                 client_id=normalize_client_event_client_id(client_id),
             )
+            self.subscribers[subscriber_id] = subscriber
+            self.replay_retained(subscriber)
         return subscriber_id, subscriber_queue
+
+    def replay_retained(self, subscriber: ClientEventSubscriberRecord) -> int:
+        """Deliver the newest retained event for each resource this subscriber demanded.
+
+        Caller holds ``self.lock``. The replayed copy is marked ``replay`` so a consumer can tell
+        a reconnect repair from a live transition; everything else, including the resource
+        revision, is the original event, because a replay must not mint a revision the producer
+        never published.
+        """
+
+        replayed = 0
+        for resource, event in sorted(self.retained_events.items()):
+            if subscriber.channels.isdisjoint(client_event_resource_channels(resource)):
+                continue
+            self.enqueue(subscriber, {**event, "replay": True})
+            replayed += 1
+            self.replayed_events += 1
+        return replayed
 
     def unsubscribe(self, subscriber_id: int) -> None:
         with self.lock:
@@ -224,6 +261,10 @@ class ClientEventBroker:
                 "resource_revision": resource_revision,
             }
             self.next_event_id += 1
+            if safe_type in CLIENT_EVENT_RETAINED_TYPES and (
+                resource in self.retained_events or len(self.retained_events) < CLIENT_EVENT_RETAINED_LIMIT
+            ):
+                self.retained_events[resource] = event
             event_channels = client_event_type_channels(safe_type)
             subscribers = list(self.subscribers.values())
             # There is no wire payload without an SSE consumer. Avoid serializing a discarded
@@ -309,6 +350,8 @@ class ClientEventBroker:
                 "filtered_bytes": self.filtered_bytes,
                 "coalesced_events": self.coalesced_events,
                 "dropped_events": self.dropped_events,
+                "replayed_events": self.replayed_events,
+                "retained_resources": sorted(self.retained_events),
                 "heartbeat_events": self.heartbeat_events,
                 "last_heartbeat_at": self.last_heartbeat_at,
                 "published_by_type": self.counter_snapshot(self.published_by_type),

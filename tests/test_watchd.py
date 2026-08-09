@@ -30,6 +30,8 @@ from yolomux_lib import app as app_module
 from yolomux_lib.infra.state_services import ClientEventWatcherRecord
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
+from yolomux_lib.workspace.session_files import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
+from yolomux_lib.filesystem import exclusions
 
 
 def _request(action: str, **fields: object) -> dict[str, object]:
@@ -2394,3 +2396,24 @@ def test_watchd_and_the_search_index_share_one_exclusion_owner(tmp_path):
             disagreements.append((str(candidate), daemon_excluded, index_excluded))
 
     assert disagreements == []
+
+
+def test_watchd_descriptor_payloads_builds_skip_dirs_from_the_shared_exclusion_owner(monkeypatch):
+    """The real method must run, and its skip_dirs must be the shared policy owner's answer.
+
+    Every other test in this file monkeypatches `watchd_descriptor_payloads` away, so deleting the
+    private search helper it called went undetected until a repo-wide grep found the orphan. This
+    executes it for real and pins it to the one owner.
+    """
+
+    configured = {"index_exclude_dir_names": [".git", "vendorcache"], "index_exclude_paths": ["glob:**/generated/**"]}
+    monkeypatch.setattr(app_module, "settings_payload", lambda: {"settings": {"file_explorer": configured}})
+    # Matches this file's convention: a status-service app starts no control server to stop.
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    payloads = webapp.watchd_descriptor_payloads()
+    assert isinstance(payloads, dict)
+    expected = sorted(exclusions.ExclusionPolicy.from_settings(configured, DEFAULT_INDEX_EXCLUDE_DIR_NAMES).skip_dir_names)
+    assert expected == [".git", "vendorcache"], expected
+    for descriptor in payloads.values():
+        if "skip_dirs" in descriptor:
+            assert sorted(descriptor["skip_dirs"]) == expected, descriptor["skip_dirs"]

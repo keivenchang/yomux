@@ -45,14 +45,22 @@ def test_corrupt_stats_database_recovery_is_unmissable_in_real_chrome(e2e_browse
               const systemTab = document.querySelector('[data-js-debug-subtab="system"]');
               if (!systemTab) return null;
               systemTab.click();
+              // The recovery event is now one line of the ONE compact alert slot above the service
+              // roster, not a 80px-tall banner card of its own. "Unmissable" is therefore measured
+              // as: the slot is visible, it carries role="alert", it sits ABOVE the roster, and it
+              // names every fact -- not as a minimum pixel height.
               const element = document.querySelector('[data-system-recovery-banner]');
-              if (!element) return null;
-              const rect = element.getBoundingClientRect();
-              const style = getComputedStyle(element);
-              if (rect.width <= 0 || rect.height < 80 || style.display === 'none') return null;
+              const slot = document.querySelector('[data-js-debug-system-alert]');
+              const roster = document.querySelector('[data-js-debug-roster]');
+              if (!element || !slot || !roster) return null;
+              const rect = slot.getBoundingClientRect();
+              const style = getComputedStyle(slot);
+              if (rect.width <= 0 || rect.height <= 0 || style.display === 'none') return null;
               return {
                 text: element.textContent.replace(/\\s+/g, ' ').trim(),
-                role: element.getAttribute('role') || '',
+                role: slot.getAttribute('role') || '',
+                slots: document.querySelectorAll('[data-js-debug-system-alert]').length,
+                aboveRoster: rect.top < roster.getBoundingClientRect().top,
                 height: rect.height,
                 fontSize: Number.parseFloat(style.fontSize),
               };
@@ -64,7 +72,8 @@ def test_corrupt_stats_database_recovery_is_unmissable_in_real_chrome(e2e_browse
             """,
         )
         assert not banner.get("__e2eError"), banner
-        assert banner["role"] == "alert" and banner["fontSize"] >= 16, banner
+        assert banner["role"] == "alert" and banner["fontSize"] >= 11, banner
+        assert banner["slots"] == 1 and banner["aboveRoster"] is True, banner
         assert "statsd" in banner["text"] and "unreadable_current_database" in banner["text"], banner
         assert str(quarantined) in banner["text"] and str(database) in banner["text"], banner
         evidence = e2e_browser.capture_failure("corruption-banner")

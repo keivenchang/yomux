@@ -1,3 +1,5 @@
+import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -575,6 +577,14 @@ def test_read_only_search_uses_the_persistent_indexer_snapshot(tmp_path, monkeyp
 
 
 def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path, monkeypatch):
+    # The rule this test owns is NO PER-QUERY RPC TO THE PRODUCER: rolling worktrees can
+    # use different local-RPC framing, which turned an exact-filename lookup into a socket
+    # retry storm (search.py:500-503). That rule is unchanged and asserted twice below.
+    #
+    # M11 killed the OTHER thing this test used to encode - that a follower checks nothing
+    # at all before calling a snapshot ready. It now proves the freshness check happened
+    # (a file read plus a /proc epoch check, no socket), and that the same query with the
+    # same zero RPCs reports the snapshot as stale once its producer is gone.
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     root = tmp_path / "root"
@@ -594,14 +604,51 @@ def test_read_only_search_uses_persisted_snapshot_before_persistent_rpc(tmp_path
         file_index.set_background_index_search_requester(lambda payload: calls.append(payload) or {"ok": False, "error": "legacy peer"})
 
         payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
+
+        # Same snapshot, same rows, producer identity replaced by a dead one.
+        dead_epoch = f"{_absent_pid()}:proc:4242"
+        with sqlite3.connect(file_index._index_disk_path(root)) as conn:
+            conn.execute("UPDATE metadata SET value = ? WHERE key = 'producer_epoch'", (dead_epoch,))
+        manifest_path = file_index._index_manifest_path(root)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["producer_epoch"] = dead_epoch
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        file_index._producer_heartbeat_path(root).write_text(
+            json.dumps({"producer_epoch": dead_epoch, "at": time.time(), "root": str(root)}),
+            encoding="utf-8",
+        )
+        file_index.reset_producer_liveness_cache()
+        _clear_registry()
+
+        orphaned_payload = filesystem.search_files(str(root), query="t5t.md", limit=20, recursive=True)
     finally:
         file_index.set_background_owner_checker(None)
         file_index.set_background_index_search_requester(None)
+        file_index.reset_producer_liveness_cache()
         _clear_registry()
 
-    assert calls == []
+    assert calls == [], "a persisted snapshot must never cost a per-query RPC to the producer"
     assert [entry["path"] for entry in payload["files"]] == [str(target)]
     assert payload["index_state"] == "follower-ready"
+    assert payload["producer_state"] == file_index.PRODUCER_RUNNING
+    assert payload["freshness"] == file_index.FRESHNESS_FRESH
+
+    assert calls == [], "and the stale verdict must not cost one either"
+    assert [entry["path"] for entry in orphaned_payload["files"]] == [str(target)], "a stale snapshot is still served"
+    assert orphaned_payload["index_state"] == "follower-stale"
+    assert orphaned_payload["producer_state"] == file_index.PRODUCER_NOT_RUNNING
+
+
+def _absent_pid() -> int:
+    """A PID with no process behind it, so an epoch recording it cannot be live."""
+    for candidate in range(4_190_000, 4_190_400):
+        try:
+            os.kill(candidate, 0)
+        except ProcessLookupError:
+            return candidate
+        except PermissionError:
+            continue
+    raise RuntimeError("no absent PID available for the dead-producer fixture")
 
 
 def test_warming_parent_search_uses_persisted_child_index(tmp_path, monkeypatch):

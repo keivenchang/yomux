@@ -1016,6 +1016,9 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.added || 0),
     Number(item.removed || 0),
     item.uploaded === true ? 1 : 0,
+    // A file that has just been deleted can match on every other field. Without this bit the
+    // update is judged unchanged and the D row never appears.
+    item.missing === true ? 1 : 0,
   ]);
   const repos = (Array.isArray(payload?.repos) ? payload.repos : []).map(item => [
     item.repo || '',
@@ -1026,6 +1029,12 @@ function sessionFilesPayloadSignatureForPayload(payload) {
     Number(item.removed || 0),
     Number.isFinite(Number(item.behind)) ? Number(item.behind) : null,
     Number.isFinite(Number(item.ahead)) ? Number(item.ahead) : null,
+    // Both new serialized facts about a retired root: that it is gone, and that it therefore
+    // carries no comparison refs. A live-to-missing transition with matching counts is otherwise
+    // indistinguishable here, so the stale compare controls would survive the repo vanishing.
+    item.missing === true ? 1 : 0,
+    String(item.from_ref || ''),
+    String(item.to_ref || ''),
   ]);
   return JSON.stringify({
     session: payload?.session || '',
@@ -1525,6 +1534,12 @@ function changesRepoTotals(repoInfo, entries) {
 }
 
 function changesRepoTotalsHtml(repoInfo, entries) {
+  // A repo that is gone has no diff to total. State what it DID hold -- the deduped count of
+  // remembered files -- so one collapsed row never stands in silently for hundreds of them.
+  if (repoInfo?.missing === true) {
+    const remembered = Number(repoInfo.touched_count || 0);
+    return `<span class="changes-repo-totals" title="${esc(t('filetab.missingTitle'))}"><span class="changes-repo-count">${esc(tPlural('changes.fileCount', remembered))}</span></span>`;
+  }
   const totals = changesRepoTotals(repoInfo, entries);
   const title = `+${totals.added} -${totals.removed} ${tPlural('changes.fileCount', totals.count)}`;
   return `<span class="changes-repo-totals" title="${esc(title)}"><span class="changes-diff-add">+${totals.added}</span><span class="changes-diff-remove">-${totals.removed}</span><span class="changes-repo-count">${totals.count}</span></span>`;
@@ -1716,7 +1731,10 @@ function buildSessionFileTree(repoPath, sessionFiles) {
     if (!entriesByDir.has(key)) entriesByDir.set(key, []);
     const siblings = entriesByDir.get(key);
     if (!siblings.some(e => e.name === fileName)) {
-      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, missing: item.missing === true, changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
+      // `deleted` is the DISPLAY classification from `sessionFileDisplayStatus`, kept under its own
+      // name so it cannot be confused with `missing` ("not on disk") elsewhere in the payload: a
+      // file created and then removed is missing but still displays A.
+      siblings.push({name: fileName, kind: 'file', mtime: item.mtime, size: item.size, deleted: status === 'D', changedFileMissingTime: sessionFileDatePlaceholderNeeded(item)});
     }
   }
   const topLevel = entriesByDir.get(normalizeDirectoryPath(repoPath)) || [];
@@ -1809,20 +1827,30 @@ function renderChangesGroups(groupsEl, files, options = {}) {
       section.className = 'changes-repo-group';
       section.dataset.changesRepo = repo;
     }
-    const collapsed = changesRepoCollapsed.has(repo);
-    section.classList.toggle(CLS.collapsed, collapsed);
     const repoInfo = repoMap.get(repo) || {};
+    // A gone repo is never collapsible, so it never joins the collapsed set.
+    const repoIsMissing = repoInfo?.missing === true;
+    const collapsed = !repoIsMissing && changesRepoCollapsed.has(repo);
+    section.classList.toggle(CLS.collapsed, collapsed);
     const repoLabel = repo === changesOutsideRepoKey ? t('changes.outsideRepo') : compactHomePath(repo);
-    const hasGit = repo && repo !== changesOutsideRepoKey;
+    // A missing repo has no working tree, so it gets no FROM/TO comparison controls either.
+    const hasGit = repo && repo !== changesOutsideRepoKey && !repoIsMissing;
+    section.dataset.changesRepoMissing = repoIsMissing ? 'true' : 'false';
     // Update repo header button (small HTML string — not performance sensitive)
     let head = section.querySelector(':scope > .changes-repo-head');
     if (!head) {
       head = makeButton({className: 'changes-repo-head'});
       section.prepend(head);
     }
-    head.dataset.changesRepoToggle = repo;
-    head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    head.innerHTML = `${disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
+    // A gone repo has no children, no refs and no open action, so it gets no disclosure control
+    // and no child list -- one header row saying it is missing on disk, and nothing that offers to
+    // reveal content that cannot exist.
+    if (repoIsMissing) delete head.dataset.changesRepoToggle;
+    else head.dataset.changesRepoToggle = repo;
+    if (repoIsMissing) head.removeAttribute('aria-expanded');
+    else head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    head.disabled = repoIsMissing;
+    head.innerHTML = `${repoIsMissing ? '' : disclosureTriangleHtml(!collapsed, 'changes-repo-caret')}<span class="changes-repo-title">${esc(repoLabel)}</span>${repoIsMissing ? `<span class="changes-repo-missing">${esc(t('filetab.missingTitle'))}</span>` : ''}${changesRepoTotalsHtml(repoInfo, repoFiles)}`;
     // Update "Comparing FROM TO" refs row (per-repo, only for git repos)
     let refsRow = section.querySelector(':scope > .changes-repo-refs');
     if (hasGit && !collapsed) {
@@ -1843,7 +1871,9 @@ function renderChangesGroups(groupsEl, files, options = {}) {
     }
     // Update file list using the unified tree renderer
     let fileList = section.querySelector(':scope > .changes-file-list');
-    if (!collapsed) {
+    if (repoIsMissing) {
+      fileList?.remove();
+    } else if (!collapsed) {
       if (!fileList) {
         fileList = document.createElement('div');
         fileList.className = 'changes-file-list';

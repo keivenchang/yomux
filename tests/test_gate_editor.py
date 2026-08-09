@@ -32,6 +32,8 @@ from tests.gate_harness import retire_expected_fixture_typed_api_failure
 from tests.gate_harness import wait_for_browser_boot
 from tests.terminal_state_guard import assert_terminal_transition
 from yolomux_lib import filesystem
+from yolomux_lib.observability.failure_severity import EXPECTED_OUTCOME_LOG_LEVEL
+from yolomux_lib.observability.failure_severity import FAULT_LOG_LEVEL
 from yolomux_lib.server_logs import SERVER_LOGS
 
 
@@ -1155,21 +1157,94 @@ def test_a7_missing_file_is_typed_404_not_transport_failure(monkeypatch, tmp_pat
         start = validate_server_log_ring_payload(runtime.server._fixture_server_log_boundary)
         current = validate_server_log_ring_payload(SERVER_LOGS.payload())
         transition = validate_server_log_ring_transition(start, current)
-        failures = [
+        assert transition["droppedCount"] == 0
+        # A 404 for the path this caller asked about is that caller's own outcome -- nothing an
+        # operator can act on -- and {"warning", "error"} is the release-blocking set the live
+        # browser soak collects. `failure_record_level` owns that rule; this asserts what the
+        # operator log actually shows, so an expected outcome that becomes an error again is red.
+        blocking = [
             entry for entry in transition["newLogs"]
             if str(entry.get("level") or "").lower() in {"warning", "error"}
         ]
-        assert transition["droppedCount"] == 0
-        assert [(entry["source"], entry["category"]) for entry in failures] == [
-            ("jobd-operation", "operation"),
-            ("api-response", "api"),
+        assert blocking == [], blocking
+        # Both writers still record the outcome, at info: `record_operation_failure` when the jobd
+        # operation fails, and `write_api_response` when that terminal failure is replayed to the
+        # caller. ONE missing file therefore produces TWO rows. The assertion this replaced demanded
+        # exactly those two rows at ERROR, which pinned the double count as correct operator
+        # evidence; the count is pinned here instead, so a third writer, a dropped row, or a
+        # de-duplication of these two is still visible without being release-blocking.
+        outcomes = [
+            entry for entry in transition["newLogs"]
+            if (entry["source"], entry["category"]) in {("jobd-operation", "operation"), ("api-response", "api")}
         ]
-        messages = [json.loads(entry["message"]) for entry in failures]
+        assert [
+            (str(entry["level"]).lower(), entry["source"], entry["category"]) for entry in outcomes
+        ] == [
+            (EXPECTED_OUTCOME_LOG_LEVEL, "jobd-operation", "operation"),
+            (EXPECTED_OUTCOME_LOG_LEVEL, "api-response", "api"),
+        ], outcomes
+        messages = [json.loads(entry["message"]) for entry in outcomes]
         assert [message["code"] for message in messages] == ["path_not_found", "path_not_found"]
         assert [message["request"]["id"] for message in messages] == [
             payload["request"]["id"], payload["request"]["id"],
         ]
         assert messages[0]["operation"]["id"] == operation_id
+        runtime.server._fixture_server_log_boundary = current
+
+
+@pytest.mark.no_browser
+def test_a7_fault_batch_above_the_server_bound_stays_an_operator_error(monkeypatch, gate_runtime_paths):
+    """A7 fault side: a /api/fs/batch body above filesystem.MAX_BATCH_REQUESTS must be refused 400 invalid_request AND recorded at error.
+
+    This is the other half of A7. A `path_not_found` is a caller's outcome and is recorded at info;
+    an `invalid_request` is the contract being broken by whoever sent it -- the defect class fixed
+    in 71ab4d6bc -- and must stay in the release-blocking set. It is also the exact refusal the
+    browser used to walk into: the Finder flush drained its whole queue into one body, so any
+    Finder operation touching more than this bound failed outright. Asserting the refusal here
+    keeps the server-side bound and the browser-side chunk size describing the same number.
+    """
+    over_limit = filesystem.MAX_BATCH_REQUESTS + 1
+    body = json.dumps({
+        "requests": [
+            {"id": index + 1, "type": "list", "path": f"/tmp/gate-a7-fault/{index}"}
+            for index in range(over_limit)
+        ],
+        "client_scope": "browser",
+    }).encode("utf-8")
+
+    with _running_server(monkeypatch, gate_runtime_paths) as runtime:
+        connection = HTTPConnection("127.0.0.1", runtime.port, timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/api/fs/batch",
+                body=body,
+                headers={**_auth_header(), "Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            status, raw = response.status, response.read()
+        finally:
+            connection.close()
+
+        payload = json.loads(raw)
+        assert status == HTTPStatus.BAD_REQUEST, payload
+        assert payload["state"] == "failed"
+        assert payload["error"]["code"] == "invalid_request"
+        assert payload["error"]["details"]["maximum"] == filesystem.MAX_BATCH_REQUESTS
+        assert payload["error"]["details"]["requests"] == over_limit
+
+        start = validate_server_log_ring_payload(runtime.server._fixture_server_log_boundary)
+        current = validate_server_log_ring_payload(SERVER_LOGS.payload())
+        transition = validate_server_log_ring_transition(start, current)
+        assert transition["droppedCount"] == 0
+        faults = [
+            entry for entry in transition["newLogs"]
+            if str(entry.get("level") or "").lower() in {"warning", "error"}
+        ]
+        assert [
+            (str(entry["level"]).lower(), entry["source"], entry["category"]) for entry in faults
+        ] == [(FAULT_LOG_LEVEL, "api-response", "api")], faults
+        assert json.loads(faults[0]["message"])["code"] == "invalid_request"
         runtime.server._fixture_server_log_boundary = current
 
 

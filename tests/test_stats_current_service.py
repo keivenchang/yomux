@@ -6,6 +6,7 @@ import json
 import math
 import os
 import threading
+import time
 from contextlib import contextmanager
 from http import HTTPStatus
 from pathlib import Path
@@ -16,7 +17,7 @@ import pytest
 from yolomux_lib.host_identity import current_host_identity
 from yolomux_lib.stats_current import client as client_module
 from yolomux_lib.stats_current import http as http_module
-from yolomux_lib.stats_current import materializer, migration, pricing, protocol, revision, storage
+from yolomux_lib.stats_current import host_collectors, materializer, migration, pricing, protocol, prune_schedule, revision, storage
 from yolomux_lib.stats_current import resolution as stats_resolution
 from yolomux_lib.stats_current import service as service_module
 
@@ -138,6 +139,7 @@ class FakeStore:
         self.closed = 0
         self.last_append = {}
         self.prunes = 0
+        self.pruned_at = []
         self.dirty_reads = []
         self.coverage_reads = []
         self.vacuums = []
@@ -227,8 +229,12 @@ class FakeStore:
 
     def prune(self, *, now):
         self.prunes += 1
+        self.pruned_at.append(now)
         deleted = getattr(self, "prune_observations_deleted", 0)
         return storage.PruneResult(deleted, 0, 0, 0, self.source_generation, 0, 0)
+
+    def last_pruned_at(self):
+        return self.pruned_at[-1] if self.pruned_at else 0.0
 
     def last_vacuumed_at(self):
         return self.vacuums[-1] if self.vacuums else 0.0
@@ -1530,35 +1536,40 @@ def test_delta_carries_the_full_precomputed_candidate_cost_report(tmp_path):
 
 def test_no_change_prune_schedules_no_build_and_deletions_dirty_only_cutoff_cells(tmp_path):
     monotonic_now = [10.0]
+    wall_now = 1_700_000_000.0
     store = FakeStore()
     service = service_module.StatsCurrentService(
         tmp_path / "statsd.sock",
         tmp_path / storage.DATABASE_FILENAME,
         monotonic=lambda: monotonic_now[0],
-        clock=lambda: 1_000.0,
+        clock=lambda: wall_now,
+        prune_time_reader=lambda: "02:30",
     )
     service.writer = store
     service._pending_full = False
-    service._next_reconcile_at = 20.0
+    service._next_prune_check_at = 20.0
 
-    assert service._reconcile_if_due() is False
+    assert service._prune_if_due() is False
     monotonic_now[0] = 20.0
     # A prune that removed nothing schedules NO build at all: rebuilding an
     # unchanged generation was an 18.6s near-100% CPU spike every five minutes.
-    assert service._reconcile_if_due() is True
+    assert service._prune_if_due() is True
     assert store.prunes == 1
     assert service._take_work() is None
-    assert service._reconcile_if_due() is False
-    assert service._reconciliations == 1
-    assert service._next_reconcile_at == 320.0
+    monotonic_now[0] = 200.0
+    # Tonight's prune already happened, so the next check finds nothing owed.
+    assert service._prune_if_due() is False
+    assert service._prunes == 1
+    assert service._next_prune_check_at == 200.0 + service_module.PRUNE_CHECK_SECONDS
 
     # A prune that DID delete originals marks exactly the cutoff-straddling cell
     # per resolution dirty (the incremental builder skips out-of-window ones);
     # it never requests a full rebuild.
     store.prune_observations_deleted = 3
-    monotonic_now[0] = 320.0
-    assert service._reconcile_if_due() is True
-    cutoff = 1_000.0 - storage.RETENTION_SECONDS
+    service._last_pruned_at = 0.0
+    monotonic_now[0] = 400.0
+    assert service._prune_if_due() is True
+    cutoff = wall_now - storage.RETENTION_SECONDS
     expected = frozenset(
         materializer.DirtyCell(resolution, math.floor(cutoff / resolution) * resolution)
         for resolution in stats_resolution.RESOLUTION_CHOICES
@@ -1580,7 +1591,7 @@ def test_vacuum_runs_only_after_idle_and_persists_its_schedule(tmp_path):
     )
     service.writer = store
     service._pending_full = False
-    service._next_reconcile_at = 9_999.0
+    service._next_prune_check_at = 9_999.0
     service._next_vacuum_at = 0.0
 
     # Requests never perform file-rewriting maintenance; the generic runtime
@@ -1654,6 +1665,7 @@ def test_collector_context_accepts_only_bounded_owner_identity(tmp_path):
         "pid": os.getpid(),
         "port": 7443,
         "owner_generation": 42,
+        "control_socket": "/tmp/web.sock",
         "sessions": ["must-not-cross-the-boundary"],
     })
 
@@ -1666,6 +1678,7 @@ def test_collector_context_accepts_only_bounded_owner_identity(tmp_path):
         "pid": os.getpid(),
         "port": 7443,
         "owner_generation": 42,
+        "control_socket": "/tmp/web.sock",
     })
 
     assert binary == b""
@@ -1675,6 +1688,8 @@ def test_collector_context_accepts_only_bounded_owner_identity(tmp_path):
         "port": 7443,
         "owner_generation": 42,
     }
+    # The address is accepted and retained, but it is NOT part of the identity `values`.
+    assert service.collector_control_socket == "/tmp/web.sock"
     assert service.collector_context == {
         "pid": os.getpid(),
         "port": 7443,
@@ -1696,7 +1711,7 @@ def test_statsd_collects_registered_web_cpu_and_pushes_it_to_the_matching_owner(
 
     pushed = []
     service._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(service, "_matching_web_owner", lambda context: {"control_socket": "owned.sock"})
+    monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
     monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda owner, request, timeout: pushed.append((owner, request, timeout)) or {"ok": True})
 
     service._collect_host_facts_if_due(publisher)
@@ -1707,6 +1722,314 @@ def test_statsd_collects_registered_web_cpu_and_pushes_it_to_the_matching_owner(
     assert observation.payload == {"process_percent": 12.0, "system_percent": 20.0}
     assert pushed == [({"control_socket": "owned.sock"}, {"action": "stats_cpu_sample", "sample": {"time": 100.0, "pid": 1234, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}}, 0.25)]
 
+
+# -- the FIRST sample after every statsd start fabricated 0.0 and it reached durable history -----
+#
+# `CpuSampler` differences two readings. On its FIRST call there is nothing to difference against,
+# and it returned `0.0` for both percentages beside a real `time`, a real `pid` and a real
+# `rss_bytes` -- a row indistinguishable from a measured idle process. `system_cpu_percent: 0.0` is
+# a whole-host claim that is physically impossible.
+#
+# Measured against a process burning 100% CPU:
+#   first : cpu_percent 0.0,    system_cpu_percent 0.0,    rss_bytes 31277056
+#   second: cpu_percent 99.979, system_cpu_percent 18.477, rss_bytes 31277056
+#
+# That first row is written to `observations`, which is retained for 48 hours, and at the default
+# five-minute view `auto_resolution(300) == 1`, so the 1s bucket holds exactly that one sample: a
+# full-depth dip to the axis on the YO!stats CPU graph, and `CPU 0%` / `System CPU 0%` stamped
+# `data-metric-state="measured"` on the Daemons web row for about a second at every statsd start.
+#
+# The existing guard for this defect went into `TmuxWebtermApp.collect_current_stats_cpu`, which
+# has NO production call site -- the collector registry never registered it -- so it never ran.
+# Every service-level test in this file substitutes a fake sampler returning non-zero, so the real
+# sampler's first call had no test at all. The two below drive the REAL sampler.
+
+
+def _advance_host_cpu_ticks(limit_seconds: float = 5.0) -> None:
+    """Burn real CPU until /proc/stat's aggregate advances, so a delta EXISTS to measure.
+
+    This is a condition, not a sleep: the busy loop is what makes the tick counter move, and it
+    returns the moment the reading it needs is available.
+    """
+
+    start = host_collectors._linux_system_times()
+    assert start is not None, "/proc/stat is required for the CPU sampler"
+    deadline = time.monotonic() + limit_seconds
+    while time.monotonic() < deadline:
+        current = host_collectors._linux_system_times()
+        if current is not None and current[0] > start[0]:
+            return
+    raise AssertionError("/proc/stat did not advance")
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="CpuSampler differences /proc readings")
+def test_the_first_cpu_sample_reports_absence_because_it_had_no_baseline():
+    sampler = host_collectors.CpuSampler()
+
+    first = sampler.sample(os.getpid())
+
+    # Not `0.0`. Nothing was measured, because nothing was differenced.
+    assert first["cpu_percent"] is None
+    assert first["system_cpu_percent"] is None
+    # The ABSOLUTE reads on the same row are real measurements and stay whole: `rss_bytes` needs no
+    # baseline, and blanking it would trade a fabricated number for a lost one.
+    assert first["rss_bytes"] > 0
+    assert first["pid"] == os.getpid()
+    assert first["time"] > 0.0
+
+    _advance_host_cpu_ticks()
+    second = sampler.sample(os.getpid())
+
+    assert isinstance(second["cpu_percent"], float)
+    assert isinstance(second["system_cpu_percent"], float)
+    assert second["rss_bytes"] > 0
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="CpuSampler differences /proc readings")
+def test_the_first_host_cpu_cycle_appends_nothing_and_pushes_nothing(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    service.collector_context = {"pid": os.getpid(), "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+    # The REAL sampler. Every other CPU test here installs a fake returning non-zero, which is
+    # precisely how the fabricated first sample survived a green gate.
+    service._host_cpu_sampler = host_collectors.CpuSampler()
+    pushed = []
+    monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
+    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda owner, request, timeout: pushed.append(request) or {"ok": True})
+
+    service._collect_host_facts_if_due(publisher)
+
+    # No observation: one second of structural absence is correct, and it is what
+    # `latest_stats_sample` already renders as `cpu_sample_not_pushed`.
+    assert publisher.appends == 0
+    assert publisher.last_append == {}
+    # And no push. Sending `None` would be worse than sending nothing: the receiver does
+    # `float(sample["cpu_percent"])` and would count a self-inflicted "invalid stats CPU sample".
+    assert pushed == []
+    # A skipped push still leaves evidence that it was skipped -- the rule this branch already set.
+    push = service._status()["host_collectors"]["cpu_push"]
+    assert push["attempted"] == 1
+    assert push["delivered"] == 0
+    assert push["skipped"] == 1
+    assert push["last_reason"] == "cpu_sample_no_baseline"
+    assert service._status()["host_collectors"]["failures"] == 0
+
+    _advance_host_cpu_ticks()
+    service._next_host_cpu_at = 0.0
+    service._collect_host_facts_if_due(publisher)
+
+    # The SECOND cycle has a baseline, so it publishes and pushes a real measurement.
+    observation = publisher.last_append["observations"][0]
+    assert observation.family == "cpu"
+    assert observation.source_id == "port:7443"
+    assert set(observation.payload) == {"process_percent", "system_percent"}
+    assert len(pushed) == 1
+    assert pushed[0]["action"] == "stats_cpu_sample"
+    assert isinstance(pushed[0]["sample"]["cpu_percent"], float)
+    push = service._status()["host_collectors"]["cpu_push"]
+    assert push["attempted"] == 2
+    assert push["delivered"] == 1
+    assert push["last_reason"] == ""
+
+
+# -- the CPU-sample push must be OBSERVED-and-forget, not fire-and-forget ------------------------
+#
+# On both live dev servers the web process's own CPU/memory read "never measured" for the life
+# of the process, and there was no evidence anywhere saying why: `_web_push_target` returned a
+# bare `None` about once a second, the push was skipped without a counter, and `failures` stayed 0
+# because a skipped push never raises. A managed instance runs `DisabledBackgroundOwner`, so no
+# `owner.json` is ever written and the skip is permanent -- the exact case these cover.
+
+
+def test_a_skipped_cpu_push_is_counted_with_the_gate_that_stopped_it(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+
+    class CpuSampler:
+        def sample(self, pid):
+            return {"time": 100.0, "pid": pid, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}
+
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
+    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: pytest.fail("no owner means no push"))
+
+    service._collect_host_facts_if_due(publisher)
+
+    push = service._status()["host_collectors"]["cpu_push"]
+    assert push["attempted"] == 1
+    assert push["delivered"] == 0
+    assert push["skipped"] == 1
+    assert push["last_reason"] == "web_owner_no_control_socket"
+    assert push["last_reason_at"] > 0.0
+    # The exception counter is NOT the evidence for this: a skipped push never raises.
+    assert service._status()["host_collectors"]["failures"] == 0
+
+
+def test_a_rejected_cpu_push_is_counted_as_not_delivered(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+
+    class CpuSampler:
+        def sample(self, pid):
+            return {"time": 100.0, "pid": pid, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}
+
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
+    # A push the web process REFUSES is not a delivery, and the old code could not tell the
+    # difference because it never read the response.
+    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: {"ok": False, "error": "stats CPU sample PID mismatch"})
+
+    service._collect_host_facts_if_due(publisher)
+
+    push = service._status()["host_collectors"]["cpu_push"]
+    assert push["attempted"] == 1
+    assert push["delivered"] == 0
+    assert push["last_reason"] == "push_rejected: stats CPU sample PID mismatch"
+
+
+def test_a_delivered_cpu_push_clears_the_reason_and_records_when(tmp_path, monkeypatch):
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+
+    class CpuSampler:
+        def sample(self, pid):
+            return {"time": 100.0, "pid": pid, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}
+
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(service, "_web_push_target", lambda: ({"control_socket": "owned.sock"}, ""))
+    monkeypatch.setattr(service_module, "send_yolomux_control_request", lambda *_a, **_k: {"ok": True})
+
+    service._collect_host_facts_if_due(publisher)
+
+    push = service._status()["host_collectors"]["cpu_push"]
+    assert push["attempted"] == 1
+    assert push["delivered"] == 1
+    assert push["skipped"] == 0
+    assert push["last_reason"] == ""
+    assert push["last_delivered_at"] > 0.0
+
+
+def test_a_managed_instance_with_no_election_record_still_delivers_its_cpu_sample(tmp_path, monkeypatch):
+    """THE managed-instance regression.
+
+    This is the exact shape that failed on the live dev servers. A managed instance gets a
+    private root before the app is imported, so `start_background_owner` installs
+    `DisabledBackgroundOwner`, which runs no election and never writes
+    `<root>/runtime/background-owner/owner.json`. The old delivery path re-discovered the web
+    process's address from that file, so it resolved nothing, skipped the push silently, and the
+    Daemons web row read "never measured" for the entire life of the process.
+
+    The background-owner directory is asserted ABSENT here on purpose: a test that passes
+    because a record happens to exist would prove nothing about the path that was broken.
+    """
+
+    owner_dir = tmp_path / "runtime" / "background-owner"
+    assert not owner_dir.exists(), "the managed path has no election record; do not create one"
+
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    publisher = FakeStore()
+    accepted, _binary = service.handle_with_binary({
+        **FENCE,
+        "action": "collector_context",
+        "pid": 1234,
+        "port": 7443,
+        "owner_generation": 42,
+        "control_socket": "/tmp/managed-web.sock",
+    })
+    assert accepted["ok"] is True
+
+    service._next_host_cpu_at = 0.0
+    service._next_host_gpu_at = float("inf")
+
+    class CpuSampler:
+        def sample(self, pid):
+            return {"time": 100.0, "pid": pid, "cpu_percent": 12.0, "system_cpu_percent": 20.0, "rss_bytes": 99}
+
+    pushed = []
+    service._host_cpu_sampler = CpuSampler()
+    monkeypatch.setattr(
+        service_module, "send_yolomux_control_request",
+        lambda owner, request, timeout: pushed.append((owner, request)) or {"ok": True},
+    )
+
+    service._collect_host_facts_if_due(publisher)
+
+    assert len(pushed) == 1, "a managed instance must deliver its own CPU sample"
+    owner, request = pushed[0]
+    assert owner["control_socket"] == "/tmp/managed-web.sock"
+    assert request["action"] == "stats_cpu_sample"
+    assert request["sample"]["rss_bytes"] == 99
+    push = service._status()["host_collectors"]["cpu_push"]
+    assert (push["attempted"], push["delivered"], push["skipped"]) == (1, 1, 0)
+    assert push["last_reason"] == ""
+
+
+def test_re_addressing_alone_does_not_reset_host_coverage_epochs(tmp_path):
+    """A new socket path is not a new source lifecycle.
+
+    `_set_collector_context` invalidates every host coverage epoch when the context changes,
+    which is right for pid/port/generation. The control socket is only WHERE to reach the same
+    process, so folding it into that identity would reset still-valid epochs on mere
+    re-addressing. It is stored outside `values` precisely so this cannot happen.
+    """
+
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+    identity = {"pid": 1234, "port": 7443, "owner_generation": 42}
+
+    def register(socket_path):
+        accepted, _binary = service.handle_with_binary({
+            **FENCE, "action": "collector_context", **identity, "control_socket": socket_path,
+        })
+        assert accepted["ok"] is True
+
+    register("/tmp/web-a.sock")
+    service._host_coverage_epochs[(42, "cpu", "port:7443", 1.0)] = ("epoch-1", 100.0)
+    service._host_gpu_sources.add("gpu:0")
+    service._host_gpu_roster_owner_generation = 42
+
+    register("/tmp/web-b.sock")
+
+    assert service.collector_control_socket == "/tmp/web-b.sock"
+    assert service._host_coverage_epochs == {(42, "cpu", "port:7443", 1.0): ("epoch-1", 100.0)}
+    assert service._host_gpu_sources == {"gpu:0"}
+    assert service._host_gpu_roster_owner_generation == 42
+
+    # ...but a real identity change still does invalidate them.
+    accepted, _binary = service.handle_with_binary({
+        **FENCE, "action": "collector_context", **{**identity, "owner_generation": 43},
+        "control_socket": "/tmp/web-b.sock",
+    })
+    assert accepted["ok"] is True
+    assert service._host_coverage_epochs == {}
+    assert service._host_gpu_sources == set()
+    assert service._host_gpu_roster_owner_generation is None
+
+
+def test_the_web_push_target_resolves_the_address_from_the_handshake(tmp_path):
+    """The address comes from the context, not from the background-owner ELECTION record.
+
+    A managed instance runs `DisabledBackgroundOwner`, holds no election and writes no
+    `owner.json`, so the old lookup returned nothing forever and every sample was dropped.
+    """
+
+    service = service_module.StatsCurrentService(tmp_path / "stats.sock", tmp_path / "stats.sqlite3")
+
+    # Nothing registered yet: no address, and it says so.
+    assert service._web_push_target() == (None, "web_owner_no_control_socket")
+
+    service.collector_control_socket = "/tmp/web.sock"
+    assert service._web_push_target() == ({"control_socket": "/tmp/web.sock"}, "")
 
 def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacement(tmp_path, monkeypatch):
     monotonic_now = [0.0]
@@ -1772,7 +2095,7 @@ def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacem
     publisher = RecordingStore()
     service.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     service._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(service, "_matching_web_owner", lambda _context: None)
+    monkeypatch.setattr(service, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
     monkeypatch.setattr(service_module.host_collectors, "gpu_devices", gpu_devices)
 
     service._collect_host_facts_if_due(publisher)
@@ -1797,6 +2120,7 @@ def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacem
         "pid": 1234,
         "port": 7443,
         "owner_generation": 42,
+        "control_socket": "/tmp/web.sock",
     })
     assert accepted["ok"] is True
     wall_now[0] = monotonic_now[0] = 120.0
@@ -1813,6 +2137,7 @@ def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacem
         "pid": 1234,
         "port": 7443,
         "owner_generation": 43,
+        "control_socket": "/tmp/web.sock",
     })
     assert accepted["ok"] is True
     wall_now[0] = monotonic_now[0] = 130.0
@@ -1836,7 +2161,7 @@ def test_inline_host_collectors_keep_source_scoped_epochs_until_context_replacem
     restarted.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     restarted._host_cpu_sampler = CpuSampler()
     restarted._next_host_gpu_at = float("inf")
-    monkeypatch.setattr(restarted, "_matching_web_owner", lambda _context: None)
+    monkeypatch.setattr(restarted, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
     wall_now[0] = monotonic_now[0] = 140.0
     restarted._collect_host_facts_if_due(publisher)
     restarted_cpu = publisher.batches[-1]["coverage_epochs"][0]
@@ -1937,7 +2262,7 @@ def test_statsd_restart_rotates_only_gpu_missing_from_initial_roster(tmp_path, m
     )
     initial.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     initial._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(initial, "_matching_web_owner", lambda _context: None)
+    monkeypatch.setattr(initial, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
     initial._collect_host_facts_if_due(publisher)
 
     restarted = service_module.StatsCurrentService(
@@ -1946,7 +2271,7 @@ def test_statsd_restart_rotates_only_gpu_missing_from_initial_roster(tmp_path, m
     )
     restarted.collector_context = {"pid": 1234, "port": 7443, "owner_generation": 42}
     restarted._host_cpu_sampler = CpuSampler()
-    monkeypatch.setattr(restarted, "_matching_web_owner", lambda _context: None)
+    monkeypatch.setattr(restarted, "_web_push_target", lambda: (None, "web_owner_no_control_socket"))
     wall_now[0] = monotonic_now[0] = 110.0
     restarted._collect_host_facts_if_due(publisher)
     wall_now[0] = monotonic_now[0] = 120.0
@@ -2238,8 +2563,12 @@ def test_system_status_exposes_current_pipeline_health_without_private_values(tm
         assert item["source_generation"] >= 0
         assert item["cache_generation"] >= 0
     assert status["requests"]["rejected_old"] == 1
-    assert status["reconciliation"]["interval_seconds"] == service_module.FULL_RECONCILE_SECONDS
-    assert status["reconciliation"]["next_at"] > 1_000.0
+    assert status["retention_prune"]["check_interval_seconds"] == service_module.PRUNE_CHECK_SECONDS
+    assert status["retention_prune"]["retention_seconds"] == storage.RETENTION_SECONDS
+    assert status["retention_prune"]["display_window_seconds"] == stats_resolution.MAX_RANGE_SECONDS
+    assert status["retention_prune"]["at_local_time"] == prune_schedule.DEFAULT_PRUNE_LOCAL_TIME
+    assert status["retention_prune"]["next_at"] > status["retention_prune"]["due_at"]
+    assert status["retention_prune"]["next_check_at"] >= 1_000.0
     assert status["failure"] == {
         "component": "materializer",
         "kind": "ValueError",

@@ -1145,6 +1145,15 @@ body.theme-light {
   --auto-active-text: #112200;
   --auto-glow: rgba(95, 152, 0, 0.22);
   --bad: var(--danger-strong-hover);
+  /* Warning/status/danger shades tuned for DARK surfaces measure 1.2-2.0:1 on the light panel, and
+     these three had no light value at all -- so the Daemons alert box (whose only container
+     affordance is `border: 1px solid var(--warning-border-strong)`) had no visible outline in light
+     mode while its text re-themed. WCAG's non-text minimum is 3:1; these clear 4.6:1 or better
+     against the lightest surface they paint on (--panel, which resolves to --paint-white in light
+     mode) so they also work where the same token is used as text. */
+  --warning-border-strong: #8a5b00;
+  --status-tool: #a15c07;
+  --danger-text-soft: var(--danger-light-text);
   --pane-ring-attention: #d11a2a;  /* darker attention red that reads on the light pane bg */
   --danger-panel-light-bg: #fff5f5;
   --danger-panel-light-confirming-bg: #fff1f0;
@@ -1575,12 +1584,17 @@ body.editor-theme-light {
 :where(button:hover) {
   border-color: var(--pc-control-hover-border);
 }
-:where(button:disabled) {
+/* ONE owner for the unavailable-button appearance, and it must cover BOTH ways a button says so.
+   A control that stays focusable while it is busy carries `aria-disabled="true"` instead of
+   `disabled` -- setting `disabled` blurs the element the instant the attribute lands, so the user
+   loses focus mid-action (the Daemons Refresh button). Listing only `:disabled` here meant that
+   switch silently removed the dimming, and with it the "something is happening" signal. */
+:where(button:disabled, button[aria-disabled="true"]) {
   color: var(--text-muted-soft);
   cursor: not-allowed;
   opacity: 0.55;
 }
-:where(button:disabled:hover) {
+:where(button:disabled:hover, button[aria-disabled="true"]:hover) {
   border-color: var(--line);
 }
 .js-debug-stat,
@@ -1693,6 +1707,7 @@ body.editor-theme-light {
 .yoagent-composer-pill,
 .yoagent-backend-pill,
 .info-tree-ai-value,
+.backend-health-indicator,
 .file-editor-codemirror .cm-search label,
 .file-editor-codemirror-panel .cm-search label {
   display: inline-flex;
@@ -1789,6 +1804,7 @@ body.theme-light :is(.changes-toolbar, .changes-repo-group, .file-explorer, .fil
 .tab-action-description,
 .terminal-drop-suggestion-label,
 .js-debug-system-kv dd,
+.backend-health-indicator-text,
 .js-debug-cost-source-label {
   min-width: 0;
   overflow: hidden;

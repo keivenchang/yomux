@@ -86,6 +86,19 @@ from ..web import html_preview_document
 # that may have changed, so the fence must retire it.
 JOBD_PROTOCOL_VERSION = 19
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
+
+# jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
+# owner pins it up with a registry lease (`JobClient.start_for_scheduler`, called at
+# `app.py:2962` when this process acquires background ownership and released at `app.py:3381`
+# on demote), and `_idle_should_stop` refuses to retire the broker while any lease is held. A
+# process that owns scheduling and cannot see jobd is looking at a real outage.
+#
+# The one legitimate absence is the other side of that same lease: before this process wins the
+# election, or when it never does, nothing here is scheduling and jobd is expected to be absent.
+# That is a DYNAMIC fact about this process, not a static property of the service, so it is
+# published as a bounded `absence_expected_reason` token and NOT as `demand_started` -- see
+# `yolomux_lib/backend_health/observer.py:ABSENCE_EXPECTED_REASON_FIELD`.
+JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_not_owned"
 # jobd is the one local service with a handler that waits by contract: `_relay` blocks on
 # `record.completion_event` for up to JOBD_MAX_DEADLINE_MS.  On a serial listener that wait is
 # charged to every other client, including the cheap last-known-good `product` reads that poll
@@ -1222,7 +1235,14 @@ class PersistentJobBroker:
             "session_files_requester_counters": dict(self.session_files_requester_counters),
             "request_counters": dict(self.request_counters),
             "last_success": max((record.completed_at for record in self.records.values() if record.status == "completed"), default=0.0),
-            "last_failure": next((record.error for record in reversed(list(self.records.values())) if record.status in {"failed", "timed_out"}), ""),
+            # A retained WORK-ITEM failure, not a daemon condition. This scans the bounded record
+            # ring, so one failed or timed-out job keeps describing a daemon that has served every
+            # request since, and only ring eviction ever drops it -- a later success does not.
+            # It must therefore never be published as `last_failure`: `local_service_failure_text`
+            # feeds that name to `observed_health`, which reads any `last_failure` on a live pid as
+            # CURRENT degradation and pins a healthy jobd to `degraded`/`terminal_failure` forever.
+            # The daemon's own current trouble travels as the registry's `failure_reason` instead.
+            "last_job_failure": next((record.error for record in reversed(list(self.records.values())) if record.status in {"failed", "timed_out"}), ""),
             "scheduler_pump": {
                 "failures": self.scheduler_pump_failures,
                 "last_failure": dict(self.scheduler_pump_last_failure),
@@ -1371,6 +1391,19 @@ class JobClient(LocalServiceClient):
             self._scheduler_lease_id = lease_id
             return True
 
+    @property
+    def holds_scheduler_lease(self) -> bool:
+        """Whether this process currently pins jobd up for background scheduling.
+
+        Deliberately NOT taken under ``_scheduler_lease_lock``. ``start_for_scheduler`` holds
+        that lock across ``registry.acquire_lease()``, which can spawn the broker and wait for
+        its socket; blocking a bounded health probe behind a service spawn would turn a healthy
+        start into a probe timeout. Rebinding a str attribute is atomic, so the worst a lock-free
+        read can see is the value from just before or just after the acquire -- and both are
+        true statements about a lease that is in the act of being taken.
+        """
+        return bool(self._scheduler_lease_id)
+
     def stop_for_scheduler(self) -> bool:
         """Release the scheduler lease when this process is demoted."""
         with self._scheduler_lease_lock:
@@ -1443,6 +1476,12 @@ class JobClient(LocalServiceClient):
         }, timeout=timeout)
 
     def runtime_status(self) -> dict[str, Any]:
+        """Build jobd's whole System/health row.
+
+        No ``demand_started`` here on purpose: the scheduler lease pins jobd up, so its absence
+        while this process owns scheduling is a verified outage, not idleness. See
+        ``JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE`` for the one absence that is expected instead.
+        """
         status = self.registry.status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
         pid = int(payload.get("pid") or 0)
@@ -1455,7 +1494,7 @@ class JobClient(LocalServiceClient):
                     continue
                 if worker_pid > 0:
                     worker_pids.append(worker_pid)
-        return {"service": "jobd", "pid": pid, "started_at": float(payload.get("started_at") or 0.0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [], "worker_count": int(payload.get("worker_count") or len(worker_pids)), "worker_pids": worker_pids, "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {}, "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {}, "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {}, "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {}, "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {}, "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": local_service_failure_text(status, payload), "scheduler_pump": payload.get("scheduler_pump") if isinstance(payload.get("scheduler_pump"), dict) else {}, "resources": self.registry.resources_for_pids(pid, worker_pids)}
+        return {"service": "jobd", "pid": pid, "started_at": float(payload.get("started_at") or 0.0), "healthy": bool(status.get("healthy")), "queues": payload.get("queues") if isinstance(payload.get("queues"), dict) else {}, "active_task": str(payload.get("active_task") or ""), "active_records": payload.get("active_records") if isinstance(payload.get("active_records"), list) else [], "worker_count": int(payload.get("worker_count") or len(worker_pids)), "worker_pids": worker_pids, "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {}, "product_counters": payload.get("product_counters") if isinstance(payload.get("product_counters"), dict) else {}, "product_runtime_ms": payload.get("product_runtime_ms") if isinstance(payload.get("product_runtime_ms"), dict) else {}, "product_phase_runtime_ms": payload.get("product_phase_runtime_ms") if isinstance(payload.get("product_phase_runtime_ms"), dict) else {}, "product_work_totals": payload.get("product_work_totals") if isinstance(payload.get("product_work_totals"), dict) else {}, "source_change_counters": payload.get("source_change_counters") if isinstance(payload.get("source_change_counters"), dict) else {}, "session_files_accepted_requester_counters": payload.get("session_files_accepted_requester_counters") if isinstance(payload.get("session_files_accepted_requester_counters"), dict) else {}, "session_files_requester_counters": payload.get("session_files_requester_counters") if isinstance(payload.get("session_files_requester_counters"), dict) else {}, "request_counters": payload.get("request_counters") if isinstance(payload.get("request_counters"), dict) else {}, "generation": int(payload.get("generation") or 0), "last_success": float(payload.get("last_success") or 0.0), "last_failure": local_service_failure_text(status, payload), "last_job_failure": str(payload.get("last_job_failure") or ""), "scheduler_pump": payload.get("scheduler_pump") if isinstance(payload.get("scheduler_pump"), dict) else {}, "absence_expected_reason": "" if self.holds_scheduler_lease else JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE, "resources": self.registry.resources_for_pids(pid, worker_pids)}
 
 
 def main(argv: list[str] | None = None) -> int:

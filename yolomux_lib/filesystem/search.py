@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import re
-from fnmatch import fnmatchcase
 import stat
 import time
 from http import HTTPStatus
@@ -27,74 +26,14 @@ from .listing import _directory_is_repo
 
 SEARCH_SKIP_DIRS = set(DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
 SEARCH_SECRET_EXCLUDE_SIGNATURE = "fs-secret-v2"
-INDEX_EXCLUDE_GLOB_PREFIX = "glob:"
-INDEX_EXCLUDE_REGEX_PREFIX = "regex:"
+# Re-exported from the shared exclusion owner; the prefixes are one definition, not two.
+INDEX_EXCLUDE_GLOB_PREFIX = exclusions.INDEX_EXCLUDE_GLOB_PREFIX
+INDEX_EXCLUDE_REGEX_PREFIX = exclusions.INDEX_EXCLUDE_REGEX_PREFIX
 MAX_SEARCH_DIRS = 20_000
 MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
 LOGGER = logging.getLogger(__name__)
 _LOGGED_BLOCKED_REINDEX_PATHS: set[str] = set()
-
-
-def _configured_search_skip_dirs(settings: dict[str, Any] | None = None) -> set[str]:
-    raw_names = (settings or {}).get("index_exclude_dir_names", list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES))
-    if not isinstance(raw_names, list):
-        raw_names = list(DEFAULT_INDEX_EXCLUDE_DIR_NAMES)
-    names: set[str] = set()
-    for raw_name in raw_names:
-        if not isinstance(raw_name, str):
-            continue
-        name = raw_name.strip()
-        if not name or name in {".", ".."} or "/" in name or "\\" in name:
-            continue
-        names.add(name)
-    return names
-
-
-def _index_exclude_rule(raw_rule: str, root: Path) -> tuple[str, str, Path | re.Pattern[str]] | None:
-    value = str(raw_rule or "").strip()
-    if not value:
-        return None
-    if value.startswith(INDEX_EXCLUDE_GLOB_PREFIX):
-        pattern = value.removeprefix(INDEX_EXCLUDE_GLOB_PREFIX).strip().replace("\\", "/").lstrip("/")
-        return ("glob", pattern, Path(".")) if pattern else None
-    if value.startswith(INDEX_EXCLUDE_REGEX_PREFIX):
-        pattern = value.removeprefix(INDEX_EXCLUDE_REGEX_PREFIX).strip()
-        if not pattern:
-            return None
-        try:
-            return "regex", pattern, re.compile(pattern)
-        except re.error:
-            return None
-    candidate = Path(value).expanduser().resolve(strict=False)
-    try:
-        candidate.relative_to(root)
-    except ValueError:
-        return None
-    return "path", str(candidate), candidate
-
-
-def _index_exclude_rule_matches(rule: tuple[str, str, Path | re.Pattern[str]], path: Path, root: Path) -> bool:
-    kind, _value, matcher = rule
-    try:
-        relative_path = path.expanduser().resolve(strict=False).relative_to(root).as_posix()
-    except ValueError:
-        return False
-    if kind == "path":
-        assert isinstance(matcher, Path)
-        try:
-            path.expanduser().resolve(strict=False).relative_to(matcher)
-            return True
-        except ValueError:
-            return False
-    if kind == "glob":
-        pattern = _value
-        # Try the directory form too: a familiar rule such as `glob:**/.uploads/**`
-        # must prune `.uploads` itself, not merely reject files after walking it.
-        candidates = (relative_path, f"_/{relative_path}", f"{relative_path}/", f"_/{relative_path}/")
-        return any(fnmatchcase(candidate, pattern) for candidate in candidates)
-    assert isinstance(matcher, re.Pattern)
-    return matcher.search(relative_path) is not None
 
 
 def _index_path_is_excluded(
@@ -128,22 +67,24 @@ def _index_path_is_excluded(
 
 def _search_index_policy(root: Path) -> dict[str, Any]:
     settings = settings_payload().get("settings", {}).get("file_explorer", {})
-    skip_dirs = _configured_search_skip_dirs(settings)
-    configured_rules = [rule for raw_path in settings.get("index_exclude_paths", []) if isinstance(raw_path, str) if (rule := _index_exclude_rule(raw_path, root)) is not None]
-    configured_rules.sort(key=lambda rule: (rule[0], rule[1]))
+    # The parsing, matching and directory-name rules live in the shared exclusion owner so the
+    # index, the watch daemon and Differ cannot drift apart again. Only the index's own knobs
+    # (walk/persist ceilings) and its lexical secret shortcut stay here.
+    compiled = exclusions.ExclusionPolicy.from_settings(settings, DEFAULT_INDEX_EXCLUDE_DIR_NAMES).compiled_for(root)
+    skip_dirs = set(compiled.skip_dirs)
 
     def exclude_path(path: Path) -> bool:
         # The index walk does not follow symlinks, so retain the lexical secret
         # policy without resolving every candidate in a large repository.
         if paths._path_is_secret(path, resolve=False):
             return True
-        return any(_index_exclude_rule_matches(rule, path, root) for rule in configured_rules)
+        return compiled.matches_configured_rule(path)
 
     max_files = int(settings.get("index_max_files", file_index.MAX_INDEX_FILES))
     persist_max_files = int(settings.get("index_persist_max_files", file_index.MAX_PERSISTED_INDEX_FILES))
     persist_max_bytes = int(settings.get("index_persist_max_mb", file_index.MAX_PERSISTED_INDEX_BYTES // (1024 * 1024))) * 1024 * 1024
     refresh_seconds = float(settings.get("index_refresh_seconds", file_index.INDEX_TTL_SECONDS))
-    rule_values = [f"{kind}:{value}" for kind, value, _matcher in configured_rules]
+    rule_values = compiled.rule_values
     coverage_policy = {
         "excludes": rule_values,
         "skip_dirs": sorted(skip_dirs),
@@ -188,6 +129,26 @@ def _ensure_search_index(
             operation=operation,
         )
     return index, policy
+
+
+def _snapshot_freshness(
+    index: file_index.RootIndex | None,
+    root: Path,
+    index_policy: dict[str, Any],
+) -> file_index.SnapshotFreshness:
+    """Adapt this module's policy dict to the one freshness owner in `file_index`.
+
+    Every `index_state`, `index_coverage`, `ready_elsewhere` and
+    `refreshing_elsewhere` value below is derived from the record this returns.
+    No freshness rule is re-implemented here; a second copy of that judgement is
+    exactly how a snapshot came to be reported ready while its producer was dead.
+    """
+    return file_index.index_freshness(
+        index,
+        root,
+        index_policy["skip_dirs"],
+        index_policy["exclude_signature"],
+    )
 
 
 def _fuzzy_subsequence_match(query: str, text: str) -> bool:
@@ -482,6 +443,7 @@ def _search_files_from_safe_root(
                     # Annotate the (capped) results with realpath + size so the client can dedupe symlink
                     # overlaps and content-mirror copies. Bounded to <= max_results, so the stat is cheap.
                     _annotate_search_dedupe_fields(entry)
+                freshness = _snapshot_freshness(index, root, index_policy)
                 payload = {
                     "root": str(root),
                     "root_realpath": os.path.realpath(root),
@@ -491,10 +453,14 @@ def _search_files_from_safe_root(
                     "index_state": "too_large" if index.too_large else "ready",
                     "index_coverage": "partial" if index.too_large else "full",
                     "files": indexed_results,
+                    **freshness.payload_fields(),
                 }
                 if indexed_payload_state:
-                    payload["index_state"] = indexed_payload_state
-                    payload["refreshing_elsewhere"] = True
+                    # A follower serves the snapshot either way, but may only call it
+                    # ready/full when the freshness record vouches for it.
+                    payload["index_state"] = "follower-ready" if freshness.authoritative else "follower-stale"
+                    if not freshness.authoritative:
+                        payload["index_coverage"] = "unverified"
                 return payload
             if not index.ready and not can_build_index:
                 # A follower can always read a persisted snapshot.  Ask the
@@ -514,16 +480,17 @@ def _search_files_from_safe_root(
                     for entry in fallback_results:
                         entry.pop("_sort_key", None)
                         _annotate_search_dedupe_fields(entry)
+                    freshness = _snapshot_freshness(index, root, index_policy)
                     return {
                         "root": str(root),
                         "root_realpath": os.path.realpath(root),
                         "query": str(query or ""),
                         "limit": max_results,
                         "truncated": fallback_truncated,
-                        "index_state": "follower-ready",
-                        "index_coverage": "full",
-                        "refreshing_elsewhere": True,
+                        "index_state": "follower-ready" if freshness.authoritative else "follower-stale",
+                        "index_coverage": "full" if freshness.authoritative else "unverified",
                         "files": fallback_results,
+                        **freshness.payload_fields(),
                     }
                 persistent_response = file_index.request_background_index_search({
                     "root": str(root),
@@ -542,6 +509,10 @@ def _search_files_from_safe_root(
                     )
                 refresh_result = file_index.request_background_owner_refresh({"root": str(root), "query": str(query or ""), "reason": "search-index-missing"})
                 if not refresh_result.get("fallback"):
+                    # `fallback` being false does NOT mean an owner took the work: with
+                    # no requester wired at all the result is neither accepted nor a
+                    # fallback. The freshness record carries the acceptance itself.
+                    freshness = _snapshot_freshness(index, root, index_policy)
                     return {
                         "root": str(root),
                         "root_realpath": os.path.realpath(root),
@@ -550,7 +521,7 @@ def _search_files_from_safe_root(
                         "truncated": False,
                         "files": [],
                         "index_state": "follower",
-                        "refreshing_elsewhere": True,
+                        **freshness.payload_fields(),
                     }
             if not index.ready and can_build_index:
                 # The first query for a large root must not return an empty
@@ -594,6 +565,9 @@ def _search_files_from_safe_root(
                         if len(unique_rows) >= max_results:
                             child_truncated = True
                             break
+                    # This process is the build owner: the only refresh that exists is
+                    # its own warming build, which is here, not elsewhere.
+                    freshness = _snapshot_freshness(index, root, index_policy)
                     return {
                         "root": str(root),
                         "root_realpath": os.path.realpath(root),
@@ -602,8 +576,8 @@ def _search_files_from_safe_root(
                         "truncated": child_truncated,
                         "index_state": "warming",
                         "index_coverage": "partial",
-                        "refreshing_elsewhere": True,
                         "files": unique_rows,
+                        **freshness.payload_fields(),
                     }
         if not tokens:
             # C11: an EMPTY query on a full-tree root used to fall through to a cold recursive walk just to
@@ -629,6 +603,9 @@ def _search_files_from_safe_root(
                 recent_results, recent_truncated = recent
                 for entry in recent_results:
                     _annotate_search_dedupe_fields(entry)
+                freshness = _snapshot_freshness(index, root, index_policy)
+                if recent_payload_state == "follower-ready" and not freshness.authoritative:
+                    recent_payload_state = "follower-stale"
                 return {
                     "root": str(root),
                     "root_realpath": os.path.realpath(root),
@@ -637,9 +614,10 @@ def _search_files_from_safe_root(
                     "truncated": recent_truncated,
                     "files": recent_results,
                     "index_state": recent_payload_state,
-                    "refreshing_elsewhere": recent_payload_state == "follower-ready",
+                    **freshness.payload_fields(),
                 }
             if not index.ready and not can_build_index:
+                freshness = _snapshot_freshness(index, root, index_policy)
                 return {
                     "root": str(root),
                     "root_realpath": os.path.realpath(root),
@@ -648,7 +626,7 @@ def _search_files_from_safe_root(
                     "truncated": False,
                     "files": [],
                     "index_state": "follower-fallback-skipped",
-                    "refreshing_elsewhere": False,
+                    **freshness.payload_fields(),
                 }
             return {
                 "root": str(root),
@@ -816,6 +794,10 @@ def _index_status_from_safe_root(raw_root: str) -> dict[str, Any]:
     state = "too_large" if ready and too_large else ("ready" if ready else ("building" if building else ("error" if last_error else "missing")))
     if not ready and not building and not file_index.background_owner_can_build():
         state = "follower"
+    # `state` is a role/build predicate. Whether another process is refreshing,
+    # and whether this snapshot may be called ready, are freshness questions and
+    # come from the one freshness record - not from "I am not the owner".
+    freshness = _snapshot_freshness(index, root, policy)
     return {
         "root": str(root),
         "root_realpath": os.path.realpath(root),
@@ -846,8 +828,8 @@ def _index_status_from_safe_root(raw_root: str) -> dict[str, Any]:
         "persist_max_bytes": policy["persist_max_bytes"],
         "excluded_paths": policy["excluded_paths"],
         "state": state,
-        "ready_elsewhere": state == "follower" and metadata_ready,
-        "refreshing_elsewhere": state == "follower",
+        "ready_elsewhere": state == "follower" and metadata_ready and freshness.authoritative,
+        **freshness.payload_fields(),
     }
 
 

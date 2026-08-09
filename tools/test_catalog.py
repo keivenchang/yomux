@@ -108,23 +108,35 @@ GOLDEN_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["golden"]
 E2E_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["e2e"]
 NODE_BRIDGE_FILES: Final[tuple[str, ...]] = PYTEST_PHASE_FILES["node_bridge"]
 MOCK_TRANSCRIPT_FILES: Final[tuple[str, ...]] = ("tests/test_mock_transcripts.py",)
-NODE_LAYOUT_FILES: Final[tuple[str, ...]] = (
-    "tests/i18n_structured_message.test.js",
-    "tests/i18n_locale_registry.test.js",
-    "tests/tmux_wall.test.js",
-    "tests/layout_restore.test.js",
-    "tests/drop_action_result.test.js",
-    "tests/file_surface_menu.test.js",
-    "tests/side_panes.test.js",
-    "tests/editor_preview_core.test.js",
-    "tests/editor_preview_tmux.test.js",
-    "tests/editor_preview_settings.test.js",
-    "tests/stats_current_ui.test.js",
-    "tests/stats_current_panel.test.js",
-    "tests/tabber.test.js",
-    "tests/layout_async.test.js",
-    # gate_panels remains an unimplemented placeholder until its browser harness exists.
+NODE_SHARD_LAUNCHER: Final[str] = "tests/layout_url.test.js"
+# The one place a Node shard may be kept out of the gate. Every other `tests/*.test.js` is derived
+# from disk below, so a new shard joins the gate by existing rather than by being remembered here.
+# This list previously enumerated its 14 members by hand and silently omitted three whole shards,
+# including tests/share_theme.test.js and its ~2,700 assertions over quick-open, Finder, Differ,
+# editor, terminal, and layout: the gate reported green without ever running them.
+NODE_LAYOUT_EXCLUDED_FILES: Final[tuple[str, ...]] = (
+    # gate_panels asserts on the decorator prose of tests/test_gate_panels.py, whose own
+    # xfail(strict=True) markers already fail the pytest-browser lane if those gates start passing.
+    # It duplicates that guarantee as text matching and is written to go red when F9 SubsystemSpec
+    # lands, so it belongs to the F9 change, not to the standing gate.
+    "tests/gate_panels.test.js",
 )
+
+
+def discover_node_layout_files() -> tuple[str, ...]:
+    """Return the Node shards the node-layout lane runs, derived from the shard files on disk."""
+
+    excluded = {NODE_SHARD_LAUNCHER, *NODE_LAYOUT_EXCLUDED_FILES}
+    return tuple(
+        relative
+        for relative in sorted(
+            path.relative_to(REPO_ROOT).as_posix() for path in TEST_ROOT.glob("*.test.js")
+        )
+        if relative not in excluded
+    )
+
+
+NODE_LAYOUT_FILES: Final[tuple[str, ...]] = discover_node_layout_files()
 
 
 def pytest_files(phase: str) -> list[str]:

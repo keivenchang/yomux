@@ -61,7 +61,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.0"
+YOLOMUX_VERSION = "0.7.1"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -438,6 +438,31 @@ def ready_response_envelope_bytes(data: bytes, request_id: str) -> bytes:
     return framed + b"}"
 
 
+def validated_causal_stack(stack: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Return the one causal stack a canonical failure envelope is allowed to carry.
+
+    The API response parent rejects a ``state: failed`` envelope whose stack is empty or whose
+    frames lack ``component``/``operation``/``code``, and route dispatch then turns that rejection
+    into an internal-error 500 with the real cause lost.  Validating here makes a caller mistake
+    fail in the producing call, where the test that covers that caller can see it, instead of in a
+    browser.  The caller supplies its own exact frame; this helper never guesses one from the call
+    stack or the route registry.
+    """
+    frames = [dict(frame) for frame in (stack or []) if isinstance(frame, dict)]
+    complete = bool(frames) and all(
+        bool(str(frame.get("component") or ""))
+        and bool(str(frame.get("operation") or ""))
+        and bool(str(frame.get("code") or ""))
+        for frame in frames
+    )
+    if not complete:
+        raise ValueError(
+            "canonical failure payload requires a causal stack of frames carrying "
+            f"component, operation, and code; got {stack!r}"
+        )
+    return frames
+
+
 def error_payload(
     error: object,
     *,
@@ -475,7 +500,7 @@ def error_payload(
             "origin": str(origin or "server.http"),
             "retryable": bool(retryable),
             "details": dict(details or {}),
-            "stack": [dict(frame) for frame in (stack or [])],
+            "stack": validated_causal_stack(stack),
         }
         return {
             "state": "failed",

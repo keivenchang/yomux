@@ -36,6 +36,7 @@ from ..host_identity import current_host_identity
 from ..host_identity import is_current_local_process
 from ..host_identity import process_start_identity
 from ..host_identity import process_start_ticks
+from ..host_identity import recorded_start_identity
 from .rpc import LocalRpcError
 from .rpc import new_envelope
 from .rpc import request
@@ -772,6 +773,7 @@ class LocalServiceRegistry:
         self._start_exit_count = 0
         self._last_exit_code: int | None = None
         self._failure_reason = ""
+        self._record_refusal_reason = ""
         self._terminal_failure = False
         self._process_diagnostic: dict[str, Any] = {}
 
@@ -854,9 +856,15 @@ class LocalServiceRegistry:
         if not record:
             return None
         diagnostic = self._record_process_diagnostic(record)
-        if not diagnostic.may_remove_stale_record and not self._dead_legacy_record_has_inert_socket_artifact(
-            record,
-            diagnostic,
+        # `may_remove_unidentifiable_record` recovers installs already poisoned by
+        # the 0.7.0 publication defect: a record whose PID is 0 or 1 names no
+        # process, so discarding the file is record-only cleanup -- no signal, no
+        # adoption, no socket removal -- and it is the only way a same-host,
+        # same-boot `invalid_pid` record can ever stop blocking startup.
+        if (
+            not diagnostic.may_remove_stale_record
+            and not diagnostic.may_remove_unidentifiable_record
+            and not self._dead_legacy_record_has_inert_socket_artifact(record, diagnostic)
         ):
             return False
         try:
@@ -1084,6 +1092,68 @@ class LocalServiceRegistry:
         if isinstance(source_epoch, str) and source_epoch:
             record["source_epoch"] = source_epoch[:160]
         return record
+
+    def _record_publication_refusal(self, status: dict[str, Any], record: dict[str, Any]) -> str:
+        """Name why a status response may not become the durable identity record."""
+
+        if status.get("ok") is not True:
+            return "status_not_ok"
+        claimed_service = status.get("service")
+        # Only a string under `service` is a service-name claim: four of the six
+        # daemons omit the key entirely and statsd reports a nested diagnostics
+        # object there.  A string that disagrees proves a cross-wired socket.
+        if isinstance(claimed_service, str) and claimed_service.strip() and claimed_service.strip() != self.spec.name:
+            return "service_name_mismatch"
+        if int(record.get("protocol_version") or 0) != self.spec.protocol_version:
+            return "protocol_version_mismatch"
+        # A PID of 0 or 1 cannot name a service process, and a record without a
+        # process-birth identity cannot be fenced.  Both are permanently
+        # unremovable on this host and boot, so publishing either one bricks the
+        # service instead of describing it.
+        if int(record.get("pid") or 0) <= 1:
+            return "invalid_pid"
+        if not recorded_start_identity(record):
+            return "missing_process_start_identity"
+        return ""
+
+    def _publish_record(self, status: dict[str, Any]) -> bool:
+        """Publish the durable identity record, and only from a proven status.
+
+        This is the one place a service record is written.  0.7.0 published
+        whatever `_record_from_status` produced straight after a successful
+        ping, so a single dropped status RPC wrote a record carrying pid 0 --
+        an `invalid_pid` identity no later start on the same host and boot
+        could clean -- while still telling the caller the service had started.
+
+        A status that cannot prove `ok`, this exact service and protocol
+        version, a PID that can name a process, and a usable process-start
+        identity is not a publishable identity.  Refuse it, drop cached health
+        so the next attempt re-probes, and let the caller continue through
+        bounded startup and retry.  Never report success from here.
+        """
+        try:
+            record = self._record_from_status(status)
+            refusal = self._record_publication_refusal(status, record)
+        except (TypeError, ValueError) as error:
+            # A malformed status is an expected peer outcome, not a crash for
+            # the caller: keep the cause and treat it as a refusal.
+            refusal = f"malformed_status ({type(error).__name__})"
+            record = {}
+        if refusal:
+            self._record_refusal_reason = redact_local_service_text(
+                f"{self.spec.name} service record refused before publication "
+                f"(reason={refusal}, status_pid={status.get('pid')!r})"
+            )
+            self._failure_reason = self._record_refusal_reason
+            self.invalidate_rpc_health()
+            return False
+        if self._failure_reason and self._failure_reason == self._record_refusal_reason:
+            # A refusal that has now been repaired must not keep describing a
+            # service whose identity is published and provable.
+            self._failure_reason = ""
+        self._record_refusal_reason = ""
+        self._write_record(record)
+        return True
 
     def _mark_failure(
         self,
@@ -1356,8 +1426,10 @@ class LocalServiceRegistry:
             return False
         if self.recently_healthy():
             return True
-        if self.healthy():
-            self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
+        # A healthy ping is not a started service until its identity record is
+        # published. When the follow-up status is lost, fall through to bounded
+        # startup and retry instead of reporting a success nothing can prove.
+        if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
             return True
         if self._upgrade_required is not None:
             return False
@@ -1366,8 +1438,7 @@ class LocalServiceRegistry:
         with self.lock:
             if not self.starts_allowed():
                 return False
-            if self.healthy():
-                self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
+            if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
                 return True
             if self._upgrade_required is not None:
                 return False
@@ -1376,8 +1447,7 @@ class LocalServiceRegistry:
             if self.clock() < self.next_start_at:
                 return False
             with file_lock(self.lock_path, dir_mode=0o700):
-                if self.healthy():
-                    self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
+                if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
                     return True
                 if self._upgrade_required is not None:
                     return False
@@ -1399,9 +1469,7 @@ class LocalServiceRegistry:
                 self.process = process
                 deadline = self.clock() + LOCAL_SERVICE_START_TIMEOUT_SECONDS
                 while self.clock() < deadline:
-                    if self.healthy():
-                        status = self._request("status", timeout=0.2)
-                        self._write_record(self._record_from_status(status))
+                    if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
                         self.failures = 0
                         self.next_start_at = 0.0
                         self._start_exit_count = 0
@@ -1416,7 +1484,10 @@ class LocalServiceRegistry:
                         break
                     self.sleep(0.03)
                 exit_code = process.poll()
-                reason = self._spawn_failure_reason(exit_code)
+                # A child that answered ping but never published a provable
+                # identity failed for that reason, not for the generic
+                # "did not become ready" one; keep the real cause.
+                reason = self._record_refusal_reason or self._spawn_failure_reason(exit_code)
                 self._mark_failure(
                     reason,
                     exit_code=exit_code,
@@ -1447,7 +1518,9 @@ class LocalServiceRegistry:
             timeout=0.25,
         )
         if response.get("ok"):
-            self._write_record(self._record_from_status(self._request("status", timeout=0.2)))
+            # A lease refresh must not publish an unprovable identity either; a
+            # refusal only drops cached health so the next call re-probes.
+            self._publish_record(self._request("status", timeout=0.2))
         return response
 
     def release_lease(self, lease_id: str) -> dict[str, Any]:

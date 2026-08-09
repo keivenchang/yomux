@@ -36,8 +36,25 @@ MIN_WRITER_PROTOCOL = 24
 # Build 4 moves recurring CPU/GPU host sampling into statsd.  An older daemon
 # must be retired rather than silently accepting context it cannot collect.
 MIN_WRITER_BUILD = 4
-RETENTION_SECONDS = 24 * 60 * 60
+# How long original facts stay on disk. Retention and the GUI's longest display
+# window (stats_resolution.MAX_RANGE_SECONDS) are two independent knobs that used
+# to be spelled with the same literal, which invited the assumption that moving
+# one moved the other. They are ordered by one invariant, enforced in
+# _require_retention_covers_display_window and asserted by the retention tests:
+#
+#     RETENTION_SECONDS >= stats_resolution.MAX_RANGE_SECONDS
+#
+# Below that, a 24h chart asks for buckets whose source rows were already pruned
+# and draws the truncated remainder as though the window were complete -- stale
+# data wearing a current timestamp. Two days keeps the whole 24h window plus a
+# day of slack for late-arriving history, clock skew, and a missed nightly prune.
+RETENTION_SECONDS = 2 * 24 * 60 * 60
 DATABASE_FILENAME = f"stats-v{SCHEMA_VERSION}.sqlite3"
+# Sidecar beside the database, like WRITER_FENCE_FILENAME. The nightly prune
+# schedule needs the last successful prune to survive a restart, and schema_meta
+# cannot grow a column without a SCHEMA_VERSION bump that would strand the
+# operator's existing history.
+PRUNE_STATE_FILENAME = "stats-prune.json"
 
 
 def default_socket_path(state_dir: Path | None = None) -> Path:
@@ -448,6 +465,34 @@ def _validate_timestamp(value: object, name: str) -> float:
     if not math.isfinite(timestamp) or timestamp < 0:
         raise StorageValidationError(f"{name} must be a finite timestamp")
     return timestamp
+
+
+def retention_covers_display_window() -> bool:
+    """Return whether kept history covers the GUI's longest window.
+
+    See the RETENTION_SECONDS comment: this is the one ordering that ties the two
+    otherwise independent knobs together.
+    """
+
+    return RETENTION_SECONDS >= stats_resolution.MAX_RANGE_SECONDS
+
+
+def _require_retention_covers_display_window() -> None:
+    """Fail closed before deleting facts the GUI can still ask for.
+
+    Pruning is the destructive half of retention. If retention were configured
+    below the longest display window, the safe answer is to keep the rows and
+    refuse, not to delete them and let a 24h chart render a partial window as a
+    complete one.
+    """
+
+    if not retention_covers_display_window():
+        raise StatsCurrentError(
+            "stats retention "
+            f"{RETENTION_SECONDS}s is shorter than the largest display window "
+            f"{stats_resolution.MAX_RANGE_SECONDS}s; refusing to prune data the "
+            "GUI can still request"
+        )
 
 
 def _validate_nonnegative_integer(value: object, name: str) -> int:
@@ -2355,9 +2400,41 @@ class Store:
 
             yield read
 
+    def last_pruned_at(self) -> float:
+        """Return the last successful prune, or 0.0 when this store never pruned.
+
+        A never-pruned store reads as due: the nightly schedule then runs once,
+        promptly, instead of waiting a whole day with an unbounded database.
+        """
+
+        try:
+            value = read_json_file(
+                self.path.parent / PRUNE_STATE_FILENAME, None, exceptions=(FileNotFoundError,)
+            )
+        except (OSError, json.JSONDecodeError):
+            # Maintenance metadata, not facts. An unreadable sidecar means "the
+            # last prune is unknown", which is due -- never "skip the prune".
+            return 0.0
+        if not isinstance(value, dict):
+            return 0.0
+        recorded = value.get("last_pruned_at")
+        if isinstance(recorded, bool) or not isinstance(recorded, (int, float)):
+            return 0.0
+        if not math.isfinite(float(recorded)) or float(recorded) < 0:
+            return 0.0
+        return float(recorded)
+
+    def _record_pruned_at(self, now: float) -> None:
+        atomic_write_text(
+            self.path.parent / PRUNE_STATE_FILENAME,
+            json.dumps({"last_pruned_at": now}, sort_keys=True, separators=(",", ":")) + "\n",
+            mode=0o600,
+        )
+
     def prune(self, *, now: float) -> PruneResult:
         if self.read_only:
             raise StatsCurrentError("stats store reader cannot mutate the database")
+        _require_retention_covers_display_window()
         cutoff = _validate_timestamp(now, "now") - RETENTION_SECONDS
         connection = self._connection()
         with _transaction(connection):
@@ -2398,6 +2475,9 @@ class Store:
                     "UPDATE schema_meta SET source_generation = ? WHERE singleton = 1",
                     (generation,),
                 )
+        # Recorded only after the transaction commits: a prune that failed must
+        # stay due, or one bad night silently becomes a skipped day.
+        self._record_pruned_at(now)
         return PruneResult(
             observations, coverage_deleted, coverage_clipped, usage_atoms, generation,
             unavailable_deleted, unavailable_clipped,

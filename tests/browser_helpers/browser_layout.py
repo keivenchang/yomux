@@ -32,6 +32,7 @@ from yolomux_lib import auto_approve_worker as auto_approve_worker_module
 from yolomux_lib import control as control_module
 from yolomux_lib import events as events_module
 from yolomux_lib import settings as settings_module
+from yolomux_lib import web
 from yolomux_lib import yolo_rules as yolo_rules_module
 from yolomux_lib import server_auth
 from yolomux_lib.locales import locale_registry_payload
@@ -2278,6 +2279,10 @@ def _live_runtime_boot_fixture_html(settings=None, transcript_current_path="/hom
         "homePath": "/home/test",
         "repoRoot": "/home/test/yolomux.dev",
         "maxSessionTabs": 9,
+        # From the server that states it on every real page, never a literal here: the bundle
+        # fails closed to one request per item when the payload states no bound, so a fixture
+        # missing this block boots the Finder in an unbatched mode no user ever sees.
+        "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
         "serverHostname": "localhost",
         "version": "test",
         "versionCommitTime": "test",

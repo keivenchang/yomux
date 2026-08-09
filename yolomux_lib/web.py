@@ -6,6 +6,8 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+from .filesystem import BATCH_TRIGGER_COUNT_LIMIT
+from .filesystem import MAX_BATCH_REQUESTS
 from .filesystem.io_ops import read_json_file
 from .common import AUTH_CONFIG_PATH
 from .common import DEFAULT_LINEAR_ISSUE_BASE_URL
@@ -251,6 +253,20 @@ def bootstrap_settings_payload(settings_data: dict) -> dict:
     return payload
 
 
+def filesystem_batch_limits_payload() -> dict[str, int]:
+    """The `filesystemBatchLimits` boot-payload block, from the one constant that enforces it.
+
+    Every page the browser boots gets its /api/fs/batch bounds from here, and so must every test
+    page that runs the real bundle: the bundle falls back to one request per item when the payload
+    states no bound, so a hand-written fixture bootstrap that omits this block does not merely skip
+    a key, it silently runs the whole Finder in an unbatched mode no real page ever uses.
+    """
+    return {
+        "maxRequests": MAX_BATCH_REQUESTS,
+        "triggerCountLimit": BATCH_TRIGGER_COUNT_LIMIT,
+    }
+
+
 # Declared inline in every page head so the browser never probes the authenticated
 # /favicon.ico. Pre-auth pages need it most: there the probe returns 401.
 INLINE_FAVICON_LINK = (
@@ -297,6 +313,14 @@ def html_page(
         "homePath": str(Path.home()),
         "repoRoot": str(Path(__file__).resolve().parents[1]),
         "maxSessionTabs": MAX_YOLOMUX_SESSION_TABS,
+        # The two bounds /api/fs/batch refuses above, stated by the server that will refuse.
+        # `maxRequests` is the size the browser must split its posts at: the same constant this
+        # server's own watch-batch producer chunks at (`submit_filesystem_watch_batches`), and the
+        # one a Finder mass re-list of a deleted worktree used to exceed in a single body and get a
+        # 400 invalid_request for.  `triggerCountLimit` is the ceiling coalesced per-item trigger
+        # counts are rejected above.  Both ship here so `filesystem.MAX_BATCH_REQUESTS` stays the
+        # one copy instead of the bundle carrying a remembered literal that can drift from it.
+        "filesystemBatchLimits": filesystem_batch_limits_payload(),
         "serverHostname": SERVER_HOSTNAME,
         "serverStartedAt": SERVER_STARTED_AT,
         "serverStartedAtMs": int(SERVER_STARTED_AT * 1000),

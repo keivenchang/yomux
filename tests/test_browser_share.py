@@ -848,6 +848,10 @@ def test_share_readonly_finder_session_is_host_authoritative(browser, tmp_path):
             "homePath": "/home/test",
             "repoRoot": "/repo/app",
             "maxSessionTabs": 99,
+            # This page drives the real Finder through /api/fs/batch, so it must state the bound
+            # a real page states: the bundle fails closed to one request per item without it, and
+            # a fixture batching one-at-a-time cannot exercise the split a share viewer performs.
+            "filesystemBatchLimits": web.filesystem_batch_limits_payload(),
             "serverHostname": "test-host",
             "strings": {"en": strings},
             "codeMirrorAssetUrl": bundle_uri,

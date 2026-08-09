@@ -230,7 +230,14 @@ def _mtime_matches_expected(expected: int, actual_ns: int, actual_legacy: int) -
     return abs(expected - actual_ns) <= MTIME_NS_CONFLICT_TOLERANCE
 
 
-def _validated_child_name(raw_name: str) -> str:
+def validated_child_name(raw_name: str) -> str:
+    """Return the one lexical rule a rename target name must pass.
+
+    Like `paths.validate_request_path_lexical` this reads only the request string -- no descriptor
+    and no name service -- so HTTP acceptance can apply it before a rename becomes an accepted
+    operation instead of discovering it in the worker.
+    """
+
     if not isinstance(raw_name, str):
         raise paths.FilesystemError("name must be a string", message_key="fs.error.nameString")
     name = raw_name.strip()
@@ -305,8 +312,8 @@ def delete_path(raw_path: str) -> dict[str, Any]:
 
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
-    name = _validated_child_name(new_name)
-    requested = paths._parsed_path(raw_path)
+    name = validated_child_name(new_name)
+    requested = paths.parsed_request_path(raw_path)
     target = requested.with_name(name)
     with paths.safe_parent(
         raw_path,

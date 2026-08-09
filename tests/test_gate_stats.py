@@ -765,8 +765,22 @@ def test_g6_unlisted_series_uses_declared_micro_usd_unit(browser, tmp_path, gate
 
 @pytest.mark.browser
 def test_g7_monotonic_value_never_renders_as_wall_clock_age(browser, tmp_path, gate_runtime_paths):
+    """`generated_at` is wall-clock data. A monotonic counter in that field must read as absent.
+
+    Subtracting a small monotonic value from `Date.now()` yields a confident, false multi-year age
+    instead of admitting no wall-clock time exists, so the guard lives in `debugSystemGeneratedAge`
+    and the summary strip's `updated` fact is where its answer is rendered.
+
+    The selector is a DATA HOOK, deliberately, and this test is why. It used to be
+    `[role="status"]`, which was written when the summary strip carried that role. A later change
+    moved the role off the strip and added a screen-reader announce region ahead of it in document
+    order; `querySelector` takes the first match, so this test silently rebound to the announce
+    region and started asserting against a counts string. The contract went unverified while the
+    suite stayed green. A bare role is a rebindable selector -- any future sibling can take it --
+    so this names the element that owns the rendering instead.
+    """
     load_live_runtime_boot_fixture(browser, tmp_path, "?sessions=1&layout=left&tabs=left:1")
-    text = browser.execute_script(
+    rendered = browser.execute_script(
         """
         jsDebugSystemState.payload = {
           ok: true,
@@ -778,8 +792,21 @@ def test_g7_monotonic_value_never_renders_as_wall_clock_age(browser, tmp_path, g
         };
         const host = document.createElement('div');
         host.innerHTML = debugSystemInnerHtml();
-        return host.querySelector('[role="status"]').textContent;
+        const updated = host.querySelector('[data-js-debug-roster-summary-fact="updated"]');
+        return {
+          updated: updated ? updated.textContent : null,
+          // Every element in the rendered panel that carries the age, so a future second copy
+          // rendered somewhere else cannot pass by being invisible to one selector.
+          matches: Array.from(host.querySelectorAll('*'))
+            .filter(node => !node.children.length && /\b12345\b|1970/.test(node.textContent))
+            .map(node => node.textContent.trim()),
+        };
         """
     )
+    assert rendered["updated"] is not None, rendered
+    text = rendered["updated"]
     assert "year" not in text.lower(), text
     assert "not available" in text.lower() or "n/a" in text.lower(), text
+    # NEGATIVE CONTROL: nothing anywhere in the panel renders the raw monotonic value or a 1970
+    # date derived from it. The single-element assertion above cannot see a second copy.
+    assert rendered["matches"] == [], rendered

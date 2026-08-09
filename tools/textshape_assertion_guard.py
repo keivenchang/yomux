@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # guard rejects stale entries, so this is an audit trail rather than a blanket
 # opt-out for a file or class of tests.
 TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
+    "tests/test_stats_current_prune_schedule.py:test_preferences_panel_offers_the_schedule_in_the_stats_section": "The client must render the server-owned prune-time choices and must never spell its own copy of the default; that wiring is the contract, and the values themselves are proven behaviourally at test_default_prune_time_is_half_past_two_and_is_offered.",
     "tests/test_chat_store.py:test_chat_store_paging_sql_reads_the_real_implementation_and_avoids_offset": "The OFFSET paging contract is only falsifiable if the scanned file really defines the store's SQL; the prior form read a six-line sys.modules alias with no SQL and could never fail.",
     "tests/test_app.py:test_session_http_guards_use_shared_decorator": "The decorator is the declared HTTP guard boundary, so its single shared attachment is a structural contract.",
     "tests/test_app.py:test_yoagent_controller_facade_allows_only_declared_dependencies": "The controller facade deliberately limits imports and dependencies; this is an architecture contract.",
@@ -36,6 +37,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_app.py:test_tabber_activity_warmer_parallel_state_is_retired": "The retired tabber warmer state must remain absent to preserve one warmer owner.",
     "tests/test_app.py:test_session_files_disk_prune_parallel_state_is_retired": "The retired disk-prune state must remain absent to prevent a duplicate pruner.",
     "tests/test_app.py:test_client_watch_file_parallel_state_maps_are_retired": "The retired watch-file maps must remain absent to preserve one event owner.",
+    "tests/test_app.py:test_the_cpu_sample_staleness_policy_has_exactly_one_owner": "The retired `3.0` staleness literal must remain absent from app.py so the reader's threshold cannot drift from the producer's cadence; the arithmetic identity asserted beside it holds regardless of a second hardcoded copy reappearing, so only the source check can detect that copy.",
     "tests/test_app.py:test_yoagent_session_summary_parallel_worker_fields_are_retired": "The retired summary worker fields must remain absent to preserve the shared worker boundary.",
     "tests/test_auth_config.py:test_missing_auth_yaml_creates_commented_starter": "The shipped starter-file comments are the user-facing configuration contract.",
     "tests/test_auth_config.py:test_legacy_placeholder_auth_yaml_is_replaced_with_commented_starter": "The migration writes the same documented starter-file contract.",
@@ -108,7 +110,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "e4ac82dcc5627142217d6ebf81c096e2e71124c6af84232d8c585533368439df"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "2dfa4c76f52548f1f1331372b9d9440f57d93bf577f9f32c04bbb849b4d16d2f"
 
 
 @dataclass(frozen=True, slots=True)
