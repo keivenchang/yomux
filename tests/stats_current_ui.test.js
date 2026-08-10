@@ -1762,6 +1762,49 @@ test('browser transport uses one authenticated current stream and exact snapshot
   assert.ok(fetches.every(item => !item.url.includes('/api/stats-delta')));
 });
 
+test('a snapshot from a newer server that grew a top-level field is reported, not silently blanked', async () => {
+  // The v0.6.10 -> v0.7.1 upgrade of port 7770: the running server grew the
+  // `usage_atom_backfill` snapshot field while an already-open tab kept running the
+  // pre-upgrade bundle. Every repair snapshot then failed the exact-field contract, the
+  // rejection was discarded by the repair `catch`, and Agent tokens, Model tokens, and the
+  // Cost Summary stayed blank for two hours with nothing said anywhere.
+  FakeEventSource.instances = [];
+  const clock = new FakeClock();
+  const failures = [];
+  let serverGrewAField = false;
+  const client = loadNamespace().createBrowserClient({
+    fetch: async url => {
+      if (url === '/api/stats-capabilities') return response(200, capabilities());
+      const payload = snapshot({requested: 1, cache: 2, sourceGeneration: 2});
+      return response(200, serverGrewAField
+        ? {...payload, field_this_client_predates: {state: 'ready'}}
+        : payload);
+    },
+    EventSource: FakeEventSource,
+    clientId: 'browser-forward-incompatible-snapshot',
+    savedRange: 300,
+    savedResolution: 1,
+    controllerOptions: {
+      clock, repairBaseMs: 100, repairMaxMs: 400,
+      onFailure: failure => failures.push(failure),
+    },
+  });
+  await client.start();
+  await clock.advance(0);
+  const painted = client.controller().generation();
+  assert.equal(painted.cache_generation, 2, 'the pre-upgrade client paints the old server\'s snapshot');
+
+  serverGrewAField = true;
+  FakeEventSource.instances[0].emit('repair');
+  await clock.advance(100);
+  await clock.advance(0);
+
+  assert.equal(client.controller().generation(), painted, 'an unreadable snapshot never replaces the painted generation');
+  assert.equal(failures.length, 1, 'the unreadable snapshot is reported once instead of leaving a blank panel');
+  assert.match(failures[0].message, /snapshot fields are not exact/, 'the reported reason names the contract that rejected the payload');
+  client.stop();
+});
+
 test('server-requested stream repair reconnects without reporting a native transport failure', async () => {
   FakeEventSource.instances = [];
   const clock = new FakeClock();

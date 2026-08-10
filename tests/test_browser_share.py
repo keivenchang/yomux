@@ -1171,7 +1171,12 @@ def test_http_share_browser_keeps_finder_tabs_editor_differ_and_tabber_in_sync(b
         ),
         filesystem_operation_http_payload=filesystem_operation_http_payload,
         fs_batch_http_payload=lambda payload, **_kwargs: (
-            filesystem.filesystem_batch_result(payload),
+            # The real route captures this server's access policy at accept time; this stub stands
+            # in for that route, so it captures it the same way.
+            filesystem.filesystem_batch_result({
+                **payload,
+                filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
+            }),
             HTTPStatus.OK,
         ),
     )

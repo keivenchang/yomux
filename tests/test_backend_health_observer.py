@@ -610,6 +610,144 @@ def test_a_probe_that_never_answers_is_bounded_by_the_probe_timeout(tmp_path: Pa
         reset_local_service_traffic()
 
 
+class VirtualProbePool:
+    """The bounded probe pool with the real blocking replaced by the injected clock.
+
+    The observer's own deadline arithmetic is what is under test (`_probe_all` computes
+    ``deadline = monotonic() + probe_timeout_seconds`` once, then ``remaining = deadline -
+    monotonic()`` per service), so this fake replaces only the part a test cannot own -- real
+    waiting -- and leaves that arithmetic running against the injected clock. A producer declared
+    slower than the remaining budget consumes the whole remaining budget on the clock and then
+    raises `TimeoutError`, which is exactly what an abandoned future costs in wall time.
+    """
+
+    def __init__(self, clock: FakeClock, delays: dict[str, float]) -> None:
+        self.clock = clock
+        self.delays = delays
+        self.shutdown_calls = 0
+
+    def submit(self, worker, producer):
+        # The observer submits `_probe_worker` with the bound row producer as its argument.
+        return VirtualFuture(self.clock, self.delays.get(producer.__self__.name, 0.0), worker, producer)
+
+    def shutdown(self, *args: Any, **kwargs: Any) -> None:
+        self.shutdown_calls += 1
+
+
+class VirtualFuture:
+    """A future that spends INJECTED time instead of real time, with `Future`'s exact contract."""
+
+    def __init__(self, clock: FakeClock, delay: float, worker, producer) -> None:
+        self._clock = clock
+        self._delay = float(delay)
+        self._worker = worker
+        self._producer = producer
+        self._value: Any = None
+
+    def exception(self, timeout: float | None = None):
+        budget = float("inf") if timeout is None else float(timeout)
+        if self._delay > budget:
+            # The deadline is spent and the future is abandoned, unfinished.
+            self._clock.advance(budget)
+            raise TimeoutError
+        self._clock.advance(self._delay)
+        try:
+            self._value = self._worker(self._producer)
+        except Exception as error:  # `Future.exception` RETURNS the failure, it does not raise it
+            return error
+        return None
+
+    def result(self, timeout: float | None = None):
+        return self._value
+
+
+def test_a_service_exit_is_detected_inside_the_composed_two_observe_plus_probe_timeout_bound(tmp_path: Path):
+    """The 4.5 s bound itself: `2*BACKEND_HEALTH_OBSERVE_SECONDS + BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS`.
+
+    Its three constituents each already have a test -- the constants
+    (`test_observer_budget_constants_match_the_health_contract`), the immediate `down` transition
+    (`test_a_verified_exit_transitions_to_down_immediately`), and the per-cycle probe deadline
+    (`test_a_probe_that_never_answers_is_bounded_by_the_probe_timeout`) -- and no test ever added
+    the three together. The number the health contract actually promises a user is the SUM, and
+    changing any one constituent silently moves it while all three parts stay green.
+
+    The worst case is built literally, because the bound only has to hold there: the exit lands
+    immediately AFTER a cycle has already read the row, so that cycle cannot see it; the next
+    cycle's probe never answers and burns the entire probe deadline, so that service reads
+    `unknown` and the debounce correctly swallows it; only the cycle after that reads the exited
+    row, where `down` is immediate and is accepted at once.
+
+    Every second below is spent by the product asking for it -- `_await_next_cycle` asking to wait
+    `interval_seconds`, and `_probe_all` spending `probe_timeout_seconds` on a probe that never
+    answers. The test advances no clock of its own, so this is an arithmetic contract and not a
+    measurement of the machine's scheduling luck.
+    """
+
+    reset_local_service_traffic()
+    clock = FakeClock(500.0)
+    wall = FakeClock(1_000_000.0)
+    services = {name: FakeService(name) for name in LOCAL_SERVICE_INVENTORY}
+    waits: list[float] = []
+
+    def wait(timeout: float) -> bool:
+        waits.append(timeout)
+        clock.advance(timeout)
+        return False
+
+    delays: dict[str, float] = {}
+    observer = BackendHealthObserver(
+        row_producers=lambda: {name: service.runtime_status for name, service in services.items()},
+        store=BackendHealthStore(PORT, state_dir=tmp_path, clock=wall),
+        publish=lambda event_type, payload: {"type": event_type},
+        monotonic=clock,
+        wall_clock=wall,
+        wait=wait,
+        identity_source=lambda pid: f"proc:{pid}" if pid > 0 else "",
+    )
+    observer._executor = VirtualProbePool(clock, delays)
+
+    # `_run` is a two-statement loop body, and the sequence driven below is exactly those two
+    # statements in exactly that order. Pinned, so a reordered or extended loop cannot leave this
+    # bound asserting a cadence the product no longer has.
+    run_body = next(
+        node for node in ast.walk(ast.parse(OBSERVER_SOURCE.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef) and node.name == "_run"
+    ).body[0].body
+    assert [ast.unparse(node).splitlines()[0] for node in run_body] == ["try:", "self._await_next_cycle()"]
+
+    try:
+        # Two cycles to debounce every service up to `ready`; each is one loop iteration.
+        for _ in range(2):
+            observer.observe_once()
+            observer._await_next_cycle()
+        observer.observe_once()
+        assert observer._accepted["statsd"] == ("ready", "none")
+
+        # t0: the worker exits the instant after the cycle above read its row.
+        exited_at = clock.value
+        services["statsd"].down("statsd worker exited")
+        delays["statsd"] = 10_000.0  # ...and its probe stops answering with it.
+
+        observer._await_next_cycle()
+        cycle = observer.observe_once()
+        assert cycle.probe_outcomes["statsd"] == PROBE_TIMEOUT
+        assert observer._accepted["statsd"][0] == "ready", "one timed-out probe must not flicker the state"
+
+        del delays["statsd"]  # the exited row is now readable; only the exit itself is left to see
+        observer._await_next_cycle()
+        observer.observe_once()
+        detected_at = clock.value
+        assert observer._accepted["statsd"] == ("down", "exited")
+    finally:
+        observer.stop()
+        reset_local_service_traffic()
+
+    bound = BACKEND_HEALTH_OBSERVE_SECONDS * 2 + BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS
+    assert bound == 4.5
+    assert waits == [BACKEND_HEALTH_OBSERVE_SECONDS] * 4
+    assert detected_at - exited_at == bound, (detected_at - exited_at, bound)
+
+
 def test_the_pooled_and_inline_probe_paths_agree(tmp_path: Path):
     reset_local_service_traffic()
     inline = Harness(tmp_path / "inline")

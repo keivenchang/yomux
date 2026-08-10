@@ -52,6 +52,7 @@ from .local_services.client import local_service_failure_is_transient
 from .local_services.rpc import local_service_traffic_snapshot
 from .local_services.runtime import local_service_exception_cause
 from .stats_current import resolution as stats_resolution
+from . import system_status_snapshot as system_status_snapshot_module
 from .approval import yolo_rules
 from .approval.approvals import blank_prompt_state  # noqa: F401 - compatibility re-export
 from .approval.approvals import hybrid_approval_prompt_state
@@ -1764,7 +1765,15 @@ def filesystem_batch_submission(
         canonical_request = copy.deepcopy(request)
         canonical_request["id"] = index
         canonical_requests.append(canonical_request)
-    canonical_payload = {**copy.deepcopy(payload), "requests": canonical_requests}
+    canonical_payload = {
+        **copy.deepcopy(payload),
+        "requests": canonical_requests,
+        # Captured HERE, on the accepting server's request thread, so the shared jobd worker
+        # authorizes with this server's roots instead of its launcher's.  It sits inside the
+        # canonical payload, so it is part of the product/coalescing identity below: two servers
+        # with different policies can never share one retained batch product.
+        filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
+    }
     identity = hashlib.sha256(json.dumps(
         {"identity_seed": identity_seed, "payload": canonical_payload},
         ensure_ascii=False,
@@ -1781,15 +1790,33 @@ FILESYSTEM_RETAINED_READ_OPERATIONS = frozenset({
 # Bounded single-target reads: one path in, a small answer out, and a browser waiting on the
 # result right now (an editor open, a file probe, an index badge).  These are the only filesystem
 # operations that take jobd's `point` lane.  Everything else -- recursive `list`, `search`,
-# `count`, `diff`, `blame`, Finder batches, watch-diff fanouts, forced session-files transforms --
-# stays on the bulk lanes, because its cost is unbounded in the input and it is exactly the work
-# that used to put an editor open behind it head-of-line on the single shared interactive slot.
+# `count`, `diff`, `blame`, `delete`, Finder batches, watch-diff fanouts, forced session-files
+# transforms -- stays on the shared `interactive` lane, because its cost is unbounded in the input
+# and it is exactly the work that used to put an editor open behind it head-of-line on it.
 FILESYSTEM_POINT_OPERATIONS = frozenset({"read", "info", "index_status"})
+
+# The write-side half of that same principle, and the half that was missed when `point` was drawn:
+# one path in, one bounded side effect, a browser waiting on it right now.  These satisfy exactly
+# the `point` test but are NOT `point`, because `point` means a coalescable retained read -- the
+# stat-derived content key and `fresh_only` are gated on `priority == "point"` -- while a mutation
+# must never be coalesced with another mutation.  They take jobd's sibling `mutation` lane, which
+# is bounded and physically separate from both the read lane and the shared `interactive` lane.
+#
+# `delete` is deliberately absent.  `delete_path` recurses through a whole subtree, so its cost is
+# unbounded in the input; it belongs with the other unbounded work regardless of looking like a
+# point mutation at the call site.  A measured `mkdir` waited 6737 ms then 8167 ms behind one
+# recursive count over 457,364 files on the shared lane before this lane existed.
+FILESYSTEM_BOUNDED_MUTATIONS = frozenset({"write", "rename", "mkdir"})
 
 
 def filesystem_operation_priority(operation: str) -> str:
     """Return the one jobd lane priority that owns a filesystem operation."""
-    return "point" if str(operation) in FILESYSTEM_POINT_OPERATIONS else "interactive"
+    name = str(operation)
+    if name in FILESYSTEM_POINT_OPERATIONS:
+        return "point"
+    if name in FILESYSTEM_BOUNDED_MUTATIONS:
+        return "mutation"
+    return "interactive"
 
 
 def filesystem_point_content_generation(path: str) -> tuple[str, str]:
@@ -1808,6 +1835,21 @@ def filesystem_point_content_generation(path: str) -> tuple[str, str]:
     return f"stat:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}", ""
 
 
+def filesystem_operation_descriptor(operation: str, path: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Build the ONE filesystem job descriptor shape, policy included.
+
+    Every filesystem descriptor -- retained read, uncoalesced submission, and byte relay -- is
+    built here, because a descriptor that reaches the shared daemon without this server's captured
+    access policy is executed with the launching server's authority instead of this one's.
+    """
+    return {
+        "op": str(operation),
+        "path": str(path),
+        "args": copy.deepcopy(args),
+        filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
+    }
+
+
 def filesystem_operation_submission(
     operation: str,
     path: str,
@@ -1817,11 +1859,11 @@ def filesystem_operation_submission(
     generation: str,
 ) -> tuple[dict[str, Any], str]:
     """Return one normalized, access-scoped retained filesystem-read descriptor."""
-    canonical_payload = {
-        "op": str(operation),
-        "path": os.path.normpath(os.path.expanduser(str(path))),
-        "args": copy.deepcopy(args),
-    }
+    canonical_payload = filesystem_operation_descriptor(
+        operation,
+        os.path.normpath(os.path.expanduser(str(path))),
+        args,
+    )
     identity = hashlib.sha256(json.dumps(
         {
             "scope": str(scope),
@@ -1866,7 +1908,13 @@ def filesystem_watch_request_product_key(roots: list[str], identity_seed: str) -
     product needs its own identity derived from the parent root list.
     """
     identity = hashlib.sha256(json.dumps(
-        {"identity_seed": str(identity_seed), "roots": [str(root) for root in roots]},
+        {
+            "identity_seed": str(identity_seed),
+            "roots": [str(root) for root in roots],
+            # The child batches carry this server's access policy, so their parent's retained
+            # product must not be shared with a server whose policy differs.
+            "access_policy": filesystem.capture_access_policy().digest(),
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -6005,7 +6053,99 @@ class TmuxWebtermApp:
         ]
         files_changed = revision.get("files_changed") if isinstance(revision.get("files_changed"), list) else []
         roots = tuple(str(root) for root in revision.get("roots", []) if isinstance(root, str))
-        root_generations = revision.get("root_generations") if isinstance(revision.get("root_generations"), dict) else {}
+        # watchd is a per-user daemon whose runtime socket derives from YOLOMUX_ROOT, not from a
+        # server's YOLOMUX_FS_ROOTS.  Two servers with different filesystem policies under the same
+        # YOLOMUX_ROOT therefore share ONE daemon, and its `wait_revision` takes no lease id and
+        # returns the caller-independent UNION of every co-tenant's leased roots and change paths.
+        # This consumer must scope that union to THIS server's own authorization boundary BEFORE it
+        # mirrors any state or fans an `fs_changed` SSE, or a narrow-policy server would disclose a
+        # broad co-tenant's roots and change activity to its own browser.  ``authorized_fs_roots()``
+        # is the same boundary S0's access-policy descriptor authorizes content reads against, so a
+        # root or path the daemon reports outside it is one this server may never publish or record.
+        authorized_roots = tuple(
+            filesystem._normalized_scope_path(root) for root in filesystem.authorized_fs_roots()
+        )
+
+        def _authorized_projection(path: Path) -> list[Path]:
+            """Two-direction intersection of one reported path with this server's authorized roots.
+
+            The daemon reports a co-tenant UNION, so a reported path may sit either INSIDE one of
+            this server's roots or OUTSIDE-and-ABOVE it (a coarse/root report whose ancestor spans
+            several tenants).  Both must resolve to a path this server is authorized for, and neither
+            may ever surface the broad ancestor:
+              * reported path is a descendant of (or equal to) an authorized root -> retain it;
+              * an authorized root is a descendant of the reported path -> substitute that authorized
+                root, so a coarse ancestor still delivers the server's OWN subtree without exposing
+                the ancestor;
+              * disjoint -> omit.
+            """
+            resolved = filesystem._normalized_scope_path(path)
+            projected: list[Path] = []
+            for authorized in authorized_roots:
+                if filesystem._path_is_within(resolved, authorized):
+                    projected.append(resolved)
+                elif filesystem._path_is_within(authorized, resolved):
+                    projected.append(authorized)
+            return projected
+
+        def _scope_paths(paths: list[Path]) -> list[Path]:
+            scoped: list[Path] = []
+            seen: set[str] = set()
+            for path in paths:
+                for projected in _authorized_projection(path):
+                    key = str(projected)
+                    if key not in seen:
+                        seen.add(key)
+                        scoped.append(projected)
+            return scoped
+
+        def _scope_generations(generations: dict[Any, Any]) -> dict[str, int]:
+            """Re-key a daemon generation map onto authorized paths, carrying the source generation.
+
+            A coarse ancestor key is substituted by the authorized descendant it covers, so the
+            generation still drives this server's own cache invalidation without storing a co-tenant
+            key it is not authorized to see.
+
+            When several source keys project onto ONE authorized key -- an ancestor repo and the
+            authorized repo itself both collapsing to the child -- their generations must compose
+            LOSSLESSLY.  They are independent monotonic-within-epoch counters, so `max` would let a
+            higher co-tenant counter mask the child's own increment (parent=100/child=5 and
+            parent=100/child=6 both `max` to 100, so a real .git change on the server's OWN tree
+            never invalidates).  Their sum is monotonic in every source, so any single source's
+            increment strictly changes the composed value and still triggers invalidation, while the
+            broad source path is still never exposed -- only the authorized child key is stored.
+            """
+            scoped: dict[str, int] = {}
+            for key, generation in generations.items():
+                if not isinstance(key, str):
+                    continue
+                value = int(generation or 0)
+                for projected in _authorized_projection(Path(key)):
+                    projected_key = str(projected)
+                    scoped[projected_key] = scoped.get(projected_key, 0) + value
+            return scoped
+
+        def _within_authorized(path: Path) -> bool:
+            resolved = filesystem._normalized_scope_path(path)
+            return any(filesystem._path_is_within(resolved, authorized) for authorized in authorized_roots)
+
+        daemon_reported_scope = bool(roots) or bool(changed_paths)
+        roots = tuple(str(root) for root in _scope_paths([Path(root) for root in roots]))
+        changed_paths = _scope_paths(changed_paths)
+        # `files_changed` carries specific files, never coarse roots, so it stays exact-descendant
+        # filtering: a file is mirrored only when it lives under an authorized root.
+        files_changed = [
+            entry
+            for entry in files_changed
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str) and _within_authorized(Path(entry["path"]))
+        ]
+        # True only when the daemon reported roots/paths and authorization removed ALL of them --
+        # a revision that touches only other tenants' roots.  A plain state revision that carried no
+        # roots/paths to begin with is NOT this case and must still record normally.
+        authorization_scoped_to_empty = daemon_reported_scope and not (roots or changed_paths)
+        root_generations = _scope_generations(
+            revision.get("root_generations") if isinstance(revision.get("root_generations"), dict) else {}
+        )
         signature = tuple(
             (root, (root, "watchd", int(root_generations.get(root) or 0), watch_generation, ()))
             for root in sorted(roots)
@@ -6027,20 +6167,29 @@ class TmuxWebtermApp:
             record.filesystem_healthy = bool(revision.get("healthy")) or bool(revision.get("fallback"))
             record.filesystem_roots = roots
             record.watchd_state = "polling" if revision.get("fallback") else ("ready" if record.filesystem_healthy else "errored")
-            self.client_watch_service.filesystem_signature = signature
-            self.client_watch_service.filesystem_history.append({
-                "token": token,
-                "created_at": float(revision.get("created_at") or time.time()),
-                "signature": signature,
-                "watchd_epoch": epoch,
-                "watchd_revision": revision_number,
-                "watch_generation": watch_generation,
-                "active_watch_generation": active_watch_generation,
-                "changed_paths": tuple(str(path) for path in changed_paths[:CLIENT_WATCH_FILE_LIMIT]),
-                "files_changed": copy.deepcopy(files_changed[:CLIENT_WATCH_FILE_LIMIT]),
-            })
-            self.client_watch_service.filesystem_history = self.client_watch_service.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
-            daemon_repo_generations = revision.get("repo_generations") if isinstance(revision.get("repo_generations"), dict) else {}
+            # Empty intersection (a revision that touches only other tenants' roots) leaves nothing
+            # authorized to mirror: skip the signature update and the history write entirely so this
+            # server records no co-tenant state, while the epoch/revision bookkeeping above still
+            # advances so the revision loop is not wedged.
+            if not authorization_scoped_to_empty:
+                self.client_watch_service.filesystem_signature = signature
+                self.client_watch_service.filesystem_history.append({
+                    "token": token,
+                    "created_at": float(revision.get("created_at") or time.time()),
+                    "signature": signature,
+                    "watchd_epoch": epoch,
+                    "watchd_revision": revision_number,
+                    "watch_generation": watch_generation,
+                    "active_watch_generation": active_watch_generation,
+                    "changed_paths": tuple(str(path) for path in changed_paths[:CLIENT_WATCH_FILE_LIMIT]),
+                    "files_changed": copy.deepcopy(files_changed[:CLIENT_WATCH_FILE_LIMIT]),
+                })
+                self.client_watch_service.filesystem_history = self.client_watch_service.filesystem_history[-FILESYSTEM_WATCH_HISTORY_LIMIT:]
+            # Scope the daemon's repo generations to authorized repos too: storing every co-tenant
+            # repo key would mirror out-of-policy state and is a second disclosure surface.
+            daemon_repo_generations = _scope_generations(
+                revision.get("repo_generations") if isinstance(revision.get("repo_generations"), dict) else {}
+            )
             prior_daemon_generations = self.client_watch_service.watchd_repo_generations
             changed_repos = [
                 repo
@@ -9182,6 +9331,7 @@ class TmuxWebtermApp:
         replace: bool = False,
         queue_rebuild_after: float | None = None,
         queue_rebuild_publish: bool = False,
+        pending_generation_out: list[int] | None = None,
     ) -> int:
         """Claim the single-flight build guard, or queue one follow-up build for a caller it cannot answer.
 
@@ -9189,6 +9339,13 @@ class TmuxWebtermApp:
         after. Deciding that here, under the same lock that refuses the guard, is what makes it
         impossible for the in-flight worker to finish in the gap and leave the caller with neither a
         build of its own nor a queued one.
+
+        ``pending_generation_out`` receives, under that same lock, the generation of the build that
+        will answer this caller -- the one claimed here, the in-flight one that already observes the
+        request, or the queued follow-up. It is an out-parameter rather than a second read of the
+        record because ANY second read is the gap: the in-flight build can commit and release the
+        guard between the two acquisitions, after which the record no longer remembers which build
+        the caller was promised and the caller is told no build was accepted.
         """
 
         with self.activity_transcript_service.transcripts_payload_cache_lock:
@@ -9203,11 +9360,21 @@ class TmuxWebtermApp:
                     if queue_rebuild_after is not None and (started_at is None or started_at < queue_rebuild_after):
                         record.rebuild_requested = True
                         record.rebuild_publish = record.rebuild_publish or queue_rebuild_publish
+                        # The queued follow-up commits the generation after the in-flight one.
+                        pending_generation = record.generation + 1
+                    else:
+                        # The in-flight build began at or after the request, so it already observes
+                        # what this caller is asking about.
+                        pending_generation = record.generation
+                    if pending_generation_out is not None:
+                        pending_generation_out.append(pending_generation)
                     return 0
             record.generation += 1
             record.worker = worker
             record.worker_started_at = time.monotonic()
             record.publish_requested = False
+            if pending_generation_out is not None:
+                pending_generation_out.append(record.generation)
             return record.generation
 
     def commit_transcripts_payload_cache(self, payload: dict[str, Any], generation: int) -> bool:
@@ -9273,12 +9440,17 @@ class TmuxWebtermApp:
         defer: bool = False,
         *,
         not_before: float | None = None,
+        pending_generation_out: list[int] | None = None,
     ) -> bool:
         """Start a metadata rebuild.
 
         ``not_before`` is a ``time.monotonic()`` reading the caller must be answered at or after. An
         in-flight build that began earlier cannot see what the caller is asking about, so instead of
         silently adopting it this queues exactly one follow-up build that starts once it finishes.
+
+        ``pending_generation_out`` is passed straight through to the guard, so a caller that needs
+        the identity of the build answering it reads that identity from the one lock acquisition
+        that decided it.
         """
 
         generation = 0
@@ -9295,6 +9467,7 @@ class TmuxWebtermApp:
             worker,
             queue_rebuild_after=not_before,
             queue_rebuild_publish=publish,
+            pending_generation_out=pending_generation_out,
         )
         if generation <= 0:
             if publish:
@@ -11322,21 +11495,25 @@ class TmuxWebtermApp:
             "filesystem_batch": self.runtime_filesystem_batch_rows(metrics),
         }
 
-    def runtime_report_payload(
+    def runtime_report_core(
         self,
         *,
         background_status: dict[str, Any] | None = None,
-        owner_debug: dict[str, Any] | None = None,
         owner_control_response: dict[str, Any] | None = None,
-        force_transcripts: bool = True,
+        local_services: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """The half of the report the Daemons roster SCANS: the service roster and its identity.
+
+        Split from `runtime_report_advanced` because these two halves have different demand. This
+        half is what a visible panel refreshes on its poll; the other half is what a reader opens
+        deliberately. Building them together meant transcript scans and performance folds ran on
+        every five-second poll of a panel whose Advanced section was closed.
+
+        The split is by CONSUMER, not by taste: every key here has a reader outside the Advanced
+        disclosure, and every key in the other half has either an Advanced-only reader or none.
+        """
+
         status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
-        # Remote control responses from older servers may still carry perf, while the current
-        # topbar status deliberately does not.  Keep the report's diagnostics source explicit.
-        diagnostic_status = dict(status)
-        if not isinstance(diagnostic_status.get("perf"), dict):
-            diagnostic_status.update(self.performance_diagnostics_payload())
-        transcript_payload = self.transcripts_payload(force=force_transcripts)
         client_events = self.client_events.snapshot()
         chat_events = {
             event_type: {
@@ -11345,7 +11522,7 @@ class TmuxWebtermApp:
             }
             for event_type in ("chat_messages_changed", "chat_typing_changed")
         }
-        local_services = self.runtime_local_services()
+        services = local_services if isinstance(local_services, dict) else self.runtime_local_services()
         return {
             "ok": True,
             "state_dir": str(common.STATE_DIR),
@@ -11354,10 +11531,7 @@ class TmuxWebtermApp:
                 "status": status.get("status"),
                 "owner": bool(status.get("owner")),
                 "search_index": status.get("search_index"),
-                "debug": self.runtime_owner_debug_summary(owner_debug),
-                "control": self.runtime_owner_control_summary(owner_control_response),
             },
-            "refresh": self.runtime_refresh_state(status, local_services),
             "caches": {
                 "session_files": self.runtime_cache_dir_stats(SESSION_FILES_CACHE_DIR),
                 "activity": self.runtime_cache_dir_stats(TABBER_ACTIVITY_CACHE_DIR),
@@ -11368,26 +11542,92 @@ class TmuxWebtermApp:
                 if isinstance(owner_control_response, dict) and isinstance(owner_control_response.get("search_index_runtime"), dict)
                 else file_index.runtime_diagnostics()
             ),
-            "local_services": local_services,
-            "top_endpoints": self.runtime_top_endpoints(diagnostic_status),
-            "top_background_work": self.runtime_top_background_work(diagnostic_status),
-            "top_event_types": self.runtime_top_event_types(),
+            "local_services": services,
             "client_events": client_events,
             "chat": {
                 **self.chat_service.diagnostics(),
                 "subscribers": int(client_events.get("channel_counts", {}).get("chat", 0)),
                 "events": chat_events,
             },
+            "tmux_signal_watcher": self.tmux_signal_event_watcher_status(),
+        }
+
+    def runtime_report_advanced(
+        self,
+        *,
+        background_status: dict[str, Any] | None = None,
+        owner_debug: dict[str, Any] | None = None,
+        owner_control_response: dict[str, Any] | None = None,
+        force_transcripts: bool = True,
+        local_services: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The half a reader consults deliberately: refresh coordination, top-N folds, transcripts.
+
+        `local_services` is INJECTED rather than defaulted away. The approvald recurring-work row
+        below is read out of the local-service roster, and a `None` default would have published a
+        row of confident zeros for a subsystem nobody measured this cycle. When the caller has
+        already collected the roster it passes it; when this half is produced on its own it pays
+        for its own collection.
+        """
+
+        status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        # Remote control responses from older servers may still carry perf, while the current
+        # topbar status deliberately does not.  Keep the report's diagnostics source explicit.
+        diagnostic_status = dict(status)
+        if not isinstance(diagnostic_status.get("perf"), dict):
+            diagnostic_status.update(self.performance_diagnostics_payload())
+        transcript_payload = self.transcripts_payload(force=force_transcripts)
+        services = local_services if isinstance(local_services, dict) else self.runtime_local_services()
+        return {
+            "owner": {
+                "debug": self.runtime_owner_debug_summary(owner_debug),
+                "control": self.runtime_owner_control_summary(owner_control_response),
+            },
+            "refresh": self.runtime_refresh_state(status, services),
+            "top_endpoints": self.runtime_top_endpoints(diagnostic_status),
+            "top_background_work": self.runtime_top_background_work(diagnostic_status),
+            "top_event_types": self.runtime_top_event_types(),
             # Privacy-safe login-throttle aggregates: allowed/blocked-by-scope counts,
             # active rows, locked accounts, decision latency — never raw usernames/IPs.
             "login_throttle": {
                 **self.login_rate_limiter.diagnostics(),
                 "edge": self.login_edge_controller.diagnostics(),
             },
-            "tmux_signal_watcher": self.tmux_signal_event_watcher_status(),
             "largest_active_transcripts": self.runtime_largest_transcripts(transcript_payload),
             "transcripts_cache": transcript_payload.get("cache", {}) if isinstance(transcript_payload, dict) else {},
         }
+
+    def runtime_report_payload(
+        self,
+        *,
+        background_status: dict[str, Any] | None = None,
+        owner_debug: dict[str, Any] | None = None,
+        owner_control_response: dict[str, Any] | None = None,
+        force_transcripts: bool = True,
+    ) -> dict[str, Any]:
+        """The whole report: both halves, one local-service collection, one merge rule.
+
+        The CLI/control report and the composed system-status payload both want everything, so the
+        composition lives here once rather than as a second construction beside each caller.
+        """
+
+        status = background_status if isinstance(background_status, dict) else self.background_owner.status_payload()
+        local_services = self.runtime_local_services()
+        core = self.runtime_report_core(
+            background_status=status,
+            owner_control_response=owner_control_response,
+            local_services=local_services,
+        )
+        advanced = self.runtime_report_advanced(
+            background_status=status,
+            owner_debug=owner_debug,
+            owner_control_response=owner_control_response,
+            force_transcripts=force_transcripts,
+            local_services=local_services,
+        )
+        # `owner` is the one key both halves contribute to, so it is merged explicitly here rather
+        # than letting a dict splat silently drop the cheap identity fields.
+        return {**core, **advanced, "owner": {**core["owner"], **advanced["owner"]}}
 
     def system_status_server_block(self, sample: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
         """Publish the web process's own row through the ONE metric-envelope owner.
@@ -11458,8 +11698,13 @@ class TmuxWebtermApp:
             "rss_bytes": envelope(sample.get("rss_bytes")),
         }
 
-    def system_status_payload(self) -> dict[str, Any]:
-        """Return bounded live diagnostics for the YO!stats System view."""
+    def system_status_core_payload(self) -> dict[str, Any]:
+        """The body the Daemons roster polls for. Produced in the background, never on a request.
+
+        This runs on the snapshot owner's thread; `/api/system-status` only reads what it
+        published. That is the whole point of the split - the panel's five-second poll used to
+        carry this entire assembly, so a server that was busy served its own diagnostics slowest.
+        """
         # Diagnostics are a reader. Only the CPU family worker may advance the
         # process/host baselines; otherwise a System refresh can consume the
         # next one-second observation and leave no durable bucket for it.
@@ -11471,7 +11716,7 @@ class TmuxWebtermApp:
         # reported `server` stale at 5s and `cpu_budget.sample_age_seconds` 0.358 at the same
         # time: the response manufactured its own staleness and flipped the row to an em dash
         # for a reason that had nothing to do with statsd.
-        runtime_report = self.runtime_report_payload(force_transcripts=False)
+        runtime_report = self.runtime_report_core()
         generated_at = time.time()
         sample = self.latest_stats_sample()
         return {
@@ -11485,6 +11730,108 @@ class TmuxWebtermApp:
             "stats_current": self.stats_current_runtime.status(),
             "host": collect_host_diagnostics().payload(admin=True),
         }
+
+    def system_status_advanced_payload(self) -> dict[str, Any]:
+        """The Advanced-disclosure body, produced only when somebody has asked for it.
+
+        `force_transcripts=False` for the same reason the composed payload used it: a diagnostics
+        read must not drive a transcript refresh, only report the one already cached.
+        """
+
+        return {
+            "ok": True,
+            "generated_at": time.time(),
+            **self.runtime_report_advanced(force_transcripts=False),
+        }
+
+    def system_status_payload(self) -> dict[str, Any]:
+        """Both halves of the System view, composed. The CLI report and contract tests read this.
+
+        The route does NOT: it reads the published core snapshot, and the Advanced disclosure reads
+        the separately retained advanced body. This composition exists so a caller that genuinely
+        wants everything at once has one place to get it rather than a second assembly of its own.
+        """
+
+        core = self.system_status_core_payload()
+        advanced = self.system_status_advanced_payload()
+        return {
+            **core,
+            **{key: value for key, value in advanced.items() if key not in {"ok", "generated_at"}},
+            "owner": {**core["owner"], **advanced["owner"]},
+        }
+
+    # ---- the background snapshot owner -------------------------------------------------------
+    #
+    # Set by `TmuxWebtermHTTPServer.__init__` through `start_system_status_snapshot_owner`, and
+    # stopped by `server_close`. `None` in a unit test that never armed one, which the route
+    # reports as an explicitly typed refusal rather than by rebuilding on the request thread.
+    system_status_snapshot: system_status_snapshot_module.SystemStatusSnapshotOwner | None = None
+
+    def attach_system_status_snapshot_owner(self, owner: system_status_snapshot_module.SystemStatusSnapshotOwner) -> None:
+        """Hold the ONE owner of the retained system-status bodies."""
+
+        self.system_status_snapshot = owner
+
+    def start_system_status_snapshot_owner(self) -> bool:
+        """Build and start the owner once. Returns False when one is already attached."""
+
+        if self.system_status_snapshot is not None:
+            return False
+        self.attach_system_status_snapshot_owner(system_status_snapshot_module.SystemStatusSnapshotOwner(
+            build_core=self.system_status_core_payload,
+            build_advanced=self.system_status_advanced_payload,
+            on_diagnostic=self.report_system_status_snapshot_failure,
+        ))
+        return self.system_status_snapshot.start()
+
+    def stop_system_status_snapshot_owner(self) -> None:
+        owner = self.system_status_snapshot
+        if owner is not None:
+            owner.stop()
+
+    def report_system_status_snapshot_failure(self, slot: str, error: BaseException) -> None:
+        """Record a failed snapshot build where the diagnostics reader can see it.
+
+        The slot counts its own failures, but a counter inside the producer is not propagation, so
+        the failure also lands in the server log ring the Logs panel reads.
+        """
+
+        emit_server_log(
+            "error",
+            "system-status-snapshot",
+            f"{slot} snapshot build failed: {type(error).__name__}: {error}",
+            dedupe_key=f"system-status-snapshot:{slot}",
+            dedupe_seconds=30.0,
+        )
+
+    def system_status_snapshot_response(self, *, advanced: bool = False) -> tuple[bytes, Mapping[str, Any]]:
+        """The route's whole job: one read of the published body, or one typed refusal.
+
+        Returns pre-encoded bytes and their product metadata so the request thread neither
+        assembles, nor encodes, nor deep-copies the ~70 KB body it is about to write.
+        """
+
+        owner = self.system_status_snapshot
+        if owner is None:
+            # No owner armed in this process. This is a real state - a unit-test app, or a server
+            # torn down mid-request - and it is reported as one rather than silently rebuilt. It
+            # goes through the SAME refusal shape as every other unpublished read, with its own
+            # reason code, so a client has one thing to parse instead of two.
+            refusal = system_status_snapshot_module.owner_unattached_read().refusal_payload(
+                cadence_seconds=system_status_snapshot_module.SNAPSHOT_CADENCE_SECONDS,
+                deadline_seconds=system_status_snapshot_module.FRESHNESS_DEADLINE_SECONDS,
+            )
+            body = system_status_snapshot_module.encode_snapshot_body(refusal)
+            return body, common.inline_json_product_metadata(body)
+        slot = owner.advanced if advanced else owner.core
+        result = owner.read_advanced() if advanced else owner.read_core()
+        if result.snapshot is not None:
+            return result.snapshot.body, result.snapshot.product
+        body = system_status_snapshot_module.encode_snapshot_body(result.refusal_payload(
+            cadence_seconds=slot.cadence_seconds,
+            deadline_seconds=slot.deadline_seconds,
+        ))
+        return body, common.inline_json_product_metadata(body)
 
     def events_payload(self, session: str | None = None, limit: int = 100) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
@@ -13089,22 +13436,23 @@ class TmuxWebtermApp:
         Returns ``(refreshing, pending_generation)``. A pending generation of 0 means no build was
         accepted or queued for this caller: it is NOT a build identity and must never be published
         to a forced caller as one, because zero is already satisfied by everything.
+
+        The guard decides which build answers this caller and reports it through
+        ``pending_generation_out`` under the lock that made the decision. This used to re-read the
+        record afterwards, so an in-flight build that already observed the request could commit and
+        release the guard in between; the record then showed no worker and no queued rebuild, and a
+        caller that had in fact just been answered was told ``no_build_accepted``.
         """
 
-        started = self.start_transcripts_payload_refresh(publish=publish, defer=defer, not_before=requested_at)
-        with self.activity_transcript_service.transcripts_payload_cache_lock:
-            record = self.activity_transcript_service.transcripts_payload_cache_record
-            active = record.worker is not None
-            if started or (active and not record.rebuild_requested):
-                # Either this call started the build, or an in-flight build began at or after this
-                # request and therefore already observes what the caller is asking about.
-                pending_generation = record.generation
-            elif record.rebuild_requested:
-                # The queued follow-up build commits the generation after the in-flight one.
-                pending_generation = record.generation + 1
-            else:
-                pending_generation = 0
-        return started or active, pending_generation
+        pending: list[int] = []
+        started = self.start_transcripts_payload_refresh(
+            publish=publish,
+            defer=defer,
+            not_before=requested_at,
+            pending_generation_out=pending,
+        )
+        pending_generation = pending[0]
+        return started or pending_generation > 0, pending_generation
 
     def forced_metadata_pending_cache_fields(self, pending_generation: int) -> dict[str, Any]:
         """The forced-read half of the contract: the identity the caller must wait for, or why not.
@@ -14676,7 +15024,7 @@ class TmuxWebtermApp:
                 generation=generation,
             )
         else:
-            job_payload = {"op": operation, "path": path, "args": operation_args}
+            job_payload = filesystem_operation_descriptor(operation, path, operation_args)
             product_key = f"filesystem-operation:{uuid.uuid4().hex}"
             if priority == "point" and not uncoalesced_reason:
                 uncoalesced_reason = "operation_not_retained"
@@ -14747,7 +15095,7 @@ class TmuxWebtermApp:
         request_id = self.new_api_request_id()
         response, body = self.job_client.relay(
             "filesystem_operation",
-            {"op": operation, "path": path, "args": dict(args or {})},
+            filesystem_operation_descriptor(operation, path, dict(args or {})),
             deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
         )
         product = response.get("product") if isinstance(response.get("product"), dict) else None

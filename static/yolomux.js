@@ -1854,8 +1854,18 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
     const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
+    // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
+    // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
+    // which pending IDs the baseline owns so the teardown quiescence gate can tell the baseline's own
+    // in-flight operation apart from unrelated work instead of rejecting on "a pending op exists".
+    const watchDiffPendingOperationIds = Array.from(apiOperationState.pending.entries())
+      .filter(([, record]) => record && record.terminalOwner === 'filesystem-watch-diff-refresh')
+      .map(([operationId]) => operationId)
+      .sort();
     return {
       pending: Array.from(apiOperationState.pending.keys()).sort(),
+      watchDiffPendingOperationIds,
       batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
       batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
       batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,
@@ -45860,6 +45870,15 @@ function bindPreferencesPanel(panel) {
       return failureOwner.report(message);
     }
 
+    // A payload this bundle cannot read is an outcome with a reason, not a reason to draw nothing.
+    // `exactFields` rejects any snapshot/delta whose top-level shape differs, which is exactly what
+    // a server upgraded under an already-open tab sends; both catch sites below used to discard that
+    // rejection, so YO!stats went blank and said nothing until the page was reloaded.
+    function reportContractViolation(error) {
+      if (error?.statsContractViolation !== true) return false;
+      return reportFailure(`YO!stats cannot read this server's data (${error.message}); reload the page to pick up the current YOLOmux bundle`);
+    }
+
     function reportCadenceStall(now) {
       if (lastGenerationAdvanceAtMs === null) lastGenerationAdvanceAtMs = now;
       const cadenceSeconds = liveCadenceSeconds();
@@ -45984,7 +46003,8 @@ function bindPreferencesPanel(panel) {
         if (snapshot && requestMatches(request, serial) && running && visible && !zoomedStatic) {
           acceptSnapshot(snapshot);
         }
-      } catch (_error) {
+      } catch (error) {
+        reportContractViolation(error);
         scheduleRepair();
       } finally {
         tickBusy = false;
@@ -46034,6 +46054,7 @@ function bindPreferencesPanel(panel) {
         if (error?.pending === true && Number.isSafeInteger(error.retryAfterMs)) {
           pendingRetryMs = error.retryAfterMs;
         }
+        reportContractViolation(error);
       } finally {
         repairBusy = false;
         if (succeeded) {
@@ -48198,8 +48219,30 @@ const jsDebugHistoryReadiness = {
 };
 let jsDebugSubTab = 'graph';
 const jsDebugSystemPollMs = 5000;
+// The retry cadence used while `/api/system-status` answers with a TYPED REFUSAL (no snapshot has
+// been published yet, or the newest one is past its freshness deadline and its aged body is
+// withheld). The producer rebuilds on demand, so the body a reader is waiting for usually exists
+// far sooner than the next 5s poll; waiting a whole poll interval would leave the panel blank on
+// first open for the entire cold-start window.
+const jsDebugSystemRefusalPollMs = 500;
+// The Advanced body's own cadence. It matches `ADVANCED_CADENCE_SECONDS` in
+// yolomux_lib/system_status_snapshot.py: asking faster than the producer republishes only re-reads
+// the same bytes. It is a MINIMUM AGE, not a second interval -- the one `debug-system` interval
+// drives both reads (see `pollDebugSystemStatus`).
+const jsDebugSystemAdvancedPollMs = 10000;
 const jsDebugLogsPollMs = 5000;
 const jsDebugSystemState = {
+  payload: null,
+  error: '',
+  inFlight: false,
+  updatedAt: 0,
+};
+// The Advanced disclosure's body, from `GET /api/system-status/advanced`. It is a SEPARATE ROUTE,
+// not a second copy: since the snapshot split, the core body no longer carries `refresh`,
+// `top_endpoints`, `top_background_work`, `top_event_types`, `login_throttle`,
+// `largest_active_transcripts`, `transcripts_cache` or `owner.debug`/`owner.control`, so this is
+// the ONE place those facts live in the client. There is no second poller and no second cache.
+const jsDebugSystemAdvancedState = {
   payload: null,
   error: '',
   inFlight: false,
@@ -56310,15 +56353,31 @@ function debugSystemRosterRows(payload = {}) {
 // which the backend computes over the six local services only: `LocalServicesCollector.collect`
 // raises if anything outside `LOCAL_SERVICE_INVENTORY` appears, so the web process cannot be in it
 // and that total is child-only by contract. The strip therefore put "8 ready" next to a CPU figure
-// that excluded one of the eight. Summing here, over `top`, makes the two structurally incapable
-// of disagreeing -- there is no second population to keep in step.
+// that excluded one of the eight. Summing here, over the rendered rows, makes the two structurally
+// incapable of disagreeing -- there is no second population to keep in step.
 //
 // `cpuMeasured`/`rssMeasured` count how many rows actually published a value, because a sum over
 // zero measurements is an ABSENCE, not `0%`.
+//
+// The state counts run over EVERY row the table draws, including the nested child. They used to
+// skip `kind === 'child'`, so the strip said "7" while eight rows rendered and a red tmux-watcher
+// row was absent from the `issues` count that is supposed to be why a reader opens this view. The
+// filter is gone: `population` is `rows.length`, the same array `debugSystemRosterHtml` renders,
+// so the count and the render cannot answer "how many rows are there" differently.
+//
+// `resourcePopulation` answers a DIFFERENT question -- how many of those rows own a process whose
+// CPU and memory can be summed at all. A row with a `parentId` runs INSIDE its parent, so its
+// resources are already inside the parent's figure; counting it as an unmeasured row would flag
+// every complete total as partial forever. It is counted in this same pass, off the same array,
+// off the `parentId` the renderer already uses to nest the row.
 function debugSystemRosterSummary(rows = []) {
-  const top = rows.filter(row => row.kind !== 'child');
-  const counts = {ready: 0, idle: 0, issues: 0, population: top.length, cpuPercent: 0, rssBytes: 0, cpuMeasured: 0, rssMeasured: 0};
-  for (const row of top) {
+  const counts = {
+    ready: 0, idle: 0, issues: 0,
+    population: rows.length, resourcePopulation: 0,
+    cpuPercent: 0, rssBytes: 0, cpuMeasured: 0, rssMeasured: 0,
+  };
+  for (const row of rows) {
+    if (!row.parentId) counts.resourcePopulation += 1;
     const tone = row.tone || debugSystemStateTone(row.state);
     if (tone === 'good') counts.ready += 1;
     else if (tone === 'muted') counts.idle += 1;
@@ -56819,14 +56878,19 @@ function debugSystemCpuBudgetCardHtml(budget = {}) {
 // own render region precisely so a moving timestamp cannot rewrite it.
 function debugSystemSummaryStripHtml(payload = {}) {
   const counts = debugSystemRosterSummary(debugSystemRosterRows(payload));
-  const cpuBudget = payload.cpu_budget && typeof payload.cpu_budget === 'object' ? payload.cpu_budget : {};
   const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
   const generatedAgo = debugSystemGeneratedAge(payload.generated_at);
-  // The budget denominator is a policy constant, but it is read out of a block that can be stale,
-  // and the strip printed it with nothing to say so. The number is not re-decided here -- the
-  // block's OWN `stale` flag is carried onto the fact as a machine-readable mark and a reason,
-  // which is the same treatment every other unmeasured value in this panel gets.
-  const budgetStale = cpuBudget.stale === true;
+  // NO CPU BUDGET DENOMINATOR HERE. The strip used to print `CPU 172.5% / 30%`: a POPULATION sum
+  // over every roster row, divided by `SERVER_CPU_BUDGET_PERCENT`, which is the budget for the WEB
+  // PROCESS ALONE (`yolomux_lib/app.py:SERVER_CPU_BUDGET_PERCENT`, published through
+  // `server_cpu_budget_payload` beside the web process's OWN `current_percent`). Eight processes
+  // measured against one process's budget reads as a 575%-over-budget alarm that nothing is
+  // actually breaching. There is no published population budget to divide by, and inventing one
+  // here (30% x rows) would be this renderer re-deciding a backend policy constant.
+  //   So the number is LABELLED as what it is -- a sum across the roster -- and the budget stays
+  //   with the one figure it applies to, in the CPU budget card (`debugSystemCpuBudgetCardHtml`),
+  //   which renders the web process's own current reading against it. That also removes the strip
+  //   as a second renderer of the budget percentage.
   // A sum over SOME of the population is not the population's total. Excluding an unmeasured row
   // stops the strip fabricating a zero, but a bare `48.0MB` still reads as "this is the memory" --
   // the same silent undercount with a better reason. The panel already has ONE spelling for
@@ -56834,17 +56898,20 @@ function debugSystemSummaryStripHtml(payload = {}) {
   // footnote marker `debugSystemCoverageFlagHtml` renders for the roster's metric cells. That one
   // function is called here rather than inventing a second convention such as an inline `1/2`,
   // which would also mean composing English outside the locale catalog.
-  //   The denominator comes from the SAME `counts` the numbers do -- one array, one population,
-  //   no second accumulator.
+  //   The denominator comes from the SAME `counts` the numbers do -- one array, one pass,
+  //   no second accumulator. It is `resourcePopulation`, not `population`: a nested row runs
+  //   inside its parent's process, so its CPU and memory are already inside the parent's figure
+  //   and it is not a row this total failed to cover.
   //   The coverage object carries its OWN measured/population numbers, so the renderer below
   //   never re-derives which count a fact belongs to from its key.
   const coverageFor = measuredRows => {
-    if (measuredRows <= 0 || measuredRows >= counts.population) return {state: '', reason: '', measured: measuredRows, population: counts.population};
+    const population = counts.resourcePopulation;
+    if (measuredRows <= 0 || measuredRows >= population) return {state: '', reason: '', measured: measuredRows, population};
     return {
       state: 'partial',
       measured: measuredRows,
-      population: counts.population,
-      reason: `this total covers the ${measuredRows} of ${counts.population} rows that published a measurement; the rest are unmeasured, not zero`,
+      population,
+      reason: `this total covers the ${measuredRows} of ${population} rows that own a process and published a measurement; the rest are unmeasured, not zero`,
     };
   };
   const cpuCoverage = coverageFor(counts.cpuMeasured);
@@ -56854,11 +56921,10 @@ function debugSystemSummaryStripHtml(payload = {}) {
     // An em dash when NOTHING in the population was measured -- the same one unmeasured spelling
     // the roster cells and the disclosures use, never a summed `0`.
     ['cpu', t('debug.system.roster.summary.cpu', {
-      current: counts.cpuMeasured > 0 ? debugSystemNumber(counts.cpuPercent, 1) : '—',
-      budget: debugSystemNumber(cpuBudget.budget_percent, 1),
-    }), budgetStale ? debugSystemHealthReasonText('cpu_budget_stale') : '', cpuCoverage, budgetStale],
+      current: counts.cpuMeasured > 0 ? `${debugSystemNumber(counts.cpuPercent, 1)}%` : '—',
+    }), cpuCoverage],
     ['memory', t('debug.system.roster.summary.memory', {value: counts.rssMeasured > 0 ? debugGraphTerseBytesText(counts.rssBytes) : '—'}),
-      '', memoryCoverage, false],
+      memoryCoverage],
     ['owner', t('debug.system.roster.summary.owner', {
       value: owner.owner ? t('backgroundOwner.thisServer') : (Number(owner.current_owner?.port) > 0 ? `:${owner.current_owner.port}` : t('common.notAvailable')),
     })],
@@ -56875,12 +56941,11 @@ function debugSystemSummaryStripHtml(payload = {}) {
   // that early return is the ONE owner of the "one refresh at a time" rule, not a second guard here.
   return `<div class="js-debug-system-toolbar js-debug-roster-summary" data-js-debug-roster-summary>
     <h3 class="js-debug-roster-summary-title">${esc(t('debug.tab.services'))}</h3>
-    <div class="js-debug-roster-summary-facts">${facts.map(([key, text, staleReason = '', coverage = {state: '', reason: ''}, stale = false]) => {
-      const explain = [staleReason, coverage.reason].filter(Boolean).join(' · ');
+    <div class="js-debug-roster-summary-facts">${facts.map(([key, text, coverage = {state: '', reason: ''}]) => {
+      const explain = coverage.reason || '';
       const flag = coverage.state === 'partial' ? debugSystemCoverageFlagHtml() : '';
       return `<span data-js-debug-roster-summary-fact="${esc(key)}"`
         + `${coverage.state ? ` data-metric-coverage="${esc(coverage.state)}" data-metric-measured-rows="${esc(String(coverage.measured))}" data-metric-population-rows="${esc(String(coverage.population))}"` : ''}`
-        + `${stale ? ' data-value-stale="true"' : ''}`
         + `${explain ? ` title="${esc(explain)}" data-value-reason="${esc(explain)}"` : ''}`
         + `>${esc(text)}${flag}</span>`;
     }).join('')}</div>
@@ -56912,13 +56977,22 @@ function debugSystemAlertsHtml(payload = {}) {
 
 // Everything a reader consults deliberately rather than scans. Collapsed by default and BUILT only
 // when open: a closed section costs nothing but its summary line.
-function debugSystemAdvancedHtml(payload = {}) {
+//
+// `advanced` is the view of the SEPARATE `/api/system-status/advanced` body (see
+// `debugSystemAdvancedView`). Since the snapshot split, `refresh`, the top-N folds and
+// `owner.debug` no longer exist in the core payload at all, so reading them off `payload` would
+// render six permanently empty cards. When the advanced body has not arrived, the cards that need
+// it are NOT drawn as empty shells -- the section says which state it is in and draws only the
+// cards the core body genuinely owns.
+function debugSystemAdvancedHtml(payload = {}, advanced = {}) {
   const open = jsDebugSystemRosterState.advancedOpen === true;
   const summary = `<summary data-js-debug-system-advanced-summary data-js-debug-system-focus-key="advanced-summary">${esc(t('debug.system.roster.advanced'))}</summary>`;
   if (!open) return `<details class="js-debug-system-advanced" data-js-debug-system-advanced>${summary}</details>`;
+  const body = advanced.payload && typeof advanced.payload === 'object' ? advanced.payload : null;
   const owner = payload.owner && typeof payload.owner === 'object' ? payload.owner : {};
   const currentOwner = owner.current_owner || {};
-  const refresh = payload.refresh && typeof payload.refresh === 'object' ? payload.refresh : {};
+  const advancedOwner = body && body.owner && typeof body.owner === 'object' ? body.owner : {};
+  const refresh = body && body.refresh && typeof body.refresh === 'object' ? body.refresh : {};
   const localRefreshing = refresh.local_refreshing || {};
   const coalescing = refresh.coalescing || {};
   const totals = debugSystemRenderableLocalServices(payload).totals || {};
@@ -56927,20 +57001,24 @@ function debugSystemAdvancedHtml(payload = {}) {
     debugSystemCardHtml('Distributed owner', debugSystemRowsHtml([
       ['Status', owner.status], ['This server owns work', owner.owner ? 'Yes' : 'No'],
       ['Owner port', currentOwner.port], ['Owner PID', currentOwner.pid],
-      ['Index mode', owner.search_index?.mode], ['Generations', owner.debug?.generation_count],
+      ['Index mode', owner.search_index?.mode],
+      ...(body ? [['Generations', advancedOwner.debug?.generation_count]] : []),
     ])),
-    debugSystemCardHtml('Refresh coordination', debugSystemRowsHtml([
-      ['Processes', totals.processes],
-      ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
-      ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
-    ])),
-    debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(Array.isArray(refresh.recurring_work) ? refresh.recurring_work : []), {wide: true}),
-    debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
-    debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(payload.top_endpoints, 'endpoint'), {wide: true}),
-    debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(payload.top_background_work, 'worker'), {wide: true}),
+    ...(body ? [
+      debugSystemCardHtml('Refresh coordination', debugSystemRowsHtml([
+        ['Processes', totals.processes],
+        ['Refreshing now', Object.entries(localRefreshing).filter(([, value]) => Boolean(value)).map(([key, value]) => `${key} ${value === true ? '' : value}`.trim()).join(' · ') || 'None'],
+        ['Pending refreshes', coalescing.recent_pending_count ?? 0], ['Coalesced requests', refresh.counters?.coalesced_refresh_requests ?? 0],
+      ])),
+      debugSystemCardHtml('Recurring work', debugSystemRecurringWorkHtml(Array.isArray(refresh.recurring_work) ? refresh.recurring_work : []), {wide: true}),
+      debugSystemCardHtml('Distributed roles', debugSystemRolesHtml(refresh.roles), {wide: true}),
+      debugSystemCardHtml('Top API endpoints', debugSystemPerformanceTableHtml(body.top_endpoints, 'endpoint'), {wide: true}),
+      debugSystemCardHtml('Top background work', debugSystemPerformanceTableHtml(body.top_background_work, 'worker'), {wide: true}),
+    ] : []),
     debugSystemCardHtml('Backend-health snapshot', debugSystemHealthSnapshotHtml(debugSystemRenderableLocalServices(payload).health || {}), {wide: true}),
   ];
   return `<details class="js-debug-system-advanced" data-js-debug-system-advanced open>${summary}
+    ${debugSystemAdvancedStatusHtml(advanced)}
     <div class="js-debug-system-grid">${cards.filter(Boolean).join('')}</div>
   </details>`;
 }
@@ -56969,12 +57047,78 @@ function debugSystemRegionHtml(region, payload) {
       expanded: jsDebugSystemRosterState.expanded,
     });
   }
-  return debugSystemAdvancedHtml(payload);
+  return debugSystemAdvancedHtml(payload, debugSystemAdvancedView());
 }
 
 const DEBUG_SYSTEM_REGIONS = Object.freeze(['announce', 'summary', 'alerts', 'roster', 'advanced']);
 
+// ---------------------------------------------------------------------------------------------
+// THE TYPED SNAPSHOT REFUSAL
+//
+// `/api/system-status` and `/api/system-status/advanced` are served from retained background
+// snapshots. Before the first publish, or past the freshness deadline, the answer is HTTP 200 with
+// `ok:false` and a `snapshot` block -- and WITHOUT the body: the aged report is withheld, never
+// relabelled as current. Both routes share one shape, so this panel parses it once, and every
+// surface renders the state it was told rather than an absence dressed up as a measurement.
+// ---------------------------------------------------------------------------------------------
+const DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT = Object.freeze({
+  unavailable: 'No system-status snapshot has been published yet.',
+  stale: 'The newest system-status snapshot is past its freshness deadline, so its aged numbers are withheld.',
+});
+
+function debugSystemSnapshotRefusal(payload) {
+  if (!payload || typeof payload !== 'object' || payload.ok !== false) return null;
+  const snapshot = payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : {};
+  // `age_seconds` is published as null for a snapshot that never existed. `Number(null)` is 0, and
+  // printing "age 0.0s" for a snapshot nobody has ever built is the same defect this whole panel is
+  // about, so the absence is carried as an absence.
+  const age = snapshot.age_seconds === null || snapshot.age_seconds === undefined ? NaN : Number(snapshot.age_seconds);
+  return {
+    state: String(snapshot.state || 'unavailable'),
+    reasonCode: String(snapshot.reason_code || ''),
+    reason: String(snapshot.reason || ''),
+    ageSeconds: Number.isFinite(age) && age >= 0 ? age : null,
+  };
+}
+
+// The whole Daemons view when the core body is a refusal. It replaces the roster rather than
+// drawing one: with no payload behind it, every row would be a fabricated `unavailable`, which is
+// exactly the "unmeasured shown as measured" failure this panel exists to avoid.
+function debugSystemSnapshotRefusalHtml(refusal) {
+  const headline = DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT[refusal.state] || `The system-status snapshot is ${refusal.state}.`;
+  const age = refusal.ageSeconds === null ? '' : ` Newest snapshot age ${debugSystemNumber(refusal.ageSeconds, 1)}s.`;
+  const retry = ` Retrying every ${debugSystemNumber(jsDebugSystemRefusalPollMs / 1000, 1)}s.`;
+  return `<div class="js-debug-system-loading" role="status" data-js-debug-system-snapshot-state="${esc(refusal.state)}" data-js-debug-system-snapshot-reason-code="${esc(refusal.reasonCode)}">${esc(`${headline}${refusal.reason ? ` ${refusal.reason}` : ''}${age}${retry}`)}</div>`;
+}
+
+// The ONE view of the Advanced body handed to the renderer: the payload when it is current, the
+// typed refusal when the producer withheld it, and this client's own fetch error when the request
+// itself failed.
+function debugSystemAdvancedView() {
+  const refusal = debugSystemSnapshotRefusal(jsDebugSystemAdvancedState.payload);
+  return {
+    payload: refusal ? null : (jsDebugSystemAdvancedState.payload || null),
+    refusal,
+    error: jsDebugSystemAdvancedState.error,
+    inFlight: jsDebugSystemAdvancedState.inFlight,
+  };
+}
+
+function debugSystemAdvancedStatusHtml(advanced = {}) {
+  if (advanced.payload) return '';
+  if (advanced.error) {
+    return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="error">${esc(advanced.error)}</p>`;
+  }
+  if (advanced.refusal) {
+    const headline = DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT[advanced.refusal.state] || `The advanced diagnostics snapshot is ${advanced.refusal.state}.`;
+    return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="${esc(advanced.refusal.state)}" data-js-debug-system-advanced-reason-code="${esc(advanced.refusal.reasonCode)}">${esc(`${headline}${advanced.refusal.reason ? ` ${advanced.refusal.reason}` : ''}`)}</p>`;
+  }
+  return `<p class="js-debug-system-empty" role="status" data-js-debug-system-advanced-state="loading">${esc(t('common.loading'))}</p>`;
+}
+
 function debugSystemInnerHtml() {
+  const refusal = debugSystemSnapshotRefusal(jsDebugSystemState.payload);
+  if (refusal) return debugSystemSnapshotRefusalHtml(refusal);
   const payload = jsDebugSystemState.payload;
   if (!payload) {
     const message = jsDebugSystemState.error || t('common.loading');
@@ -57026,7 +57170,9 @@ function refreshDebugSystemViews() {
     const scrollTop = view.scrollTop;
     const scrollLeft = view.scrollLeft;
     const focusKey = view.contains(document.activeElement) ? debugSystemFocusKey() : '';
-    const payload = jsDebugSystemState.payload;
+    // A typed refusal is NOT a payload: it has no regions to update, so it takes the shell branch
+    // below and `debugSystemInnerHtml` renders the state it was told.
+    const payload = debugSystemSnapshotRefusal(jsDebugSystemState.payload) ? null : jsDebugSystemState.payload;
     const regions = view.querySelectorAll('[data-js-debug-system-region]');
     // First render, or a view whose shell is not the current one: build the whole shell. Every
     // later render replaces only the regions whose GENERATED html changed -- the cache holds what
@@ -57058,6 +57204,53 @@ function toggleDebugSystemRosterRow(id) {
   refreshDebugSystemViews();
 }
 
+// The Advanced body, fetched ONLY while the reader has the disclosure open.
+//
+// LAZINESS IS THE POINT: the whole reason the backend split this half out is that transcript scans
+// and top-N folds should not run on the five-second poll of a panel whose Advanced section is
+// closed. Reading the route on every poll would move that work back onto the producer and undo the
+// split, so the closed-disclosure early return below is load-bearing, not a nicety
+// (tests/system_health_panel.test.js pins it).
+//
+// It is not a second poller: it has no interval of its own. `pollDebugSystemStatus` -- the one
+// owner of the `debug-system` timer -- drives it, and `jsDebugSystemAdvancedPollMs` is the minimum
+// age at which a re-read can produce different bytes.
+async function pollDebugSystemAdvanced({force = false} = {}) {
+  if (jsDebugSystemAdvancedState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
+  if (jsDebugSystemRosterState.advancedOpen !== true) return false;
+  const age = Date.now() - jsDebugSystemAdvancedState.updatedAt;
+  if (!force && jsDebugSystemAdvancedState.updatedAt > 0 && age < jsDebugSystemAdvancedPollMs) return false;
+  jsDebugSystemAdvancedState.inFlight = true;
+  jsDebugSystemAdvancedState.error = '';
+  try {
+    const payload = await apiFetchJsonQuiet('/api/system-status/advanced', {cache: 'no-store'});
+    jsDebugSystemAdvancedState.payload = payload;
+    // A refusal carries no body, so it does not start a cadence window: the next poll asks again.
+    jsDebugSystemAdvancedState.updatedAt = debugSystemSnapshotRefusal(payload) ? 0 : Date.now();
+    return true;
+  } catch (error) {
+    jsDebugSystemAdvancedState.error = userMessageText(error);
+    jsDebugSystemAdvancedState.updatedAt = 0;
+    return false;
+  } finally {
+    jsDebugSystemAdvancedState.inFlight = false;
+    refreshDebugSystemViews();
+  }
+}
+
+// How long until the next poll. A typed refusal is answered in half a second, not in five: the
+// producer builds on demand, so the body the reader is waiting for normally exists well before the
+// next scheduled poll. This is the NORMAL first read of the panel after any quiet period -- the
+// slots are demand-gated -- not a rare cold-start edge case, so the panel would otherwise be blank
+// for a full poll interval every time somebody opens it.
+function debugSystemPollDelayMs() {
+  if (debugSystemSnapshotRefusal(jsDebugSystemState.payload)) return jsDebugSystemRefusalPollMs;
+  if (jsDebugSystemRosterState.advancedOpen === true && debugSystemSnapshotRefusal(jsDebugSystemAdvancedState.payload)) {
+    return jsDebugSystemRefusalPollMs;
+  }
+  return jsDebugSystemPollMs;
+}
+
 async function pollDebugSystemStatus({force = false} = {}) {
   if (jsDebugSystemState.inFlight || typeof apiFetchJsonQuiet !== 'function') return false;
   if (!force && (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible())) return false;
@@ -57074,7 +57267,19 @@ async function pollDebugSystemStatus({force = false} = {}) {
   } finally {
     jsDebugSystemState.inFlight = false;
     refreshDebugSystemViews();
+    // Both reads ride the one poll: the Advanced fetch returns immediately unless its disclosure is
+    // open and its retained body is old enough to have been replaced.
+    await pollDebugSystemAdvanced();
+    retimeDebugSystemPolling();
   }
+}
+
+// Re-arm the ONE `debug-system` timer at the delay the current state deserves. `resetRuntimeInterval`
+// keeps the existing timer when the delay is unchanged, so calling this after every poll costs
+// nothing on the steady path.
+function retimeDebugSystemPolling() {
+  if (jsDebugSubTab !== 'system' || !jsDebugStatsPanelVisible()) return;
+  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, debugSystemPollDelayMs());
 }
 
 function syncDebugSystemPolling({pollNow = false} = {}) {
@@ -57082,7 +57287,8 @@ function syncDebugSystemPolling({pollNow = false} = {}) {
     clearRuntimeInterval('debug-system');
     return;
   }
-  resetRuntimeInterval('debug-system', () => { void pollDebugSystemStatus(); }, jsDebugSystemPollMs);
+  // ONE arming site for the ONE timer, so the delay rule cannot drift between the two callers.
+  retimeDebugSystemPolling();
   if (pollNow || !jsDebugSystemState.payload) void pollDebugSystemStatus({force: true});
 }
 
@@ -58500,6 +58706,9 @@ function bindDebugPanel(panel) {
       event.preventDefault();
       jsDebugSystemRosterState.advancedOpen = !jsDebugSystemRosterState.advancedOpen;
       refreshDebugSystemViews();
+      // Opening is the demand signal for the Advanced body: fetch it here rather than waiting up to
+      // five seconds for the next poll. Closing fetches nothing.
+      if (jsDebugSystemRosterState.advancedOpen) void pollDebugSystemAdvanced({force: true});
       return;
     }
     const logLevel = event.target.closest('[data-js-debug-log-level]');
@@ -80013,7 +80222,17 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // otherwise flip the epoch back after the replacement's bytes had already landed.
   if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'superseded_request', payload);
+  if (!requestIsCurrent()) {
+    // A superseded response still carries a true fact about the SERVER's build queue: which build
+    // will observe the request that produced it. That fact is not about whether THIS client request
+    // is still current, so discarding it with the payload is what left a forced read awaiting build
+    // zero -- a target every payload already satisfies -- whenever its apply lost the race against a
+    // concurrent refresh or a `transcripts_changed` push. Recording it here is safe without the
+    // epoch adoption above, because the recorder refuses an identity from any other epoch and never
+    // lowers the number.
+    noteSessionMetadataPendingIdentity(payload);
+    return noteSessionMetadataApply(false, 'superseded_request', payload);
+  }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(

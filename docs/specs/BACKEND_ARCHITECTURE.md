@@ -1,8 +1,34 @@
-# Backend Architecture — two shared daemons and thin webservers
-
-The durable architecture reference for YOLOmux's backend: process topology, ownership rules, the storaged request contract, and the mermaid diagrams. Extracted from the two-daemon migration queue on 2026-07-25 so the design outlives the queue that produced it.
+# Backend Architecture
 
 Companion documents: [`BACKEND_TEST_CONTRACT.md`](BACKEND_TEST_CONTRACT.md) for how backend work is verified, [`../DEVELOPMENT.md`](../DEVELOPMENT.md) for owner inventory and runbooks, and [`../DONE.md`](../DONE.md) for migration history.
+
+> **ABANDONED (2026-08-09): the `storaged` / `daemon` two-daemon fold below was never built and is not the target architecture.** Everything from "Naming Decision" through "Non-Blocking Storaged Request Contract" describes a two-process consolidation (`yolomux-storaged` + `yolomux-daemon`) that this codebase does not implement and is not executing. It is retained as a rejected design proposal, not as current or planned behavior. The shipped backend keeps the six separately-launched local services (`indexd`, `statsd`, `jobd`, `statusd`, `watchd`, `approvald`), and the daemon-monitor queue's Rejected Shortcuts forbid reintroducing the `storaged`/`daemon`/`SUBSYSTEM_SPECS` names — a test pins their absence (`tests/test_gate_panels.py`). Reason it was abandoned: the fold added no observability the per-service model lacked, would have churned the entire launcher, registry, and process-ledger surface, and the actually-shipped work (real per-service metrics, the backend-health observer, the system-status snapshot owner) delivered the goal without consolidating processes. Read the next section for what exists; treat the rest as history.
+
+## Shipped architecture (2026-08-09)
+
+The backend that actually runs is six separately-launched local service processes, plus one in-web-process backend-health observer, plus one background system-status snapshot owner. There is no `storaged` and no consolidated `daemon` process.
+
+### Six local services over Unix-socket RPC
+
+- The service roster is exactly six, frozen in one owner: `LOCAL_SERVICE_INVENTORY = ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")` (`yolomux_lib/local_service_projection.py:82`), with the same set as `ESSENTIAL_LOCAL_SERVICES` (`yolomux_lib/app.py:593`). Each is an independently launched process, not a namespace inside a shared daemon.
+- `LocalServiceRegistry` (`yolomux_lib/local_services/registry.py:740`) is the single owner of service lifecycle: launch, health, record publication, stale-record reclamation, and non-destructive recovery. Records carry the service's socket path and a verified `(pid, process-start)` identity before any signal, reap, or prune.
+- Transport is per-service Unix-domain-socket RPC: `socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)` (`yolomux_lib/local_services/rpc.py:705,785`), with each service reachable at a rooted socket path under `YOLOMUX_RUNTIME_DIR` validated by `validate_rooted_socket_paths` (`yolomux_lib/infra/common.py:119`). Web processes are structurally followers that connect to these sockets; browsers never connect to a service directly.
+
+### The backend-health observer
+
+- `BackendHealthObserver` (`yolomux_lib/backend_health/observer.py:754`) runs one sampling loop that probes the six services and records their state. It runs at `BACKEND_HEALTH_OBSERVE_SECONDS = 2.0` with a `BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS = 0.5` per-probe bound (`observer.py:147-148`). It uses an injected clock and wake event, not sleeps, and starts zero demand-scoped services during a full observation cycle.
+- It is started after the port lease and stopped before backend clients close, in `cli.start_backend_health_observer` (`yolomux_lib/cli.py:457-529`), and attached to the app via `attach_backend_health_observer` / `attach_backend_health_store` (`yolomux_lib/app.py:11202`). The observer runs *inside* the web process, which is why the web process's own process metrics are reported `web_process_not_observed` rather than fabricated.
+- History is retained per leased web port by `BackendHealthStore` (`yolomux_lib/backend_health/store.py:633`), the one owner of `STATE_DIR/backend-health/<port>.json`, written under the port lease with an explicit schema version, observer epoch, monotonic revision, per-resource state, bounded cumulative counters, and at most 128 transition rows per resource. Non-default ports derive their state root under `/tmp`, so this history survives service and web restarts (measured advancing across a real restart) but not a reboot or tmp sweep — an accept-or-relocate decision tracked in `DOIT.p0.v0.7.2.md` F3.
+
+### The system-status snapshot owner
+
+- `/api/system-status` is served from a background-published immutable snapshot, not built on the request thread. The route reads pre-encoded bytes via `system_status_snapshot_response` (`yolomux_lib/app.py:11688`; route at `yolomux_lib/http_routes.py:685`, advanced variant at `:693`), and the background owner is started and stopped with the server through `start_system_status_snapshot_owner` / `stop_system_status_snapshot_owner` (`yolomux_lib/app.py:11656,11668`; wired in `yolomux_lib/server.py:3696,3705`). Before the first snapshot or past its freshness deadline the route returns a typed unavailable/stale result, never a synchronous rebuild. (This background owner landed in 0.7.2; `v0.7.1` still built the payload on the request thread — see [`../releases/v0.7.1-evidence.md`](../releases/v0.7.1-evidence.md).)
+
+---
+
+## Rejected design proposal — the two-daemon `storaged` / `daemon` fold (abandoned, see banner above)
+
+The material below this line was extracted from the two-daemon migration queue on 2026-07-25. It was never implemented and is retained only as a record of the rejected consolidation. The "Historical Pre-Migration Architecture" mermaid remains an accurate picture of the pre-observer topology; the "Target Architecture" and "Non-Blocking Storaged Request Contract" sections describe software that does not exist.
 
 ### Naming Decision
 
@@ -89,7 +115,7 @@ Before the migration, the webserver was stdlib `ThreadingHTTPServer` (`server.py
 Acceptable synchronous work that stays request-scoped: login PBKDF2 hashing (deliberately expensive), upload writes, `/api/fs/list` (scandir capped at 1000 entries), and HTTP wrapper work around daemon-bounded `fs/read`, `fs/raw`, and `/api/fs/zip` payloads. `/api/fs/zip` now spools bounded archive bytes through `daemon.fs.read`'s binary mux path, so the webserver keeps only headers and download disposition. SSE/WebSocket endpoints are asynchronous by construction, but each open stream permanently parks one thread — the target delivers generation events over the existing client-events stream rather than adding more per-feature SSE endpoints.
 
 
-### Target Architecture
+### Target Architecture (ABANDONED — this two-daemon topology was never built; see the banner and "Shipped architecture" section at the top of this file)
 
 ```mermaid
 flowchart TB

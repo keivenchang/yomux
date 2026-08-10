@@ -408,7 +408,7 @@
   "debug.system.roster.state.unavailable": "לא זמין",
   "debug.system.roster.state.unsupported": "לא נתמך",
   "debug.system.roster.summary.counts": "{ready} מוכנים · {idle} במנוחה · {issues} תקלות",
-  "debug.system.roster.summary.cpu": "מעבד {current} % מתוך {budget} %",
+  "debug.system.roster.summary.cpu": "מעבד {current} בכל השורות",
   "debug.system.roster.summary.memory": "זיכרון {value}",
   "debug.system.roster.summary.owner": "בעלים {value}",
   "debug.system.roster.summary.updated": "עודכן {time}",

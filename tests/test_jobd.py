@@ -174,15 +174,29 @@ def test_registered_task_result_preserves_opaque_body_and_metadata(monkeypatch):
     assert result.product == product
 
 
+def _fs_descriptor(**fields):
+    """One filesystem job descriptor carrying this process's captured access policy.
+
+    The shared daemon refuses a descriptor without one, so tests must build them the way a real
+    accepting server does rather than hand-rolling `{"op": ..., "path": ...}`.
+    """
+    return {**fields, jobd.filesystem.FS_ACCESS_POLICY_FIELD: jobd.filesystem.access_policy_descriptor()}
+
+
+def _fs_batch_payload(**fields):
+    """One filesystem batch payload carrying this process's captured access policy."""
+    return {**fields, jobd.filesystem.FS_ACCESS_POLICY_FIELD: jobd.filesystem.access_policy_descriptor()}
+
+
 def test_filesystem_operation_task_reads_in_jobd(tmp_path):
     path = tmp_path / "note.txt"
     path.write_text("jobd owns this read\n", encoding="utf-8")
 
-    result = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps({
-        "op": "read",
-        "path": str(path),
-        "args": {},
-    }).encode("utf-8")))
+    result = json.loads(jobd.run_registered_task("filesystem_operation", json.dumps(_fs_descriptor(
+        op="read",
+        path=str(path),
+        args={},
+    )).encode("utf-8")))
 
     assert result["content"] == "jobd owns this read\n"
 
@@ -192,11 +206,11 @@ def test_filesystem_operation_task_preserves_raw_bytes(tmp_path):
     body = b"\x00raw\xff"
     path.write_bytes(body)
 
-    result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
-        "op": "raw",
-        "path": str(path),
-        "args": {"download": True},
-    }).encode("utf-8"))
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps(_fs_descriptor(
+        op="raw",
+        path=str(path),
+        args={"download": True},
+    )).encode("utf-8"))
 
     assert result.body == body
     assert result.product["format"] == "opaque_bytes"
@@ -208,11 +222,11 @@ def test_filesystem_operation_task_frames_html_preview_as_opaque_bytes(tmp_path)
     path = tmp_path / "preview.html"
     path.write_text("<h1>ok</h1><script>window.answer = 42;</script>\n", encoding="utf-8")
 
-    result = jobd.run_registered_task_result("filesystem_operation", json.dumps({
-        "op": "html_preview",
-        "path": str(path),
-        "args": {"locale": "he"},
-    }).encode("utf-8"))
+    result = jobd.run_registered_task_result("filesystem_operation", json.dumps(_fs_descriptor(
+        op="html_preview",
+        path=str(path),
+        args={"locale": "he"},
+    )).encode("utf-8"))
 
     assert result.product["format"] == "opaque_bytes"
     assert result.product["content_type"] == "text/html; charset=utf-8"
@@ -235,7 +249,7 @@ def test_filesystem_operation_relay_waits_in_jobd_and_returns_opaque_bytes(tmp_p
         response, returned = broker.handle({
             "action": "relay",
             "task": "filesystem_operation",
-            "payload": {"op": "raw", "path": str(path), "args": {"download": True}},
+            "payload": _fs_descriptor(op="raw", path=str(path), args={"download": True}),
             "priority": "interactive",
             "deadline_ms": 5_000,
         })
@@ -256,7 +270,7 @@ def test_filesystem_operation_relay_preserves_typed_filesystem_failure(tmp_path)
         response, returned = broker.handle({
             "action": "relay",
             "task": "filesystem_operation",
-            "payload": {"op": "raw", "path": str(tmp_path / "missing.bin"), "args": {}},
+            "payload": _fs_descriptor(op="raw", path=str(tmp_path / "missing.bin"), args={}),
             "priority": "interactive",
             "deadline_ms": 5_000,
         })
@@ -285,7 +299,7 @@ def test_filesystem_operation_parent_preserves_typed_failures(monkeypatch, tmp_p
         path.write_bytes(contents)
     if maximum is not None:
         monkeypatch.setattr(jobd.filesystem, "MAX_READ_BYTES", maximum)
-    payload = json.dumps({"op": operation, "path": str(path), "args": {}}).encode("utf-8")
+    payload = json.dumps(_fs_descriptor(op=operation, path=str(path), args={})).encode("utf-8")
 
     with pytest.raises(jobd.JobdFilesystemOperationFailure) as failure:
         jobd._filesystem_operation(payload)
@@ -795,9 +809,10 @@ def test_jobd_has_a_bounded_spawn_worker_pool_and_registered_tasks_only(tmp_path
     assert result["job"]["result"] == {"a": [2], "z": 1}
     assert produced["state"] == "ready"
     assert json.loads(produced_body) == {"a": [2], "z": 1}
-    assert status["queues"] == {"point": 0, "interactive": 0, "freshness": 0, "maintenance": 0}
+    assert status["queues"] == {"point": 0, "mutation": 0, "interactive": 0, "freshness": 0, "maintenance": 0}
     assert status["lanes"] == {
         "point": {"capacity": jobd.JOBD_POINT_WORKERS, "active": 0, "queued": 0},
+        "mutation": {"capacity": jobd.JOBD_MUTATION_WORKERS, "active": 0, "queued": 0},
         "interactive": {"capacity": jobd.JOBD_INTERACTIVE_WORKERS, "active": 0, "queued": 0},
         "bulk": {"capacity": 1, "active": 0, "queued": 0},
     }
@@ -1247,6 +1262,42 @@ def test_jobd_every_declared_priority_is_owned_by_exactly_one_bounded_lane(tmp_p
     }
 
 
+def test_point_read_admits_against_its_own_lane_while_the_bulk_queue_is_full(tmp_path):
+    """A full bulk/freshness queue must not refuse an idle point read as `queue full`.
+
+    Before the per-lane cap, one global `JOBD_MAX_QUEUE` sat ahead of every lane: 64 queued
+    freshness records made a fresh point submission return `queue full` while the point lane read
+    capacity 2, active 0.  The cap is per-lane now, so each lane stays bounded (the backpressure
+    intent) without one lane's queue starving another's admission.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    for number in range(jobd.JOBD_MAX_QUEUE):
+        submission, error = jobd.PersistentJobBroker._validated_submission({
+            "task": "session_files_view", "priority": "freshness",
+            "payload": {"session": f"s{number}"}, "generation": 1,
+            "coalesce_key": f"freshness-{number}", "deadline_ms": 60_000,
+        })
+        assert error is None, error
+        assert service._submit_validated(submission)["ok"] is True
+
+    # The freshness (bulk) lane's queue is full; the point lane is idle.
+    assert service._queued_count(lane="bulk") >= jobd.JOBD_MAX_QUEUE
+    assert service._queued_count(lane="point") == 0
+    assert service._future_slots(lane="point") == 0
+
+    submission, error = jobd.PersistentJobBroker._validated_submission({
+        "task": "session_files_view", "priority": "point",
+        "payload": {"session": "point-read"}, "generation": 1,
+        "coalesce_key": "point-read", "deadline_ms": 60_000,
+    })
+    assert error is None, error
+    result = service._submit_validated(submission)
+    assert result["ok"] is True, result
+    assert result["coalesced"] is False
+    # And the point lane's own cap still holds against a flood of point submissions.
+    assert service._queued_count(lane="point") == 1
+
+
 def test_jobd_fresh_only_joins_in_flight_work_but_never_serves_a_stored_product(tmp_path, monkeypatch):
     """The mtime-granularity case: one coalesce key, two different contents.
 
@@ -1568,8 +1619,8 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, and v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority.
-    assert jobd.JOBD_PROTOCOL_VERSION == 19
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, and v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority.
+    assert jobd.JOBD_PROTOCOL_VERSION == 21
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
     assert "session_files_view" in jobd.REGISTERED_TASKS
@@ -1675,7 +1726,7 @@ def test_filesystem_batch_task_preserves_64_item_ids_and_results(tmp_path):
 
     result = json.loads(jobd.run_registered_task(
         "filesystem_batch",
-        json.dumps({"requests": requests, "client_scope": "browser"}).encode("utf-8"),
+        json.dumps(_fs_batch_payload(requests=requests, client_scope="browser")).encode("utf-8"),
     ))
 
     assert [response["id"] for response in result["responses"]] == [request["id"] for request in requests]
@@ -1686,7 +1737,7 @@ def test_filesystem_batch_task_preserves_64_item_ids_and_results(tmp_path):
     with pytest.raises(ValueError, match="at most 64"):
         jobd.run_registered_task(
             "filesystem_batch",
-            json.dumps({"requests": [*requests, {"id": "overflow", "type": "info", "path": str(root)}]}).encode("utf-8"),
+            json.dumps(_fs_batch_payload(requests=[*requests, {"id": "overflow", "type": "info", "path": str(root)}])).encode("utf-8"),
         )
 
 
@@ -1725,7 +1776,7 @@ def test_filesystem_batch_task_uses_the_bounded_binary_product_budget(monkeypatc
         lambda _payload: {"responses": [{"id": "large", "ok": True, "payload": {"text": large_payload}}]},
     )
 
-    result = jobd.run_registered_task("filesystem_batch", b'{"requests":[]}')
+    result = jobd.run_registered_task("filesystem_batch", json.dumps(_fs_batch_payload(requests=[])).encode("utf-8"))
 
     assert len(result) > jobd.JOBD_MAX_RESULT_BYTES
     assert len(result) <= jobd.JOBD_MAX_FILESYSTEM_BATCH_RESULT_BYTES
@@ -1749,7 +1800,7 @@ def test_jobd_produce_executes_one_typed_64_item_filesystem_batch(tmp_path):
 
     metadata, body = client.produce(
         "filesystem_batch",
-        {"requests": requests, "client_scope": "browser"},
+        _fs_batch_payload(requests=requests, client_scope="browser"),
         priority="interactive",
         generation=1,
         coalesce_key="filesystem-batch-integration",
@@ -1847,7 +1898,7 @@ def test_filesystem_batch_large_real_rpc_uses_binary_product_not_result_metadata
             "path": str(directory),
             "trigger_counts": {"tree-render": 1},
         })
-    payload = {"requests": requests, "client_scope": "browser"}
+    payload = _fs_batch_payload(requests=requests, client_scope="browser")
     request_bytes = len(json.dumps({
         "action": "produce",
         "task": "filesystem_batch",
@@ -2009,13 +2060,16 @@ def test_jobd_status_and_shutdown_cover_every_scheduler_lane_executor(tmp_path):
     service.executors["bulk"] = Executor(101)  # type: ignore[assignment]
     service.executors["interactive"] = Executor(102)  # type: ignore[assignment]
     service.executors["point"] = Executor(103)  # type: ignore[assignment]
+    service.executors["mutation"] = Executor(104)  # type: ignore[assignment]
 
     status = service.common_status()
     service._on_shutdown()
 
-    assert status["worker_count"] == 2 + jobd.JOBD_INTERACTIVE_WORKERS + jobd.JOBD_POINT_WORKERS
-    assert status["worker_pids"] == [101, 102, 103]
-    assert sorted(shutdown_pids) == [101, 102, 103]
+    assert status["worker_count"] == (
+        2 + jobd.JOBD_INTERACTIVE_WORKERS + jobd.JOBD_POINT_WORKERS + jobd.JOBD_MUTATION_WORKERS
+    )
+    assert status["worker_pids"] == [101, 102, 103, 104]
+    assert sorted(shutdown_pids) == [101, 102, 103, 104]
     assert set(service.executors) == set(jobd.JOBD_LANE_PRIORITIES)
     assert all(executor is None for executor in service.executors.values())
 

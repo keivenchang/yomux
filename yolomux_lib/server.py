@@ -3691,10 +3691,19 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.start_tabber_activity_cache_warmer()
         if hasattr(self.app, "start_update_check_thread"):
             self.app.start_update_check_thread()
+        # The system-status snapshot producer belongs to the serving process, not to background
+        # ownership: every server answers /api/system-status about itself, owner or not.
+        if hasattr(self.app, "start_system_status_snapshot_owner"):
+            self.app.start_system_status_snapshot_owner()
         start_agent_auth_status_refresh(force=True)
 
     def shutdown(self) -> None:
         self.persistent_request_stop.set()
+        # Retire the snapshot producer with the first shutdown signal, not at close: a build that
+        # started after a fixture sealed local-service starts would look like the product starting
+        # a service during teardown. `stop` is idempotent, so `server_close` may call it again.
+        if hasattr(self.app, "stop_system_status_snapshot_owner"):
+            self.app.stop_system_status_snapshot_owner()
         super().shutdown()
 
     def server_close(self) -> None:
@@ -3708,6 +3717,8 @@ class TmuxWebtermHTTPServer(ThreadingHTTPServer):
             self.app.stop_client_event_watcher()
         if hasattr(self, "app") and hasattr(self.app, "stop_input_heartbeat_worker"):
             self.app.stop_input_heartbeat_worker()
+        if hasattr(self, "app") and hasattr(self.app, "stop_system_status_snapshot_owner"):
+            self.app.stop_system_status_snapshot_owner()
         super().server_close()
 
     def record_host_pty_dimensions(self, session: str, rows: int, cols: int) -> None:

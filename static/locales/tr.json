@@ -402,7 +402,7 @@
   "debug.system.roster.state.unavailable": "Kullanılamıyor",
   "debug.system.roster.state.unsupported": "Desteklenmiyor",
   "debug.system.roster.summary.counts": "{ready} hazır · {idle} boşta · {issues} sorun",
-  "debug.system.roster.summary.cpu": "CPU {current} % / {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} tüm satırlarda",
   "debug.system.roster.summary.memory": "Bellek {value}",
   "debug.system.roster.summary.owner": "Sahibi {value}",
   "debug.system.roster.summary.updated": "Güncellendi {time}",

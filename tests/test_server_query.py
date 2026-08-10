@@ -1123,6 +1123,7 @@ def route_handler(path, app=None, readonly=False):
     handler.share_token = lambda: ""
     handler.write_json = lambda value, status=HTTPStatus.OK: writes.append(("json", status, value))
     handler.write_json_bytes = lambda value, status=HTTPStatus.OK: writes.append(("json_bytes", status, value))
+    handler.write_product_bytes = lambda data, product, promise=None: writes.append(("product", HTTPStatus.OK, data))
     handler.write_text = lambda value, status=HTTPStatus.OK, content_type="text/plain; charset=utf-8": writes.append(("text", status, value, content_type))
     handler.write_html = lambda value: writes.append(("html", HTTPStatus.OK, value))
     handler.write_app_result = lambda result: handler.write_json(result[0], status=result[1])
@@ -1301,11 +1302,13 @@ def test_do_get_routes_authenticated_json_and_stream_handlers():
     assert calls == [("require_auth", "readonly")]
     assert writes == [("json", HTTPStatus.OK, {"status": "owner"})]
 
-    app = SimpleNamespace(system_status_payload=lambda: {"ok": True, "server": {"pid": 123}})
+    # The route reads a published snapshot and writes its bytes; it never calls a payload builder.
+    system_status_body = b'{"ok":true,"server":{"pid":123}}'
+    app = SimpleNamespace(system_status_snapshot_response=lambda advanced=False: (system_status_body, {"length": len(system_status_body)}))
     handler, calls, writes = route_handler("/api/system-status", app)
     Handler.do_GET(handler)
     assert calls == [("require_auth", "readonly")]
-    assert writes == [("json", HTTPStatus.OK, {"ok": True, "server": {"pid": 123}})]
+    assert writes == [("product", HTTPStatus.OK, system_status_body)]
 
     app = SimpleNamespace(background_owner_claim_payload=lambda: ({"ok": True, "claimed": True, "was_owner": False}, HTTPStatus.OK))
     handler, calls, writes = route_handler("/api/background/claim", app)
@@ -2250,6 +2253,7 @@ def test_filesystem_batch_product_returns_per_item_results(monkeypatch):
             {"id": "mkdir", "type": "mkdir", "path": "/repo/new"},
             {"id": "unindex", "type": "unindex", "path": "/repo"},
         ],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
     })
 
     responses = result["responses"]
@@ -2274,7 +2278,10 @@ def test_filesystem_batch_product_returns_typed_permission_failure_without_raisi
         raise PermissionError(13, "permission denied", "/restricted/item")
 
     monkeypatch.setattr(server_module.filesystem.io_ops, "path_info", denied_path_info)
-    result = server_module.filesystem.filesystem_batch_result({"requests": [{"id": "denied", "type": "info", "path": "/restricted/item"}]})
+    result = server_module.filesystem.filesystem_batch_result({
+        "requests": [{"id": "denied", "type": "info", "path": "/restricted/item"}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
+    })
 
     assert result["responses"] == [{
         "id": "denied",
@@ -2353,6 +2360,7 @@ def test_filesystem_batch_product_preserves_bounded_coalesced_trigger_counts(mon
     )
     result = server_module.filesystem.filesystem_batch_result({
         "requests": [{"id": "root", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 2, "watch-diff-fallback": 3}}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
     })
 
     assert result["responses"][0]["ok"] is True
@@ -2370,6 +2378,7 @@ def test_filesystem_batch_product_rejects_arbitrary_trigger_without_recording_it
         "client_scope": trigger_canary,
         "password": "do-not-log-this-body-8e2f6a4d",
         "requests": [{"id": "root", "type": "list", "path": path_canary, "trigger": trigger_canary}],
+        server_module.filesystem.FS_ACCESS_POLICY_FIELD: server_module.filesystem.access_policy_descriptor(),
     })
 
     assert result["responses"] == [{

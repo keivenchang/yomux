@@ -414,7 +414,7 @@
   "debug.system.roster.state.unavailable": "Недоступен",
   "debug.system.roster.state.unsupported": "Не поддерживается",
   "debug.system.roster.summary.counts": "{ready} готовы · {idle} ожидают · {issues} проблем",
-  "debug.system.roster.summary.cpu": "ЦП {current} % из {budget} %",
+  "debug.system.roster.summary.cpu": "ЦП {current} по всем строкам",
   "debug.system.roster.summary.memory": "Память {value}",
   "debug.system.roster.summary.owner": "Владелец {value}",
   "debug.system.roster.summary.updated": "Обновлено {time}",

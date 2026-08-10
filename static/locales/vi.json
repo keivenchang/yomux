@@ -402,7 +402,7 @@
   "debug.system.roster.state.unavailable": "Không khả dụng",
   "debug.system.roster.state.unsupported": "Không được hỗ trợ",
   "debug.system.roster.summary.counts": "{ready} sẵn sàng · {idle} rảnh · {issues} sự cố",
-  "debug.system.roster.summary.cpu": "CPU {current} % trên {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} trên tất cả các hàng",
   "debug.system.roster.summary.memory": "Bộ nhớ {value}",
   "debug.system.roster.summary.owner": "Chủ sở hữu {value}",
   "debug.system.roster.summary.updated": "Cập nhật {time}",

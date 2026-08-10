@@ -408,7 +408,7 @@
   "debug.system.roster.state.unavailable": "No disponible",
   "debug.system.roster.state.unsupported": "No compatible",
   "debug.system.roster.summary.counts": "{ready} listos · {idle} inactivos · {issues} problemas",
-  "debug.system.roster.summary.cpu": "CPU {current} % de {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} en todas las filas",
   "debug.system.roster.summary.memory": "Memoria {value}",
   "debug.system.roster.summary.owner": "Propietario {value}",
   "debug.system.roster.summary.updated": "Actualizado {time}",

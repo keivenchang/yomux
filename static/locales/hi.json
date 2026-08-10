@@ -402,7 +402,7 @@
   "debug.system.roster.state.unavailable": "अनुपलब्ध",
   "debug.system.roster.state.unsupported": "असमर्थित",
   "debug.system.roster.summary.counts": "{ready} तैयार · {idle} निष्क्रिय · {issues} समस्याएँ",
-  "debug.system.roster.summary.cpu": "CPU {current} % / {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} सभी पंक्तियों में",
   "debug.system.roster.summary.memory": "स्मृति {value}",
   "debug.system.roster.summary.owner": "स्वामी {value}",
   "debug.system.roster.summary.updated": "अद्यतन {time}",

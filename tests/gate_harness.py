@@ -2338,6 +2338,171 @@ def wait_for_fixture_client_event_demand(driver, timeout: float = 4.0, *, expect
     return result["state"]
 
 
+# A genuinely stuck operation must still fail closed, but an in-flight full watch-diff baseline is a
+# known completion receipt, not a hang. Under browser-lane concurrency (many chromedrivers doing real
+# filesystem-watch work) a fresh POST /api/watch/roots can start a /api/fs/watch-diff?full=1 baseline
+# right at the teardown boundary, leaving watchRootsBaselinePending true past the general quiescence
+# timeout. Waiting on that one promise as a receipt is correct; raising the general timeout to paper
+# over it is not. This bound is the fail-closed limit on a baseline that never delivers its receipt.
+_WATCH_DIFF_BASELINE_RECEIPT_SECONDS = 20.0
+
+
+def _read_fixture_operation_state(driver) -> dict[str, Any]:
+    """Read and validate the fixture lifecycle operation state; raise on an unreachable adapter."""
+
+    state = driver.execute_script(
+        """
+        const lifecycle = window.__yolomuxFixtureLifecycle;
+        if (!lifecycle || typeof lifecycle.operationState !== 'function') {
+          return {available: false};
+        }
+        return {available: true, diagnosticMode: lifecycle.diagnosticMode, ...lifecycle.operationState()};
+        """
+    )
+    if not isinstance(state, Mapping) or state.get("available") is not True:
+        raise AssertionError(f"fixture lifecycle operation state is unreachable: {state}")
+    if state.get("diagnosticMode") not in {"retained-js", "browser-console"}:
+        raise AssertionError(f"fixture lifecycle diagnostic mode is invalid: {state}")
+    pending = state.get("pending")
+    if not isinstance(pending, list) or not all(isinstance(operation_id, str) for operation_id in pending):
+        raise AssertionError(f"fixture lifecycle pending operations are malformed: {state}")
+    if (
+        state.get("diagnosticMode") == "retained-js"
+        and not isinstance(state.get("watchRootsPending"), bool)
+    ) or (
+        "watchRootsPending" in state
+        and not isinstance(state.get("watchRootsPending"), bool)
+    ):
+        raise AssertionError(f"fixture lifecycle watch-root state is malformed: {state}")
+    # watchDiffPendingOperationIds partitions `pending` into the baseline's own parked operation IDs
+    # and everything else. operationState() builds both from one Map synchronously, so for retained-JS
+    # it is REQUIRED and every owned ID must be a real pending ID; an owned ID absent from `pending` is
+    # a malformed contradiction, not a race. Browser-console omits this retained-JS-only field, but a
+    # malformed present value fails closed in any mode.
+    owned_ids = state.get("watchDiffPendingOperationIds")
+    if state.get("diagnosticMode") == "retained-js" and owned_ids is None:
+        raise AssertionError(f"fixture lifecycle watch-diff pending ownership is missing: {state}")
+    if owned_ids is not None:
+        if not isinstance(owned_ids, list) or not all(isinstance(operation_id, str) for operation_id in owned_ids):
+            raise AssertionError(f"fixture lifecycle watch-diff pending ownership is malformed: {state}")
+        if not set(owned_ids) <= set(pending):
+            raise AssertionError(f"fixture lifecycle watch-diff pending ownership is not a subset of pending: {state}")
+    return dict(state)
+
+
+def _fixture_operation_state_quiescent(state: Mapping[str, Any]) -> bool:
+    """Return whether every owned operation surface has reached terminal state."""
+
+    return (
+        not state.get("pending")
+        and int(state.get("batchQueued") or 0) == 0
+        and int(state.get("batchPending") or 0) == 0
+        and int(state.get("batchOperations") or 0) == 0
+        and state.get("activityRefreshing") is not True
+        and state.get("watchRootsPending", False) is False
+        and state.get("finderWatchReady", True) is True
+    )
+
+
+def _blocked_only_by_watch_diff_baseline(state: Mapping[str, Any]) -> bool:
+    """The single non-terminal condition is a known in-flight full watch-diff baseline receipt.
+
+    A held watch-root timer/registration/in-flight registration is not a baseline receipt: those are
+    ordinary pending work that must fail closed at the general timeout. The baseline parks its own
+    operation record in `pending` while it awaits a 202 result, so a bare "a pending op exists" check
+    would reject the very state this gate must open on. Disregard ONLY the baseline-owned operation
+    IDs (`watchDiffPendingOperationIds`); any unrelated pending ID still fails closed.
+    """
+
+    if state.get("diagnosticMode") != "retained-js":
+        return False
+    if state.get("watchRootsBaselinePending", False) is not True:
+        return False
+    if (
+        state.get("watchRootsTimerPending", False) is True
+        or state.get("watchRootsRegistrationPending", False) is True
+        or state.get("watchRootsInFlight", False) is True
+    ):
+        return False
+    baseline_owned = set(state.get("watchDiffPendingOperationIds") or [])
+    unrelated_pending = [
+        operation_id for operation_id in (state.get("pending") or []) if operation_id not in baseline_owned
+    ]
+    if unrelated_pending:
+        return False
+    # Every other surface must be terminal; the baseline's own pending op and its watchRootsPending
+    # flag are the only remaining work, and both clear when the receipt lands.
+    return _fixture_operation_state_quiescent({**state, "pending": [], "watchRootsPending": False})
+
+
+def _await_in_flight_watch_diff_baseline(driver, timeout: float) -> Mapping[str, Any]:
+    """Wait on the in-flight full watch-diff promise as a completion receipt, bounded fail-closed."""
+
+    receipt = driver.execute_async_script(
+        """
+        const boundMs = arguments[0];
+        const done = arguments[arguments.length - 1];
+        const state = (typeof serverWatchRootsState === 'undefined') ? null : serverWatchRootsState;
+        const promise = state ? state.watchDiffPromise : null;
+        if (!promise) { done({hadPromise: false, settled: true}); return; }
+        let finished = false;
+        const finish = (result) => { if (finished) { return; } finished = true; done(result); };
+        const timer = setTimeout(() => finish({hadPromise: true, settled: false, timedOut: true}), boundMs);
+        Promise.resolve(promise).then(
+          () => { clearTimeout(timer); finish({hadPromise: true, settled: true, rejected: false}); },
+          () => { clearTimeout(timer); finish({hadPromise: true, settled: true, rejected: true}); },
+        );
+        """,
+        int(max(0.0, float(timeout)) * 1000),
+    )
+    if not isinstance(receipt, Mapping):
+        raise AssertionError(f"watch-diff baseline receipt is malformed: {receipt}")
+    return receipt
+
+
+def _wait_out_watch_diff_baseline_receipt(driver, blocked_state: Mapping[str, Any]) -> dict[str, Any]:
+    """Wait for the in-flight baseline receipt, honoring its outcome; fail closed on a real hang.
+
+    Only an actually in-flight async promise consumes the fail-closed bound. Every other outcome is
+    resolved without spinning: a state that claims a baseline is pending while no promise exists is a
+    contradiction and fails immediately, and a promise that resolves or rejects is followed by exactly
+    one state re-read that either accepts quiescence or raises the exact contradictory state.
+    """
+
+    frozen_blocked = dict(blocked_state)
+    deadline = time.monotonic() + _WATCH_DIFF_BASELINE_RECEIPT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise AssertionError(
+                "in-flight full watch-diff baseline did not deliver its completion receipt before the "
+                f"fail-closed bound: {json.dumps(frozen_blocked, sort_keys=True)}"
+            )
+        receipt = _await_in_flight_watch_diff_baseline(driver, remaining)
+        if receipt.get("hadPromise") is not True:
+            # The state claimed a baseline was pending, but there is no in-flight promise to wait on.
+            # That is a contradiction, not an in-flight receipt; do not spin the bound waiting for it.
+            raise AssertionError(
+                "watch-diff baseline was reported pending with no in-flight promise to await: "
+                f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+                f"state={json.dumps(frozen_blocked, sort_keys=True)}"
+            )
+        if receipt.get("settled") is not True:
+            # The promise is genuinely still in flight; this await consumed its slice of the bound.
+            continue
+        # The promise resolved or rejected. Re-read state exactly once and decide; a still-pending
+        # flag after a settled/rejected receipt is a contradiction, not a reason to keep waiting.
+        state = _read_fixture_operation_state(driver)
+        if _fixture_operation_state_quiescent(state):
+            state["watchDiffBaselineReceipt"] = dict(receipt)
+            return state
+        raise AssertionError(
+            "watch-diff baseline receipt settled but fixture work is still not quiescent: "
+            f"receipt={json.dumps(dict(receipt), sort_keys=True)} "
+            f"state={json.dumps(state, sort_keys=True)}"
+        )
+
+
 def wait_for_fixture_api_quiescence(driver, timeout: float = 8.0) -> dict[str, Any]:
     """Wait until product work and its diagnostic receipts reach owned terminal state."""
 
@@ -2345,48 +2510,21 @@ def wait_for_fixture_api_quiescence(driver, timeout: float = 8.0) -> dict[str, A
 
     def settled(current):
         nonlocal last_state
-        state = current.execute_script(
-            """
-            const lifecycle = window.__yolomuxFixtureLifecycle;
-            if (!lifecycle || typeof lifecycle.operationState !== 'function') {
-              return {available: false};
-            }
-            return {available: true, diagnosticMode: lifecycle.diagnosticMode, ...lifecycle.operationState()};
-            """
-        )
-        if not isinstance(state, Mapping) or state.get("available") is not True:
-            raise AssertionError(f"fixture lifecycle operation state is unreachable: {state}")
-        if state.get("diagnosticMode") not in {"retained-js", "browser-console"}:
-            raise AssertionError(f"fixture lifecycle diagnostic mode is invalid: {state}")
-        if not isinstance(state.get("pending"), list):
-            raise AssertionError(f"fixture lifecycle pending operations are malformed: {state}")
-        if (
-            state.get("diagnosticMode") == "retained-js"
-            and not isinstance(state.get("watchRootsPending"), bool)
-        ) or (
-            "watchRootsPending" in state
-            and not isinstance(state.get("watchRootsPending"), bool)
-        ):
-            raise AssertionError(f"fixture lifecycle watch-root state is malformed: {state}")
-        last_state = dict(state)
-        complete = (
-            not state.get("pending")
-            and int(state.get("batchQueued") or 0) == 0
-            and int(state.get("batchPending") or 0) == 0
-            and int(state.get("batchOperations") or 0) == 0
-            and state.get("activityRefreshing") is not True
-            and state.get("watchRootsPending", False) is False
-            and state.get("finderWatchReady", True) is True
-        )
-        return last_state if complete else False
+        last_state = _read_fixture_operation_state(current)
+        return last_state if _fixture_operation_state_quiescent(last_state) else False
 
     try:
         settled_state = WebDriverWait(driver, float(timeout)).until(settled)
     except TimeoutException as error:
-        raise AssertionError(
-            "fixture API work did not quiesce before the owned boundary: "
-            f"{json.dumps(last_state, sort_keys=True)}"
-        ) from error
+        if last_state is not None and _blocked_only_by_watch_diff_baseline(last_state):
+            # The one remaining surface is a known in-flight full watch-diff baseline. Wait on its
+            # completion receipt rather than reporting a hang that is not one.
+            settled_state = _wait_out_watch_diff_baseline_receipt(driver, last_state)
+        else:
+            raise AssertionError(
+                "fixture API work did not quiesce before the owned boundary: "
+                f"{json.dumps(last_state, sort_keys=True)}"
+            ) from error
     if settled_state.get("diagnosticMode") == "retained-js":
         settled_state["browserReceiptBarrier"] = dict(acknowledge_browser_diagnostic_receipts(driver))
     return settled_state

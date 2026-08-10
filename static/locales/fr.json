@@ -408,7 +408,7 @@
   "debug.system.roster.state.unavailable": "Indisponible",
   "debug.system.roster.state.unsupported": "Non pris en charge",
   "debug.system.roster.summary.counts": "{ready} prêts · {idle} inactifs · {issues} problèmes",
-  "debug.system.roster.summary.cpu": "Processeur {current} % sur {budget} %",
+  "debug.system.roster.summary.cpu": "Processeur {current} sur toutes les lignes",
   "debug.system.roster.summary.memory": "Mémoire {value}",
   "debug.system.roster.summary.owner": "Propriétaire {value}",
   "debug.system.roster.summary.updated": "Mis à jour {time}",

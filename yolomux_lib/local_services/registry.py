@@ -1264,6 +1264,10 @@ class LocalServiceRegistry:
         ]
         self.stderr_path.parent.mkdir(parents=True, exist_ok=True)
         self.spawn_ownership = None
+        # A local service is shared per user, so this inherited environment belongs to whichever
+        # server happened to launch it first and is NOT authority for any other server's request.
+        # Filesystem access policy in particular travels on the job descriptor
+        # (`filesystem.paths.FilesystemAccessPolicy`), never through `YOLOMUX_FS_ROOTS` here.
         spawn_environ = dict(os.environ)
         spawn_environ[LOCAL_SERVICE_SPAWN_GENERATION_ENV] = generation_marker
         try:

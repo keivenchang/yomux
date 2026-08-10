@@ -252,6 +252,10 @@ const WEB_SERVER_NEVER_SAMPLED = {
   rss_bytes: absent('cpu_sample_not_pushed', UNPUSHED_SAMPLE_REASON),
 };
 
+// The CORE body only. `refresh`, `top_endpoints`, `top_background_work`, `top_event_types`,
+// `login_throttle`, `largest_active_transcripts`, `transcripts_cache` and `owner.debug`/
+// `owner.control` moved to `/api/system-status/advanced` when the snapshot split landed, so a
+// fixture that still carried them here would be describing a body the server no longer sends.
 function payloadFor(payloadLocalServices, extra = {}) {
   return {
     ok: true,
@@ -259,14 +263,11 @@ function payloadFor(payloadLocalServices, extra = {}) {
     state_dir: '/fixture/state',
     server: WEB_SERVER,
     owner: {},
-    refresh: {},
     search_index: {},
     caches: {},
     client_events: {},
     chat: {},
     cpu_budget: {},
-    top_endpoints: [],
-    top_background_work: [],
     tmux_signal_watcher: {state: 'attached', demanded: true, sessions: ['debug'], process_pid: 9001},
     local_services: payloadLocalServices,
     ...extra,
@@ -588,6 +589,12 @@ test('a running daemon whose transport failed is an issue with its typed reason,
   const row = rosterRow(renderRoster(fixture), 'statsd');
   assert.match(row, /data-subsystem-state="issue"/);
   assert.match(row, /data-subsystem-tone="bad"/, 'a service that is not serving is actionable');
+  // THE WORD, not just the attributes. Both assertions above are machine-readable state that a
+  // reader never sees; the rule this row exists to obey is "status is never carried by colour
+  // alone", and until this line nothing checked that the degraded state renders a word at all.
+  assert.match(row, /<span data-subsystem-state-label>Issue<\/span>/, 'the degraded state renders its word beside the dot');
+  // ...and the word is the catalog's, not a literal composed in the renderer.
+  assert.equal(localeEn['debug.system.localServices.state.issue'], 'Issue');
   assert.match(row, /<span class="js-debug-roster-reason" data-subsystem-reason>status transport refused<\/span>/);
   // The two readings the old label existed to prevent, still prevented.
   assert.doesNotMatch(row, /data-subsystem-state="unavailable"/, 'a running process with a failed transport is not down');
@@ -998,7 +1005,7 @@ test('the summary strip total carries the same footnote marker and the same acce
     'the strip and the roster cells share ONE marker owner, so the strip reads 48.0MB*',
   );
   // The sentence behind the marker is unchanged: it is the only place the reader learns WHY.
-  assert.match(memoryFact, /title="this total covers the 1 of 2 rows that published a measurement; the rest are unmeasured, not zero"/);
+  assert.match(memoryFact, /title="this total covers the 1 of 2 rows that own a process and published a measurement; the rest are unmeasured, not zero"/);
 });
 
 test('counter_scope web_process is spelled out ONCE for the whole table', () => {
@@ -1251,6 +1258,33 @@ test('transitions_truncated says older rows exist rather than implying the list 
   assert.match(complete, /data-transitions-truncated="false"/);
   assert.match(complete, /16 state changes recorded — all of them are shown\./);
   assert.doesNotMatch(complete, /older rows exist/);
+});
+
+// `recovery_outcome` has exactly two renderers -- the observed-state sentence and the transition
+// list -- and until this test EVERY fixture in this file pinned `'none'`, which is the one value
+// both renderers drop. Two live branches, zero coverage: a `recovered` service could have rendered
+// nothing, or the wrong word, and the whole suite would still have been green.
+test('a recovered service prints its recovery outcome in the observed state AND on the transition it happened on', () => {
+  const html = renderStatsdOpen(localServices({}, {
+    state: 'ready',
+    reason_code: 'none',
+    recovery_outcome: 'recovered',
+    transitions: [
+      {revision: 3, wall_time: 1000, previous_state: 'ready', new_state: 'down', reason_code: 'service_absent', process_epoch: 'pid:4242:start:98', recovery_outcome: 'none'},
+      {revision: 4, wall_time: 1500, previous_state: 'down', new_state: 'ready', reason_code: 'none', process_epoch: 'pid:4242:start:98', recovery_outcome: 'recovered'},
+    ],
+    transitions_total: 2,
+  }));
+  // Branch 1 -- `debugSystemHealthObservedText`. `reason_code` is `none`, so the outcome is the
+  // ONLY detail the sentence carries, which is exactly the case a `'none'` fixture cannot reach.
+  assert.match(html, /<p data-subsystem-health-state>Observed state: ready for [^<]*since revision #700 — recovery recovered\.<\/p>/);
+  // Branch 2 -- `debugSystemHealthTransitionsHtml`, on the row where the recovery happened.
+  assert.match(html, /<li>rev #4 · [^<]*· down → ready \(recovery recovered\)<\/li>/);
+  // NEGATIVE CONTROL, same render: the earlier transition published `'none'`, and `none` is not a
+  // recovery outcome to print. Without this the two assertions above pass for a renderer that
+  // prints the field unconditionally, which is the defect in the other direction.
+  assert.match(html, /<li>rev #3 · [^<]*· ready → down \(service_absent\)<\/li>/);
+  assert.doesNotMatch(html, /recovery none/);
 });
 
 test('an observed service with no recorded change says so instead of rendering an empty list', () => {
@@ -1655,9 +1689,13 @@ test('the summary counts and its CPU/memory describe the SAME rows', () => {
   vm.runInContext('result = {summary: debugSystemRosterSummary(debugSystemRosterRows(fixture)), html: debugSystemSummaryStripHtml(fixture)};', context);
   const {summary, html} = context.result;
 
-  // Three rows are counted: the web process plus two services (the tmux child is nested).
-  assert.equal(summary.ready + summary.idle + summary.issues, 3, summary);
-  assert.equal(summary.population, 3, summary);
+  // Four rows are counted, because four rows render: the web process, its nested tmux child, and
+  // two services.
+  assert.equal(summary.ready + summary.idle + summary.issues, 4, summary);
+  assert.equal(summary.population, 4, summary);
+  // Three of the four own a process whose CPU and memory can be summed. The nested child runs
+  // INSIDE the web process, so its resources are already inside the web row's figure.
+  assert.equal(summary.resourcePopulation, 3, summary);
   // ...and the CPU/memory sums cover those same three rows: 2% + 2% from the services and 3% from
   // the web process, 48MB + 48MB + 88MB.
   assert.equal(Math.round(summary.cpuPercent * 10) / 10, 7.0, summary);
@@ -1667,6 +1705,75 @@ test('the summary counts and its CPU/memory describe the SAME rows', () => {
   assert.doesNotMatch(html, /999/, 'the strip must not read a total computed over a different population');
   // `debugSystemNumber(7, 1)` drops the trailing zero, as it does everywhere else in the panel.
   assert.match(html, /CPU 7%/);
+});
+
+test('the summary counts EVERY row the roster renders, nested child included', () => {
+  // THE "of 7 while 8 rows render" DEFECT. `debugSystemRosterSummary` filtered `kind === 'child'`
+  // out of its population while `debugSystemRosterHtml` drew it, so two owners answered "how many
+  // rows are there" with two different numbers -- and a red child row was missing from the
+  // `issues` count that is the whole reason a reader opens this view. One array now feeds both.
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
+  const fixture = localServices();
+  fixture.inventory = ['statsd', 'jobd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('jobd')];
+  context.fixture = payloadFor(fixture);
+  vm.runInContext(
+    'result = {summary: debugSystemRosterSummary(debugSystemRosterRows(fixture)),'
+    + ' html: debugSystemRosterHtml(fixture, {nowSeconds: 1902, expanded: new Set()})};',
+    context,
+  );
+  const {summary, html} = context.result;
+  const rendered = (String(html).match(/data-subsystem-row /g) || []).length;
+  assert.equal(rendered, 4, 'web + tmux child + two services');
+  assert.equal(summary.population, rendered, 'the counted population IS the rendered rows');
+  assert.equal(summary.ready + summary.idle + summary.issues, rendered, summary);
+
+  // The fact the old filter hid: a demanded watcher that never started is an outage, it renders
+  // red, and it must be IN the issues count. Under the filter this read "0 issues" beside a red row.
+  context.fixture = payloadFor(fixture, {
+    tmux_signal_watcher: {state: 'never-started', demanded: true, sessions: ['debug'], process_pid: 0},
+  });
+  vm.runInContext(
+    'result = {summary: debugSystemRosterSummary(debugSystemRosterRows(fixture)),'
+    + ' html: debugSystemRosterHtml(fixture, {nowSeconds: 1902, expanded: new Set()})};',
+    context,
+  );
+  const degraded = context.result;
+  assert.match(rosterRow(String(degraded.html), 'tmux-signal-watcher'), /data-subsystem-tone="bad"/);
+  assert.equal(degraded.summary.issues, 1, degraded.summary);
+  // NEGATIVE CONTROL: an undemanded watcher in the same state is idle by design, so it is counted
+  // as idle -- counting every child as an issue would be the same defect with the sign flipped.
+  context.fixture = payloadFor(fixture, {
+    tmux_signal_watcher: {state: 'never-started', demanded: false, sessions: [], process_pid: 0},
+  });
+  vm.runInContext('result = debugSystemRosterSummary(debugSystemRosterRows(fixture));', context);
+  assert.equal(context.result.issues, 0, context.result);
+  assert.equal(context.result.idle, 1, context.result);
+});
+
+test('the summary CPU number is labelled a population sum and carries no single-process budget', () => {
+  // THE `CPU 172.5% / 30%` DEFECT. The numerator is a sum over every roster row; the denominator
+  // was `SERVER_CPU_BUDGET_PERCENT`, the budget for the WEB PROCESS ALONE. Eight processes over
+  // one process's budget renders a permanent breach nothing is actually breaching.
+  const context = renderContext();
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
+  const fixture = localServices();
+  fixture.inventory = ['statsd', 'jobd'];
+  fixture.services = [serviceRow('statsd'), serviceRow('jobd')];
+  context.fixture = payloadFor(fixture, {
+    cpu_budget: {status: 'ok', current_percent: 3.0, budget_percent: 30.0, sustained_budget_seconds: 300, sustained_seconds: 0, top_consumers: [], stale: false},
+  });
+  vm.runInContext('result = debugSystemSummaryStripHtml(fixture);', context);
+  const html = String(context.result);
+  const cpuFact = slice(html, 'data-js-debug-roster-summary-fact="cpu"', '</span>');
+  assert.match(cpuFact, /CPU 7% across all rows/, 'the number says what it is a sum over');
+  assert.doesNotMatch(cpuFact, /30/, 'a single-process budget is not the denominator of a population sum');
+  assert.doesNotMatch(html, /7% \/ /, 'and the strip prints no ratio at all');
+  // The budget is not deleted, it is left with the ONE figure it applies to: the CPU budget card,
+  // which renders the web process's own current reading against it.
+  vm.runInContext('result = debugSystemCpuBudgetCardHtml({status: "ok", current_percent: 3.0, budget_percent: 30.0, sustained_seconds: 0, sustained_budget_seconds: 300, top_consumers: []});', context);
+  assert.match(String(context.result), />3% \/ 30%</, 'the budget still renders against the one process it budgets');
 });
 
 test('a summary number nobody measured is an em dash with a reason, never a zero', () => {
@@ -1787,7 +1894,11 @@ test('a stale CPU budget renders stale, and its unmeasured current reading is an
   assert.match(html, />— \/ 30%</);
 });
 
-test('the summary strip marks a CPU budget denominator taken from a stale block', () => {
+test('the summary strip reads nothing at all out of the CPU budget block', () => {
+  // This test used to assert the strip MARKED its 30% denominator as stale. That mark existed only
+  // because the strip printed a denominator it had no business printing; with the denominator gone
+  // there is nothing stale to mark, and the block has exactly one renderer again. The assertion
+  // that survives is the stronger one: a stale budget block cannot reach the strip in any form.
   const context = renderContext();
   vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}`, context);
   context.fixture = payloadFor(localServices(), {
@@ -1796,10 +1907,259 @@ test('the summary strip marks a CPU budget denominator taken from a stale block'
   });
   vm.runInContext('result = debugSystemSummaryStripHtml(fixture);', context);
   const html = String(context.result);
-  const cpuFact = html.split('data-js-debug-roster-summary-fact="cpu"')[1].split('</span>')[0];
-  assert.match(cpuFact, /data-value-stale="true"/, 'a 30% denominator read out of a stale block must say so');
-  assert.match(cpuFact, /data-value-reason="[^"]+"/);
+  const cpuFact = slice(html, 'data-js-debug-roster-summary-fact="cpu"', '</span>');
+  assert.doesNotMatch(cpuFact, /30/, 'the budget percentage must not reach the strip');
+  assert.doesNotMatch(html, /data-value-stale/, 'and there is no budget freshness for the strip to report');
+  // Source-level negative search: one reader of the block, and it is not this one.
+  const strip = sourceFunction('debugSystemSummaryStripHtml', 'debugSystemAlertsHtml');
+  assert.doesNotMatch(strip, /payload\.cpu_budget/, 'the summary strip must not read the CPU budget block');
+  assert.doesNotMatch(strip, /budget_percent/);
+  // ...and the strip's own CPU sum is still rendered, so this is not a test that passes by deleting
+  // the fact it is about.
+  assert.match(cpuFact, /CPU 2% across all rows/, 'statsd measured 2%; the web process published none');
 });
 
-console.log(`system health panel suite: ${passed} passed, ${failed} failed`);
-if (failed) process.exitCode = 1;
+// ---------------------------------------------------------------------------------------------
+// THE SNAPSHOT SPLIT
+//
+// `/api/system-status` is served from a retained background snapshot, and the diagnostics a reader
+// opens deliberately moved to `/api/system-status/advanced` on their own cadence. Two contracts the
+// panel has to hold, and each one is a defect a green suite would otherwise hide:
+//   * the Advanced body is fetched ONLY while its disclosure is open -- fetching it on every poll
+//     puts the transcript scans and top-N folds back on the 5s path the split removed, and nothing
+//     about a rendered card would show it;
+//   * both routes can answer `ok:false` with a typed `snapshot` state and NO body. The aged body is
+//     withheld, not relabelled, so there is nothing to fall back on: the panel says which state it
+//     is in and re-asks in half a second instead of leaving the reader a blank poll interval.
+// ---------------------------------------------------------------------------------------------
+
+// The panel's own poll cadences and request state, sliced rather than re-declared: a test that
+// wrote its own 5000/500/10000 would keep passing after the product's numbers changed.
+const SNAPSHOT_CADENCE_SOURCE = slice(source, 'const jsDebugSystemPollMs =', '\nconst jsDebugLogsPollMs');
+const SNAPSHOT_STATE_SOURCE = slice(source, 'const jsDebugSystemState = {', '\nconst jsDebugLogLevels');
+const SNAPSHOT_REFUSAL_SOURCE = slice(source, 'const DEBUG_SYSTEM_SNAPSHOT_STATE_TEXT', '\nfunction debugSystemInnerHtml(');
+const SNAPSHOT_POLL_SOURCE = slice(source, 'async function pollDebugSystemAdvanced(', '\nfunction refreshDebugLogsViews(');
+// The whole render path from the region dispatcher down, so a refusal test that expects NO regions
+// is running against a build that could actually have rendered them.
+const ADVANCED_RENDER_SOURCE = [
+  SNAPSHOT_CADENCE_SOURCE,
+  slice(source, 'function debugSystemRolesHtml(', '\nfunction debugSystemSamplerFamilyEntries('),
+  slice(source, 'function debugSystemAdvancedHtml(', '\n// The four regions of the Daemons view'),
+  slice(source, 'function debugSystemRegionHtml(', '\n// The last HTML written into each region'),
+].join('\n');
+
+// One harness for the poll owner. Every request the panel makes lands in `requests`, and every
+// re-arm of the ONE `debug-system` timer lands in `intervals`, so a test names the exact URL that
+// should not have been asked for and the exact delay the next poll was scheduled at.
+function pollHarness({advancedOpen = false, responses = {}} = {}) {
+  const sandbox = {
+    Array, Boolean, Date, Intl, JSON, Map, Math, Number, Object, Set, String, console,
+    t: translate,
+    i18nActiveLocale: 'en',
+    result: null,
+    requests: [],
+    intervals: [],
+    cleared: [],
+    renders: 0,
+    jsDebugSubTab: 'system',
+    jsDebugStatsPanelVisible: () => true,
+    userMessageText: error => String(error?.message || error),
+    refreshDebugSystemViews: () => { sandbox.renders += 1; },
+    resetRuntimeInterval: (name, callback, delay) => { sandbox.intervals.push({name, delay}); },
+    clearRuntimeInterval: name => { sandbox.cleared.push(name); },
+    apiFetchJsonQuiet: async url => {
+      sandbox.requests.push(url);
+      const answer = responses[url];
+      if (answer === undefined) throw new Error(`no fixture response for ${url}`);
+      if (answer instanceof Error) throw answer;
+      return answer;
+    },
+  };
+  const context = vm.createContext(sandbox);
+  vm.runInContext(`${SNAPSHOT_CADENCE_SOURCE}\n${SNAPSHOT_STATE_SOURCE}\n${SNAPSHOT_REFUSAL_SOURCE}\n${SNAPSHOT_POLL_SOURCE}`, context);
+  vm.runInContext(`jsDebugSystemRosterState.advancedOpen = ${advancedOpen === true};`, context);
+  return context;
+}
+
+function pollOnce(context) {
+  return vm.runInContext('pollDebugSystemStatus({force: true});', context);
+}
+
+const CORE_BODY = payloadFor(localServices());
+const ADVANCED_BODY = {
+  ok: true,
+  generated_at: 1902,
+  owner: {debug: {generation_count: 41}, control: {}},
+  refresh: {
+    local_refreshing: {},
+    coalescing: {recent_pending_count: 0},
+    counters: {coalesced_refresh_requests: 7},
+    recurring_work: [],
+    roles: {},
+  },
+  top_endpoints: [{surface: '/api/from-the-advanced-route', count: 12, compute_ms_max: 4, payload_bytes_total: 2048}],
+  top_background_work: [{role: 'indexd', surface: 'index-scan', count: 3, compute_ms_max: 900, payload_bytes_total: 4096}],
+  top_event_types: [],
+  login_throttle: {},
+  largest_active_transcripts: [],
+  transcripts_cache: {},
+};
+// The exact shape `SnapshotRead.refusal_payload` publishes at HTTP 200 (see
+// yolomux_lib/system_status_snapshot.py). `snapshot` describes the state; there is no body.
+function snapshotRefusalBody(overrides = {}) {
+  return {
+    ok: false,
+    schema: 'system-status-snapshot',
+    snapshot: {
+      state: 'stale',
+      reason_code: 'system_status_snapshot_stale',
+      reason: 'The newest system-status snapshot is 14.0s old, past the 12.0s freshness deadline.',
+      age_seconds: 14.0,
+      last_generated_at: 1888,
+      last_sequence: 3,
+      cadence_seconds: 5.0,
+      freshness_deadline_seconds: 12.0,
+      ...overrides,
+    },
+  };
+}
+
+function renderAdvanced({payload = CORE_BODY, advanced = {}} = {}) {
+  const context = renderContext({
+    jsDebugSystemRosterState: {expanded: new Set(), advancedOpen: true},
+    jsDebugSystemAdvancedState: {payload: null, error: '', inFlight: false, updatedAt: 0},
+  });
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}\n${ADVANCED_RENDER_SOURCE}`, context);
+  context.fixture = payload;
+  context.advanced = advanced;
+  vm.runInContext('result = debugSystemAdvancedHtml(fixture, advanced);', context);
+  return String(context.result);
+}
+
+async function testAsync(name, body) {
+  try {
+    await body();
+    passed += 1;
+  } catch (error) {
+    failed += 1;
+    console.error(`FAIL: ${name}`);
+    console.error(error.stack || error);
+  }
+}
+
+async function runSnapshotSplitSuite() {
+  await testAsync('a poll with the Advanced disclosure CLOSED asks for the core body and nothing else', async () => {
+    // The load-bearing negative. Nothing rendered would reveal a background fetch of the Advanced
+    // body, so the request list is the only place this can be pinned: an unconditional advanced
+    // read here would move the transcript scans and top-N folds back onto every 5s poll.
+    const context = pollHarness({advancedOpen: false, responses: {'/api/system-status': CORE_BODY}});
+    await pollOnce(context);
+    assert.deepEqual([...context.requests], ['/api/system-status'], 'a closed Advanced disclosure must not fetch /api/system-status/advanced');
+  });
+
+  await testAsync('opening the Advanced disclosure is what fetches its route, and the producer cadence gates the re-read', async () => {
+    const context = pollHarness({
+      advancedOpen: true,
+      responses: {'/api/system-status': CORE_BODY, '/api/system-status/advanced': ADVANCED_BODY},
+    });
+    await pollOnce(context);
+    assert.deepEqual([...context.requests], ['/api/system-status', '/api/system-status/advanced']);
+    // A second poll inside the producer's own cadence would re-read the same bytes.
+    await pollOnce(context);
+    assert.deepEqual([...context.requests], ['/api/system-status', '/api/system-status/advanced', '/api/system-status'],
+      'the advanced body is re-read on the producer cadence, not on every core poll');
+    // Past that cadence the panel asks again, so this is not a test that passes by never refetching.
+    vm.runInContext('jsDebugSystemAdvancedState.updatedAt -= jsDebugSystemAdvancedPollMs + 1;', context);
+    await pollOnce(context);
+    assert.deepEqual([...context.requests].slice(-2), ['/api/system-status', '/api/system-status/advanced']);
+    // One owner: the core poll re-arms the ONE `debug-system` timer, and no other interval exists.
+    assert.deepEqual([...new Set(context.intervals.map(entry => entry.name))], ['debug-system']);
+  });
+
+  await testAsync('a typed refusal re-polls in half a second instead of leaving the panel blank for a whole interval', async () => {
+    const context = pollHarness({advancedOpen: false, responses: {'/api/system-status': snapshotRefusalBody()}});
+    await pollOnce(context);
+    assert.deepEqual(context.intervals.at(-1), {name: 'debug-system', delay: 500},
+      'a withheld snapshot is re-asked at the refusal cadence, not at the 5s poll cadence');
+    // ...and a body that arrived goes straight back to the normal cadence.
+    context.responses = null;
+    vm.runInContext('jsDebugSystemState.payload = null;', context);
+    const current = pollHarness({advancedOpen: false, responses: {'/api/system-status': CORE_BODY}});
+    await pollOnce(current);
+    assert.deepEqual(current.intervals.at(-1), {name: 'debug-system', delay: 5000});
+  });
+
+  await testAsync('the Advanced fetch survives a core refusal and reports its own refusal without caching it', async () => {
+    const context = pollHarness({
+      advancedOpen: true,
+      responses: {'/api/system-status': CORE_BODY, '/api/system-status/advanced': snapshotRefusalBody({state: 'unavailable', reason_code: 'system_status_snapshot_unavailable', age_seconds: null})},
+    });
+    await pollOnce(context);
+    await pollOnce(context);
+    assert.deepEqual([...context.requests], [
+      '/api/system-status', '/api/system-status/advanced', '/api/system-status', '/api/system-status/advanced',
+    ], 'a refusal carries no body, so it must not start a cadence window that suppresses the next read');
+    assert.equal(vm.runInContext('debugSystemPollDelayMs();', context), 500);
+  });
+
+  console.log(`system health panel suite: ${passed} passed, ${failed} failed`);
+  if (failed) process.exitCode = 1;
+}
+
+test('the Advanced cards read the advanced body, never the core keys that moved off it', () => {
+  // The core body no longer carries `top_endpoints`/`top_background_work`/`refresh`/`owner.debug` at
+  // all. This fixture puts a decoy row in the core body: reading it would render the wrong surface,
+  // and reading nothing would render an empty table where six cards used to be.
+  const html = renderAdvanced({
+    payload: payloadFor(localServices(), {
+      owner: {status: 'owner', owner: true, current_owner: {port: 7999, pid: 5150}, search_index: {mode: 'live'}, debug: {generation_count: 999}},
+      top_endpoints: [{surface: '/api/decoy-from-the-core-body', count: 1, compute_ms_max: 1, payload_bytes_total: 1}],
+      refresh: {counters: {coalesced_refresh_requests: 999}},
+    }),
+    advanced: {payload: ADVANCED_BODY, refusal: null, error: '', inFlight: false},
+  });
+  assert.match(html, /\/api\/from-the-advanced-route/, 'Top API endpoints must be rendered from the advanced body');
+  assert.doesNotMatch(html, /decoy-from-the-core-body/, 'the retired core keys are not a fallback source');
+  assert.match(html, /index-scan/, 'Top background work comes from the advanced body too');
+  assert.match(html, /Refresh coordination/);
+  assert.match(html, /<dt>Generations<\/dt><dd[^>]*>41</, 'owner.debug now arrives on the advanced route');
+  assert.doesNotMatch(html, />999</, 'no advanced fact may be read out of the core payload');
+});
+
+test('an Advanced body that has not arrived is reported, not drawn as empty cards', () => {
+  const loading = renderAdvanced({advanced: {payload: null, refusal: null, error: '', inFlight: true}});
+  assert.match(loading, /data-js-debug-system-advanced-state="loading"/);
+  assert.doesNotMatch(loading, /Top API endpoints/, 'an empty card is an absence dressed up as a measurement');
+  assert.match(loading, /Backend-health snapshot/, 'the cards the CORE body owns still render');
+  const refused = renderAdvanced({
+    advanced: {payload: null, error: '', inFlight: false, refusal: {state: 'stale', reasonCode: 'system_status_snapshot_stale', reason: 'The newest system-status snapshot is 14.0s old, past the 12.0s freshness deadline.', ageSeconds: 14.0}},
+  });
+  assert.match(refused, /data-js-debug-system-advanced-state="stale"/);
+  assert.match(refused, /data-js-debug-system-advanced-reason-code="system_status_snapshot_stale"/);
+  assert.match(refused, /past the 12.0s freshness deadline/);
+});
+
+test('a typed core refusal replaces the roster instead of rendering a roster nobody measured', () => {
+  const context = renderContext({
+    jsDebugSystemState: {payload: snapshotRefusalBody(), error: '', inFlight: false, updatedAt: 0},
+    jsDebugSystemAdvancedState: {payload: null, error: '', inFlight: false, updatedAt: 0},
+    jsDebugSystemRosterState: {expanded: new Set(), advancedOpen: false},
+  });
+  vm.runInContext(`${SHARED_SOURCE}\n${RENDER_SOURCE}\n${ADVANCED_RENDER_SOURCE}`, context);
+  vm.runInContext('result = debugSystemInnerHtml();', context);
+  const html = String(context.result);
+  assert.match(html, /data-js-debug-system-snapshot-state="stale"/, 'the panel renders the state it was told');
+  assert.match(html, /data-js-debug-system-snapshot-reason-code="system_status_snapshot_stale"/);
+  assert.match(html, /past the 12.0s freshness deadline/, 'the backend reason is the reason the reader sees');
+  assert.doesNotMatch(html, /data-js-debug-system-region/, 'there is no payload behind a refusal, so there is no roster to draw');
+  // The owner-unattached refusal is the same shape with its own reason code -- one contract.
+  context.jsDebugSystemState.payload = snapshotRefusalBody({state: 'unavailable', reason_code: 'system_status_snapshot_owner_unattached', reason: 'This process has no system-status snapshot owner.', age_seconds: null});
+  vm.runInContext('result = debugSystemInnerHtml();', context);
+  assert.match(String(context.result), /data-js-debug-system-snapshot-reason-code="system_status_snapshot_owner_unattached"/);
+  assert.doesNotMatch(String(context.result), /Newest snapshot age/, 'an age nobody published is not printed');
+});
+
+// The suite summary and the exit code are printed by the async runner, AFTER the awaited tests
+// settle. Printing them here would count an async failure as a pass -- the shard launcher treats a
+// summary line as the whole result.
+void runSnapshotSplitSuite();

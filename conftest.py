@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 
@@ -33,7 +32,9 @@ HOST_EXPENSIVE_TOOL_LOCK = Path.home() / ".cache" / "yolomux" / "expensive-tools
 # Import only the stdlib-only image helper here. tools.check imports product configuration
 # and would bind it from the host environment before isolation is installed.
 from tools import docker_image
-from tools.tool_guard import container_command_with_host_tool_guard
+from tools.tool_guard import hold_host_tool_flock
+from tools.tool_guard import parent_owns_tool_lock
+from tools.tool_guard import run_reaped_container_command
 
 
 def host_local_cache_dir() -> Path:
@@ -141,20 +142,32 @@ def pytest_cmdline_main(config: pytest.Config) -> int | None:
         "pytest",
         *arguments,
     ]
-    command = container_command_with_host_tool_guard(
-        command,
-        lock_path=HOST_EXPENSIVE_TOOL_LOCK,
-        collect_only=config.option.collectonly,
-        environ=dict(os.environ),
-        parent_pid=os.getppid(),
+    child_env = dict(os.environ)
+    # A collect-only run does no expensive work, and a launching check that already owns the flock
+    # must not be serialized behind itself; both run directly. Every other direct run must serialize
+    # on the tool flock BEFORE it takes the worktree writer lease, so a run queued behind another
+    # agent's docker launch waits holding no lease at all (F8). The container is launched in its own
+    # session so an interrupt reaps the docker wrapper and its container instead of leaving them
+    # detached and holding the lock.
+    #
+    # The writer lease MUST write its token into the exact env forwarded to the container:
+    # acquire_worktree_writer(environ=child_env) sets YOLOMUX_WORKTREE_WRITER_TOKEN there, and
+    # run-tests.sh forwards that name so the in-container pytest borrows this lease instead of
+    # declaring a second, conflicting writer and refusing itself.
+    serialize = not (
+        config.option.collectonly
+        or parent_owns_tool_lock(HOST_EXPENSIVE_TOOL_LOCK, environ=child_env, parent_pid=os.getppid())
     )
     try:
-        with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="pytest"):
-            completed = subprocess.run(command, cwd=REPO_ROOT, env=dict(os.environ), check=False)
+        if serialize:
+            with hold_host_tool_flock(HOST_EXPENSIVE_TOOL_LOCK, environ=child_env):
+                with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="pytest", environ=child_env):
+                    return run_reaped_container_command(command, cwd=REPO_ROOT, env=child_env)
+        with worktree_writer.acquire_worktree_writer(REPO_ROOT, purpose="pytest", environ=child_env):
+            return run_reaped_container_command(command, cwd=REPO_ROOT, env=child_env)
     except worktree_writer.WorktreeWriterBusy as error:
         print(f"PYTEST REFUSED: {error}", file=sys.stderr, flush=True)
         return 3
-    return completed.returncode
 
 
 _SESSION_WRITER_LEASE: worktree_writer.WorktreeWriterLease | None = None

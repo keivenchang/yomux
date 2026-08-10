@@ -15,6 +15,8 @@ from watchfiles import Change
 
 from yolomux_lib import watchd
 from yolomux_lib.filesystem import search as search_module
+from yolomux_lib import filesystem
+from yolomux_lib.filesystem.paths import FilesystemAccessPolicy, FS_ACCESS_POLICY_VERSION
 from yolomux_lib.watchd import PersistentWatchService
 from yolomux_lib.local_services import rpc
 from yolomux_lib.common import TmuxPaneInfo
@@ -2417,3 +2419,243 @@ def test_watchd_descriptor_payloads_builds_skip_dirs_from_the_shared_exclusion_o
     for descriptor in payloads.values():
         if "skip_dirs" in descriptor:
             assert sorted(descriptor["skip_dirs"]) == expected, descriptor["skip_dirs"]
+
+
+def _apply_shared_daemon_revision_under_policy(tmp_path, monkeypatch, *, changed_under):
+    """Drive a NARROW server's revision consumer against the shared-daemon union.
+
+    watchd is a per-user daemon keyed on YOLOMUX_ROOT, so its `wait_revision` returns the
+    caller-independent UNION of every co-tenant server's leased roots.  This helper co-tenants a
+    broad and a narrow root in ONE daemon, publishes a change under ``changed_under`` (``"broad"``,
+    ``"narrow"``, or ``"broad_only_no_narrow"``), then applies the resulting revision as the narrow
+    server -- whose own filesystem authorization boundary is ONLY the narrow root.
+    """
+
+    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+
+    narrow = tmp_path / "narrow_root"
+    broad = tmp_path / "broad_root"
+    narrow.mkdir()
+    broad.mkdir()
+    secret = broad / "SECRET.txt"
+    secret.write_text("BROAD-ONLY SECRET\n", encoding="utf-8")
+    narrow_file = narrow / "own.txt"
+    narrow_file.write_text("narrow change\n", encoding="utf-8")
+    narrow_s = str(narrow.resolve())
+    broad_s = str(broad.resolve())
+
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    lease_narrow = _lease(service, 1001)
+    service.handle(_request("upsert", lease_id=lease_narrow, descriptor_id="browser", descriptor=_descriptor(narrow.resolve())))
+    if changed_under != "broad_only_no_narrow":
+        # Both tenants share the daemon, so the union carries the broad root even for the narrow waiter.
+        lease_broad = _lease(service, 1002)
+        service.handle(_request("upsert", lease_id=lease_broad, descriptor_id="browser", descriptor=_descriptor(broad.resolve())))
+    else:
+        # The narrow tenant has released; the union now carries ONLY another tenant's broad root.
+        service.handle(_request("release", lease_id=lease_narrow))
+        lease_broad = _lease(service, 1002)
+        service.handle(_request("upsert", lease_id=lease_broad, descriptor_id="browser", descriptor=_descriptor(broad.resolve())))
+    service.native_healthy = True
+    service.active_watch_generation = service.watch_generation
+
+    changed_path = str((narrow_file if changed_under == "narrow" else secret).resolve())
+    service.publish_revision(kind="delta", changed_paths=[changed_path])
+    response, _body = service.handle(_request("wait_revision", epoch=service.epoch, after_revision=0, timeout_seconds=0.0))
+    response = json.loads(json.dumps(response))
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord(
+        watchd_epoch=service.epoch,
+        filesystem_roots=(narrow_s,),
+        watchd_revision=0,
+    )
+    webapp.client_watch_service.event_watcher_record = record
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event, payload, **kwargs: published.append((event, payload)))
+    monkeypatch.setattr(webapp, "mark_indexed_repo_discovery_dirty", lambda _paths: None)
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda **_kwargs: [])
+
+    # The narrow server process is authorized ONLY for its narrow root; bind that policy for the
+    # duration of the consume, exactly as the real narrow server's environment would.
+    policy = FilesystemAccessPolicy(version=FS_ACCESS_POLICY_VERSION, roots=(narrow_s,))
+    with filesystem.enforce_access_policy(policy):
+        events = webapp.apply_watchd_revision(record, response["revision"], reset=response["reset"])
+
+    return {
+        "webapp": webapp,
+        "record": record,
+        "events": events,
+        "published": published,
+        "narrow_s": narrow_s,
+        "broad_s": broad_s,
+    }
+
+
+def test_apply_watchd_revision_never_discloses_a_co_tenant_root_to_a_narrow_browser(tmp_path, monkeypatch):
+    """LEAK regression: a narrow server's browser must not receive a broad co-tenant's root/path.
+
+    The shared daemon returns the union ``roots=[broad, narrow]`` with ``changed_paths=[broad/SECRET]``
+    to the narrow waiter.  Before scoping, ``apply_watchd_revision`` fanned an ``fs_changed`` SSE
+    carrying the broad root and the broad change path to the narrow browser, and wrote the broad
+    path into ``filesystem_history`` -- a policy disclosure even though S0 later refuses the content
+    fetch with 403.
+    """
+    result = _apply_shared_daemon_revision_under_policy(tmp_path, monkeypatch, changed_under="broad")
+    broad_s = result["broad_s"]
+    fs_events = [payload for event, payload in result["published"] if event == "fs_changed"]
+    disclosed_roots = [root for payload in fs_events for root in payload.get("roots", [])]
+    assert broad_s not in disclosed_roots, f"narrow browser received broad co-tenant root: {disclosed_roots}"
+    history = result["webapp"].client_watch_service.filesystem_history
+    disclosed_paths = [path for entry in history for path in entry.get("changed_paths", ())]
+    assert all("broad_root" not in path for path in disclosed_paths), f"filesystem_history disclosed broad path: {disclosed_paths}"
+    assert result["record"].filesystem_roots == (result["narrow_s"],), result["record"].filesystem_roots
+
+
+def test_apply_watchd_revision_still_delivers_a_change_under_the_servers_own_root(tmp_path, monkeypatch):
+    """Positive control: scoping must NOT silence a change under the server's OWN authorized root."""
+    result = _apply_shared_daemon_revision_under_policy(tmp_path, monkeypatch, changed_under="narrow")
+    fs_events = [payload for event, payload in result["published"] if event == "fs_changed"]
+    assert fs_events, f"own-root change produced no fs_changed: {[e for e, _ in result['published']]}"
+    disclosed_roots = [root for payload in fs_events for root in payload.get("roots", [])]
+    assert result["narrow_s"] in disclosed_roots, disclosed_roots
+    assert result["broad_s"] not in disclosed_roots, disclosed_roots
+
+
+def test_apply_watchd_revision_empty_intersection_publishes_nothing_and_does_not_wedge(tmp_path, monkeypatch):
+    """Empty-intersection control: a revision touching only other tenants' roots is silent, not an error.
+
+    No ``fs_changed`` fans out, no ``filesystem_history`` entry is written for this server, and the
+    revision loop still advances the record without raising.
+    """
+    result = _apply_shared_daemon_revision_under_policy(tmp_path, monkeypatch, changed_under="broad_only_no_narrow")
+    assert [event for event, _ in result["published"] if event == "fs_changed"] == []
+    assert result["webapp"].client_watch_service.filesystem_history == []
+    # The record still advanced past the applied revision, so the loop is not wedged.
+    assert result["record"].watchd_revision >= 1
+
+
+def test_apply_watchd_revision_broad_parent_coarse_reset_delivers_only_the_narrow_child_root(tmp_path, monkeypatch):
+    """The normal broad-daemon shape: the daemon root is an ANCESTOR of the narrow server's root.
+
+    A co-tenant watches ``/parent`` and a coarse reset reports ``changed_paths=[/parent]``; the
+    narrow server authorizes only ``/parent/project``.  One-directional descendant filtering drops
+    ``/parent`` (it is not beneath ``/parent/project``) and silently loses a real change to the
+    server's OWN tree.  Two-direction intersection must instead SUBSTITUTE the authorized child so
+    the change is still delivered -- carrying ONLY the narrow child root, never the broad ancestor.
+    """
+
+    parent = tmp_path / "workspace"
+    child = parent / "project"
+    child.mkdir(parents=True)
+    parent_s = str(parent.resolve())
+    child_s = str(child.resolve())
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord(watchd_epoch="e1", filesystem_roots=(child_s,), watchd_revision=0)
+    webapp.client_watch_service.event_watcher_record = record
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event, payload, **kwargs: published.append((event, payload)))
+    monkeypatch.setattr(webapp, "mark_indexed_repo_discovery_dirty", lambda _paths: None)
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda **_kwargs: [])
+
+    # Daemon UNION carries only the broad ancestor; a coarse reset reports the ancestor path itself.
+    revision = {
+        "epoch": "e1",
+        "revision": 1,
+        "healthy": True,
+        "coarse": True,
+        "roots": [parent_s],
+        "root_generations": {parent_s: 3},
+        "repo_generations": {parent_s: 3, child_s: 5},
+        "changed_paths": [parent_s],
+        "files_changed": [],
+        "token": "e1:1",
+    }
+    policy = FilesystemAccessPolicy(version=FS_ACCESS_POLICY_VERSION, roots=(child_s,))
+    with filesystem.enforce_access_policy(policy):
+        events = webapp.apply_watchd_revision(record, revision, reset=True)
+
+    assert "fs_changed" in events, f"broad-parent coarse reset was silently lost: {events}"
+    fs_events = [payload for event, payload in published if event == "fs_changed"]
+    assert fs_events, [event for event, _ in published]
+    disclosed_roots = fs_events[0]["roots"]
+    assert child_s in disclosed_roots, disclosed_roots
+    assert parent_s not in disclosed_roots, disclosed_roots
+    # The record and history mirror only the narrow child, never the broad ancestor.
+    assert record.filesystem_roots == (child_s,), record.filesystem_roots
+    history_paths = list(webapp.client_watch_service.filesystem_history[-1]["changed_paths"])
+    assert parent_s not in history_paths, history_paths
+    assert all(path == child_s or path.startswith(child_s + "/") for path in history_paths), history_paths
+    # The daemon's repo generations are re-keyed onto the authorized child; the broad ancestor key
+    # is never stored.  Both the ancestor (3) and the child (5) project onto the child and compose
+    # losslessly, so the stored counter is their sum, not a lossy max.
+    stored_repos = webapp.client_watch_service.watchd_repo_generations
+    assert parent_s not in stored_repos, stored_repos
+    assert stored_repos.get(child_s) == 8, stored_repos
+
+
+def test_apply_watchd_revision_child_repo_generation_increment_is_not_masked_by_a_co_tenant_parent(tmp_path, monkeypatch):
+    """A child .git bump must invalidate even when an ancestor co-tenant counter dominates.
+
+    The daemon reports a repo generation for the broad parent AND for the narrow child; both project
+    onto the authorized child.  Composing them with ``max`` lets the higher parent counter mask the
+    child's own increment across revisions, so a real repository change to the server's OWN tree
+    never refreshes.  The composition must be lossless: the child's 5 -> 6 increment between two
+    revisions must change the scoped repository signal and invalidate the child, while the broad
+    parent key and the raw ``.git`` path are never stored or published.
+    """
+
+    parent = tmp_path / "workspace"
+    child = parent / "project"
+    child.mkdir(parents=True)
+    parent_s = str(parent.resolve())
+    child_s = str(child.resolve())
+    raw_git = str((parent / ".git" / "index").resolve())
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    record = ClientEventWatcherRecord(watchd_epoch="e1", filesystem_roots=(child_s,), watchd_revision=0)
+    webapp.client_watch_service.event_watcher_record = record
+    # The child repo must be a known dirty-generation key for the invalidation to be observable.
+    webapp.session_files_service.repo_dirty_generations[child_s] = 0
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(webapp, "publish_client_event", lambda event, payload, **kwargs: published.append((event, payload)))
+    monkeypatch.setattr(webapp, "mark_indexed_repo_discovery_dirty", lambda _paths: None)
+    monkeypatch.setattr(webapp, "publish_session_files_ready_events", lambda **_kwargs: [])
+
+    def _revision(number, child_generation):
+        # The parent counter is HIGHER and STAYS FIXED; only the child increments.  Under `max` the
+        # parent's 100 dominates and the child increment vanishes; the raw `.git` path rides along in
+        # changed_paths and must be filtered out (it is outside the authorized child).
+        return {
+            "epoch": "e1",
+            "revision": number,
+            "healthy": True,
+            "roots": [parent_s, child_s],
+            "repo_generations": {parent_s: 100, child_s: child_generation},
+            "changed_paths": [raw_git],
+            "files_changed": [],
+            "token": f"e1:{number}",
+        }
+
+    policy = FilesystemAccessPolicy(version=FS_ACCESS_POLICY_VERSION, roots=(child_s,))
+    with filesystem.enforce_access_policy(policy):
+        webapp.apply_watchd_revision(record, _revision(1, 5), reset=True)
+        first_stored = dict(webapp.client_watch_service.watchd_repo_generations)
+        first_dirty = webapp.session_files_service.repo_dirty_generations[child_s]
+        webapp.apply_watchd_revision(record, _revision(2, 6), reset=False)
+
+    stored = webapp.client_watch_service.watchd_repo_generations
+    # The child's 5 -> 6 increment MUST move the scoped repository signal (revision 1 vs revision 2).
+    assert stored.get(child_s) != first_stored.get(child_s), (first_stored, stored)
+    # ... and must invalidate the child a SECOND time, not stay masked at the revision-1 count.
+    assert webapp.session_files_service.repo_dirty_generations[child_s] > first_dirty, (
+        first_dirty,
+        webapp.session_files_service.repo_dirty_generations[child_s],
+    )
+    # The broad parent key is never stored, and the raw .git path is never mirrored or published.
+    assert parent_s not in stored, stored
+    for entry in webapp.client_watch_service.filesystem_history:
+        assert raw_git not in entry.get("changed_paths", ()), entry
+        assert all(".git" not in path for path in entry.get("changed_paths", ())), entry

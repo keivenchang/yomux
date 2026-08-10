@@ -2589,7 +2589,7 @@
   "debug.system.roster.state.exited": "ออกแล้ว",
   "debug.system.roster.state.unsupported": "ไม่รองรับ",
   "debug.system.roster.summary.counts": "พร้อม {ready} · ว่าง {idle} · ปัญหา {issues}",
-  "debug.system.roster.summary.cpu": "CPU {current} % จาก {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} ทุกแถว",
   "debug.system.roster.summary.memory": "หน่วยความจำ {value}",
   "debug.system.roster.summary.owner": "เจ้าของ {value}",
   "debug.system.roster.summary.updated": "อัปเดตเมื่อ {time}",

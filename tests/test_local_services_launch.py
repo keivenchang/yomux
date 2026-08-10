@@ -25,6 +25,7 @@ from yolomux_lib.stats_current import service as stats_current_service
 from yolomux_lib.stats_current import storage as stats_current_storage
 from tests.gate_harness import FixtureLocalServiceProcess
 from tests.gate_harness import stop_fixture_local_service_process
+from tests.serving_process import pid_is_serving
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,6 +79,38 @@ def test_process_record_diagnostic_rejects_a_real_unreaped_zombie():
         identity = current_host_identity()
         record = identity.process_record_fields(pid=child, start_identity=registry_mod.process_start_identity(child))
         assert registry_mod.process_record_diagnostic(record, table=registry_mod.bounded_process_table()).current is False
+    finally:
+        os.waitpid(child, 0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="zombie lifecycle is POSIX-only")
+def test_serving_predicate_rejects_a_real_unreaped_zombie():
+    """The teardown liveness oracle must read an unreaped zombie as NOT serving.
+
+    This is the class that reddens the post-TERM teardown test under load: a child
+    that has exited but not been reaped keeps its ``/proc/<pid>/stat`` start ticks,
+    so the retired ``process_start_identity`` read returns a truthy identity and a
+    dead child reads as alive. Forge that state directly and prove the old read
+    mis-classifies it while the shared serving-member predicate does not, then prove
+    a genuinely live process still reads as serving so a real survivor is not
+    ignored.
+    """
+
+    child = os.fork()
+    if child == 0:  # pragma: no cover - child never returns
+        os._exit(0)
+    try:
+        deadline = time.monotonic() + 2.0
+        while registry_mod.process_state(child) != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert registry_mod.process_state(child) == "Z", registry_mod.process_state(child)
+
+        # Red for the retired oracle: the zombie retains its start ticks.
+        assert registry_mod.process_start_identity(child)
+        # Green for the shared predicate: a zombie is not serving.
+        assert pid_is_serving(child) is False
+        # Fails closed: this live test process is still serving.
+        assert pid_is_serving(os.getpid()) is True
     finally:
         os.waitpid(child, 0)
 
@@ -581,7 +614,13 @@ def test_fixture_teardown_refreshes_generation_authority_after_term(tmp_path):
     )
 
     child_pid = int(child_pid_file.read_text(encoding="utf-8"))
-    assert not registry_mod.process_start_identity(child_pid)
+    # A raw ``process_start_identity`` read keeps returning the child's start ticks
+    # while it lingers as an unreaped zombie, so under load teardown finishes before
+    # the reaper runs and a dead child reads as alive. Route the liveness check
+    # through the shared serving-member predicate, which excludes zombies exactly as
+    # production's ``bounded_process_table`` does. A genuinely live child still reads
+    # as serving, so a real survivor is not ignored.
+    assert not pid_is_serving(child_pid)
 
 
 def test_transport_diagnostics_returns_total_and_per_exception_counters(monkeypatch):

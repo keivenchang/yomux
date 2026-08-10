@@ -386,6 +386,15 @@
       return failureOwner.report(message);
     }
 
+    // A payload this bundle cannot read is an outcome with a reason, not a reason to draw nothing.
+    // `exactFields` rejects any snapshot/delta whose top-level shape differs, which is exactly what
+    // a server upgraded under an already-open tab sends; both catch sites below used to discard that
+    // rejection, so YO!stats went blank and said nothing until the page was reloaded.
+    function reportContractViolation(error) {
+      if (error?.statsContractViolation !== true) return false;
+      return reportFailure(`YO!stats cannot read this server's data (${error.message}); reload the page to pick up the current YOLOmux bundle`);
+    }
+
     function reportCadenceStall(now) {
       if (lastGenerationAdvanceAtMs === null) lastGenerationAdvanceAtMs = now;
       const cadenceSeconds = liveCadenceSeconds();
@@ -510,7 +519,8 @@
         if (snapshot && requestMatches(request, serial) && running && visible && !zoomedStatic) {
           acceptSnapshot(snapshot);
         }
-      } catch (_error) {
+      } catch (error) {
+        reportContractViolation(error);
         scheduleRepair();
       } finally {
         tickBusy = false;
@@ -560,6 +570,7 @@
         if (error?.pending === true && Number.isSafeInteger(error.retryAfterMs)) {
           pendingRetryMs = error.retryAfterMs;
         }
+        reportContractViolation(error);
       } finally {
         repairBusy = false;
         if (succeeded) {

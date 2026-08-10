@@ -197,9 +197,9 @@ def test_gate_browser_boundary_waits_for_preexisting_async_api_work():
     class PendingApiDriver:
         def __init__(self):
             self.states = [
-                {"available": True, "diagnosticMode": "retained-js", "pending": ["op-fixture"], "activityRefreshing": False, "watchRootsPending": False},
-                {"available": True, "diagnosticMode": "retained-js", "pending": [], "activityRefreshing": True, "watchRootsPending": False},
-                {"available": True, "diagnosticMode": "retained-js", "pending": [], "activityRefreshing": False, "watchRootsPending": False},
+                {"available": True, "diagnosticMode": "retained-js", "pending": ["op-fixture"], "watchDiffPendingOperationIds": [], "activityRefreshing": False, "watchRootsPending": False},
+                {"available": True, "diagnosticMode": "retained-js", "pending": [], "watchDiffPendingOperationIds": [], "activityRefreshing": True, "watchRootsPending": False},
+                {"available": True, "diagnosticMode": "retained-js", "pending": [], "watchDiffPendingOperationIds": [], "activityRefreshing": False, "watchRootsPending": False},
             ]
             self.receipt_barriers = [
                 browser_receipt_barrier_with_blocker(normal_browser_receipt_blocker()),
@@ -224,6 +224,7 @@ def test_gate_browser_boundary_waits_for_preexisting_async_api_work():
         "available": True,
         "diagnosticMode": "retained-js",
         "pending": [],
+        "watchDiffPendingOperationIds": [],
         "activityRefreshing": False,
         "watchRootsPending": False,
         "browserReceiptBarrier": clean_browser_receipt_barrier(accepted=1),
@@ -307,6 +308,7 @@ def test_gate_browser_boundary_timeout_names_the_owned_pending_work():
                 "available": True,
                 "diagnosticMode": "retained-js",
                 "pending": ["op-stuck"],
+                "watchDiffPendingOperationIds": [],
                 "batchQueued": 0,
                 "batchPending": 0,
                 "batchOperations": 0,

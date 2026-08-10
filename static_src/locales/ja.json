@@ -2589,7 +2589,7 @@
   "debug.system.roster.state.exited": "終了",
   "debug.system.roster.state.unsupported": "サポート対象外",
   "debug.system.roster.summary.counts": "準備完了 {ready} · アイドル {idle} · 問題 {issues}",
-  "debug.system.roster.summary.cpu": "CPU {current} % / {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current}（全行合計）",
   "debug.system.roster.summary.memory": "メモリ {value}",
   "debug.system.roster.summary.owner": "所有者 {value}",
   "debug.system.roster.summary.updated": "更新 {time}",

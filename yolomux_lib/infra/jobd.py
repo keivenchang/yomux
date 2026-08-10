@@ -84,7 +84,14 @@ from ..web import html_preview_document
 # work but never accept an already-stored product. A v18 daemon rejects `priority="point"` as an
 # invalid priority and would silently ignore `fresh_only`, serving a retained product for content
 # that may have changed, so the fence must retire it.
-JOBD_PROTOCOL_VERSION = 19
+# v20: filesystem descriptors carry the accepting server's access policy, and the worker authorizes
+# with that policy instead of its own environment. A v19 daemon ignores the new field and keeps
+# authorizing every port's filesystem work with its launcher's roots -- the cross-port confused
+# deputy this fence exists to retire -- so an upgraded web process must not reuse one.
+# v21: adds the bounded `mutation` scheduler lane so a point write/rename/mkdir no longer queues
+# behind unbounded recursive work on the shared `interactive` slot. A v20 daemon rejects
+# `priority="mutation"` as an invalid priority, so the fence must retire it.
+JOBD_PROTOCOL_VERSION = 21
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 
 # jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
@@ -117,11 +124,25 @@ JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # file were 29.9s, 11.3s, 51.3s and 16.0s during a batch/watch fanout, and 0.02s once the lane
 # drained.  Point capacity is deliberately bounded at two -- enough that one slow NFS stat cannot
 # strand every other editor open, small enough that point work cannot become unbounded CPU itself.
+#
+# `mutation` is the write-side sibling of `point`, added for the same reason and measured the same
+# way: a bounded single-target `write`/`rename`/`mkdir` used to share the single `interactive` slot
+# with recursive `count`, `search`, `diff` and Finder batches, so clicking "new folder" while
+# something walked a 457,364-file tree queued the one `mkdir` syscall for 6737 ms and 8167 ms
+# across two runs while the `point` lane answered in 0.07 ms.  It is a lane of its own rather than
+# more `point` capacity because `point` means a coalescable retained READ -- `app.py` gates the
+# stat-derived content key and `fresh_only` on `priority == "point"` -- and a mutation is a
+# non-coalescable side effect that would pay for that machinery without ever using it.  Capacity
+# matches `point` for the same reason `point` is two: one slow mutation must not strand the next.
+# Recursive `delete` is deliberately NOT here: `delete_path` walks and unlinks a whole subtree, so
+# its cost is unbounded in the input and it belongs on the bulk-shared `interactive` lane.
 JOBD_MAX_WORKERS = 2
 JOBD_INTERACTIVE_WORKERS = 1
 JOBD_POINT_WORKERS = 2
+JOBD_MUTATION_WORKERS = 2
 JOBD_LANE_PRIORITIES: dict[str, tuple[str, ...]] = {
     "point": ("point",),
+    "mutation": ("mutation",),
     "interactive": ("interactive",),
     "bulk": ("freshness", "maintenance"),
 }
@@ -132,6 +153,7 @@ JOBD_PRIORITY_LANES: dict[str, str] = {
 # general worker count, derived from the host CPU count when the broker is constructed.
 JOBD_LANE_WORKERS: dict[str, int] = {
     "point": JOBD_POINT_WORKERS,
+    "mutation": JOBD_MUTATION_WORKERS,
     "interactive": JOBD_INTERACTIVE_WORKERS,
 }
 JOBD_SESSION_FILES_REQUESTERS = frozenset({
@@ -314,10 +336,22 @@ def _filesystem_batch(payload: bytes) -> bytes:
 
 
 def _filesystem_operation_untyped(payload: bytes) -> bytes:
-    """Execute one typed filesystem snapshot descriptor outside the web process."""
+    """Execute one typed filesystem snapshot descriptor outside the web process.
+
+    This daemon is shared by every server on every port, so the descriptor's own access policy --
+    captured by the server that accepted the request -- is what authorizes the path.  A descriptor
+    without a parsable policy is refused; falling back to this process's environment would hand the
+    caller whichever server happened to launch the daemon first.
+    """
     value = json.loads(payload.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("filesystem operation payload must be an object")
+    policy = filesystem.access_policy_from_descriptor(value.get(filesystem.FS_ACCESS_POLICY_FIELD))
+    with filesystem.enforce_access_policy(policy):
+        return _filesystem_operation_authorized(value)
+
+
+def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes:
     operation = str(value.get("op") or "")
     path = str(value.get("path") or "")
     args = value.get("args", {})
@@ -955,8 +989,22 @@ class PersistentJobBroker:
                 record.completed_at = time.time()
                 self._bump_counter(record.task, "superseded")
 
-    def _queued_count(self) -> int:
-        return sum(1 for record in self.records.values() if record.status == "queued")
+    def _queued_count(self, *, lane: str | None = None) -> int:
+        """Count queued records, globally or within one lane.
+
+        The lane-scoped count is what admission backpressure uses: a global cap ahead of the
+        per-lane executors let a full bulk/freshness queue refuse an idle `point` read as
+        `queue full` while the point lane read capacity 2, active 0.  A per-lane cap keeps each
+        lane bounded (the overall backpressure intent) without one lane's queue starving another's
+        admission.  The global count remains the right question for idle retirement.
+        """
+        if lane is None:
+            return sum(1 for record in self.records.values() if record.status == "queued")
+        return sum(
+            1
+            for record in self.records.values()
+            if record.status == "queued" and self._lane_for_priority(record.priority) == lane
+        )
 
     @staticmethod
     def _validated_submission(request: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -1014,7 +1062,7 @@ class PersistentJobBroker:
         if existing is not None and existing.generation >= generation and existing.status in reusable_states:
             self._bump_counter(task, "coalesced")
             return {"ok": True, "coalesced": True, "job": self._record_payload(existing)}
-        if self._queued_count() >= JOBD_MAX_QUEUE:
+        if self._queued_count(lane=self._lane_for_priority(priority)) >= JOBD_MAX_QUEUE:
             return {"ok": False, "error": "queue full"}
         self.latest_generation[coalesce_key] = max(generation, self.latest_generation.get(coalesce_key, generation))
         self._supersede_stale_queued(coalesce_key, generation)

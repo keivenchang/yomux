@@ -281,6 +281,33 @@ def _wait_for_service_socket(socket_path, expected_mode=0o600):
     pytest.fail(f"local service socket did not become ready with mode {oct(expected_mode)}: {mode}")
 
 
+def _connect_to_service(service_socket_path, *, timeout=1.0, deadline_seconds=2.0):
+    """Connect to a starting local service, which publishes its socket file before it listens.
+
+    ``run_local_rpc_service`` creates the path with ``bind()`` -- already mode 0600 under its umask
+    -- and calls ``listen()`` afterwards, so the file's existence and mode are true for a service
+    that cannot accept yet. A connect issued in that window fails with ECONNREFUSED against a
+    service starting normally, which is what a loaded gate saw. The product never treats the file
+    as readiness either: the registry waits for a real ping and retries. This is the test-side
+    equivalent, and it retries the connection the caller actually wants rather than probing with an
+    extra one that would consume a handler slot and change what the capacity tests observe.
+    """
+
+    deadline = time.monotonic() + deadline_seconds
+    while True:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        try:
+            client.connect(str(service_socket_path))
+        except ConnectionRefusedError:
+            client.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+            continue
+        return client
+
+
 def _run_echo_service(socket_path, lock_path, stop_event, *, monkeypatch=None, peer_uid=None):
     if monkeypatch is not None:
         monkeypatch.setattr(runtime, "peer_uid", lambda _connection: peer_uid)
@@ -322,8 +349,7 @@ def test_local_service_runtime_uses_mode_0600_unix_socket_and_survives_slow_clie
     assert oct(socket_path.stat().st_mode & 0o777) == "0o600"
     assert oct(lock_path.stat().st_mode & 0o777) == "0o600"
 
-    slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    slow.connect(str(service_socket_path))
+    slow = _connect_to_service(service_socket_path)
     envelope = rpc.new_envelope("testd", "echo", {"action": "echo"}, timeout_seconds=2.0)
     response, _binary = rpc.request(service_socket_path, envelope, timeout_seconds=2.0)
     slow.close()
@@ -370,9 +396,7 @@ def test_local_service_runtime_carries_accept_read_and_handler_phases(tmp_path, 
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
     envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
 
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(1.0)
-        client.connect(str(service_socket_path))
+    with _connect_to_service(service_socket_path) as client:
         rpc.write_message(client, envelope, envelope.payload)
         response_envelope, response, _binary, legacy = rpc.read_message(client)
 
@@ -423,15 +447,11 @@ def test_local_service_runtime_reports_bounded_capacity_rejection(tmp_path, monk
     )
     worker.start()
     _wait_for_service_socket(socket_path)
-    first = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    first.settimeout(1.0)
-    first.connect(str(service_socket_path))
+    first = _connect_to_service(service_socket_path)
     hold = rpc.new_envelope("testd", "hold", {"action": "hold"})
     rpc.write_message(first, hold, hold.payload)
     assert started.wait(timeout=1.0)
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as second:
-        second.settimeout(1.0)
-        second.connect(str(service_socket_path))
+    with _connect_to_service(service_socket_path) as second:
         busy = json.loads(second.makefile("rb").readline())
     release.set()
     response_envelope, response, _binary, legacy = rpc.read_message(first)
@@ -477,9 +497,7 @@ def test_local_service_runtime_does_not_idle_shutdown_with_active_handler(tmp_pa
     )
     worker.start()
     _wait_for_service_socket(socket_path)
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(1.0)
-    client.connect(str(service_socket_path))
+    client = _connect_to_service(service_socket_path)
     hold = rpc.new_envelope("testd", "hold", {"action": "hold"})
     rpc.write_message(client, hold, hold.payload)
     try:
@@ -500,9 +518,7 @@ def test_local_service_runtime_rejects_wrong_peer_uid_where_supported(tmp_path, 
     lock_path = tmp_path / "service.lock"
     stop_event = threading.Event()
     worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid() + 1)
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(1.0)
-        client.connect(str(service_socket_path))
+    with _connect_to_service(service_socket_path) as client:
         response = json.loads(client.makefile("rb").readline())
     stop_event.set()
     worker.join(timeout=1.0)
@@ -1192,3 +1208,44 @@ def test_local_service_traffic_keeps_probe_and_work_separate_under_concurrency(t
     assert (snapshot["work"]["accepted"], snapshot["work"]["completed"]) == (expected, expected)
     assert (snapshot["probe"]["accepted"], snapshot["probe"]["completed"]) == (expected, expected)
     assert snapshot["work"]["errors"] == snapshot["probe"]["errors"] == 0
+
+
+def test_a_client_reaches_a_service_whose_socket_is_published_before_it_listens(tmp_path, monkeypatch):
+    """The published socket file is not yet a listening socket, and a client must survive that.
+
+    `run_local_rpc_service` binds the path -- creating it with its final 0600 mode -- and calls
+    `listen()` afterwards. Every readiness predicate built on the file (existence plus mode) is
+    therefore true while the service still refuses connections, and a connect issued in that window
+    fails with ECONNREFUSED against a service that is starting normally. A loaded gate hit exactly
+    that window; this forces it by delaying `listen()`.
+    """
+
+    socket_path = tmp_path / "service.sock"
+    service_socket_path = rpc.safe_socket_path(socket_path, prefix="yolomux-testd")
+    lock_path = tmp_path / "service.lock"
+    stop_event = threading.Event()
+    original_listen = socket.socket.listen
+
+    def delayed_listen(self, backlog=0):
+        time.sleep(0.3)
+        return original_listen(self, backlog)
+
+    monkeypatch.setattr(socket.socket, "listen", delayed_listen)
+    worker = _run_echo_service(socket_path, lock_path, stop_event, monkeypatch=monkeypatch, peer_uid=os.getuid())
+    try:
+        # The readiness predicate the tests use is already satisfied here, before `listen()` ran.
+        assert socket_path.exists() and (socket_path.stat().st_mode & 0o777) == 0o600
+        # Negative control, and the exact pre-fix failure: a single connect in this window is
+        # refused, so this test can never pass because the window failed to open.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as premature:
+            premature.settimeout(1.0)
+            with pytest.raises(ConnectionRefusedError):
+                premature.connect(str(service_socket_path))
+        with _connect_to_service(service_socket_path) as client:
+            envelope = rpc.new_envelope("testd", "echo", {"action": "echo"})
+            rpc.write_message(client, envelope, envelope.payload)
+            _response_envelope, response, _binary, _legacy = rpc.read_message(client)
+        assert response == {"ok": True, "echo": {"action": "echo"}, "request_binary": ""}
+    finally:
+        stop_event.set()
+        worker.join(timeout=2.0)

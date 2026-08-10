@@ -2589,7 +2589,7 @@
   "debug.system.roster.state.exited": "已退出",
   "debug.system.roster.state.unsupported": "不支持",
   "debug.system.roster.summary.counts": "就绪 {ready} · 空闲 {idle} · 问题 {issues}",
-  "debug.system.roster.summary.cpu": "CPU {current} % / 预算 {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current}（所有行合计）",
   "debug.system.roster.summary.memory": "内存 {value}",
   "debug.system.roster.summary.owner": "所有者 {value}",
   "debug.system.roster.summary.updated": "更新于 {time}",

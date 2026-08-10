@@ -1328,7 +1328,7 @@ def test_one_response_cannot_answer_sample_freshness_two_ways(monkeypatch):
     said `sample_age_seconds: 0.358, stale: False`. Two answers to one question.
 
     The cause is read ordering, not delivery: the sample was read BEFORE the slow
-    `runtime_report_payload` work and rendered after it, so it aged during assembly, while
+    `runtime_report_core` work and rendered after it, so it aged during assembly, while
     `cpu_budget` re-read the cache afterwards and saw a newer push. A response that takes
     long enough to build manufactures its own staleness and flips the row to an em dash for
     a reason that has nothing to do with statsd.
@@ -1345,13 +1345,15 @@ def test_one_response_cannot_answer_sample_freshness_two_ways(monkeypatch):
         # What statsd had pushed when the request arrived: already older than the window.
         push(time.time() - 4.0, 1234)
 
-        def slow_report(force_transcripts=False):
+        def slow_report(**_kwargs):
             # statsd keeps pushing on its 1s cadence while the report is assembled.
             push(time.time(), 4321)
             return {"ok": True}
 
-        monkeypatch.setattr(webapp, "runtime_report_payload", slow_report)
-        payload = webapp.system_status_payload()
+        # The ordering invariant belongs to the body the snapshot producer builds, which is where
+        # the slow assembly now happens; the route itself no longer builds anything.
+        monkeypatch.setattr(webapp, "runtime_report_core", slow_report)
+        payload = webapp.system_status_core_payload()
     finally:
         webapp.control_server.stop()
 
@@ -5440,13 +5442,31 @@ def test_tmux_snapshot_bounds_and_skips_unchanged_history(monkeypatch):
     ]
 
 
+def stub_transcripts_payload_refresh(calls, *, started=True, pending_generation=1):
+    """One test double for the whole refresh contract, recording each call.
+
+    A substitute for this method must answer BOTH halves of it: whether it started a build, and --
+    through ``pending_generation_out``, under the guard lock -- the generation of the build that
+    answers the caller. Independent per-test lambdas answered only the first half, so any caller
+    reading the promised build identity got nothing from any of them.
+    """
+
+    def refresh(publish=False, defer=False, *, not_before=None, pending_generation_out=None):
+        calls.append((publish, defer))
+        if pending_generation_out is not None:
+            pending_generation_out.append(pending_generation if started else 0)
+        return started
+
+    return refresh
+
+
 def test_transcripts_payload_exposes_server_version(monkeypatch):
     monkeypatch.setattr(app_module, "discover_sessions", lambda sessions: ({}, []))
     monkeypatch.setattr(app_module, "yolomux_client_revision", lambda: "client-rev-test")
     webapp = app_module.TmuxWebtermApp([])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda *args, **kwargs: False)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh([], started=False))
     try:
         payload = webapp.transcripts_payload()
     finally:
@@ -5491,7 +5511,7 @@ def test_transcripts_payload_returns_stale_cache_and_refreshes(monkeypatch):
     refreshes = []
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
     monkeypatch.setattr(webapp, "warm_metadata_cache_async", lambda sessions: None)
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
     try:
         webapp.set_transcripts_payload_cache(webapp.build_session_metadata_payload())
         first = webapp.transcripts_payload()
@@ -5659,7 +5679,7 @@ def test_transcripts_payload_cold_returns_lightweight_and_starts_full_refresh(mo
     monkeypatch.setattr(app_module, "session_to_json", fake_session_to_json)
     webapp = app_module.TmuxWebtermApp(["5"])
     monkeypatch.setattr(webapp, "refresh_sessions", lambda *args, **kwargs: [])
-    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refresh_calls.append((publish, defer)) or True)
+    monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refresh_calls))
     try:
         payload = webapp.transcripts_payload()
     finally:
@@ -5829,7 +5849,11 @@ def queued_transcripts_follow_up_app(monkeypatch):
     monkeypatch.setattr(
         app_module.TmuxWebtermApp,
         "start_transcripts_payload_refresh",
-        lambda self, publish=False, defer=False, not_before=None: bool(started.append(publish)) or True,
+        lambda self, publish=False, defer=False, *, not_before=None, pending_generation_out=None: (
+            bool(started.append(publish))
+            or bool(pending_generation_out is not None and pending_generation_out.append(1))
+            or True
+        ),
     )
     record = webapp.activity_transcript_service.transcripts_payload_cache_record
     worker = object()
@@ -5880,6 +5904,62 @@ def test_clear_transcript_caches_releases_the_whole_guard_and_drains_the_queued_
     next_generation = webapp.begin_transcripts_payload_work(next_worker, replace=True)
     assert webapp.finish_transcripts_payload_work(next_generation, next_worker) is True
     assert started == [True]
+
+
+def transcripts_payload_guard_app():
+    """A bare app that owns only the single-flight build guard and its cache record."""
+
+    webapp = object.__new__(app_module.TmuxWebtermApp)
+    webapp.client_events = SimpleNamespace(epoch="epoch-under-test")
+    webapp.activity_transcript_service = SimpleNamespace(
+        transcripts_payload_cache_lock=threading.RLock(),
+        transcripts_payload_cache_record=state_services.TranscriptsPayloadCacheRecord(),
+        transcript_tail_cache_lock=threading.Lock(),
+        transcript_tail_cache={},
+        context_items_cache_lock=threading.Lock(),
+        context_items_cache={},
+    )
+    return webapp, webapp.activity_transcript_service.transcripts_payload_cache_record
+
+
+def test_a_forced_read_keeps_the_inflight_build_identity_when_that_build_finishes_in_the_start_gap(monkeypatch):
+    """The build that answers a forced read is decided under the guard lock, never re-read after it.
+
+    Regression: `start_metadata_refresh_for_request` refused the guard under one lock acquisition
+    and then took a SECOND one to name the generation the caller must wait for. An in-flight build
+    that already observed the request could finish in that gap, leaving `worker is None` and no
+    queued rebuild, so the forced caller was told `no_build_accepted` and handed pending generation
+    zero -- which every payload already satisfies -- for a build that had in fact just answered it.
+    """
+
+    webapp, record = transcripts_payload_guard_app()
+    in_flight = object()
+    generation = webapp.begin_transcripts_payload_work(in_flight)
+    # The request predates the in-flight build, so that build already observes it and no follow-up
+    # is queued: this is the branch whose answer the second read used to lose.
+    requested_at = record.worker_started_at - 1.0
+
+    real_start = app_module.TmuxWebtermApp.start_transcripts_payload_refresh
+
+    def start_then_finish_the_inflight_build(self, *args, **kwargs):
+        outcome = real_start(self, *args, **kwargs)
+        with self.activity_transcript_service.transcripts_payload_cache_lock:
+            record.release_worker()
+        return outcome
+
+    monkeypatch.setattr(
+        app_module.TmuxWebtermApp,
+        "start_transcripts_payload_refresh",
+        start_then_finish_the_inflight_build,
+    )
+
+    refreshing, pending_generation = webapp.start_metadata_refresh_for_request(requested_at, publish=True)
+
+    assert (refreshing, pending_generation) == (True, generation)
+    assert webapp.forced_metadata_pending_cache_fields(pending_generation) == {
+        "pending_generation": generation,
+        "pending_identity": webapp.metadata_identity(generation),
+    }
 
 
 def test_clear_transcript_caches_guard_assertion_fails_when_queued_intent_survives(monkeypatch):
@@ -6054,7 +6134,7 @@ def test_warm_metadata_cache_refreshes_cached_graph_after_network_enrichment(mon
     monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): calls.append("jobd"))
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         webapp.warm_metadata_cache({"5": info}, threading.Event())
     finally:
         webapp.control_server.stop()
@@ -6080,7 +6160,7 @@ def test_warm_metadata_cache_ignores_graph_generation_only(monkeypatch):
     monkeypatch.setattr(webapp, "warm_metadata_cache_via_jobd", lambda sessions, repository_generations=(): None)
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"5": {"work_graph": cached_graph}}})
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         webapp.warm_metadata_cache({"5": info}, threading.Event())
     finally:
         webapp.control_server.stop()
@@ -7209,7 +7289,7 @@ def test_record_user_input_cache_miss_avoids_tmux_and_refreshes_out_of_band(monk
     try:
         webapp.set_transcripts_payload_cache({"sessions": {"7770": {"panes": []}}})
         monkeypatch.setattr(app_module, "tmux", fail_tmux)
-        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", lambda publish=False, defer=False, not_before=None: refreshes.append((publish, defer)) or True)
+        monkeypatch.setattr(webapp, "start_transcripts_payload_refresh", stub_transcripts_payload_refresh(refreshes))
         monkeypatch.setattr(webapp.activity_ledger, "_clock", lambda: 2000.0)
         monkeypatch.setattr(app_module.time, "time", lambda: 2000.0)
 
@@ -9617,6 +9697,9 @@ def test_filesystem_batch_receipt_completes_once_through_operation_sse(monkeypat
             {**batch["requests"][0], "id": 0},
             {**batch["requests"][1], "id": 1},
         ],
+        # The accepting server's own policy rides with the batch; the shared daemon authorizes
+        # with it instead of its launcher's environment.
+        app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
     }
     assert produce[4]["delivery"] == "ready_or_receipt"
     assert result_status == HTTPStatus.OK
@@ -10473,6 +10556,112 @@ def test_point_filesystem_operations_take_the_bounded_point_lane_and_bulk_reads_
     assert {jobd.JOBD_PRIORITY_LANES[priority] for priority in emitted} == {"point", "interactive"}
 
 
+def test_bounded_mutations_take_the_mutation_lane_and_unbounded_writes_do_not():
+    """The write-side boundary, held as tightly as the read-side one above.
+
+    `point` stays reads-only: it carries the stat-derived coalescing key and `fresh_only`, which a
+    mutation must never get.  `delete` stays unbounded: `delete_path` recurses through a subtree.
+    """
+    assert app_module.FILESYSTEM_BOUNDED_MUTATIONS == {"write", "rename", "mkdir"}
+    for operation in sorted(app_module.FILESYSTEM_BOUNDED_MUTATIONS):
+        assert app_module.filesystem_operation_priority(operation) == "mutation"
+    # A mutation is not a retained read and must never enter the coalescing read lane.
+    assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_POINT_OPERATIONS)
+    assert not (app_module.FILESYSTEM_BOUNDED_MUTATIONS & app_module.FILESYSTEM_RETAINED_READ_OPERATIONS)
+    # Recursive/unbounded writes stay on the shared `interactive` lane no matter how point-shaped
+    # they look at the call site.
+    for operation in ("delete", "unindex", "zip"):
+        assert app_module.filesystem_operation_priority(operation) == "interactive"
+    # The mutation lane is physically separate from the read lane and from every bulk lane.
+    assert jobd.JOBD_PRIORITY_LANES["mutation"] == "mutation"
+    assert jobd.JOBD_LANE_PRIORITIES["mutation"] == ("mutation",)
+    assert jobd.JOBD_LANE_WORKERS["mutation"] == jobd.JOBD_MUTATION_WORKERS
+    assert "mutation" in jobd.JOBD_PRIORITIES
+
+
+@pytest.mark.parametrize("operation", ["write", "rename", "mkdir"])
+def test_bounded_mutation_dispatches_while_unbounded_work_holds_every_other_lane(operation, tmp_path, monkeypatch):
+    """A one-syscall mkdir must not wait for someone else's recursive tree walk.
+
+    Cross-class isolation, not a latency average: every non-mutation lane is held at capacity by an
+    unresolved future (a tree walk that has not finished), and the bounded mutation must still reach
+    `running` on this one pump.  Measured before the mutation lane existed, `filesystem_operation_
+    priority` sent `mkdir` to the single-worker `interactive` lane, where one `count` over a
+    457,364-file tree left the `mkdir` queued for 6737 ms and 8167 ms across two runs.
+    """
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    holders = []
+    for priority in ("freshness", "maintenance", "interactive"):
+        lane = jobd.PersistentJobBroker._lane_for_priority(priority)
+        for number in range(service._lane_capacity(lane)):
+            holder = service._queue_record(
+                "filesystem_operation",
+                app_module.filesystem_operation_descriptor("count", str(tmp_path), {}),
+                priority, number, f"unbounded-{priority}-{number}",
+            )
+            holder.status = "running"
+            # An unresolved future is a tree walk that has not finished. Nothing bounded may wait on it.
+            holder.future = Future()
+            holders.append(holder)
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    mutation = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor(operation, str(tmp_path / "target"), {}),
+        app_module.filesystem_operation_priority(operation), 1, f"mutation-{operation}",
+    )
+
+    service._pump()
+
+    assert [holder.status for holder in holders] == ["running"] * len(holders)
+    assert mutation.status == "running", (
+        f"{operation} terminalized behind unbounded work on a shared lane"
+    )
+
+
+@pytest.mark.parametrize("held_operation, probe_operation", [("mkdir", "read"), ("read", "mkdir")])
+def test_point_reads_and_bounded_mutations_cannot_starve_each_other(held_operation, probe_operation, tmp_path, monkeypatch):
+    """`point` and `mutation` are separate lanes with separate executors, so filling every slot of
+    one must leave the other's capacity untouched in both directions."""
+    service = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=2)
+    held_priority = app_module.filesystem_operation_priority(held_operation)
+    probe_priority = app_module.filesystem_operation_priority(probe_operation)
+    assert held_priority != probe_priority
+    held_lane = jobd.PersistentJobBroker._lane_for_priority(held_priority)
+
+    for number in range(service._lane_capacity(held_lane)):
+        holder = service._queue_record(
+            "filesystem_operation",
+            app_module.filesystem_operation_descriptor(held_operation, str(tmp_path / f"held-{number}"), {}),
+            held_priority, number, f"held-{held_operation}-{number}",
+        )
+        holder.status = "running"
+        holder.future = Future()
+
+    class Executor:
+        def submit(self, *_args):
+            return Future()
+
+    monkeypatch.setattr(service, "_executor", lambda priority="freshness": Executor())
+    probe = service._queue_record(
+        "filesystem_operation",
+        app_module.filesystem_operation_descriptor(probe_operation, str(tmp_path / "probe"), {}),
+        probe_priority, 1, f"probe-{probe_operation}",
+    )
+
+    service._pump()
+
+    lanes = service.common_status()["lanes"]
+    assert lanes[held_lane]["active"] == service._lane_capacity(held_lane)
+    assert lanes[held_lane]["queued"] == 0
+    assert probe.status == "running"
+    assert lanes[jobd.PersistentJobBroker._lane_for_priority(probe_priority)]["active"] == 1
+
+
 @pytest.mark.parametrize("operation", ["read", "info", "index_status"])
 def test_stat_derived_point_keys_submit_fresh_only_and_watchd_keys_do_not(monkeypatch, tmp_path, operation):
     """Every point operation, not just `read`, must refuse a retained product for a stat key.
@@ -10860,6 +11049,8 @@ def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receip
         "op": "raw",
         "path": "/repo/payload.bin",
         "args": {"download": False, "max_bytes": 1024},
+        # A relayed byte product takes the same descriptor owner, so it carries the same policy.
+        app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
     }, {"deadline_ms": int(app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)})]
     assert response.status == HTTPStatus.OK
     assert response.payload is None
@@ -10930,7 +11121,12 @@ def test_filesystem_operation_submission_is_stable_per_scope_and_watchd_revision
         generation="watchd:epoch-a:8",
     )
 
-    assert first_payload == {"op": "list", "path": "/repo/src", "args": {"limit": "400"}}
+    assert first_payload == {
+        "op": "list",
+        "path": "/repo/src",
+        "args": {"limit": "400"},
+        app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
+    }
     assert second_payload == first_payload
     assert first_key == second_key
     assert other_scope_key != first_key

@@ -2367,6 +2367,47 @@ async function runLayoutAsyncSuite() {
     assert.equal(afterUnidentified.generation, 7, 'a bare generation scalar cannot advance the applied identity');
   });
 
+  await testAsync('a superseded response still records the build the server promised', async () => {
+    // Regression: the pending identity is a fact about the SERVER's build queue, not about whether
+    // this client's request is still current, but it was read AFTER the supersede check and so was
+    // discarded with the payload. A forced read whose apply lost the race against any concurrent
+    // refresh or `transcripts_changed` push therefore left `pendingGeneration` at zero -- a target
+    // every payload already satisfies -- while the forced settle, which reads the target from its
+    // own response, still converged. The reload gate saw exactly that: the server named build 7 and
+    // the browser reported awaiting build 0.
+    const api = loadYolomux('', ['1']);
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 7},
+      cache: {pending_identity: {epoch: 'epoch-a', generation: 9}},
+      session_order: ['1'],
+      sessions: {'1': {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false});
+    assert.equal(api.transcriptMetadataStateForTest().pendingGeneration, 9);
+
+    const superseded = await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-a', generation: 10},
+      cache: {pending_identity: {epoch: 'epoch-a', generation: 11}},
+      session_order: ['1'],
+      sessions: {'1': {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false, requestIsCurrent: () => false});
+    const state = api.transcriptMetadataStateForTest();
+    assert.equal(superseded, false, 'a superseded payload is still not rendered');
+    assert.equal(state.lastApply.reason, 'superseded_request');
+    assert.equal(state.generation, 7, 'a superseded payload cannot advance the RENDERED generation');
+    assert.equal(state.pendingGeneration, 11, 'the build the server promised survives the supersede');
+
+    // The epoch fence still holds: a promise from another server process is not comparable here.
+    await api.applySessionMetadataPayloadForTest({
+      metadata_identity: {epoch: 'epoch-b', generation: 20},
+      cache: {pending_identity: {epoch: 'epoch-b', generation: 21}},
+      session_order: ['1'],
+      sessions: {'1': {panes: []}},
+    }, {refreshAuto: false, refreshActivity: false, refreshContext: false, requestIsCurrent: () => false});
+    const afterForeign = api.transcriptMetadataStateForTest();
+    assert.equal(afterForeign.epoch, 'epoch-a', 'a superseded reply cannot adopt another epoch');
+    assert.equal(afterForeign.pendingGeneration, 11, 'a promise from another server process is not adopted here');
+  });
+
   // ---------------------------------------------------------------------------------------------
   // Session-metadata identity is (server epoch, build generation).
   //

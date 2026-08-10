@@ -2773,7 +2773,7 @@
   "debug.system.roster.state.exited": "انتهى",
   "debug.system.roster.state.unsupported": "غير مدعوم",
   "debug.system.roster.summary.counts": "{ready} جاهز · {idle} خامل · {issues} مشاكل",
-  "debug.system.roster.summary.cpu": "المعالج {current} % من {budget} %",
+  "debug.system.roster.summary.cpu": "المعالج {current} في كل الصفوف",
   "debug.system.roster.summary.memory": "الذاكرة {value}",
   "debug.system.roster.summary.owner": "المالك {value}",
   "debug.system.roster.summary.updated": "حُدّث {time}",

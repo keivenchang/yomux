@@ -402,7 +402,7 @@
   "debug.system.roster.state.unavailable": "Nicht verfügbar",
   "debug.system.roster.state.unsupported": "Nicht unterstützt",
   "debug.system.roster.summary.counts": "{ready} bereit · {idle} untätig · {issues} Probleme",
-  "debug.system.roster.summary.cpu": "CPU {current} % von {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} über alle Zeilen",
   "debug.system.roster.summary.memory": "Speicher {value}",
   "debug.system.roster.summary.owner": "Eigentümer {value}",
   "debug.system.roster.summary.updated": "Aktualisiert {time}",

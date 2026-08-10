@@ -402,7 +402,7 @@
   "debug.system.roster.state.unavailable": "⟦Úñáṽáíłáƀłé····⟧",
   "debug.system.roster.state.unsupported": "⟦Úñšúƥƥóřťéđ····⟧",
   "debug.system.roster.summary.counts": "⟦{ready} řéáđý · {idle} íđłé · {issues} íššúéš··········⟧",
-  "debug.system.roster.summary.cpu": "⟦ÇƤÚ {current}% / {budget}%····⟧",
+  "debug.system.roster.summary.cpu": "⟦ÇƤÚ {current} áçřóšš áłł řóŵš········⟧",
   "debug.system.roster.summary.memory": "⟦Ɱéɱóřý {value}···⟧",
   "debug.system.roster.summary.owner": "⟦Óŵñéř {value}··⟧",
   "debug.system.roster.summary.updated": "⟦Úƥđáťéđ {time}···⟧",

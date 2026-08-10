@@ -2589,7 +2589,7 @@
   "debug.system.roster.state.exited": "已結束",
   "debug.system.roster.state.unsupported": "不支援",
   "debug.system.roster.summary.counts": "就緒 {ready} · 閒置 {idle} · 問題 {issues}",
-  "debug.system.roster.summary.cpu": "CPU {current} % / 預算 {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current}（所有列合計）",
   "debug.system.roster.summary.memory": "記憶體 {value}",
   "debug.system.roster.summary.owner": "擁有者 {value}",
   "debug.system.roster.summary.updated": "更新於 {time}",

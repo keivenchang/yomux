@@ -2589,7 +2589,7 @@
   "debug.system.roster.state.exited": "종료됨",
   "debug.system.roster.state.unsupported": "지원되지 않음",
   "debug.system.roster.summary.counts": "준비 {ready} · 대기 {idle} · 문제 {issues}",
-  "debug.system.roster.summary.cpu": "CPU {current} % / {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current}(전체 행 합계)",
   "debug.system.roster.summary.memory": "메모리 {value}",
   "debug.system.roster.summary.owner": "소유자 {value}",
   "debug.system.roster.summary.updated": "업데이트 {time}",

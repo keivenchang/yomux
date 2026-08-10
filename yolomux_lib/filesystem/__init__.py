@@ -28,7 +28,17 @@ CONFIG_DIR = paths.CONFIG_DIR
 BINARY_SNIFF_BYTES = paths.BINARY_SNIFF_BYTES
 DEFAULT_FS_ROOTS = paths.DEFAULT_FS_ROOTS
 FilesystemError = paths.FilesystemError
+FilesystemAccessPolicy = paths.FilesystemAccessPolicy
+FS_ACCESS_POLICY_FIELD = paths.FS_ACCESS_POLICY_FIELD
+FS_ACCESS_POLICY_VERSION = paths.FS_ACCESS_POLICY_VERSION
 FS_ROOTS_ENV = paths.FS_ROOTS_ENV
+access_policy_descriptor = paths.access_policy_descriptor
+access_policy_from_descriptor = paths.access_policy_from_descriptor
+access_policy_refused = paths.access_policy_refused
+active_access_policy = paths.active_access_policy
+authorized_fs_roots = paths.authorized_fs_roots
+capture_access_policy = paths.capture_access_policy
+enforce_access_policy = paths.enforce_access_policy
 MAX_READ_BYTES = paths.MAX_READ_BYTES
 SECRET_DIR_COMPONENTS = paths.SECRET_DIR_COMPONENTS
 SECRET_DIR_SUFFIXES = paths.SECRET_DIR_SUFFIXES
@@ -244,7 +254,18 @@ def filesystem_batch_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def filesystem_batch_result(payload: dict[str, Any]) -> dict[str, Any]:
-    """Compute one typed, max-64 list/info product in the jobd worker process."""
+    """Compute one typed, max-64 list/info product under the ACCEPTING server's access policy.
+
+    A batch runs in a shared daemon, so it is authorized by the policy the payload carries, not by
+    the daemon's own environment.  A payload without a parsable policy is refused here rather than
+    executed with borrowed authority.
+    """
+    policy = paths.access_policy_from_descriptor(payload.get(paths.FS_ACCESS_POLICY_FIELD))
+    with paths.enforce_access_policy(policy):
+        return _filesystem_batch_result_authorized(payload)
+
+
+def _filesystem_batch_result_authorized(payload: dict[str, Any]) -> dict[str, Any]:
     requests = validated_batch_requests(payload)
     summary = filesystem_batch_request_summary(payload)
     responses = []
@@ -501,7 +522,17 @@ __all__ = [
     "BINARY_SNIFF_BYTES",
     "DEFAULT_FS_ROOTS",
     "EXTENSIONLESS_TEXT_NAMES",
+    "FS_ACCESS_POLICY_FIELD",
+    "FS_ACCESS_POLICY_VERSION",
+    "FilesystemAccessPolicy",
     "FilesystemError",
+    "access_policy_descriptor",
+    "access_policy_from_descriptor",
+    "access_policy_refused",
+    "active_access_policy",
+    "authorized_fs_roots",
+    "capture_access_policy",
+    "enforce_access_policy",
     "FS_ZIP_MAX_BYTES",
     "FS_ROOTS_ENV",
     "IMAGE_EXTENSIONS",

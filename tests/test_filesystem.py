@@ -339,6 +339,7 @@ def test_filesystem_batch_watch_signature_reuses_the_directory_listing_scan(tmp_
             "include_watch_signature": True,
         }],
         "client_scope": "browser",
+        filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
     })
 
     assert len(scans) == 1

@@ -79,8 +79,10 @@ def _schema_two_payload_script(states=None):
           generated_at: Date.now() / 1000,
           state_dir: '/fixture/state',
           server: {version: '0.7.1', pid: 5150, started_at: Date.now() / 1000 - 8040, uptime_seconds: 8040, cpu_percent: 3, system_cpu_percent: 11, rss_bytes: 92274688},
-          owner: {}, refresh: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {budget_percent: 30},
-          top_endpoints: [], top_background_work: [],
+          // CORE body keys only: `refresh` and the top-N folds moved to /api/system-status/advanced
+          // when the snapshot split landed, so a fixture carrying them would describe a body the
+          // server no longer sends.
+          owner: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {budget_percent: 30},
           tmux_signal_watcher: {state: 'attached', demanded: true, sessions: ['debug'], process_pid: 9001},
           local_services: {
             schema_version: 2,
@@ -91,8 +93,10 @@ def _schema_two_payload_script(states=None):
               id,
               label: id,
               state: states[index],
-              reason_code: states[index] === 'unavailable' ? 'transport_failed' : (states[index] === 'idle' ? 'not_started' : ''),
-              reason: states[index] === 'unavailable' ? 'Status transport failed' : (states[index] === 'idle' ? 'Starts on demand' : ''),
+              // `issue` is a RUNNING process that is not serving, so it keeps its pid and its
+              // measured metrics and carries a transport reason -- it is not `unavailable`.
+              reason_code: states[index] === 'idle' ? 'not_started' : (states[index] === 'running' ? '' : 'transport_failed'),
+              reason: states[index] === 'unavailable' ? 'Status transport failed' : (states[index] === 'issue' ? 'Status transport refused' : (states[index] === 'idle' ? 'Starts on demand' : '')),
               pid: index < 3 ? 4200 + index : 0,
               started_at: index < 3 ? Date.now() / 1000 - 120 : 0,
               metrics: {
@@ -110,6 +114,10 @@ def _schema_two_payload_script(states=None):
 
 
 DEFAULT_ROSTER_STATES = ["running", "running", "running", "unavailable", "idle", "running"]
+# `issue` -- a running daemon whose status transport failed -- is the one published service state
+# no browser fixture exercised. It sits at index 2 so the row keeps a pid and measured metrics: the
+# whole point of the state is that the PROCESS is alive while the SERVICE is not answering.
+ISSUE_ROSTER_STATES = ["running", "running", "issue", "unavailable", "idle", "running"]
 
 
 @pytest.mark.browser
@@ -262,6 +270,59 @@ def test_h3_every_roster_row_remains_rendered_in_inventory_order(browser, tmp_pa
 
 
 @pytest.mark.browser
+def test_a_degraded_service_renders_the_word_issue_in_the_red_tone(browser, tmp_path):
+    """A running daemon that is not serving reads as the WORD `Issue`, painted the roster's red.
+
+    No browser fixture used the `issue` state before this one, so the degraded row had never been
+    rendered by a real engine: its state word, its paint, and its reason were pinned only as
+    strings in the Node shard. Colour is checked against the roster's OWN other rows rather than
+    against a hex literal -- an `issue` must paint exactly like the `unavailable` row beside it and
+    must not paint like the ready or idle rows, which is the rule `debugSystemStateTone` owns.
+    """
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    _open_daemons_with_frozen_poll(browser)
+    painted = run_when_browser_ready(
+        browser,
+        _schema_two_payload_script()
+        + """
+        const statusOf = id => {
+          const row = document.querySelector(`[data-subsystem-row][data-subsystem-id="${id}"]`);
+          const status = row.querySelector('[data-subsystem-tone]');
+          return {
+            state: row.dataset.subsystemState || '',
+            tone: status.dataset.subsystemTone || '',
+            word: status.querySelector('[data-subsystem-state-label]')?.textContent?.trim() || '',
+            color: getComputedStyle(status).color,
+            reason: row.querySelector('[data-subsystem-reason]')?.textContent?.trim() || '',
+            uptime: row.querySelector('[data-subsystem-metric="uptime_seconds"]')?.textContent?.trim() || '',
+          };
+        };
+        return {issue: statusOf('jobd'), down: statusOf('statusd'), ready: statusOf('statsd'), idle: statusOf('watchd')};
+        """,
+        list(SYSTEM_STATUS_SERVICE_IDS),
+        ISSUE_ROSTER_STATES,
+        globals_required={"refreshDebugSystemViews": "function"},
+        dom_anchors=("[data-js-debug-subtab=\"system\"]",),
+    )
+    issue = painted["issue"]
+    assert issue["state"] == "issue" and issue["tone"] == "bad", painted
+    # The WORD, in the browser. Status is never carried by colour alone.
+    assert issue["word"] == "Issue", painted
+    assert issue["reason"] == "Status transport refused", painted
+    # Red, and the same red the roster already uses for an actionable row -- not a second token.
+    red = tuple(int(part) for part in issue["color"].removeprefix("rgb(").removesuffix(")").split(",")[:3])
+    assert red[0] > red[1] and red[0] > red[2], painted
+    assert issue["color"] == painted["down"]["color"], painted
+    # ...and not the ready green or the idle gray, so the assertion above cannot pass on a roster
+    # that paints every row the same colour.
+    assert issue["color"] not in (painted["ready"]["color"], painted["idle"]["color"]), painted
+    # The state's whole meaning: the PROCESS is up while the SERVICE is not answering. A row that
+    # rendered an em dash here would be `unavailable` wearing a different word.
+    assert issue["uptime"] == "2m 2s", painted
+    assert painted["down"]["uptime"] == "—", painted
+
+
+@pytest.mark.browser
 def test_the_default_daemons_view_is_a_roster_not_a_card_wall(browser, tmp_path):
     """The retired Server/CPU budget/Worker totals/Search & caches boxes are gone from the default."""
     load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
@@ -309,6 +370,192 @@ def test_the_default_daemons_view_is_a_roster_not_a_card_wall(browser, tmp_path)
     # Lazy, not hidden: no collapsed row builds its transition list or its sampler table.
     assert layout["detailRows"] == 0, layout
     assert layout["transitionLists"] == 0 and layout["samplerTables"] == 0, layout
+
+
+# Records every URL the panel asks for, and answers the two system-status routes from fixtures. The
+# core body is the roster fixture the other tests already build, plus a DECOY `top_endpoints`: the
+# advanced diagnostics moved off the core body when `/api/system-status` became a background
+# snapshot, so a card rendered from that decoy is a card reading a key the server no longer sends.
+_ADVANCED_ROUTE_RECORDER_SCRIPT = """
+    const advanced = arguments[0];
+    const core = jsDebugSystemState.payload;
+    core.top_endpoints = [{surface: '/api/decoy-from-the-core-body', count: 1, compute_ms_max: 1, payload_bytes_total: 1}];
+    window.__systemStatusRequests = [];
+    window.__realApiFetchJsonQuiet = apiFetchJsonQuiet;
+    apiFetchJsonQuiet = async (url, ...rest) => {
+      window.__systemStatusRequests.push(url);
+      if (url.startsWith('/api/system-status/advanced')) return advanced;
+      if (url.startsWith('/api/system-status')) return core;
+      return window.__realApiFetchJsonQuiet(url, ...rest);
+    };
+    // The freeze helper stubbed the poller out; this test is about what the REAL poller requests.
+    pollDebugSystemStatus = window.__realPollDebugSystemStatus;
+    return true;
+"""
+
+# One real poll, settled: both the core read and the advanced read it may drive are awaited before
+# the request list is reported.
+_POLL_AND_SETTLE_SCRIPT = """
+    const done = arguments[arguments.length - 1];
+    pollDebugSystemStatus({force: true}).then(() => {
+      const settle = () => {
+        if (jsDebugSystemState.inFlight || jsDebugSystemAdvancedState.inFlight) {
+          setTimeout(settle, 25);
+          return;
+        }
+        done(window.__systemStatusRequests.slice());
+      };
+      settle();
+    }, error => done(['poll failed', String(error)]));
+"""
+
+_ADVANCED_FIXTURE = {
+    "ok": True,
+    "generated_at": 1902,
+    "owner": {"debug": {"generation_count": 41}, "control": {}},
+    "refresh": {"local_refreshing": {}, "coalescing": {"recent_pending_count": 0}, "counters": {"coalesced_refresh_requests": 7}, "recurring_work": [], "roles": {}},
+    "top_endpoints": [{"surface": "/api/from-the-advanced-route", "count": 12, "compute_ms_max": 4, "payload_bytes_total": 2048}],
+    "top_background_work": [],
+    "top_event_types": [],
+    "login_throttle": {},
+    "largest_active_transcripts": [],
+    "transcripts_cache": {},
+}
+
+
+@pytest.mark.browser
+def test_advanced_diagnostics_are_fetched_only_while_their_disclosure_is_open(browser, tmp_path):
+    """The Advanced body has its own route, and the panel asks for it only when it is open.
+
+    `/api/system-status` is now published from a retained background snapshot, and the diagnostics a
+    reader opens deliberately -- refresh coordination, the top-N folds, transcripts, `owner.debug` --
+    were split onto `/api/system-status/advanced` at their own cadence precisely so that transcript
+    scans and top-N folds stop running on the five-second poll of a panel nobody has opened.
+
+    Requesting that route on every poll would put all of it back and nothing rendered would show it,
+    so the assertion is on the REQUEST LIST, driven through the real click path in a real browser.
+    """
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    _open_daemons_with_frozen_poll(browser)
+    run_when_browser_ready(
+        browser,
+        _schema_two_payload_script() + "return true;",
+        list(SYSTEM_STATUS_SERVICE_IDS),
+        DEFAULT_ROSTER_STATES,
+        globals_required={"refreshDebugSystemViews": "function"},
+        dom_anchors=("[data-js-debug-subtab=\"system\"]",),
+    )
+    assert browser.execute_script(_ADVANCED_ROUTE_RECORDER_SCRIPT, _ADVANCED_FIXTURE) is True
+
+    closed_requests = browser.execute_async_script(_POLL_AND_SETTLE_SCRIPT)
+    assert closed_requests == ["/api/system-status"], closed_requests
+
+    # Opening it is the demand signal, through a real mouse click on the real summary.
+    fast_pointer_actions(browser).click(
+        browser.find_element(By.CSS_SELECTOR, "[data-js-debug-system-advanced-summary]")
+    ).perform()
+    opened = browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        const settle = () => {
+          if (jsDebugSystemAdvancedState.inFlight || !jsDebugSystemAdvancedState.payload) {
+            setTimeout(settle, 25);
+            return;
+          }
+          const advanced = document.querySelector('[data-js-debug-system-advanced]');
+          done({
+            requests: window.__systemStatusRequests.slice(),
+            open: advanced.hasAttribute('open'),
+            text: advanced.textContent.replace(/\\s+/g, ' ').trim(),
+            state: advanced.querySelector('[data-js-debug-system-advanced-state]')?.dataset.jsDebugSystemAdvancedState || '',
+          });
+        };
+        settle();
+        """
+    )
+    assert opened["open"] is True, opened
+    assert opened["requests"] == ["/api/system-status", "/api/system-status/advanced"], opened
+    # Rendered from the advanced body, and NOT from the retired core key sitting right beside it.
+    assert "/api/from-the-advanced-route" in opened["text"], opened
+    assert "decoy-from-the-core-body" not in opened["text"], opened
+    # The label and value are adjacent cells of the one key/value list, so textContent joins them.
+    assert "Generations41" in opened["text"], opened
+    assert opened["state"] == "", opened
+
+    # Closing it stops the demand: the next poll is a core-only read again.
+    fast_pointer_actions(browser).click(
+        browser.find_element(By.CSS_SELECTOR, "[data-js-debug-system-advanced-summary]")
+    ).perform()
+    closed_again = browser.execute_async_script(_POLL_AND_SETTLE_SCRIPT)
+    assert closed_again == [
+        "/api/system-status",
+        "/api/system-status/advanced",
+        "/api/system-status",
+    ], closed_again
+
+
+@pytest.mark.browser
+def test_a_withheld_system_status_snapshot_is_rendered_as_the_state_it_is(browser, tmp_path):
+    """Before the first publish, or past the freshness deadline, the body is a typed refusal.
+
+    The aged report is WITHHELD, not relabelled, so there is nothing to fall back on: the panel has
+    to say which state it is in rather than draw a roster of fabricated `unavailable` rows, and it
+    has to re-ask in half a second rather than leave the reader a blank five-second poll interval.
+    The core slot is demand-gated, so this is the normal first read after any quiet period.
+    """
+    load_live_runtime_boot_fixture(browser, tmp_path, "?debug=1&sessions=debug")
+    _open_daemons_with_frozen_poll(browser)
+    rendered = browser.execute_async_script(
+        """
+        const refusal = arguments[0];
+        const done = arguments[arguments.length - 1];
+        window.__intervalDelays = [];
+        const realReset = resetRuntimeInterval;
+        resetRuntimeInterval = (name, callback, delay) => {
+          if (name === 'debug-system') window.__intervalDelays.push(delay);
+          // The recorded timer is NOT armed: an interval left running at the refusal cadence would
+          // keep firing into the next test through the shared browser.
+          return null;
+        };
+        apiFetchJsonQuiet = async () => refusal;
+        pollDebugSystemStatus = window.__realPollDebugSystemStatus;
+        pollDebugSystemStatus({force: true}).then(() => {
+          const view = document.querySelector('[data-js-debug-system]');
+          const status = view.querySelector('[data-js-debug-system-snapshot-state]');
+          resetRuntimeInterval = realReset;
+          done({
+            state: status?.dataset.jsDebugSystemSnapshotState || '',
+            reasonCode: status?.dataset.jsDebugSystemSnapshotReasonCode || '',
+            text: view.textContent.replace(/\\s+/g, ' ').trim(),
+            regions: view.querySelectorAll('[data-js-debug-system-region]').length,
+            rosterRows: view.querySelectorAll('[data-subsystem-id]').length,
+            delays: window.__intervalDelays.slice(),
+          });
+        }, error => done({error: String(error)}));
+        """,
+        {
+            "ok": False,
+            "schema": "system-status-snapshot",
+            "snapshot": {
+                "state": "stale",
+                "reason_code": "system_status_snapshot_stale",
+                "reason": "The newest system-status snapshot is 14.0s old, past the 12.0s freshness deadline.",
+                "age_seconds": 14.0,
+                "last_generated_at": 1888,
+                "last_sequence": 3,
+                "cadence_seconds": 5.0,
+                "freshness_deadline_seconds": 12.0,
+            },
+        },
+    )
+    assert rendered.get("error") is None, rendered
+    assert rendered["state"] == "stale", rendered
+    assert rendered["reasonCode"] == "system_status_snapshot_stale", rendered
+    assert "past the 12.0s freshness deadline" in rendered["text"], rendered
+    # Nothing measured, so nothing drawn: no regions, and no roster rows invented from an empty body.
+    assert rendered["regions"] == 0 and rendered["rosterRows"] == 0, rendered
+    # And the next read is half a second away, not five.
+    assert rendered["delays"] and rendered["delays"][-1] == 500, rendered
 
 
 @pytest.mark.browser

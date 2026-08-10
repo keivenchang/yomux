@@ -129,6 +129,7 @@ from time import monotonic as monotonic_now
 from time import time as wall_clock_now
 from typing import Any
 
+from ..infra.common import thread_is_running
 from ..infra.host_identity import process_start_identity
 from ..local_service_projection import LOCAL_SERVICE_INVENTORY
 from ..local_service_projection import LocalServicesCollector
@@ -841,8 +842,7 @@ class BackendHealthObserver:
 
     @property
     def running(self) -> bool:
-        thread = self._thread
-        return thread is not None and thread.is_alive()
+        return thread_is_running(self._thread)
 
     def start(self) -> bool:
         """Start the observer exactly once. Returns False if it was already started."""

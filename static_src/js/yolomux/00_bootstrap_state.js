@@ -1853,8 +1853,18 @@ window.__yolomuxFixtureLifecycle = Object.freeze({
     const watchRootsRegistrationPending = serverWatchRootsState.registrationPending === true;
     const watchRootsInFlight = serverWatchRootsState.inFlight === true;
     const watchRootsBaselinePending = serverWatchRootsState.watchDiffPromise !== null;
+    // The full watch-diff baseline parks its own operation record in apiOperationState.pending while
+    // it awaits a 202 result (refreshFileExplorerFromWatchDiffOnce marks that record
+    // terminalOwner='filesystem-watch-diff-refresh' in 40_file_explorer_files.js). Expose exactly
+    // which pending IDs the baseline owns so the teardown quiescence gate can tell the baseline's own
+    // in-flight operation apart from unrelated work instead of rejecting on "a pending op exists".
+    const watchDiffPendingOperationIds = Array.from(apiOperationState.pending.entries())
+      .filter(([, record]) => record && record.terminalOwner === 'filesystem-watch-diff-refresh')
+      .map(([operationId]) => operationId)
+      .sort();
     return {
       pending: Array.from(apiOperationState.pending.keys()).sort(),
+      watchDiffPendingOperationIds,
       batchQueued: typeof fileExplorerFsBatchQueue === 'undefined' ? 0 : fileExplorerFsBatchQueue.length,
       batchPending: typeof fileExplorerFsBatchPending === 'undefined' ? 0 : fileExplorerFsBatchPending.size,
       batchOperations: typeof fileExplorerFsBatchOperations === 'undefined' ? 0 : fileExplorerFsBatchOperations.size,

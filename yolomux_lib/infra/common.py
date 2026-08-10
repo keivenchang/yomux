@@ -61,7 +61,7 @@ MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
 MAX_YOLOMUX_SESSION_TABS = 99
 ACTIVITY_MAX_HOURS = 24.0 * 365.0
-YOLOMUX_VERSION = "0.7.1"
+YOLOMUX_VERSION = "0.7.2"
 # Persistent state is versioned independently from the release string.  A
 # rebuilt checkout must be able to run beside v0.6.10 without reopening its
 # append-only event log or its current-schema database.
@@ -294,6 +294,16 @@ TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
 YOLOMUX_VERSION_ASSIGNMENT_RE = re.compile(r"^\s*YOLOMUX_VERSION\s*=\s*['\"]([^'\"]+)['\"]\s*$", re.MULTILINE)
 SEMVER_RE = re.compile(r"^\s*v?(\d+)\.(\d+)\.(\d+)(?:\D.*)?$")
+
+
+def thread_is_running(thread: threading.Thread | None) -> bool:
+    """Answer whether an owner's single background thread was started and is still alive.
+
+    Every owner that starts one named worker thread asks exactly this question, so it has
+    one implementation here rather than a copy per owner; two byte-identical copies of it
+    were what the duplicate-body guard caught.
+    """
+    return thread is not None and thread.is_alive()
 
 
 def start_thread_with_rollback(worker: threading.Thread, rollback: Callable[[], None]) -> None:

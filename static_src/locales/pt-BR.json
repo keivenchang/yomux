@@ -2635,7 +2635,7 @@
   "debug.system.roster.state.exited": "Encerrado",
   "debug.system.roster.state.unsupported": "Sem suporte",
   "debug.system.roster.summary.counts": "{ready} prontos · {idle} ociosos · {issues} problemas",
-  "debug.system.roster.summary.cpu": "CPU {current} % de {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} em todas as linhas",
   "debug.system.roster.summary.memory": "Memória {value}",
   "debug.system.roster.summary.owner": "Proprietário {value}",
   "debug.system.roster.summary.updated": "Atualizado {time}",

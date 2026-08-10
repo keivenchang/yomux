@@ -402,7 +402,7 @@
   "debug.system.roster.state.unavailable": "Niet beschikbaar",
   "debug.system.roster.state.unsupported": "Niet ondersteund",
   "debug.system.roster.summary.counts": "{ready} gereed · {idle} inactief · {issues} problemen",
-  "debug.system.roster.summary.cpu": "CPU {current} % van {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} over alle rijen",
   "debug.system.roster.summary.memory": "Geheugen {value}",
   "debug.system.roster.summary.owner": "Eigenaar {value}",
   "debug.system.roster.summary.updated": "Bijgewerkt {time}",

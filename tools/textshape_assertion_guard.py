@@ -96,6 +96,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_stats_current_materializer.py:test_materializer_source_has_no_synthetic_cost_series_or_metadata_codec": "Synthetic cost and metadata codec paths were intentionally retired.",
     "tests/test_stats_current_service.py:test_server_wire_builders_do_not_revalidate_each_preencoded_private_variant": "Wire builders must preserve the one validation boundary for private variants.",
     "tests/test_stats_current_service.py:test_system_status_exposes_current_pipeline_health_without_private_values": "Status source must not expose private values while reporting pipeline health.",
+    "tests/test_system_status_snapshot.py:test_the_serving_process_owns_the_producer_lifecycle": "The snapshot producer must have exactly one lifecycle owner, and 'exactly one' is a count over the serving process's source that no runtime assertion can make: a second start call in a second place still yields a running producer, so a behavioural test cannot see it. The producer's observable start/stop behaviour is proven separately; this assertion protects only the single-owner wiring.",
     "tests/test_text_client_common_metadata.py:test_text_clients_use_shared_agent_comms_primitives": "Text clients must import the shared communication primitives rather than fork them.",
     "tests/test_tmux_runtime.py:test_e2e_auto_approve_routes_tmux_waits_through_the_selenium_free_shared_owner": "The E2E harness must route tmux waits through the shared Selenium-free owner.",
     "tests/test_uploads.py:test_upload_request_limit_comes_from_live_settings": "The upload route must use the live settings limit rather than a duplicate literal.",
@@ -103,6 +104,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_yostats_active_browser_window.py:test_active_browser_window_workload_source_contract": "The operator capture tool's workload and measurement setup is an audited static contract; authentication is exercised separately.",
     "tests/test_yostats_active_browser_window.py:test_benchmark_child_runs_in_its_own_process_group_and_is_group_stopped": "The benchmark subprocess group boundary is an operator cleanup contract.",
     "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts": "The capture CLI's bounded signal, deadline, and Selenium setup is an operator safety contract.",
+    "tests/test_filesystem_access_policy.py:test_one_owner_builds_every_filesystem_job_descriptor": "The one-owner scan IS a source-shape contract: a filesystem job descriptor built by hand anywhere in app.py, jobd.py or tests/ is the second construction site that reintroduces the cross-port authorization bypass. Its allowlist is keyed by occurrence count so a second copy of an allowlisted literal still fails, and it was watched firing on a reverted fixture.",
 }
 
 # A function-level reason covers related assertions in that one source-contract
@@ -110,7 +112,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "2dfa4c76f52548f1f1331372b9d9440f57d93bf577f9f32c04bbb849b4d16d2f"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "7d19d89efe0f3741032f53de5f630dd48f9b62e2e6d637011b49fe8fed59e005"
 
 
 @dataclass(frozen=True, slots=True)

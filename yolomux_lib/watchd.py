@@ -718,6 +718,11 @@ class PersistentWatchService:
                 "trigger": "watch-diff",
                 "client_scope": "browser",
                 "client_revision": str(base_payload.get("token") or "watchd")[:80],
+                # watchd builds ONE shared product from the union of every registered descriptor's
+                # roots, so there is no single accepting server to inherit a policy from; this
+                # producer's authority is its own configured roots.  Name it explicitly rather than
+                # letting the batch fall through to an implicit environment read.
+                filesystem.FS_ACCESS_POLICY_FIELD: filesystem.access_policy_descriptor(),
             }
             product = filesystem.filesystem_batch_result(batch_payload)
             if time.monotonic() >= deadline_at:

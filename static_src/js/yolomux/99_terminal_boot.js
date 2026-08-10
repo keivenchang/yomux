@@ -6110,7 +6110,17 @@ async function applySessionMetadataPayload(payload, options = {}) {
   // otherwise flip the epoch back after the replacement's bytes had already landed.
   if (!payload || typeof payload !== 'object') return noteSessionMetadataApply(false, 'malformed_payload', payload);
   const requestIsCurrent = typeof options.requestIsCurrent === 'function' ? options.requestIsCurrent : () => true;
-  if (!requestIsCurrent()) return noteSessionMetadataApply(false, 'superseded_request', payload);
+  if (!requestIsCurrent()) {
+    // A superseded response still carries a true fact about the SERVER's build queue: which build
+    // will observe the request that produced it. That fact is not about whether THIS client request
+    // is still current, so discarding it with the payload is what left a forced read awaiting build
+    // zero -- a target every payload already satisfies -- whenever its apply lost the race against a
+    // concurrent refresh or a `transcripts_changed` push. Recording it here is safe without the
+    // epoch adoption above, because the recorder refuses an identity from any other epoch and never
+    // lowers the number.
+    noteSessionMetadataPendingIdentity(payload);
+    return noteSessionMetadataApply(false, 'superseded_request', payload);
+  }
   const epochChanged = adoptServerEpoch(sessionMetadataPayloadIdentity(payload)?.epoch);
   noteSessionMetadataPendingIdentity(payload);
   const filteredSessions = Object.fromEntries(

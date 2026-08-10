@@ -414,7 +414,7 @@
   "debug.system.roster.state.unavailable": "Niedostępny",
   "debug.system.roster.state.unsupported": "Nieobsługiwany",
   "debug.system.roster.summary.counts": "{ready} gotowych · {idle} bezczynnych · {issues} problemów",
-  "debug.system.roster.summary.cpu": "CPU {current} % z {budget} %",
+  "debug.system.roster.summary.cpu": "CPU {current} we wszystkich wierszach",
   "debug.system.roster.summary.memory": "Pamięć {value}",
   "debug.system.roster.summary.owner": "Właściciel {value}",
   "debug.system.roster.summary.updated": "Zaktualizowano {time}",
