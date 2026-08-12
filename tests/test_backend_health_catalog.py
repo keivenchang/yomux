@@ -100,10 +100,13 @@ no start primitive anywhere on its path.
 from __future__ import annotations
 
 import ast
+import contextlib
 import importlib
 import importlib.util
 import inspect
 import re
+import shutil
+import tempfile
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,6 +132,25 @@ ABANDONED_TOPOLOGY_NAMES = (
     "StoragedSearchCoordinator",
 )
 ABANDONED_MODULES = ("yolomux_lib.daemon", "yolomux_lib.storaged", "yolomux_lib.storaged_process")
+
+
+def _abandoned_module_is_truly_present(module: str) -> bool:
+    """True only when an abandoned module resolves to REAL importable code.
+
+    A fresh checkout has none of the `ABANDONED_MODULES` on disk, so `find_spec` returns None.
+    But the real 0.7.2->0.7.3 upgrade path leaves an empty `yolomux_lib/daemon/` directory with
+    NO `__init__.py` behind. Python resolves that residue as an implicit *namespace package*: a
+    spec whose `origin` is None and whose `submodule_search_locations` is a `_NamespacePath`. No
+    code is loadable from it. Treating that spec as "present" is what falsely failed the oracle in
+    an upgraded/dirty checkout (W15). A namespace-only residue is acceptable; only a spec backed by
+    a real origin (an ordinary module file, or a package with `__init__.py`) is a genuine
+    violation -- an abandoned module that actually came back.
+    """
+
+    spec = importlib.util.find_spec(module)
+    if spec is None:
+        return False
+    return spec.origin is not None
 
 ROLES = ("demand", "status", "identity", "metrics", "recovery")
 
@@ -304,7 +326,7 @@ CATALOG: dict[str, ServiceOwners] = {
         client_owner="yolomux_lib.infra.jobd:JobClient",
         demand_owner=DEMAND_PRIMITIVE,
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
-        demand_evidence="return self.registry.ensure_started()",
+        demand_evidence="started = self.registry.ensure_started()",
         status_owner="yolomux_lib.infra.jobd:JobClient.runtime_status",
         status_row_expression="self.job_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
@@ -332,7 +354,7 @@ CATALOG: dict[str, ServiceOwners] = {
         client_owner="yolomux_lib.statusd_client:StatusClient",
         demand_owner=DEMAND_PRIMITIVE,
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
-        demand_evidence="return self.registry.ensure_started()",
+        demand_evidence="started = self.registry.ensure_started()",
         status_owner="yolomux_lib.statusd_client:StatusClient.runtime_status",
         status_row_expression="self.status_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
@@ -393,7 +415,7 @@ CATALOG: dict[str, ServiceOwners] = {
         client_owner="yolomux_lib.approval.approvald:ApprovalClient",
         demand_owner=DEMAND_PRIMITIVE,
         demand_entrypoint="yolomux_lib.local_services.client:LocalServiceClient.ensure_started",
-        demand_evidence="return self.registry.ensure_started()",
+        demand_evidence="started = self.registry.ensure_started()",
         status_owner="yolomux_lib.approval.approvald:ApprovalClient.runtime_status",
         status_row_expression="self.approval_client.runtime_status",
         identity_owner=REGISTRY_STATUS_IDENTITY,
@@ -737,9 +759,8 @@ def test_an_absent_demand_started_service_is_idle_and_not_alerting_even_though_e
 def test_every_service_has_a_display_label_owner():
     """M2 gave watchd the capability name it lacked; a raw id in the UI is a visible defect.
 
-    `local_services_alert` copies this label verbatim into the persistent UI indicator, so a
-    service missing from the map is named "watchd" there and in the System row while every
-    other service gets a capability name.
+    The System row and the Daemons roster display this label verbatim, so a service missing
+    from the map is named "watchd" in the UI while every other service gets a capability name.
     """
     labels = _literal_assignment(
         _function_ast(SYSTEM_STATUS_SERVICE), "labels"
@@ -1299,7 +1320,11 @@ def test_no_abandoned_topology_name_is_a_service_row_or_an_owner():
         ])
     assert _abandoned_names_in(surfaces) == [], _abandoned_names_in(surfaces)
     for module in ABANDONED_MODULES:
-        assert importlib.util.find_spec(module) is None, module
+        # Not `find_spec(module) is None`: an upgraded checkout leaves an importable namespace-only
+        # residue (empty `yolomux_lib/daemon/`, no `__init__.py`) that returns a spec but no code.
+        # A genuinely-present abandoned module (a real origin) is still a violation; the residue is
+        # tolerated. See `_abandoned_module_is_truly_present` and the W15 regression below.
+        assert not _abandoned_module_is_truly_present(module), module
 
 
 def test_an_abandoned_name_in_an_inventory_is_rejected():
@@ -1310,3 +1335,70 @@ def test_an_abandoned_name_in_an_inventory_is_rejected():
     # Substrings of real identifiers are not hits: this rule must not fire on `storaged.products`
     # style keys or on `jobd`.
     assert _abandoned_names_in(["storagedaemonish", "jobd", "search_indexer"]) == []
+
+
+@contextlib.contextmanager
+def _materialized_namespace_residue(module: str):
+    """Yield after making `module` resolve as a namespace-only residue, then clean up.
+
+    Reproduces the 0.7.2->0.7.3 upgrade residue deterministically and without touching the source
+    tree: create a temporary `<parent>/` directory holding an empty `daemon/` (no `__init__.py`),
+    add it to the real parent package's search path, and invalidate the import caches. On exit the
+    residue is removed and caches invalidated again -- no manual cache deletion, no sleeps.
+    """
+
+    package_name, _, leaf = module.rpartition(".")
+    parent = importlib.import_module(package_name)
+    residue_root = Path(tempfile.mkdtemp(prefix="w15-residue-"))
+    (residue_root / leaf).mkdir()
+    parent.__path__.append(str(residue_root))
+    importlib.invalidate_caches()
+    try:
+        yield residue_root / leaf
+    finally:
+        parent.__path__.remove(str(residue_root))
+        importlib.invalidate_caches()
+        shutil.rmtree(residue_root)
+
+
+def test_namespace_package_residue_is_tolerated_but_a_real_module_is_not():
+    """W15: the abandoned-module oracle survives the upgrade residue, without weakening.
+
+    (a) Clean checkout: none of the abandoned modules resolve to real code, so the oracle holds.
+    (b) Upgraded/dirty checkout: an empty `yolomux_lib/daemon/` namespace residue is importable
+        (`find_spec` returns a spec), which is exactly what falsely failed the bare
+        `find_spec is None` oracle. The fixed oracle tolerates it, but a REAL
+        `yolomux_lib/daemon/__init__.py` would still be a violation.
+    """
+
+    module = "yolomux_lib.daemon"
+    assert module in ABANDONED_MODULES
+
+    # (a) Clean checkout: no residue on disk, no abandoned module is truly present.
+    for abandoned in ABANDONED_MODULES:
+        assert not _abandoned_module_is_truly_present(abandoned), abandoned
+    # The whole oracle holds in the clean state.
+    test_no_abandoned_topology_name_is_a_service_row_or_an_owner()
+
+    # (b) Upgraded/dirty checkout: materialize the namespace residue.
+    with _materialized_namespace_residue(module) as residue_dir:
+        # The residue is importable -- this is precisely what broke the old `find_spec is None`.
+        spec = importlib.util.find_spec(module)
+        assert spec is not None, "residue should resolve as a namespace package"
+        assert spec.origin is None, spec.origin
+        # ...but it is not truly present, so the fixed oracle still holds.
+        assert not _abandoned_module_is_truly_present(module), module
+        test_no_abandoned_topology_name_is_a_service_row_or_an_owner()
+
+        # A REAL module at the same name (an ordinary origin with actual code) WOULD fail.
+        (residue_dir / "__init__.py").write_text("SUPERVISOR = object()\n", encoding="utf-8")
+        importlib.invalidate_caches()
+        real_spec = importlib.util.find_spec(module)
+        assert real_spec is not None and real_spec.origin is not None, real_spec
+        assert _abandoned_module_is_truly_present(module), module
+        with pytest.raises(AssertionError):
+            test_no_abandoned_topology_name_is_a_service_row_or_an_owner()
+
+    # Teardown restored the clean state: the oracle holds again.
+    for abandoned in ABANDONED_MODULES:
+        assert not _abandoned_module_is_truly_present(abandoned), abandoned

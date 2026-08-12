@@ -173,11 +173,15 @@ def list_directory(
     watch_signature_child_limit: int = 0,
 ) -> dict[str, Any]:
     _sync_package_overrides()
-    return listing.list_directory(
+    result = listing.list_directory(
         raw_path,
         performance_details=performance_details,
         watch_signature_child_limit=watch_signature_child_limit,
     )
+    # Item 6: a directory the user is viewing in Finder is concrete visibility evidence -- promote its
+    # indexed root's frontier to user-visible-demand (debounced, non-blocking; never a second crawl).
+    search.promote_visible_path(raw_path)
+    return result
 
 
 def validated_batch_requests(payload: dict[str, Any]) -> list[Any]:
@@ -361,9 +365,15 @@ def watch_signature(raw_path: str, *, child_limit: int = 0) -> tuple[Any, ...]:
 
 
 @normalize_os_errors
-def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
+def search_files(
+    raw_root: str,
+    query: str = "",
+    limit: int | str | None = 400,
+    recursive: bool = False,
+    cursor: str | None = None,
+) -> dict[str, Any]:
     _sync_package_overrides()
-    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive)
+    return search.search_files(raw_root, query=query, limit=limit, recursive=recursive, cursor=cursor)
 
 
 @normalize_os_errors
@@ -427,7 +437,10 @@ def git_file_history(path: Path, limit: int = 60) -> list[dict[str, Any]]:
 @normalize_os_errors
 def diff_file(raw_path: str, from_ref: str | None = None, to_ref: str | None = None) -> dict[str, Any]:
     _sync_package_overrides()
-    return git_ops.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref)
+    payload = git_ops.diff_file(raw_path, from_ref=from_ref, to_ref=to_ref)
+    # Item 6: a file open in the Differ is concrete visibility evidence for its indexed root.
+    search.promote_visible_path(raw_path)
+    return payload
 
 
 @normalize_os_errors
@@ -456,11 +469,30 @@ def read_file(raw_path: str) -> dict[str, Any]:
     return io_ops.read_file(raw_path)
 
 
+def _reindex_after_mutation(mutated_paths: list[Any], reason: str) -> list[str]:
+    """Route a successful YOLOmux file mutation into the ONE hot-path index owner (item 6).
+
+    A create/upsert/delete/rename/upload that changed the filesystem is concrete change evidence, so
+    it must reach the index in seconds instead of waiting for the 1800s safety TTL. It goes through
+    the same `search.reindex_roots_for_paths` owner watchd and the persistent indexer already use --
+    which coalesces by indexed root and either promotes the pending frontier or runs one bounded
+    subtree repair -- so `write`/`delete`/`mkdir`/upload stop bypassing the index. In an HTTP or jobd
+    process (not the elected owner) this only marks paths dirty and dispatches a bounded RPC; the
+    crawl runs in indexd, never on jobd's single interactive worker.
+    """
+    candidates = [str(path) for path in mutated_paths if path]
+    if not candidates:
+        return []
+    return search.reindex_roots_for_paths(candidates, reason=reason)
+
+
 @normalize_os_errors
 def write_file(raw_path: str, content: str, expected_mtime: int | None = None) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.write_file(raw_path, content, expected_mtime=expected_mtime)
     paths.invalidate_path_policy_caches()
+    # Covers editor saves too: an editor save reaches the filesystem through this one write funnel.
+    payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-write")
     return payload
 
 
@@ -469,6 +501,7 @@ def delete_path(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.delete_path(raw_path)
     paths.invalidate_path_policy_caches()
+    payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-delete")
     return payload
 
 
@@ -477,7 +510,7 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.rename_path(raw_path, new_name)
     paths.invalidate_path_policy_caches()
-    payload["reindex_roots"] = search.reindex_roots_for_paths([payload["old_path"], payload["path"]], reason="fs-rename")
+    payload["reindex_roots"] = _reindex_after_mutation([payload["old_path"], payload["path"]], reason="fs-rename")
     return payload
 
 
@@ -486,6 +519,7 @@ def create_directory(raw_path: str) -> dict[str, Any]:
     _sync_package_overrides()
     payload = io_ops.create_directory(raw_path)
     paths.invalidate_path_policy_caches()
+    payload["reindex_roots"] = _reindex_after_mutation([payload.get("path")], reason="fs-mkdir")
     return payload
 
 

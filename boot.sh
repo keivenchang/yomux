@@ -304,17 +304,10 @@ print_detach_prefix() {
   fi
 }
 
+# Delegates to the one shared scanner in startup_common.sh (sourced above), so
+# boot.sh and the supported launcher never carry two copies of this logic.
 port_listener_pids() {
-  local port="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u
-    return
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u
-    return
-  fi
-  die "need ss or lsof to find the listener for port $port"
+  yolomux_port_listener_pids "$1" || die "need ss or lsof to find the listener for port $1"
 }
 
 wait_for_pid_exit() {

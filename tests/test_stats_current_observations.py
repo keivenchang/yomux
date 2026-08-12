@@ -10,7 +10,9 @@ import pytest
 
 from yolomux_lib import app as app_module
 from yolomux_lib import http_routes
+from yolomux_lib.stats_current import browser_family
 from yolomux_lib.stats_current import client as stats_client
+from yolomux_lib.stats_current import families
 from yolomux_lib.stats_current import observations, service, storage
 
 
@@ -538,3 +540,27 @@ def test_statsd_rotates_browser_failure_jsonl_at_its_bound(tmp_path, monkeypatch
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert {record["message"] for record in records} == {"failure 0", "failure 1", "failure 2"}
+
+
+def test_sanitize_retained_payload_redacts_then_rebounds_so_second_validation_passes():
+    """W2: redaction markers expand text past the byte bound and turn a /share path
+    into a non-absolute marker; sanitize must re-bound and normalize so the mandatory
+    second validation passes instead of failing closed on a raw-valid input."""
+    raw = {
+        "kind": "error",
+        "signature": "sig",
+        "message": ("token=a " * 63)[:500],
+        "stack": ("token=a " * 500)[:4000],
+        "source": "/share/raw-secret-token",
+    }
+    validated = families.validate_payload("browser", raw)
+    sanitized = browser_family.sanitize_retained_payload(validated)
+
+    assert "token=a" not in sanitized["message"]
+    assert "token=a" not in sanitized["stack"]
+    assert "raw-secret-token" not in sanitized["source"]
+    assert sanitized["source"] == "/share/[redacted]"
+    assert len(sanitized["message"].encode("utf-8")) <= 500
+    assert len(sanitized["stack"].encode("utf-8")) <= 4000
+    # the mandatory second validation now succeeds
+    families.validate_payload("browser", sanitized)

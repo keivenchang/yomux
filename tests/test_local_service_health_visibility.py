@@ -10,9 +10,14 @@ reach the row, and a demand-started service that nobody has asked for yet must N
 raise an alarm.
 """
 
+import os
+import time
 from typing import Any
 
+import pytest
+
 from yolomux_lib import app as app_module
+from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib.local_services.runtime import local_service_failure_text
 from yolomux_lib.search.search_indexer import SearchIndexerClient
 
@@ -98,7 +103,7 @@ def test_demand_started_service_with_a_real_failure_still_alarms():
 
 
 def test_healthy_services_raise_no_alert():
-    """Negative control: nothing degraded means no indicator anywhere."""
+    """Negative control: nothing degraded means no row alarms anywhere."""
     rows = [
         {"service": name, "pid": 4321, "healthy": True, "last_failure": "", "resources": {}}
         for name in ("indexd", "statsd", "jobd", "statusd", "approvald")
@@ -106,24 +111,28 @@ def test_healthy_services_raise_no_alert():
     rows.append({"service": "watchd", "pid": 0, "healthy": False, "demand_started": True, "last_failure": "", "resources": {}})
     services = [classify(row) for row in rows]
     assert [service["state"] for service in services] == ["running"] * 5 + ["idle"]
-    assert app_module.local_services_alert(services) == {}
+    # No row is alarming: each consumer reads its own `alerting`, and none is set here.
+    assert all(service["alerting"] is False for service in services)
 
 
-def test_alert_names_the_service_and_its_reason():
-    """The indicator must name the service and what is degraded, not just show a dot."""
+def test_a_degraded_service_names_itself_and_its_reason():
+    """A degraded row must name the service and what is degraded, not just flip a flag.
+
+    The rolled-up `alert` summary is gone (W13): every consumer reads each row's own typed
+    fields, so this pins those fields on the row itself.
+    """
     services = [
         classify({"service": "jobd", "pid": 1, "healthy": True, "last_failure": "", "resources": {}}),
         classify({"service": "indexd", "pid": 0, "healthy": False, "last_failure": "indexd exited (1): boom", "resources": {}}),
     ]
-    alert = app_module.local_services_alert(services)
-    assert alert["count"] == 1
-    assert alert["services"] == [{
-        "id": "indexd",
-        "label": "Quick Open index",
-        "state": "unavailable",
-        "reason_code": "service_unavailable",
-        "reason": "indexd exited (1): boom",
-    }]
+    degraded = [service for service in services if service["alerting"] is True]
+    assert len(degraded) == 1
+    row = degraded[0]
+    assert row["id"] == "indexd"
+    assert row["label"] == "Quick Open index"
+    assert row["state"] == "unavailable"
+    assert row["reason_code"] == "service_unavailable"
+    assert row["reason"] == "indexd exited (1): boom"
 
 
 def test_failure_text_helper_prefers_the_live_payload_then_the_registry():
@@ -132,3 +141,61 @@ def test_failure_text_helper_prefers_the_live_payload_then_the_registry():
     assert local_service_failure_text({"failure_reason": "registry"}, {"last_failure": "live"}) == "live"
     assert local_service_failure_text({"failure_reason": "registry"}, {}) == "registry"
     assert local_service_failure_text({}, {}) == ""
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="zombie lifecycle is POSIX-only")
+def test_idle_exited_demand_daemon_zombie_reads_as_idle_not_errored():
+    """A demand daemon that idle-exits but is not yet reaped must classify idle, not "errored".
+
+    The live 7771 defect: a demand daemon (watchd) adopted by a later supervisor generation
+    idle-exits, nothing wait()s it, and it lingers as a zombie whose pid `os.kill(pid, 0)`
+    still reports alive. The service record still names that pid, so `pid > 0` and
+    `observed_health`'s pid-derived `running` both read it as running-but-unhealthy and the
+    System row shows "issue" / "Service did not report healthy status" -- an "errored" alarm
+    for a service that simply went idle. Forge that exact state with a real unreaped zombie and
+    prove the row now reads its `/proc` State and classifies it idle/absent.
+    """
+    child = os.fork()
+    if child == 0:  # pragma: no cover - child never returns
+        os._exit(0)
+    try:
+        deadline = time.monotonic() + 2.0
+        while registry_mod.process_state(child) != "Z" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert registry_mod.process_state(child) == "Z", registry_mod.process_state(child)
+
+        row = {
+            "service": "watchd",
+            "pid": child,
+            "healthy": False,
+            "demand_started": True,
+            "last_failure": "",
+            "resources": {},
+        }
+        service = classify(row)
+        assert service["state"] == "idle", service
+        assert service["reason_code"] == "not_started"
+        assert service["reason"] == "Starts on demand"
+        assert service["alerting"] is False, "an idle-exited demand daemon must not alarm"
+    finally:
+        os.waitpid(child, 0)
+
+
+def test_live_but_unhealthy_daemon_still_reads_as_issue():
+    """The distinction the zombie fix must preserve: a genuinely-running daemon still alarms.
+
+    A daemon whose pid is a live, serving process (state R/S/D) that reports unhealthy is a
+    real outage, not an idle exit. Its `/proc` State is not `Z`, so the zombie guard leaves it
+    alone and it classifies "issue" as before.
+    """
+    row = {
+        "service": "jobd",
+        "pid": os.getpid(),
+        "healthy": False,
+        "last_failure": "",
+        "resources": {},
+    }
+    assert registry_mod.process_state(os.getpid()) != "Z"
+    service = classify(row)
+    assert service["state"] == "issue", service
+    assert service["alerting"] is True

@@ -3326,49 +3326,6 @@ def session_live_pane_repo_roots(info: SessionInfo) -> list[str]:
     return roots
 
 
-def refreshing_session_files_payload_for_info(
-    info: SessionInfo,
-    hours: float = 24.0,
-    from_ref: str | None = None,
-    to_ref: str | None = None,
-    repo_refs: dict[str, dict[str, str]] | None = None,
-) -> SessionFilesPayload:
-    refs_active = refs_requested(from_ref, to_ref)
-    selected_from, selected_to = diff_refs(from_ref, to_ref) if refs_active else ("", "")
-    repo_payloads: list[RepoPayload] = []
-    for repo_text in session_live_pane_repo_roots(info):
-        repo = Path(repo_text)
-        repo_override = (repo_refs or {}).get(repo_text) or (repo_refs or {}).get(str(repo)) or {}
-        repo_from = str(repo_override.get("from") or "").strip() or from_ref
-        repo_to = str(repo_override.get("to") or "").strip() or to_ref
-        repo_refs_active = refs_requested(repo_from, repo_to)
-        sel_from, sel_to = diff_refs(repo_from, repo_to) if repo_refs_active else ("", "")
-        repo_payload: RepoPayload = {
-            "repo": str(repo),
-            "count": 0,
-            "touched_count": 0,
-            "added": 0,
-            "removed": 0,
-            "from_ref": sel_from or "default",
-            "to_ref": sel_to or "base",
-            "error": "",
-        }
-        repo_payload.update(git_ahead_behind(repo, sel_from or None, sel_to or None))
-        repo_payloads.append(repo_payload)
-    return {
-        "session": info.session,
-        "hours": bounded_session_files_hours(hours),
-        "files": [],
-        "repos": repo_payloads,
-        "refs_by_repo": {},
-        "from_ref": selected_from or "default",
-        "to_ref": selected_to or "base",
-        "errors": [],
-        "warnings": [],
-        "refreshing_elsewhere": True,
-    }
-
-
 def session_file_entry(
     session: str,
     agents: list[str],

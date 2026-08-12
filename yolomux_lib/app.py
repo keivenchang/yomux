@@ -79,6 +79,7 @@ from .infra.atomic_file import atomic_write_text
 from .infra.atomic_file import file_lock
 from .infra.cache import MISS as CACHE_MISS
 from .infra.cache import TtlCache
+from .infra.refresh_outcome import RefreshOutcome
 from .infra.host_diagnostics import collect_host_diagnostics
 from .infra.host_identity import current_host_identity
 from .infra.host_partition import host_namespaced_path
@@ -215,6 +216,9 @@ from .tmux.tmux_utils import tmux_has_exact_session
 from .tmux.tmux_utils import tmux_paste_text  # noqa: F401 - Yoagent dependency injection re-export
 from .tmux.tmux_utils import tmux_session_client_rows  # noqa: F401 - session-action compatibility seam
 from .tmux.tmux_utils import tmux_session_target
+from .tmux.session_retirement import SessionRetirementError
+from .tmux.session_retirement import capture_tmux_session_retirement
+from .tmux.session_retirement import join_tmux_session_retirement
 from .tmux.tmux_theme import apply_tmux_theme_color_to_existing
 from .tmux.tmux_theme import apply_tmux_theme_color_to_new_session
 from .tmux.tmux_theme import tmux_theme_color_from_settings
@@ -232,6 +236,8 @@ from .state_services import ClientEventWatcherRecord
 from .state_services import ClientWatchDescriptor
 from .state_services import ClientWatchService
 from .state_services import JobdOperationService
+from .state_services import JobdOperationReservation
+from .state_services import jobd_operation_lane
 from .state_services import SessionFilesDiskPruneRecord
 from .state_services import SessionFilesGitSnapshotRecord
 from .state_services import SessionFilesService
@@ -413,6 +419,64 @@ class JobdOperationUnavailable(RuntimeError):
         self.failure = copy.deepcopy(failure or {"error": message})
         self.code = str(code)
         self.status = status
+
+
+class JobdInteractionLease:
+    """One reference-counted jobd client lease held across an active fs-batch/differ interaction.
+
+    Measured W15 #4 root cause: under a saturated gate the fs-batch completion worker's product
+    poll can be starved longer than the broker's idle window, so between two ``/api/fs/batch``
+    calls the broker decides it is idle, removes its own socket, and the next relay fails with
+    ``LocalRpcError: unattributed_latency`` -- the Finder shows "request failed".  A HELD client
+    lease vetoes ``_idle_should_stop``/``shutdown_if_idle`` so the broker cannot vanish mid-session,
+    while NOT weakening idle shutdown: once no interaction holds it, the broker still idles out and
+    exits honestly.
+
+    This reuses the ONE registry client-lease mechanism -- the same ``acquire_lease`` /
+    ``release_lease`` the scheduler lease already uses -- so it is not a second lease type.  The
+    lease is best-effort liveness, never a safety gate: if the acquire RPC cannot refresh it, the
+    interaction proceeds unpinned rather than failing a healthy request.  Leases are reaped only
+    when their holder process dies, so one acquire pins the broker until the matching release with
+    no TTL refresh loop.
+    """
+
+    def __init__(self, job_client: JobClient) -> None:
+        self._job_client = job_client
+        self._lock = threading.Lock()
+        self._holders = 0
+        self._lease_id = ""
+
+    def acquire(self) -> bool:
+        """Add one interaction holder; take the shared client lease when it is the first."""
+        with self._lock:
+            if self._holders > 0:
+                self._holders += 1
+                return bool(self._lease_id)
+            response = self._job_client.registry.acquire_lease(self._lease_id)
+            lease_id = response.get("lease_id")
+            if response.get("ok") is True and isinstance(lease_id, str) and lease_id:
+                self._lease_id = lease_id
+                self._holders = 1
+                return True
+            # Could not pin the broker this attempt.  Do NOT count a holder: a later acquire must
+            # re-issue the RPC rather than assume a lease it never took.
+            return False
+
+    def release(self) -> None:
+        """Drop one interaction holder; release the shared client lease when the last one leaves."""
+        with self._lock:
+            if self._holders == 0:
+                return
+            self._holders -= 1
+            if self._holders == 0 and self._lease_id:
+                self._job_client.registry.release_lease(self._lease_id)
+                self._lease_id = ""
+
+    @property
+    def held(self) -> bool:
+        """Whether a client lease is currently pinning the broker for an active interaction."""
+        with self._lock:
+            return bool(self._lease_id)
 
 
 TABBER_ACTIVITY_JOBD_JOB_DEADLINE_MS = 15_000
@@ -678,32 +742,6 @@ STATS_AGENT_TOKEN_ENRICH_MEMO_TTL_SECONDS = STATS_AGENT_TOKEN_IDLE_SAMPLE_SECOND
 # One entry per distinct unresolved-agent roster. The roster changes only when a pane starts or
 # stops, so this holds far more history than a live host produces; oldest-expiry entries evict.
 STATS_AGENT_TOKEN_ENRICH_MEMO_MAX_ENTRIES = 64
-
-
-def local_services_alert(services: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize the local services that are down, for the persistent UI indicator.
-
-    Returns {} when nothing is degraded, so the indicator has exactly one falsy resting
-    state. Every listed service carries its own machine-readable reason_code plus the
-    human reason, because "a service is down" without naming which one and what broke is
-    the same silent degradation this exists to remove.
-    """
-    degraded = [service for service in services if service.get("alerting") is True]
-    if not degraded:
-        return {}
-    return {
-        "count": len(degraded),
-        "services": [
-            {
-                "id": str(service.get("id") or ""),
-                "label": str(service.get("label") or ""),
-                "state": str(service.get("state") or ""),
-                "reason_code": str(service.get("reason_code") or ""),
-                "reason": str(service.get("reason") or ""),
-            }
-            for service in degraded
-        ],
-    }
 
 
 def stats_current_usage_health(
@@ -1118,9 +1156,9 @@ CLIENT_WATCH_ROOT_LIMIT = 128
 CLIENT_WATCH_FILE_LIMIT = 128
 FILESYSTEM_WATCH_HISTORY_LIMIT = 64
 FILESYSTEM_WATCH_HISTORY_SECONDS = 180.0
-FILESYSTEM_WATCH_KEYFRAME_SECONDS = 60.0
 PERFORMANCE_RECORD_LIMIT = 4096
 PERFORMANCE_RECENT_LIMIT = 120
+PERFORMANCE_CAPTURE_RECORD_LIMIT = 512
 PERFORMANCE_SUMMARY_WINDOW_SECONDS = 60.0
 SERVER_CPU_BUDGET_PERCENT = 30.0
 # Below this share of the measured CPU, the profiled consumer list is not an explanation and
@@ -1158,6 +1196,11 @@ BACKGROUND_CLIENT_EVENT_POLICIES: dict[str, dict[str, str]] = {
     "auto_approve_changed": {"truth": "tmux workers and yolomux state", "delivery": "push"},
     "background_owner_changed": {"truth": "background-owner", "delivery": "push"},
     "background_refresh_done": {"truth": "background owner", "delivery": "push"},
+    # Streaming Quick Open (step 5): a signal-only per-root progress nudge. Push delivery so a
+    # FOLLOWER web process (not just the indexd-electing owner) receives it and can pull committed
+    # deltas by cursor. The truth is the committed change journal in SQLite; the signal carries no
+    # filesystem data, so persisting + fanning it out cannot disclose one client's paths to another.
+    "search_progress": {"truth": "search change journal", "delivery": "push"},
     "chat_messages_changed": {"truth": "chat database", "delivery": "push"},
     "chat_typing_changed": {"truth": "chat database", "delivery": "push"},
     "event_log_changed": {"truth": "event log", "delivery": "push"},
@@ -1172,6 +1215,12 @@ BACKGROUND_CLIENT_EVENT_TYPES = frozenset(
 )
 BACKGROUND_CLIENT_EVENT_MANIFEST_LIMIT = 128
 BACKGROUND_CLIENT_EVENT_NOTIFY_TIMEOUT_SECONDS = 0.2
+# Streaming Quick Open follower drain: how often a web process with an open palette pulls indexd's
+# buffered progress frames while a crawl is active, and how long "active" lasts after the last kick or
+# unfinished frame. The window is bounded and only opens when the web itself enqueues/promotes a crawl,
+# so an idle terminal never polls the daemon and never keeps it hot past its own idle timeout.
+SEARCH_PROGRESS_DRAIN_POLL_SECONDS = 0.5
+SEARCH_PROGRESS_ACTIVE_WINDOW_SECONDS = 30.0
 CLIENT_EVENT_SIGNATURE_VOLATILE_KEYS = frozenset({
     "activity_age_seconds",
     "activity_ts",
@@ -2337,6 +2386,9 @@ class TmuxWebtermApp:
         # rather than publishing zeros. See `attach_backend_health_store`.
         self.backend_health_store: Any | None = None
         self.job_client = JobClient()
+        # Pins the jobd broker up for the duration of an fs-batch/differ browser interaction so a
+        # saturated gate cannot idle-shut the broker between two /api/fs/batch calls (W15 #4).
+        self.jobd_fs_batch_lease = JobdInteractionLease(self.job_client)
         self.jobd_operation_service = JobdOperationService()
         self.upload_retention_sweeper = UploadRetentionSweeper()
         self.approval_client = ApprovalClient()
@@ -2350,12 +2402,17 @@ class TmuxWebtermApp:
         self.agent_window_transition_state: dict[str, dict[str, float | str]] = {}
         self.performance_record_lock = threading.RLock()
         self.performance_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_RECORD_LIMIT)
+        self.performance_capture_records: collections.deque[dict[str, Any]] = collections.deque(maxlen=PERFORMANCE_CAPTURE_RECORD_LIMIT)
         self.queued_delivery_ledger = QueuedDeliveryLedger(
             state_path=SESSION_FILES_OPERATION_STATE_PATH,
         )
         self.background_refresh_event_log_lock = threading.Lock()
         self.background_refresh_event_log_records: dict[tuple[str, str], BackgroundRefreshEventLogRecord] = {}
         self.replayed_background_client_event_ids: set[str] = set()
+        # The monotonic deadline until which the client-event loop drains indexd's buffered Quick Open
+        # progress frames. Opened by `mark_search_progress_active` when this web process kicks a crawl,
+        # extended while unfinished frames keep arriving, and left to lapse once a crawl settles.
+        self.search_progress_active_until: float = 0.0
         self.client_events = ClientEventBroker()
         self.abandon_recovered_operations()
         # Catalog startup is offline-only; the coordinator performs provider
@@ -2441,6 +2498,7 @@ class TmuxWebtermApp:
         file_index.set_background_index_search_requester(self.request_background_index_search)
         file_index.set_background_owner_bytes_recorder(self.record_background_search_index_bytes_written)
         file_index.set_background_owner_done_notifier(self.publish_background_refresh_done)
+        file_index.set_search_progress_notifier(self.publish_search_progress)
 
     def require_known_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus] | None:
         # The standard "unknown session -> 404" guard. Decorated handlers use requires_known_session();
@@ -3118,10 +3176,27 @@ class TmuxWebtermApp:
         self.job_client.start_for_scheduler()
         self.pricing_refresh_coordinator.start_periodic()
         self.stats_current_runtime.start()
+        self.refresh_search_indexer_schedule()
         self.warm_start_session_files_payload_cache()
         self.warm_start_tabber_activity_cache()
         self.start_tabber_activity_cache_warmer()
         self.publish_background_client_event("background_owner_changed", self.background_owner.status_payload(), trigger="background-owner", cache="ready")
+
+    def refresh_search_indexer_schedule(self) -> dict[str, Any]:
+        """Lease indexd and enqueue startup-depth-1 work for every configured indexed root (item 1).
+
+        Only the elected background owner leases and schedules. Called on owner acquisition and
+        whenever indexed-root settings change while this server owns scheduling, so adding a root
+        starts its layer-1 crawl proactively and removing every root releases the lease and lets the
+        daemon idle out honestly. Reuses the one `indexd` service; it starts no second scheduler.
+        """
+        if not self.background_owner.is_owner():
+            return {"ok": True, "owner": False, "scheduled_roots": [], "leased": False}
+        settings = self.settings_payload().get("settings", {})
+        file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
+        roots = list(self.indexed_repo_discovery_dirs(file_explorer))
+        result = self.search_indexer.lease_configured_roots(roots)
+        return {**result, "owner": True}
 
     def background_can_run(self, role: str) -> bool:
         return self.background_owner.can_run(role)
@@ -3141,10 +3216,10 @@ class TmuxWebtermApp:
         # endpoint so routine owner state never serializes the recent profiling ring.
         return self.background_owner.status_payload(), HTTPStatus.OK
 
-    def performance_diagnostics_payload(self) -> dict[str, Any]:
+    def performance_diagnostics_payload(self, measurement_scope: str = "") -> dict[str, Any]:
         """Return bounded profiling summaries without making status polling expensive."""
 
-        metrics = self.performance_metrics_payload()
+        metrics = self.performance_metrics_payload(measurement_scope=measurement_scope)
         browser_diagnostics_response = self.stats_current_client.browser_diagnostics()
         browser_profiles = {
             key: value for key, value in browser_diagnostics_response.get("profiles", {}).items()
@@ -3188,10 +3263,15 @@ class TmuxWebtermApp:
             **self.queued_delivery_ledger.diagnostics(),
         }
 
-    def observe_http_delivery(self, payload: object, status: HTTPStatus | int) -> None:
-        """Record one structured HTTP promise or terminal at the response boundary."""
+    def observe_http_commit(self, payload: object, status: HTTPStatus | int) -> None:
+        """Register an accepted/committed operation's queued state before its response flush."""
 
-        self.queued_delivery_ledger.observe_http_response(payload, status)
+        self.queued_delivery_ledger.observe_http_commit(payload, status)
+
+    def observe_http_receipt(self, payload: object, status: HTTPStatus | int) -> None:
+        """Record that an accepted receipt reached the client, only after a successful flush."""
+
+        self.queued_delivery_ledger.observe_http_receipt(payload, status)
 
     def observe_http_product_delivery(self, key: str, epoch: int) -> None:
         """Register one explicit ready-byte terminal before the response is framed."""
@@ -3598,6 +3678,9 @@ class TmuxWebtermApp:
             self.activity_transcript_service.tabber_cache_record.refresh_worker = None
         demoted_warmer.wake.set()  # unpark so a parked warmer exits promptly
         self.session_files_service.cancel_all_work()
+        # Release the configured-root scheduler lease so the daemon may idle out honestly and its
+        # Daemons row stops reporting a scheduled obligation this demoted server no longer owns.
+        self.search_indexer.release_scheduler_lease()
         file_index.clear_memory_indexes()
         # Demotion/release is just as relevant to followers as acquisition.  Use
         # the durable background fan-out parent so clients on another port do
@@ -3630,7 +3713,9 @@ class TmuxWebtermApp:
         return {"ok": True, "owner": False, "status": self.background_owner.status_payload()}
 
     def background_refresh_should_fallback(self, result: dict[str, Any]) -> bool:
-        return bool(result.get("fallback"))
+        # The single classifier owns "must the caller compute locally?"; every
+        # consumer routes through it so no two derive contradictory verdicts.
+        return RefreshOutcome.from_result(result).fallback
 
     def record_background_avoided_recompute(self, role: str) -> None:
         recorder = getattr(self.background_owner, "record_avoided_recompute", None)
@@ -3680,6 +3765,12 @@ class TmuxWebtermApp:
                 try:
                     if request_payload.get("operation") == "unindex":
                         result["indexer"] = self.search_indexer.unindex(root)
+                    elif request_payload.get("operation") == "promote":
+                        # Item 5: a Quick Open query for a not-yet-covered scope promotes that root's
+                        # existing frontier to user-visible-demand, never launching a second crawl.
+                        result["indexer"] = self.search_indexer.promote_user_visible(
+                            root, str(request_payload.get("directory") or "")
+                        )
                     else:
                         changed_paths = request_payload.get("paths")
                         if not isinstance(changed_paths, list):
@@ -3690,6 +3781,10 @@ class TmuxWebtermApp:
                             normalized_changed_paths,
                             reason=str(request_payload.get("reason") or "owner-refresh"),
                         )
+                    if result["indexer"].get("accepted"):
+                        # A crawl was accepted in the daemon; become the follower that drains its
+                        # redacted progress frames onto the shared bus while it runs.
+                        self.mark_search_progress_active()
                     if not result["indexer"].get("accepted"):
                         result.update({
                             "ok": False,
@@ -3698,7 +3793,14 @@ class TmuxWebtermApp:
                         })
                 except filesystem.FilesystemError as exc:
                     result.update({"ok": False, "accepted": False, "error": str(exc)})
-        cache_status = "coalesced" if result.get("coalesced") else ("fallback" if self.background_refresh_should_fallback(result) else ("accepted" if result.get("accepted") else "rejected"))
+        # Classify the raw result ONCE, on ingress. Every downstream decision --
+        # the performance-sample label, the owner/follower role, the fallback
+        # branch, and `refreshing_elsewhere` -- reads this single verdict instead
+        # of re-inspecting the raw booleans, so they cannot diverge. Stamp the
+        # derived `refreshing_elsewhere` so control-outcome consumers reading the
+        # returned dict (e.g. `_unindex_safe_root`) get the same judgement.
+        outcome = RefreshOutcome.from_result(result)
+        result["refreshing_elsewhere"] = outcome.refreshing_elsewhere
         self.record_performance_sample(
             role,
             "background-refresh-request",
@@ -3706,14 +3808,14 @@ class TmuxWebtermApp:
             compute_ms=(time.perf_counter() - started) * 1000,
             payload=request_payload,
             cache_key=request_payload.get("cache_key", role),
-            cache_status=cache_status,
-            owner_role="owner" if result.get("local_owner") else "follower",
-            details={"accepted": bool(result.get("accepted")), "fallback": bool(result.get("fallback")), "coalesced": bool(result.get("coalesced"))},
+            cache_status=outcome.cache_status,
+            owner_role="owner" if outcome.local_owner else "follower",
+            details={"accepted": outcome.accepted, "fallback": outcome.fallback, "coalesced": outcome.coalesced},
         )
-        if result.get("local_owner"):
+        if outcome.local_owner:
             if role == BACKGROUND_ROLE_STATS_SAMPLER and request_payload.get("family") == "agent_tokens":
                 result["refreshing"] = self.stats_current_runtime.wake("agent_tokens")
-            if not result.get("coalesced"):
+            if not outcome.coalesced:
                 self.log_sampled_background_refresh_event(
                     "background_refresh_started",
                     role,
@@ -3725,10 +3827,8 @@ class TmuxWebtermApp:
                     result["refreshing"] = self.start_requested_session_files_cache_refresh(request_payload)
                 elif role == BACKGROUND_ROLE_TABBER_ACTIVITY:
                     result["refreshing"] = self.start_tabber_activity_cache_refresh()
-        elif self.background_refresh_should_fallback(result):
+        elif outcome.fallback:
             self.record_background_fallback(role, result, payload)
-        if result.get("coalesced"):
-            return result
         return result
 
     def refresh_sessions(self, maintenance: bool = True) -> list[str]:
@@ -4953,6 +5053,46 @@ class TmuxWebtermApp:
         )
         return self.publish_background_client_event("background_refresh_done", event_payload, trigger="background-refresh", cache="ready")
 
+    def publish_search_progress(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Fan out one redacted Quick Open progress signal over the shared background-client-events bus.
+
+        The frame is already `{scope_id, generation, revision, coverage}` -- the writer (`indexd`)
+        redacted and coalesced it in `file_index.notify_search_progress`. This method only forwards it;
+        it MUST NOT enrich the payload with anything (a role, a root, a session), because every field
+        here is globally persisted, fanned out to all clients, and replayed on reconnect. Passing the
+        frame through unchanged is what keeps the security boundary fail-closed at the transport."""
+        return self.publish_background_client_event("search_progress", dict(frame), trigger="search-progress", cache="ready")
+
+    def mark_search_progress_active(self) -> None:
+        """Open/extend the window in which the client-event loop drains indexd's progress frames.
+
+        The crawl runs in the `indexd` daemon, which cannot reach the shared client-events bus, so the
+        web process that kicked it (`request_background_refresh` enqueue/promote) becomes the follower
+        that drains the daemon's redacted frames and republishes them. Opening a bounded active window
+        and waking the loop delivers the first frame within one poll instead of waiting for an unrelated
+        deadline; an idle terminal never opens the window, so the daemon is never polled or kept hot."""
+        self.search_progress_active_until = time.monotonic() + SEARCH_PROGRESS_ACTIVE_WINDOW_SECONDS
+        record = self.client_watch_service.event_watcher_record
+        record.next_search_progress_poll_at = 0.0
+        record.wake_event.set()
+
+    def drain_and_publish_search_progress(self) -> int:
+        """Forward one batch of indexd's buffered progress frames onto the shared client-events bus.
+
+        `notify_search_progress` builds the redacted `{scope_id, generation, revision, coverage}` frame
+        inside the daemon but cannot publish it there (no App/broker). This FOLLOWER drains those frames
+        and republishes each UNCHANGED through the one forwarder (`publish_search_progress`) -- the same
+        path a same-process crawl would take -- so the palette receives the signal and pulls committed
+        deltas by cursor. A frame that reports full coverage does not extend the active window; an
+        unfinished one does, so draining tracks the crawl and stops after it settles."""
+        frames = self.search_indexer.drain_search_progress()
+        for frame in frames:
+            coverage = frame.get("coverage") if isinstance(frame.get("coverage"), dict) else {}
+            if not coverage.get("full_coverage"):
+                self.search_progress_active_until = time.monotonic() + SEARCH_PROGRESS_ACTIVE_WINDOW_SECONDS
+            self.publish_search_progress(frame)
+        return len(frames)
+
     def handle_background_client_event(self, request: dict[str, Any]) -> dict[str, Any]:
         event_type = str(request.get("event_type") or "")
         if event_type not in BACKGROUND_CLIENT_EVENT_TYPES or event_type not in CLIENT_EVENT_TYPES:
@@ -5064,7 +5204,22 @@ class TmuxWebtermApp:
                 removed_fields.append(key)
             elif key not in previous or self.stable_client_event_payload_signature(previous.get(key)) != self.stable_client_event_payload_signature(current.get(key)):
                 fields[key] = copy.deepcopy(current[key])
-        if not changes and not removed_keys and not fields and not removed_fields:
+        # An always-included field (the agent-window snapshot revision) is excluded from the change
+        # comparison above so an unchanged roster never fans out a spurious patch. But when only the
+        # revision advances -- the server re-measured the exact same rows under a new generation --
+        # the browser still has to learn the new revision to clear its own stale marker, and it must
+        # do so from this patch rather than an HTTP refetch. So an always-field value change is itself
+        # a reason to emit an otherwise-minimal patch (empty changes, one field).
+        always_field_changed = any(
+            key in current
+            and (
+                key not in previous
+                or self.stable_client_event_payload_signature(previous.get(key))
+                != self.stable_client_event_payload_signature(current.get(key))
+            )
+            for key in always_fields
+        )
+        if not changes and not removed_keys and not fields and not removed_fields and not always_field_changed:
             return None
         for key in sorted(always_fields):
             if key in current:
@@ -5717,6 +5872,8 @@ class TmuxWebtermApp:
                 deadlines.append(current.next_tmux_signal_poll_at)
         if not channels.isdisjoint({"core", "attention"}):
             deadlines.append(current.next_watched_pr_poll_at)
+            if now < self.search_progress_active_until:
+                deadlines.append(current.next_search_progress_poll_at)
         if not channels.isdisjoint({"yoagent", "attention"}):
             deadlines.append(current.next_yoagent_job_poll_at)
         if not deadlines:
@@ -6007,12 +6164,16 @@ class TmuxWebtermApp:
         settings = settings_payload().get("settings", {})
         file_explorer = settings.get("file_explorer", {}) if isinstance(settings, dict) else {}
         indexed_dirs = list(self.indexed_repo_discovery_dirs(file_explorer))
-        # Same shared policy owner the Finder index and Differ ask; the watch daemon needs only its
-        # directory-name half.
-        skip_dirs = sorted(exclusions.ExclusionPolicy.from_settings(
+        # Same shared policy owner the Finder index and Differ ask. The watch daemon needs BOTH
+        # halves: the directory-name half (skip_dirs) and the configured index_exclude_paths rules
+        # (exclude_rules), so it can compile the FULL policy through this one owner and apply it at
+        # native registration -- not a second ignore list inside watchd.
+        exclusion_policy = exclusions.ExclusionPolicy.from_settings(
             file_explorer if isinstance(file_explorer, dict) else {},
             session_files.DEFAULT_INDEX_EXCLUDE_DIR_NAMES,
-        ).skip_dir_names)
+        )
+        skip_dirs = sorted(exclusion_policy.skip_dir_names)
+        exclude_rules = list(exclusion_policy.exclude_rules)
         configured_roots = [str(root) for root in filesystem._configured_fs_roots()]
         with self.session_files_service.cache_lock:
             repo_roots = sorted(self.session_files_service.repo_dirty_generations)
@@ -6033,6 +6194,7 @@ class TmuxWebtermApp:
                 "repo_roots": repo_roots,
                 "indexed_dirs": indexed_dirs,
                 "skip_dirs": skip_dirs,
+                "exclude_rules": exclude_rules,
                 "settings_path": str(SETTINGS_PATH.expanduser().resolve(strict=False)),
                 "attention_path": str(self.tmux_ai_status_path.expanduser().resolve(strict=False)),
                 "configured_roots": configured_roots,
@@ -6158,7 +6320,6 @@ class TmuxWebtermApp:
                 return []
             if reset or record.watchd_epoch != epoch:
                 self.client_watch_service.filesystem_history.clear()
-                self.client_watch_service.filesystem_payload_signature = ""
             previous_filesystem_roots = record.filesystem_roots
             record.watchd_epoch = epoch
             record.watchd_revision = revision_number
@@ -6224,9 +6385,18 @@ class TmuxWebtermApp:
             # against the cached repository roots, so an ordinary file inside a
             # repository invalidates exactly that repository.
             invalidate_git_metadata_paths(changed_paths)
+            # Item 6: feed native watchd change evidence into the ONE hot-path index owner so a file
+            # created/modified/deleted outside YOLOmux (an external editor, a build) refreshes the
+            # Quick Open index in seconds instead of waiting for the safety TTL. These paths are
+            # already scoped to this server's authorized roots; the owner coalesces them by indexed
+            # root and either promotes the frontier or runs one bounded subtree repair.
+            filesystem.reindex_roots_for_paths([str(path) for path in changed_paths], reason="watchd")
         if revision.get("attention_changed"):
             events.extend(self.refresh_shared_attention_acks(trigger="watchd", notify_followers=True))
         if revision.get("settings_changed"):
+            # Re-lease/enqueue when indexed-root settings change: added roots start layer-1 crawls,
+            # removed roots release the scheduler obligation. Only the owner acts (guarded inside).
+            self.refresh_search_indexer_schedule()
             self.publish_client_event("settings_changed", {"data": self.settings_payload()}, trigger="watchd", cache="ready")
             events.append("settings_changed")
         if revision.get("transcripts_changed"):
@@ -6582,14 +6752,6 @@ class TmuxWebtermApp:
             for root in roots[:CLIENT_WATCH_ROOT_LIMIT]
         )
 
-    def filesystem_watch_full_due(self) -> bool:
-        with self.client_watch_service.lock:
-            return self.client_watch_service.filesystem_last_full_at <= 0.0 or time.monotonic() - self.client_watch_service.filesystem_last_full_at >= FILESYSTEM_WATCH_KEYFRAME_SECONDS
-
-    def mark_filesystem_watch_full_sent(self) -> None:
-        with self.client_watch_service.lock:
-            self.client_watch_service.filesystem_last_full_at = time.monotonic()
-
     def filesystem_watch_full_plan(
         self,
         record: dict[str, Any],
@@ -6850,6 +7012,15 @@ class TmuxWebtermApp:
         operation = "jobd.produce"
         data: dict[str, Any] | None = None
         failure: tuple[dict[str, Any], str, HTTPStatus, str] | None = None
+        # Hold the jobd interaction lease across the whole submit+product-poll window, exactly as
+        # POST /api/fs/batch does (W15 #4).  Under a saturated gate this completion worker can be
+        # starved between the submit ``produce`` and the product poll for longer than the broker's
+        # idle window; the held lease vetoes the broker's idle shutdown so its socket cannot vanish
+        # mid-interaction, which was the live ``GET /api/fs/watch-diff`` jobd-404.  This is the same
+        # ONE lease owner fs/batch holds -- best-effort liveness, never a safety gate -- so the
+        # ``try/finally`` always releases even when acquire could not pin the broker (release is
+        # ref-counted and no-ops at holders==0).
+        self.jobd_fs_batch_lease.acquire()
         try:
             batches = self.submit_filesystem_watch_batches(
                 roots,
@@ -6881,6 +7052,8 @@ class TmuxWebtermApp:
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 "producer_failed",
             )
+        finally:
+            self.jobd_fs_batch_lease.release()
         operation_id = receipt_fence.wait_for_operation_id()
         if not operation_id:
             return
@@ -6906,6 +7079,7 @@ class TmuxWebtermApp:
         base_payload: dict[str, Any],
         roots: list[str],
         identity_seed: str,
+        reservation: JobdOperationReservation,
     ) -> tuple[dict[str, Any], HTTPStatus]:
         deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
         # The receipt is the only place the caller learns how much bounded work it is waiting on.
@@ -6913,6 +7087,7 @@ class TmuxWebtermApp:
         batch_count = math.ceil(len(roots) / filesystem.MAX_BATCH_REQUESTS)
         receipt_fence = FilesystemWatchReceiptFence()
         submitted = self.jobd_operation_service.submit_reserved(
+            reservation,
             self.complete_filesystem_watch_diff_operation,
             receipt_fence,
             request_id,
@@ -7000,7 +7175,8 @@ class TmuxWebtermApp:
                 cached_products,
                 product_keys={product_key},
             ), HTTPStatus.OK
-        if not self.jobd_operation_service.reserve():
+        reservation = self.jobd_operation_service.reserve("bulk")
+        if reservation is None:
             result = self.jobd_operation_failure_result(
                 request_id,
                 {"error": "jobd operation completion pool is full", "status": "service_busy"},
@@ -7010,188 +7186,7 @@ class TmuxWebtermApp:
             )
             self.record_operation_failure("", result)
             return result, HTTPStatus.SERVICE_UNAVAILABLE
-        return self.accept_filesystem_watch_diff_operation(request_id, base_payload, roots, identity_seed)
-
-    def publish_filesystem_ready_event(
-        self,
-        roots: list[str],
-        trigger: str = "watch",
-        change_summary: dict[str, Any] | None = None,
-        current_signature: tuple[Any, ...] | None = None,
-        force_full: bool = False,
-        defer_full: bool = False,
-    ) -> list[str]:
-        if not roots:
-            return []
-        started = time.perf_counter()
-        filesystem_signature = current_signature or self.filesystem_watch_signature_for_roots(roots)
-        token = self.record_filesystem_watch_snapshot(filesystem_signature)
-        with self.client_watch_service.lock:
-            previous_signature = self.client_watch_service.filesystem_payload_signature
-        if previous_signature == token:
-            return []
-        full = not defer_full and (force_full or trigger != "watch" or self.filesystem_watch_full_due())
-        if not full:
-            with self.client_watch_service.lock:
-                self.client_watch_service.filesystem_payload_signature = token
-            payload = {
-                "roots": roots,
-                "mode": "diff",
-                "refresh": True,
-                "token": token,
-                "change_summary": change_summary or {},
-                "compute_ms": round((time.perf_counter() - started) * 1000, 1),
-            }
-            self.publish_client_event(
-                "fs_changed",
-                payload,
-                trigger=trigger,
-                cache="ready",
-                compute_ms=float(payload.get("compute_ms") or 0.0),
-            )
-            return ["fs_changed"]
-        with self.client_watch_service.lock:
-            inflight_token = self.client_watch_service.filesystem_full_inflight_token
-            if not inflight_token:
-                self.client_watch_service.filesystem_full_inflight_token = token
-        if inflight_token == token:
-            return []
-        if inflight_token:
-            with self.client_watch_service.lock:
-                self.client_watch_service.filesystem_payload_signature = token
-            payload = {
-                "roots": roots,
-                "mode": "diff",
-                "refresh": True,
-                "token": token,
-                "change_summary": change_summary or {},
-                "compute_ms": round((time.perf_counter() - started) * 1000, 1),
-            }
-            self.publish_client_event(
-                "fs_changed",
-                payload,
-                trigger=trigger,
-                cache="ready",
-                compute_ms=float(payload.get("compute_ms") or 0.0),
-            )
-            return ["fs_changed"]
-        if not self.jobd_operation_service.reserve():
-            self.clear_filesystem_watch_full_inflight(token)
-            return []
-        try:
-            batches = self.submit_filesystem_watch_batches(roots, token, delivery="ready_or_receipt")
-        except JobdOperationUnavailable as error:
-            self.jobd_operation_service.release_reservation()
-            self.record_filesystem_watch_product_failure(error, trigger)
-            self.clear_filesystem_watch_full_inflight(token)
-            return []
-        except Exception:
-            self.jobd_operation_service.release_reservation()
-            self.clear_filesystem_watch_full_inflight(token)
-            raise
-        base_payload = {"mode": "full", "token": token, "removed_roots": []}
-        if all(batch.ready_product is not None for batch in batches):
-            self.jobd_operation_service.release_reservation()
-            # Warm children still go through the one resolver, so their responses are re-based
-            # onto parent root order by the same owner that handles cold children.
-            products = self.resolve_filesystem_watch_batches(batches, time.time())
-            payload = self.materialize_filesystem_watch_products(
-                base_payload,
-                roots,
-                products,
-                product_keys={batch.producer.product_key for batch in batches},
-            )
-            return self.publish_completed_filesystem_full_payload(token, trigger, payload)
-        deadline_at = time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS
-        submitted = self.jobd_operation_service.submit_reserved(
-            self.complete_filesystem_ready_event,
-            token,
-            trigger,
-            base_payload,
-            roots,
-            batches,
-            deadline_at,
-        )
-        if not submitted:
-            self.clear_filesystem_watch_full_inflight(token)
-        return []
-
-    def clear_filesystem_watch_full_inflight(self, token: str) -> None:
-        with self.client_watch_service.lock:
-            if self.client_watch_service.filesystem_full_inflight_token == token:
-                self.client_watch_service.filesystem_full_inflight_token = ""
-
-    def record_filesystem_watch_product_failure(
-        self,
-        error: JobdOperationUnavailable,
-        trigger: str,
-    ) -> None:
-        result = self.jobd_operation_failure_result(
-            self.new_api_request_id(),
-            error.failure,
-            route="fs_changed",
-            operation="jobd.product",
-            code=error.code,
-        )
-        self.record_operation_failure("", result)
-
-    def publish_completed_filesystem_full_payload(
-        self,
-        token: str,
-        trigger: str,
-        payload: dict[str, Any],
-    ) -> list[str]:
-        with self.client_watch_service.lock:
-            if self.client_watch_service.filesystem_full_inflight_token == token:
-                self.client_watch_service.filesystem_full_inflight_token = ""
-            latest_record = self.client_watch_service.filesystem_history[-1] if self.client_watch_service.filesystem_history else {}
-            latest_token = str(latest_record.get("token") or "")
-            if latest_token and latest_token != token:
-                return []
-            self.client_watch_service.filesystem_payload_signature = token
-            self.client_watch_service.filesystem_last_full_at = time.monotonic()
-        self.publish_client_event(
-            "fs_changed",
-            payload,
-            trigger=trigger,
-            cache="ready",
-            compute_ms=float(payload.get("compute_ms") or 0.0),
-        )
-        return ["fs_changed"]
-
-    def complete_filesystem_ready_event(
-        self,
-        token: str,
-        trigger: str,
-        base_payload: dict[str, Any],
-        roots: list[str],
-        batches: tuple[FilesystemWatchBatchProduct, ...],
-        deadline_at: float,
-    ) -> None:
-        try:
-            products = self.resolve_filesystem_watch_batches(batches, deadline_at)
-            payload = self.materialize_filesystem_watch_products(
-                base_payload,
-                roots,
-                products,
-                product_keys={batch.producer.product_key for batch in batches},
-            )
-        except JobdOperationUnavailable as error:
-            if error.code != "producer_abandoned" or not self.jobd_operation_service.stop_event.is_set():
-                self.record_filesystem_watch_product_failure(error, trigger)
-            self.clear_filesystem_watch_full_inflight(token)
-            return
-        except Exception as error:
-            failure = JobdOperationUnavailable(
-                str(error),
-                {"error": str(error), "cause": local_service_exception_cause(error)},
-                code="producer_failed",
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-            self.record_filesystem_watch_product_failure(failure, trigger)
-            self.clear_filesystem_watch_full_inflight(token)
-            return
-        self.publish_completed_filesystem_full_payload(token, trigger, payload)
+        return self.accept_filesystem_watch_diff_operation(request_id, base_payload, roots, identity_seed, reservation)
 
     def clear_transcript_content_caches(self) -> None:
         with self.activity_transcript_service.transcript_tail_cache_lock:
@@ -7755,6 +7750,11 @@ class TmuxWebtermApp:
                         events = self.yoagent_controller.poll_yoagent_jobs_once()
                         self.note_client_event_recurring_work(current, "yoagent_job_reconcile", useful=bool(events))
                         current.next_yoagent_job_poll_at = now + YOAGENT_JOB_POLL_SECONDS
+                    if (self.client_events.has_demand("core") or notification_demand) and now < self.search_progress_active_until and now >= current.next_search_progress_poll_at:
+                        # Streaming Quick Open: while a crawl this process kicked is active and a palette
+                        # client is subscribed, forward indexd's buffered progress frames onto the bus.
+                        self.drain_and_publish_search_progress()
+                        current.next_search_progress_poll_at = now + SEARCH_PROGRESS_DRAIN_POLL_SECONDS
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.log_event(
                         None,
@@ -8845,7 +8845,8 @@ class TmuxWebtermApp:
             )
             self.record_operation_failure("", result)
             return result, HTTPStatus.SERVICE_UNAVAILABLE
-        if not self.jobd_operation_service.reserve():
+        reservation = self.jobd_operation_service.reserve("bulk")
+        if reservation is None:
             result = self.session_files_failure_result(
                 request_id,
                 {"error": "jobd operation completion pool is full", "status": "service_busy"},
@@ -8881,10 +8882,11 @@ class TmuxWebtermApp:
                 },
             )
         except Exception:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             raise
         operation_id = str(receipt["operation"]["id"])
         submitted = self.jobd_operation_service.submit_reserved(
+            reservation,
             self.complete_session_files_operation,
             operation_id,
             request_id,
@@ -10324,6 +10326,11 @@ class TmuxWebtermApp:
                 previous_retention_days=previous_retention_days,
             )
         self.sync_tmux_theme_from_settings(payload, force=patch_updates_active_color(patch))
+        # Re-lease/enqueue promptly when indexed-root settings change: added roots start their
+        # layer-1 crawl and removed roots release the scheduler obligation, without waiting for the
+        # asynchronous watchd settings revision. Guarded to the background owner inside.
+        if isinstance(patch, dict) and isinstance(patch.get("file_explorer"), dict) and "indexed_dirs" in patch["file_explorer"]:
+            self.refresh_search_indexer_schedule()
         self.publish_background_client_event("settings_changed", {"mtime_ns": payload.get("mtime_ns", 0), "data": payload}, trigger="manual", cache="ready")
         self.wake_client_event_watcher()
         return payload
@@ -10550,6 +10557,9 @@ class TmuxWebtermApp:
             }
         with self.performance_record_lock:
             self.performance_records.append(item)
+            item_details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            if item_details.get("measurement_scope") == "capture":
+                self.performance_capture_records.append(item)
         return item
 
     def performance_metrics_payload(self, window_seconds: float = PERFORMANCE_SUMMARY_WINDOW_SECONDS, measurement_scope: str = "") -> dict[str, Any]:
@@ -10558,7 +10568,13 @@ class TmuxWebtermApp:
         requested_scope = str(measurement_scope or "").strip()
         with self.performance_record_lock:
             records = [dict(item) for item in self.performance_records]
-        window_records = [item for item in records if self.float_value(item.get("time"), 0.0) >= cutoff]
+            scoped_records = [dict(item) for item in self.performance_capture_records] if requested_scope == "capture" else records
+        # Capture rows have their own bounded ring and unique request digests. Do not apply the
+        # diagnostics UI's 60-second summary window to a 200-request measurement run: a slow but
+        # valid run must remain joinable, and the caller selects its exact rows by digest.
+        window_records = scoped_records if requested_scope == "capture" else [
+            item for item in scoped_records if self.float_value(item.get("time"), 0.0) >= cutoff
+        ]
         if requested_scope:
             window_records = [
                 item for item in window_records
@@ -10621,7 +10637,9 @@ class TmuxWebtermApp:
             "record_count": len(records),
             "summary": summary_rows,
             "top_payload_bytes": top_payload_rows,
-            "recent": records[-PERFORMANCE_RECENT_LIMIT:],
+            # A scoped request must return its OWN recent rows, not the global ring tail (which
+            # unrelated churn evicts): `window_records` is already scope+window filtered (W9).
+            "recent": window_records if requested_scope == "capture" else records[-PERFORMANCE_RECENT_LIMIT:],
         }
 
     def server_cpu_budget_top_consumers(
@@ -11062,14 +11080,26 @@ class TmuxWebtermApp:
             "statsd": "YO!stats",
             "jobd": "Filesystem jobs",
             "statusd": "Tmux status",
-            # watchd had no entry, so the indicator and System row named it "watchd" -- the raw
-            # id -- while every other service got a capability name. local_services_alert copies
-            # this label verbatim into the persistent UI indicator, so a missing entry is a
-            # user-visible defect, not a cosmetic one.
+            # watchd had no entry, so the System row named it "watchd" -- the raw id -- while
+            # every other service got a capability name. This label is what the System row and the
+            # Daemons roster display verbatim, so a missing entry is a user-visible defect, not a
+            # cosmetic one.
             "watchd": "File watching",
             "approvald": "Auto-approval",
         }
         pid = int(row.get("pid") or 0)
+        # A demand daemon that idle-exits becomes a zombie until the registry reaper wait()s it:
+        # `os.kill(pid, 0)` still succeeds and the service record still names it, so both `pid > 0`
+        # here and the `pid`-derived `running` inside `observed_health` would read a dead-and-unreaped
+        # child as a running-but-unhealthy service and raise a false "errored". Its `/proc` State is
+        # the truth -- `Z` means dead, which for a demand-scoped service is absent-by-design, not an
+        # outage. Reading the state distinguishes an idle-exited/zombie daemon (classified idle/absent
+        # through the demand path below) from a genuinely-running-but-unhealthy one (state R/S/D with a
+        # recorded failure, which still alarms). Only `Z` is treated as dead: a `/proc`-less host
+        # returns "" for every pid, and a fully-gone pid is already fenced to 0 by the identity read.
+        pid_zombie = pid > 0 and local_services_registry.process_state(pid) == "Z"
+        health_row = {**row, "pid": 0} if pid_zombie else row
+        pid = 0 if pid_zombie else pid
         running = pid > 0
         transport_reason = str(row.get("transport_reason") or "").strip()
         last_failure = str(row.get("last_failure") or "").strip()
@@ -11102,7 +11132,7 @@ class TmuxWebtermApp:
         # is classified before essentiality is consulted, and the sentence a demand-scoped
         # service shows ("Starts on demand") is a different sentence from a pending pin.
         demand_started = row.get("demand_started") is True
-        health_state, _health_reason_code = observed_health(row)
+        health_state, _health_reason_code = observed_health(health_row)
         if health_state == "ready":
             state, reason_code, reason = "running", "", ""
         elif health_state == "starting":
@@ -11384,7 +11414,6 @@ class TmuxWebtermApp:
         health = self.retained_backend_health()
         return self.local_services_snapshot().payload(
             lambda row: self.system_status_service(row, health=health),
-            local_services_alert,
             health=health,
         )
 
@@ -12848,13 +12877,17 @@ class TmuxWebtermApp:
             record.thread = worker
             self.activity_transcript_service.tabber_warmer_record = record
 
-        def rollback() -> None:
-            with self.activity_transcript_service.tabber_cache_lock:
+            def rollback() -> None:
+                # tabber_cache_lock is already held by this caller; clear the just-published thread
+                # in place. capture_thread_owners reads tabber_warmer_record.thread under this same
+                # lock and stop_tabber_warmer joins it, so publication and start must be atomic.
                 if self.activity_transcript_service.tabber_warmer_record is record and record.thread is worker:
                     record.thread = None
                     record.running = False
 
-        common.start_thread_with_rollback(worker, rollback)
+            # Start under the lock so a teardown capturing tabber_warmer_record.thread in the gap
+            # cannot observe or join a published-but-unstarted warmer thread.
+            common.start_thread_with_rollback(worker, rollback)
         return True
 
     def tabber_activity_cache_warmer_loop(self, record: TabberActivityWarmerRecord) -> None:
@@ -13866,13 +13899,18 @@ class TmuxWebtermApp:
             record.worker = worker
             record.stop_event = stop_event
 
-        def rollback() -> None:
-            with self.metadata_warm_lock:
+            def rollback() -> None:
+                # Thread.start failed while metadata_warm_lock is still held by this caller; clear
+                # the just-published worker in place so no observer ever joins an unstarted thread.
+                # Do NOT reacquire metadata_warm_lock here — this is a plain Lock and re-entry would
+                # deadlock the very caller performing the rollback.
                 if self.metadata_warm_record is record and record.worker is worker:
                     record.stop_event.set()
                     record.worker = None
 
-        common.start_thread_with_rollback(worker, rollback)
+            # Publish-and-start under one lock hold: a teardown that acquires metadata_warm_lock in
+            # the gap can only see a not-yet-published record or a worker that is already started.
+            common.start_thread_with_rollback(worker, rollback)
 
     def metadata_warm_view_coalesce_identity(self, source_signature: str) -> tuple[str, int]:
         """Cross-port product identity for `metadata_warm_view`, so two web ports warming the same
@@ -14479,26 +14517,29 @@ class TmuxWebtermApp:
         deadline_seconds: float,
         completion: Callable[..., None],
         completion_args: tuple[Any, ...] = (),
-        reservation_held: bool = False,
+        reservation: JobdOperationReservation | None = None,
+        lane: str = "bulk",
     ) -> tuple[dict[str, Any], HTTPStatus]:
         request_id = self.new_api_request_id()
         if producer is None:
-            if reservation_held:
-                self.jobd_operation_service.release_reservation()
+            if reservation is not None:
+                reservation.release()
             return self.jobd_operation_failure_result(
                 request_id,
                 {"error": "jobd did not return an accepted product receipt"},
                 route=route,
                 operation="jobd.produce",
             ), HTTPStatus.SERVICE_UNAVAILABLE
-        if not reservation_held and not self.jobd_operation_service.reserve():
-            return self.jobd_operation_failure_result(
-                request_id,
-                {"error": "jobd operation completion pool is full", "status": "service_busy"},
-                route=route,
-                operation="jobd.produce",
-                code="service_busy",
-            ), HTTPStatus.SERVICE_UNAVAILABLE
+        if reservation is None:
+            reservation = self.jobd_operation_service.reserve(lane)
+            if reservation is None:
+                return self.jobd_operation_failure_result(
+                    request_id,
+                    {"error": "jobd operation completion pool is full", "status": "service_busy"},
+                    route=route,
+                    operation="jobd.produce",
+                    code="service_busy",
+                ), HTTPStatus.SERVICE_UNAVAILABLE
         deadline_at = time.time() + max(1.0, float(deadline_seconds))
         try:
             receipt = self.queued_delivery_ledger.accept_operation(
@@ -14520,10 +14561,11 @@ class TmuxWebtermApp:
                 context=context,
             )
         except Exception:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             raise
         operation_id = str(receipt["operation"]["id"])
         submitted = self.jobd_operation_service.submit_reserved(
+            reservation,
             completion,
             operation_id,
             request_id,
@@ -14632,6 +14674,10 @@ class TmuxWebtermApp:
         deadline_at: float,
     ) -> None:
         route = "POST /api/fs/batch"
+        # Hold the jobd interaction lease across the whole product-poll window.  Under a saturated
+        # gate this poll thread can be starved past the broker's idle window; the held lease vetoes
+        # its idle shutdown so the socket cannot vanish out from under this operation (W15 #4).
+        self.jobd_fs_batch_lease.acquire()
         try:
             product = self.wait_for_jobd_operation_product(producer, deadline_at)
             if not isinstance(product.get("responses"), list):
@@ -14661,6 +14707,8 @@ class TmuxWebtermApp:
                 code="producer_failed",
             )
             self.terminalize_operation(operation_id, result, HTTPStatus.INTERNAL_SERVER_ERROR)
+        finally:
+            self.jobd_fs_batch_lease.release()
 
     @staticmethod
     def materialize_filesystem_batch_product(
@@ -14737,7 +14785,8 @@ class TmuxWebtermApp:
             requests = filesystem.validated_batch_requests(payload)
         except ValueError as error:
             return self.fs_batch_invalid_request_result(payload, error), HTTPStatus.BAD_REQUEST
-        if not self.jobd_operation_service.reserve():
+        reservation = self.jobd_operation_service.reserve("bulk")
+        if reservation is None:
             request_id = self.new_api_request_id()
             result = self.jobd_operation_failure_result(
                 request_id,
@@ -14753,6 +14802,11 @@ class TmuxWebtermApp:
             key_prefix="fs-batch",
         )
         generation = 1
+        # Hold the jobd interaction lease while contacting the broker so it cannot idle-shut its
+        # socket during this exchange (W15 #4).  The accepted-operation completion worker below
+        # re-holds its own lease across the long product-poll window between the two /api/fs/batch
+        # calls; this acquire also spawns the broker if it had idled out before this request.
+        self.jobd_fs_batch_lease.acquire()
         try:
             response, body = self.job_client.produce(
                 "filesystem_batch",
@@ -14767,10 +14821,12 @@ class TmuxWebtermApp:
                 delivery="ready_or_receipt",
             )
         except Exception:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             raise
+        finally:
+            self.jobd_fs_batch_lease.release()
         if body and response.get("ok") is True:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             try:
                 product = self.decode_filesystem_watch_batch_product(body)
                 return self.materialize_filesystem_batch_product(product, request_ids), HTTPStatus.OK
@@ -14788,7 +14844,7 @@ class TmuxWebtermApp:
         job_id = str(job.get("job_id") or "")
         producer_state = str(job.get("status") or "")
         if body or response.get("ok") is not True or not job_id or producer_state not in {"queued", "running", "completed"}:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             failure = dict(response)
             if body:
                 failure["error"] = "filesystem batch returned unusable product bytes"
@@ -14816,7 +14872,8 @@ class TmuxWebtermApp:
             deadline_seconds=FS_BATCH_OPERATION_DEADLINE_SECONDS,
             completion=self.complete_filesystem_batch_operation,
             completion_args=(tuple(request_ids),),
-            reservation_held=True,
+            reservation=reservation,
+            lane="bulk",
         )
 
     def wait_for_filesystem_operation_product(
@@ -14989,7 +15046,12 @@ class TmuxWebtermApp:
         if refusal is not None:
             return FilesystemOperationHttpResponse(*refusal)
         request_id = self.new_api_request_id()
-        if not self.jobd_operation_service.reserve():
+        # Priority (and therefore the completion lane) is computed BEFORE admission: a point read
+        # reserves the point lane and a bounded mutation the mutation lane, so neither can be
+        # refused or stranded because bulk completion polls hold the shared pool.
+        priority = filesystem_operation_priority(operation)
+        reservation = self.jobd_operation_service.reserve(jobd_operation_lane(priority))
+        if reservation is None:
             result = self.jobd_operation_failure_result(
                 request_id,
                 {"error": "jobd operation completion pool is full", "status": "service_busy"},
@@ -14999,7 +15061,6 @@ class TmuxWebtermApp:
             )
             self.record_operation_failure("", result)
             return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
-        priority = filesystem_operation_priority(operation)
         generation = self.filesystem_operation_product_generation()
         uncoalesced_reason = ""
         # A watchd generation is authoritative: its revision advances on any observed change, so a
@@ -15041,7 +15102,7 @@ class TmuxWebtermApp:
                 fresh_only=fresh_only,
             )
         except Exception:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             raise
         if response.get("_transport_error") == "timeout":
             response, body = self.job_client.produce(
@@ -15052,13 +15113,13 @@ class TmuxWebtermApp:
         if body and response.get("ok") is True:
             product = response.get("product") if isinstance(response.get("product"), dict) else None
             if response.get("state") == "ready" and product is not None and product.get("format") == "json":
-                self.jobd_operation_service.release_reservation()
+                reservation.release()
                 return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=body, product=dict(product))
         job = response.get("job") if isinstance(response.get("job"), dict) else {}
         job_id = str(job.get("job_id") or "")
         producer_state = str(job.get("status") or "")
         if body or response.get("ok") is not True or not job_id or producer_state not in {"queued", "running", "completed"}:
-            self.jobd_operation_service.release_reservation()
+            reservation.release()
             typed_failure = self.typed_filesystem_operation_failure(response)
             if typed_failure is not None:
                 filesystem_error, status = typed_failure
@@ -15079,7 +15140,8 @@ class TmuxWebtermApp:
             deadline_seconds=FS_BATCH_OPERATION_DEADLINE_SECONDS,
             completion=self.complete_filesystem_operation,
             completion_args=(route, reload_yolo_rules),
-            reservation_held=True,
+            reservation=reservation,
+            lane=jobd_operation_lane(priority),
         )
         return FilesystemOperationHttpResponse(payload, status)
 
@@ -15091,28 +15153,67 @@ class TmuxWebtermApp:
         path: str,
         args: dict[str, Any] | None = None,
     ) -> FilesystemOperationHttpResponse:
-        """Relay one browser-consumed byte product without a receipt protocol."""
+        """Relay one browser-consumed byte product without a receipt protocol.
+
+        There is no browser receipt to fall back on for a raw/download/preview/zip byte stream, so
+        this response is synchronous.  It no longer BLOCKS a serial jobd handler slot for the whole
+        job: it submits with a zero-wait ``produce`` (warm bytes return immediately) and, on a cold
+        receipt, waits for the product on the ONE shared filesystem product-poll owner
+        (``wait_for_filesystem_operation_product``) rather than inside the daemon.  The former
+        ``relay`` action held one of jobd's bounded concurrent-handler slots for the entire job, so
+        enough concurrent downloads refused every other client with ``service busy``.
+        """
         request_id = self.new_api_request_id()
-        response, body = self.job_client.relay(
+        descriptor = filesystem_operation_descriptor(operation, path, dict(args or {}))
+        product_key = f"filesystem-operation-relay:{uuid.uuid4().hex}"
+        priority = filesystem_operation_priority(operation)
+        deadline_ms = int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)
+        response, body = self.job_client.produce(
             "filesystem_operation",
-            filesystem_operation_descriptor(operation, path, dict(args or {})),
-            deadline_ms=int(FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000),
+            descriptor,
+            priority=priority,
+            generation=1,
+            coalesce_key=product_key,
+            deadline_ms=deadline_ms,
+            delivery="ready_or_receipt",
         )
         product = response.get("product") if isinstance(response.get("product"), dict) else None
-        if response.get("ok") is True and product is not None:
+        if response.get("ok") is True and body and response.get("state") in {"ready", "stale"} and product is not None:
             return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=body, product=dict(product))
-        typed_failure = self.typed_filesystem_operation_failure(response)
-        if typed_failure is not None:
-            filesystem_error, status = typed_failure
-            return FilesystemOperationHttpResponse(filesystem_error, status)
-        result = self.jobd_operation_failure_result(
-            request_id,
-            dict(response),
-            route=route,
-            operation="jobd.relay",
-        )
-        self.record_operation_failure("", result)
-        return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
+        job = response.get("job") if isinstance(response.get("job"), dict) else {}
+        job_id = str(job.get("job_id") or "")
+        producer_state = str(job.get("status") or "")
+        if body or response.get("ok") is not True or not job_id or producer_state not in {"queued", "running", "completed"}:
+            typed_failure = self.typed_filesystem_operation_failure(response)
+            if typed_failure is not None:
+                filesystem_error, status = typed_failure
+                return FilesystemOperationHttpResponse(filesystem_error, status)
+            failure = dict(response)
+            failure.setdefault("error", "jobd did not return an accepted filesystem operation receipt")
+            result = self.jobd_operation_failure_result(request_id, failure, route=route, operation="jobd.produce")
+            self.record_operation_failure("", result)
+            return FilesystemOperationHttpResponse(result, HTTPStatus.SERVICE_UNAVAILABLE)
+        producer = JobdProductOperation(job_id=job_id, product_key=product_key, generation=1)
+        try:
+            product_meta, product_body, _schedule = self.wait_for_filesystem_operation_product(
+                producer,
+                time.time() + FS_BATCH_OPERATION_DEADLINE_SECONDS,
+            )
+        except JobdOperationUnavailable as error:
+            typed_failure = self.typed_filesystem_operation_failure(error.failure)
+            if typed_failure is not None:
+                filesystem_error, status = typed_failure
+                return FilesystemOperationHttpResponse(filesystem_error, status)
+            result = self.jobd_operation_failure_result(
+                request_id,
+                error.failure,
+                route=route,
+                operation="jobd.product",
+                code=error.code,
+            )
+            self.record_operation_failure("", result)
+            return FilesystemOperationHttpResponse(result, error.status)
+        return FilesystemOperationHttpResponse(None, HTTPStatus.OK, body=product_body, product=dict(product_meta))
 
     def context_tail(
         self,
@@ -15387,12 +15488,31 @@ class TmuxWebtermApp:
 
     @requires_known_session(refresh=True)
     def kill_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        try:
+            retirement_identity = capture_tmux_session_retirement(session)
+        except SessionRetirementError as error:
+            diagnostic = str(error)
+            return {
+                "session": session,
+                "killed": False,
+                **user_message_payload("status.sessionKillFailed", diagnostic, error=diagnostic),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
         result = tmux(["kill-session", "-t", tmux_session_target(session)], timeout=3.0)
         if result.returncode != 0:
             error = cmd_error(result, "tmux kill-session failed")
             return {
                 "session": session,
                 **user_message_payload("status.sessionKillFailed", error, error=error),
+            }, HTTPStatus.INTERNAL_SERVER_ERROR
+
+        try:
+            join_tmux_session_retirement(retirement_identity)
+        except SessionRetirementError as error:
+            diagnostic = str(error)
+            return {
+                "session": session,
+                "killed": False,
+                **user_message_payload("status.sessionKillFailed", diagnostic, error=diagnostic),
             }, HTTPStatus.INTERNAL_SERVER_ERROR
 
         self.stop_auto_approve_worker(session)
@@ -15711,6 +15831,11 @@ class TmuxWebtermApp:
                     "size": len(upload.content),
                 }
             )
+        # Item 6: an upload is a successful YOLOmux file create -- route it into the ONE hot-path
+        # index owner (the same path write/delete/rename take) so an uploaded file is searchable in
+        # seconds. Covers both browser uploads and editor uploads, which share this save funnel.
+        if saved:
+            filesystem.reindex_roots_for_paths([item["path"] for item in saved], reason="fs-upload")
         return saved, None, HTTPStatus.OK
 
     @requires_known_session()

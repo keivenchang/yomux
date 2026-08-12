@@ -2312,42 +2312,71 @@ button.topbar-status-surface {
 .topbar-status-surface[hidden] {
   display: none;
 }
-/* The one backend-health chip. Its severity is carried by the sentence it renders ("... is not
-   running" vs "... is degraded"), never by these colours alone -- they only reinforce a message that
-   already reads correctly in a monochrome or forced-colours theme. */
+/* The one backend-health control: permanently mounted and a FIXED icon-sized square, so a health
+   transition repaints one slot instead of inserting or removing a text pill. Its outer box is the
+   same in every state -- box-sizing:border-box with a fixed inline and block size and a constant 1px
+   border whose colour is the only thing that changes -- so the topbar, #grid, Search, Language, and
+   every xterm keep identical geometry while healthy, degraded, down, or recovered. Its severity is
+   carried by the sentence in its role=status label, never by these colours alone. */
 .backend-health-indicator {
-  min-width: 0;
-  max-width: min(32vw, 20rem);
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  inline-size: var(--compact-control-height);
+  min-inline-size: var(--compact-control-height);
+  max-inline-size: var(--compact-control-height);
+  block-size: var(--compact-control-height);
+  padding: 0;
   overflow: hidden;
-  padding: var(--space-4) var(--space-7);
   color: var(--danger-text-soft);
-  background: color-mix(in srgb, var(--bad) 18%, var(--panel2));
-  border: 1px solid var(--danger-border-soft);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
-  text-overflow: ellipsis;
   font-size: var(--ui-font-size-2xs);
+  line-height: 1;
+  cursor: default;
 }
 .backend-health-indicator[data-backend-health="degraded"] {
   color: var(--text);
   background: color-mix(in srgb, var(--warning-border-strong) 12%, var(--panel2));
   border-color: var(--warning-border-strong);
-}
-.backend-health-indicator-details {
-  flex: 0 0 auto;
-  padding: 0 var(--space-4);
-  color: inherit;
-  background: transparent;
-  border: 1px solid currentColor;
-  border-radius: var(--radius-sm);
-  font: inherit;
   cursor: pointer;
-  white-space: nowrap;
 }
-.backend-health-indicator-details:hover,
-.backend-health-indicator-details:focus-visible {
+.backend-health-indicator[data-backend-health="down"],
+.backend-health-indicator[data-backend-health="unresponsive"] {
+  color: var(--danger-text-soft);
+  background: color-mix(in srgb, var(--bad) 18%, var(--panel2));
+  border-color: var(--danger-border-soft);
+  cursor: pointer;
+}
+.backend-health-indicator:hover:not(:disabled),
+.backend-health-indicator:focus-visible {
   outline: 0;
   border-color: var(--accent);
   color: var(--text);
+}
+.backend-health-indicator-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  pointer-events: none;
+}
+/* The full localized sentence lives here as a role=status live region, visually clipped so it
+   announces to assistive tech and shows on the control's tooltip without widening the fixed slot. */
+.backend-health-indicator-text {
+  position: absolute;
+  width: var(--space-1);
+  height: var(--space-1);
+  margin: calc(-1 * var(--space-1));
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 button.topbar-status-surface:hover,
 button.topbar-status-surface:focus-visible {

@@ -12,6 +12,7 @@ from time import monotonic as monotonic_clock
 from typing import Any
 
 from ..server_logs import emit_server_log
+from .registry import LOCAL_SERVICE_START_TIMEOUT_SECONDS
 from .registry import LocalServiceRegistry
 from .registry import LocalServiceSpec
 from .rpc import LOCAL_RPC_DEADLINE_REASONS
@@ -59,17 +60,19 @@ def local_service_failure_is_transient(response: Mapping[str, object]) -> bool:
 class LocalServiceClient:
     """Thin typed client that owns shared registry/RPC behavior once."""
 
-    def __init__(self, service: str, module: str, socket_path: Path, protocol_version: int = LOCAL_RPC_VERSION, *, idle_seconds: float = 60.0, extra_args: tuple[str, ...] = (), code_revision: str = "", build_revision: int = 0, service_dir: Path | None = None):
+    def __init__(self, service: str, module: str, socket_path: Path, protocol_version: int = LOCAL_RPC_VERSION, *, idle_seconds: float = 60.0, start_timeout_seconds: float | None = None, extra_args: tuple[str, ...] = (), code_revision: str = "", build_revision: int = 0, service_dir: Path | None = None):
         requested_socket_path = Path(socket_path)
         requested_service_dir = Path(service_dir) if service_dir is not None else requested_socket_path.parent
         self.service = service
         self.socket_path = safe_socket_path(requested_socket_path, prefix=f"yolomux-{service}")
+        spec_start_timeout = LOCAL_SERVICE_START_TIMEOUT_SECONDS if start_timeout_seconds is None else start_timeout_seconds
         self.registry = LocalServiceRegistry(
             requested_service_dir,
-            LocalServiceSpec(service, module, self.socket_path.name, protocol_version, idle_seconds=idle_seconds, extra_args=extra_args, code_revision=code_revision, build_revision=build_revision),
+            LocalServiceSpec(service, module, self.socket_path.name, protocol_version, idle_seconds=idle_seconds, start_timeout_seconds=spec_start_timeout, extra_args=extra_args, code_revision=code_revision, build_revision=build_revision),
             socket_path=self.socket_path,
             service_dir=requested_service_dir,
         )
+        self._reported_terminal_startup_reason = ""
 
     def _request_once(
         self,
@@ -198,8 +201,28 @@ class LocalServiceClient:
         return response
 
     def ensure_started(self) -> bool:
-        return self.registry.ensure_started()
+        started = self.registry.ensure_started()
+        if started:
+            self._reported_terminal_startup_reason = ""
+            return True
+        failure = self.registry.failure_response()
+        reason = str(failure.get("reason") or "")
+        if failure.get("terminal") is True and reason != self._reported_terminal_startup_reason:
+            emit_server_log(
+                "error",
+                f"local-service:{self.service}",
+                reason,
+                category="startup",
+                dedupe_key=f"local-service:{self.service}:startup:{reason}",
+                dedupe_seconds=5.0,
+                route=f"local-service:{self.service}",
+                event="startup",
+                delivery="terminal",
+            )
+            self._reported_terminal_startup_reason = reason
+        return False
 
     def retry(self) -> bool:
         self.registry.retry()
-        return self.registry.ensure_started()
+        self._reported_terminal_startup_reason = ""
+        return self.ensure_started()

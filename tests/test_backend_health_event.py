@@ -210,7 +210,9 @@ def test_a_reconnecting_client_is_replayed_the_latest_revision(live: BrokerHarne
 
 
 def test_only_retained_types_are_replayed(live: BrokerHarness):
-    assert CLIENT_EVENT_RETAINED_TYPES == frozenset({BACKEND_HEALTH_EVENT})
+    # `search_progress` is intentionally retained + replayed (streaming Quick Open: a reconnecting
+    # page receives the latest per-scope revision signal and pulls the delta by cursor).
+    assert CLIENT_EVENT_RETAINED_TYPES == frozenset({BACKEND_HEALTH_EVENT, "search_progress"})
     live.broker.publish("settings_changed", {"data": {}})
     core_id, _core_queue = live.broker.subscribe(channels={"core"})
     try:

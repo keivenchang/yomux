@@ -3,6 +3,7 @@
 
 import importlib.util
 import os
+import signal
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -303,9 +304,29 @@ def test_main_installs_signal_handlers_deadline_and_selenium_timeouts():
     assert "capture changed the service ledger" in source
 
 
-def test_bounded_driver_quit_falls_back_to_killing_the_chromedriver_tree():
+def test_bounded_driver_quit_retires_via_the_shared_lease_and_proof_sweeps_the_renderer_tree():
+    """Migrated from the bare SIGKILL fallback to the one shared lease's proof-guarded retirement.
+
+    A wedged chromedriver is retired by the WebDriverLease owner (bounded quit -> TERM -> KILL), and
+    the orphan renderer subtree is swept only for PIDs whose captured start-key proof still holds. A
+    descendant that exited or was reparented (no key) is NEVER signalled - the reuse/reparent guard.
+    """
+
     tool = load_tool_module()
-    kills = []
+    signals = []
+    # An injectable process world: chromedriver 5000 and renderers 5001/5002 are proven live; 5003 is
+    # a descendant that has already exited (no key) and must never be signalled.
+    alive = {5000: "cd", 5001: "r1", 5002: "r2"}
+
+    def identity(pid):
+        return alive.get(pid)
+
+    def fake_signal(pid, sig):
+        signals.append((pid, sig))
+        if pid not in alive:
+            raise ProcessLookupError(pid)
+        if sig in (signal.SIGTERM, signal.SIGKILL):
+            del alive[pid]
 
     class HangingDriver:
         class service:  # noqa: N801 - mirrors selenium attribute shape
@@ -315,17 +336,18 @@ def test_bounded_driver_quit_falls_back_to_killing_the_chromedriver_tree():
         def quit(self):
             time.sleep(60)
 
-    original_kill = tool.os.kill
     original_descendants = tool.descendants_of
-    tool.os.kill = lambda pid, sig: kills.append((pid, sig))
-    tool.descendants_of = lambda pid: [5001, 5002]
+    tool.descendants_of = lambda pid: [5001, 5002, 5003]
     try:
-        tool.bounded_driver_quit(HangingDriver(), quit_timeout=0.05)
+        tool.bounded_driver_quit(HangingDriver(), quit_timeout=0.05, identity_fn=identity, signal_fn=fake_signal)
     finally:
-        tool.os.kill = original_kill
         tool.descendants_of = original_descendants
 
-    assert kills == [(5000, tool.signal.SIGKILL), (5001, tool.signal.SIGKILL), (5002, tool.signal.SIGKILL)]
+    # The lease retired chromedriver 5000 through its proof-guarded escalation (TERM cleared it).
+    assert (5000, signal.SIGTERM) in signals, signals
+    # The two proven renderers were swept; the exited descendant 5003 was never signalled.
+    assert (5001, signal.SIGKILL) in signals and (5002, signal.SIGKILL) in signals, signals
+    assert not any(pid == 5003 for pid, _sig in signals), signals
 
 
 def test_idle_yostats_counter_is_limited_to_the_two_live_ticker_callback_names():

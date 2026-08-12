@@ -18,8 +18,10 @@ from pathlib import Path
 import pytest
 
 from tests import latency_calibration
+from tests.browser_helpers import webdriver_lease
 from tests.source_inventory import parsed_python_source
 from tests.source_inventory import python_source_paths
+from tools import static_build
 from tools import test_catalog
 from tools.test_catalog import discover_pytest_phase_files
 from tools.tool_guard import container_command_with_host_tool_guard
@@ -492,7 +494,7 @@ def test_default_check_gate_uses_guard_and_lowers_priority_when_servers_are_acti
         events.append(("run", [lane.name for lane in selected]))
         return [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected]
 
-    def fake_certification_phase(*, evidence_dir):
+    def fake_certification_phase(*, evidence_dir, expected_containers=False):
         events.append(("certify", str(evidence_dir)))
         return {
             "result": "certified",
@@ -531,7 +533,7 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
     monkeypatch.setattr(
         check,
         "run_certification_phase",
-        lambda *, evidence_dir: (
+        lambda *, evidence_dir, expected_containers=False: (
             {
                 "result": "not-certifiable",
                 "reason": "host_unqualified_preflight",
@@ -547,6 +549,33 @@ def test_default_check_gate_exits_not_certifiable_when_the_host_is_unqualified(m
     output = capsys.readouterr().out
     assert latency_calibration.NOT_CERTIFIABLE in output
     assert "host_unqualified_preflight" in output
+    assert "CHECK PASSED" not in output
+
+
+@pytest.mark.parametrize("reason", ["dirty_start_checkout", "start_state_unobservable"])
+def test_default_check_gate_exits_nonzero_when_exact_sha_is_not_admitted(monkeypatch, capsys, reason):
+    check = load_check_module()
+    monkeypatch.setattr(check, "active_yolomux_server_records", lambda: [])
+    monkeypatch.setattr(check, "run_parallel", lambda selected: [check.LaneResult(lane.name, lane.label, True, 0.0, "") for lane in selected])
+    monkeypatch.setattr(
+        check,
+        "run_certification_phase",
+        lambda *, evidence_dir, expected_containers=False: (
+            {
+                "result": "certified",
+                "reason": "all_units_certified_on_a_qualified_host",
+                "evidence": {},
+                "wall_seconds": 1.0,
+                "evidence_dir": str(evidence_dir),
+                "release": {"exact_sha_certification": {"admitted": False, "reason": reason}},
+            },
+            None,
+        ),
+    )
+
+    assert check.main(["--no-tool-guard"]) == check.EXIT_NOT_CERTIFIABLE
+    output = capsys.readouterr().out
+    assert "exact_sha_certification_rejected" in output
     assert "CHECK PASSED" not in output
 
 
@@ -810,6 +839,126 @@ def _junit_document(cases: list[tuple[str, str, str]]) -> str:
         for file, name, outcome in cases
     )
     return f'<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" tests="{len(cases)}">{body}</testsuite></testsuites>'
+
+
+_ADMISSION_EXPECTED = ("tests/test_a.py::test_one", "tests/test_b.py::test_two")
+
+
+def _write_junit(tmp_path, xml: str) -> Path:
+    junit = tmp_path / "certification-junit.xml"
+    junit.write_text(xml, encoding="utf-8")
+    return junit
+
+
+def test_certification_junit_admission_accepts_a_well_formed_document(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, _junit_document([("tests/test_a.py", "test_one", "passed"), ("tests/test_b.py", "test_two", "skipped")]))
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is True, admission
+    assert admission["outcomes"]["tests/test_a.py::test_one"]["outcome"] == "passed"
+    assert admission["outcomes"]["tests/test_b.py::test_two"]["outcome"] == "skipped"
+
+
+def test_certification_junit_admission_defers_an_absent_document_to_did_not_run(tmp_path):
+    """Absent is the ordinary did-not-run the not-collected path owns, not a structural rejection."""
+
+    check = load_check_module()
+    admission = check.certification_junit_admission(tmp_path / "absent.xml", _ADMISSION_EXPECTED)
+    assert admission["admitted"] is True, admission
+    assert all(row["outcome"] == "not-collected" for row in admission["outcomes"].values()), admission
+
+
+def test_certification_junit_admission_rejects_a_malformed_document(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, "<testsuite><testcase file='tests/test_a.py' name='test_one' time='1.0'>")
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_malformed", admission
+
+
+def test_certification_junit_admission_rejects_a_row_without_identity(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, '<?xml version="1.0"?><testsuite><testcase classname="c" name="test_one" time="1.0"/></testsuite>')
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_missing_identity", admission
+
+
+def test_certification_junit_admission_rejects_an_unexpected_row(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, _junit_document([("tests/test_a.py", "test_one", "passed"), ("tests/other.py", "test_strange", "passed")]))
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_unexpected_row", admission
+    assert admission["detail"] == "tests/other.py::test_strange", admission
+
+
+def test_certification_junit_admission_rejects_duplicate_rows(tmp_path):
+    check = load_check_module()
+    junit = _write_junit(tmp_path, _junit_document([("tests/test_a.py", "test_one", "passed"), ("tests/test_a.py", "test_one", "failure")]))
+    admission = check.certification_junit_admission(junit, _ADMISSION_EXPECTED)
+    assert admission["admitted"] is False and admission["reason"] == "junit_duplicate_row", admission
+
+
+def test_certification_junit_admission_rejects_missing_or_nonfinite_timing(tmp_path):
+    check = load_check_module()
+    missing = _write_junit(tmp_path, '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one"/></testsuite>')
+    assert check.certification_junit_admission(missing, _ADMISSION_EXPECTED)["reason"] == "junit_timing_missing"
+
+    invalid = _write_junit(tmp_path, '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="fast"/></testsuite>')
+    assert check.certification_junit_admission(invalid, _ADMISSION_EXPECTED)["reason"] == "junit_timing_invalid"
+
+    for spelling in ("inf", "nan", "-1.0"):
+        nonfinite = _write_junit(tmp_path, f'<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="{spelling}"/></testsuite>')
+        assert check.certification_junit_admission(nonfinite, _ADMISSION_EXPECTED)["reason"] == "junit_timing_non_finite", spelling
+
+
+def test_certification_junit_admission_rejects_contradictory_or_unknown_outcome_children(tmp_path):
+    check = load_check_module()
+    contradictory = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<failure message="breach"/><skipped message="also"/></testcase></testsuite>',
+    )
+    assert check.certification_junit_admission(contradictory, _ADMISSION_EXPECTED)["reason"] == "junit_contradictory_outcome"
+
+    duplicate_failure = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<failure message="first"/><failure message="second"/></testcase></testsuite>',
+    )
+    assert check.certification_junit_admission(duplicate_failure, _ADMISSION_EXPECTED)["reason"] == "junit_contradictory_outcome"
+
+    unknown = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<rerun message="what"/></testcase></testsuite>',
+    )
+    assert check.certification_junit_admission(unknown, _ADMISSION_EXPECTED)["reason"] == "junit_unknown_outcome_child"
+
+    # system-out/system-err are captured stdio, never an outcome, and must not trip the guard.
+    with_stdio = _write_junit(
+        tmp_path,
+        '<?xml version="1.0"?><testsuite><testcase classname="c" file="tests/test_a.py" name="test_one" time="1.0">'
+        '<system-out>logs</system-out></testcase></testsuite>',
+    )
+    admitted = check.certification_junit_admission(with_stdio, _ADMISSION_EXPECTED)
+    assert admitted["admitted"] is True and admitted["outcomes"]["tests/test_a.py::test_one"]["outcome"] == "passed", admitted
+
+
+def test_certification_verdict_refuses_an_inadmissible_junit_before_reading_outcomes(tmp_path):
+    """A rejected document outranks the outcomes; the phase never certifies from a file it distrusts."""
+
+    check = load_check_module()
+    qualified = {"qualified": True, "reasons": []}
+    retired = {"retired": True, "survivors": []}
+    passed = {"tests/test_a.py::test_one": {"outcome": "passed", "detail": "", "seconds": 1.0}}
+    rejected = {"admitted": False, "reason": "junit_duplicate_row", "detail": "tests/test_a.py::test_one", "outcomes": {}}
+    verdict = check.certification_verdict(retirement=retired, preflight=qualified, postflight=qualified, outcomes=passed, returncode=0, junit_admission=rejected)
+    assert (verdict["result"], verdict["reason"]) == ("not-certifiable", "certification_junit_rejected"), verdict
+    assert verdict["evidence"]["junit_reason"] == "junit_duplicate_row", verdict
+
+    # An admitted document leaves every existing outcome precedence exactly as it was.
+    admitted = {"admitted": True, "reason": "", "detail": "", "outcomes": passed}
+    green = check.certification_verdict(retirement=retired, preflight=qualified, postflight=qualified, outcomes=passed, returncode=0, junit_admission=admitted)
+    assert green["result"] == "certified", green
 
 
 def test_certification_outcomes_report_a_skipped_node_as_skipped_not_as_green(tmp_path):
@@ -1699,6 +1848,262 @@ def test_running_test_containers_reports_why_it_could_not_observe_docker(monkeyp
     retirement = check.retire_owned_processes(deadline_seconds=0.3)
     assert retirement["retired"] is True, retirement
     assert retirement["container_probe"]["available"] is False
+
+
+def test_running_test_containers_tracks_exact_run_owned_ids_by_token_label(monkeypatch):
+    """A run that minted a token filters on its exact owner label, never the shared image ancestor.
+
+    A foreign agent's container built from the identical test image carries no owner label, so it
+    can neither block this run's certification nor falsely clear it.
+    """
+
+    check = load_check_module()
+    image = check.docker_image.image_name(check.REPO_ROOT)
+    observed = []
+
+    class Completed:
+        returncode = 0
+        stdout = "owned123\tUp 4 seconds\n"
+
+    monkeypatch.setattr(check.subprocess, "run", lambda command, **_kwargs: observed.append(command) or Completed())
+
+    # With a token, ownership is proven by the exact label; the ancestor filter never appears.
+    monkeypatch.setenv(check.CHECK_RUN_TOKEN_ENV, "tok-abc")
+    owned = check.running_test_containers()
+    assert observed[-1] == ["docker", "ps", "--filter", f"label={check.CONTAINER_OWNER_LABEL}=tok-abc", "--format", "{{.ID}}\t{{.Status}}"], observed[-1]
+    assert [entry["container"] for entry in owned["containers"]] == ["owned123"]
+
+    # An explicit token argument overrides the environment.
+    check.running_test_containers(run_token="tok-explicit")
+    assert observed[-1][3] == f"label={check.CONTAINER_OWNER_LABEL}=tok-explicit", observed[-1]
+
+    # No token anywhere: image-ancestor discovery remains the fallback for a bare invocation.
+    monkeypatch.delenv(check.CHECK_RUN_TOKEN_ENV, raising=False)
+    check.running_test_containers()
+    assert observed[-1] == ["docker", "ps", "--filter", f"ancestor={image}", "--format", "{{.ID}}\t{{.Status}}"], observed[-1]
+
+
+def test_retirement_refuses_when_docker_is_unobservable_after_the_gate_used_containers(monkeypatch):
+    """An unobservable client cannot prove an owned container is gone; only a host-only run clears."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [])
+    unobservable = {"available": False, "reason": "docker daemon is not reachable", "image": "probe", "containers": []}
+    monkeypatch.setattr(check, "running_test_containers", lambda: unobservable)
+
+    # The gate routed into Docker: absence is not proved, so retirement refuses and names the cause.
+    refused = check.retire_owned_processes(deadline_seconds=0.3, expected_containers=True)
+    assert refused["retired"] is False, refused
+    assert refused["docker_unobservable"] is True, refused
+    verdict = check.certification_verdict(retirement=refused, preflight=None, postflight=None, outcomes=None, returncode=None)
+    assert verdict["reason"] == "owned_processes_not_retired", verdict
+    assert verdict["evidence"]["docker_unobservable"] is True, verdict
+
+    # The gate never used Docker (host run, or units running inside the image where there is no
+    # client at all): there is no owned container to prove absent, and the process walk covered
+    # what ran, so an unobservable client does not block.
+    cleared = check.retire_owned_processes(deadline_seconds=0.3, expected_containers=False)
+    assert cleared["retired"] is True and cleared["docker_unobservable"] is False, cleared
+
+
+def test_retirement_shares_the_lease_start_key_owner_for_its_member_proof():
+    """One owner of the reuse-proof identity: the barrier reads the WebDriver lease's start key.
+
+    A second copy of process-start-key logic is exactly the divergence that lets one path guard a
+    signal while another does not; this pins that the barrier imports the lease's owner, not a fork.
+    """
+
+    check = load_check_module()
+    assert check.process_start_key is webdriver_lease.process_start_key
+
+
+def test_retirement_authorizes_a_survivor_only_by_its_immutable_start_key(monkeypatch):
+    """A PID whose start key changed was reused; the barrier proves the owned process gone, not alive.
+
+    A bare descendant walk sees PID 5000 present on every poll and never retires. The proof-guarded
+    barrier captures the key it first observed and, when `identity_fn` later reads a different key,
+    knows the process it owned exited and the number belongs to someone else - so it retires and
+    never treats the new occupant as its survivor.
+    """
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "running_test_containers", lambda: {"available": True, "reason": "", "image": "probe", "containers": []})
+    # The descendant walk keeps reporting PID 5000 as present with the key we first captured.
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [{"pid": 5000, "ppid": 1, "command": "chrome", "start_key": "gen-A"}])
+
+    # While the key still holds, the member is a proven survivor and retirement refuses by deadline.
+    held = check.retire_owned_processes(pid=999, deadline_seconds=0.3, identity_fn=lambda _pid: "gen-A")
+    assert held["retired"] is False, held
+    assert [member["pid"] for member in held["survivors"]] == [5000], held
+
+    # The PID is now reused (its key changed): the process we owned is gone. We must not keep waiting
+    # on, nor ever signal, the new occupant under the stale proof - the barrier retires.
+    reused = check.retire_owned_processes(pid=999, deadline_seconds=2.0, identity_fn=lambda _pid: "someone-elses-key")
+    assert reused["retired"] is True, reused
+    assert reused["survivors"] == [], reused
+    assert reused["seconds"] < 2.0, reused
+
+
+def test_retirement_proves_a_reparented_or_exited_member_gone_without_a_bare_pid_match(monkeypatch):
+    """A reparented-away or exited PID reads no key at all: proven gone, never a lingering survivor."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "running_test_containers", lambda: {"available": True, "reason": "", "image": "probe", "containers": []})
+    monkeypatch.setattr(check, "descendant_processes", lambda _pid: [{"pid": 5000, "ppid": 1, "command": "chrome", "start_key": "gen-A"}])
+    retirement = check.retire_owned_processes(pid=999, deadline_seconds=2.0, identity_fn=lambda _pid: None)
+    assert retirement["retired"] is True, retirement
+    assert retirement["survivors"] == [], retirement
+
+
+def test_platform_profile_owner_keeps_linux_and_fails_closed_off_it():
+    """One owner of which signals a platform certifies. Linux keeps them; Darwin omits and refuses."""
+
+    linux = latency_calibration.platform_profile("Linux")
+    assert linux["certifiable"] is True
+    assert linux["limits"] == dict(latency_calibration.HOST_QUALIFICATION_LIMITS)
+    assert linux["uses_inotify_capacity"] is True and linux["omitted_signals"] == []
+
+    darwin = latency_calibration.platform_profile("Darwin")
+    assert darwin["certifiable"] is False
+    assert darwin["reason_code"] == "no_recorded_platform_reference_population"
+    assert darwin["limits"] == {}
+    # Every Linux-only kernel signal is explicitly omitted, never asserted against an absent surface.
+    assert set(darwin["omitted_signals"]) == set(latency_calibration.LINUX_ONLY_SIGNALS)
+    assert darwin["uses_inotify_capacity"] is False
+
+    # PSI stalls, procs_running and the disk signals are all Linux /proc surfaces.
+    assert {"cpu_stall_some_fraction", "procs_running_p75", "disk_busy_fraction_max"} <= set(latency_calibration.LINUX_ONLY_SIGNALS)
+
+
+def test_darwin_profile_is_admitted_only_by_retained_discriminating_populations(monkeypatch):
+    populations = {
+        "quiet": {"probes": 20, "cpu_work_median_ms": [4.0, 5.0], "storage_work_median_ms": [2.0, 3.0]},
+        "post_lane": {"probes": 20, "cpu_work_median_ms": [5.0, 6.0], "storage_work_median_ms": [3.0, 4.0]},
+        "saturated": {"probes": 20, "cpu_work_median_ms": [20.0, 30.0], "storage_work_median_ms": [12.0, 18.0]},
+    }
+    monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", populations)
+
+    profile = latency_calibration.platform_profile("Darwin")
+    assert profile["certifiable"] is True, profile
+    assert profile["limits"] == {"cpu_work_median_ms": 12.0, "storage_work_median_ms": 8.0}
+    assert profile["reference_populations"] == ["quiet", "post_lane", "saturated"]
+    assert profile["uses_inotify_capacity"] is False
+
+
+def test_darwin_profile_rejects_present_but_non_discriminating_populations(monkeypatch):
+    populations = {
+        "quiet": {"probes": 20, "cpu_work_median_ms": [4.0, 5.0], "storage_work_median_ms": [2.0, 3.0]},
+        "post_lane": {"probes": 20, "cpu_work_median_ms": [5.0, 6.0], "storage_work_median_ms": [3.0, 4.0]},
+        "saturated": {"probes": 20, "cpu_work_median_ms": [10.0, 30.0], "storage_work_median_ms": [12.0, 18.0]},
+    }
+    monkeypatch.setattr(latency_calibration, "DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS", populations)
+    profile = latency_calibration.platform_profile("Darwin")
+    assert profile["certifiable"] is False, profile
+    assert profile["reason_code"] == "darwin_reference_population_not_discriminating"
+
+
+def test_host_qualification_fails_closed_on_an_unprofiled_platform(monkeypatch):
+    """An unprofiled platform (no recorded reference population) is NOT CERTIFIABLE, never a silent pass."""
+
+    monkeypatch.setattr(latency_calibration.platform, "system", lambda: "Darwin")
+    # Even handed a measurement that would satisfy every Linux limit, an unprofiled platform refuses.
+    inside = {signal: limit / 2 for signal, limit in latency_calibration.HOST_QUALIFICATION_LIMITS.items()}
+    qualification = latency_calibration.host_qualification(inside)
+    assert qualification["qualified"] is False, qualification
+    assert qualification["reasons"] == [{"signal": "platform", "measured": "Darwin", "limit": None, "reason": "no_recorded_platform_reference_population"}], qualification
+    assert qualification["platform_profile"]["system"] == "Darwin"
+
+    # An explicit limit set is a deliberate override and still qualifies - the owner only governs the
+    # default profile, so a caller measuring a known signal set is never blocked by the platform gate.
+    explicit = latency_calibration.host_qualification(inside, limits=dict(latency_calibration.HOST_QUALIFICATION_LIMITS))
+    assert explicit["qualified"] is True, explicit
+
+
+def test_certification_release_context_reports_sha_platform_and_generated_bundle_hashes():
+    check = load_check_module()
+    context = check.certification_release_context(REPO_ROOT)
+    sha = context["full_sha"]
+    assert sha is None or (len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)), sha
+    assert context["platform"]["system"] and context["platform"]["machine"], context
+    assert set(context["generated_bundle_hashes"]) == set(static_build.ASSETS), context["generated_bundle_hashes"]
+    for asset, digest in context["generated_bundle_hashes"].items():
+        assert digest is None or (len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)), (asset, digest)
+
+
+def test_working_tree_clean_state_names_every_tracked_and_untracked_path(tmp_path):
+    check = load_check_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+
+    clean = check.working_tree_clean_state(repo)
+    assert clean == {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}, clean
+
+    (repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+    (repo / "new.txt").write_text("x\n", encoding="utf-8")
+    dirty = check.working_tree_clean_state(repo)
+    assert dirty["clean"] is False and dirty["observable"] is True, dirty
+    assert dirty["tracked"] == ["tracked.txt"] and dirty["untracked"] == ["new.txt"], dirty
+
+
+def test_exact_sha_certification_requires_a_fresh_checkout_at_both_ends():
+    check = load_check_module()
+    clean = {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}
+    dirty = {"observable": True, "clean": False, "reason": "", "tracked": ["a.py"], "untracked": ["b.py"]}
+    unobservable = {"observable": False, "clean": False, "reason": "no git", "tracked": [], "untracked": []}
+
+    assert check.exact_sha_certification_admission(start_state=clean, end_state=clean)["admitted"] is True
+    assert check.exact_sha_certification_admission(start_state=dirty, end_state=clean)["reason"] == "dirty_start_checkout"
+    # A tree the run itself dirtied no longer certifies the exact SHA either.
+    assert check.exact_sha_certification_admission(start_state=clean, end_state=dirty)["reason"] == "dirty_end_checkout"
+    refused = check.exact_sha_certification_admission(start_state=dirty, end_state=clean)
+    assert set(refused["detail"]) == {"tracked", "untracked"}, refused
+    # Fail closed: an unobservable git state is never a clean one.
+    assert check.exact_sha_certification_admission(start_state=unobservable, end_state=clean)["reason"] == "start_state_unobservable"
+
+
+def test_run_certification_phase_records_the_release_context(monkeypatch, tmp_path):
+    """Every certification payload carries SHA, platform, start/end clean state and bundle hashes."""
+
+    check = load_check_module()
+    monkeypatch.setattr(check, "retire_owned_processes", lambda **_kwargs: {"retired": False, "survivors": [{"pid": 1, "ppid": 0, "command": "x"}], "container_probe": {}, "docker_unobservable": False})
+    payload, _lane = check.run_certification_phase(evidence_dir=tmp_path / "cert")
+    release = payload["release"]
+    assert set(release) >= {"full_sha", "platform", "generated_bundle_hashes", "start_clean_state", "end_clean_state", "exact_sha_certification"}, release
+    assert release["start_clean_state"]["observable"] in (True, False)
+    assert "admitted" in release["exact_sha_certification"], release
+
+
+def test_run_certification_phase_refuses_a_certified_result_when_exact_sha_is_dirty(monkeypatch, tmp_path):
+    check = load_check_module()
+    clean = {"observable": True, "clean": True, "reason": "", "tracked": [], "untracked": []}
+    dirty = {"observable": True, "clean": False, "reason": "", "tracked": ["x.py"], "untracked": []}
+    states = iter((dirty, clean))
+    monkeypatch.setattr(check, "working_tree_clean_state", lambda: next(states))
+    monkeypatch.setattr(check, "retire_owned_processes", lambda **_kwargs: {"retired": True, "survivors": []})
+    monkeypatch.setattr(check.latency_calibration, "host_qualification", lambda **_kwargs: {"qualified": True, "reasons": []})
+    monkeypatch.setattr(check, "run_lane", lambda _lane: check.LaneResult("certification", "latency certification", True, 0.0, "", (check.StepResult("s", "c", 0.0, 0),)))
+    monkeypatch.setattr(check, "certification_junit_admission", lambda _path: {"admitted": True, "reason": "", "detail": "", "outcomes": {nodeid: {"outcome": "passed", "detail": "", "seconds": 0.1} for nodeid in check.CERTIFICATION_NODE_IDS}})
+
+    payload, _lane = check.run_certification_phase(evidence_dir=tmp_path / "cert")
+    assert (payload["result"], payload["reason"]) == ("not-certifiable", "exact_sha_certification_rejected"), payload
+    assert payload["evidence"]["reason"] == "dirty_start_checkout"
+
+
+def test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present():
+    """docker/run-tests.sh must label the container it launches with this run's ownership token."""
+
+    check = load_check_module()
+    text = (REPO_ROOT / "docker" / "run-tests.sh").read_text(encoding="utf-8")
+    assert "YOLOMUX_CHECK_RUN_TOKEN" in text, text
+    assert f'--label "{check.CONTAINER_OWNER_LABEL}=$YOLOMUX_CHECK_RUN_TOKEN"' in text, text
+    # The label array is threaded into the real docker run, not built and dropped.
+    assert '"${owner_label[@]+"${owner_label[@]}"}"' in text, text
 
 
 def test_linux_cpu_budget_is_the_same_number_in_code_help_text_and_docs(monkeypatch, capsys):

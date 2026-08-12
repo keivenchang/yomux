@@ -1074,6 +1074,8 @@ globalThis.__layoutTestApi = {
   fileExplorerIndexStatusForTest(root) { return fileExplorerIndexStatus.get(normalizeStoredFileExplorerIndexedDir(root)) || ''; },
   showFileIndexPartialCoverageWarningForTest: showFileIndexPartialCoverageWarning,
   clearFileIndexPartialWarningsForTest() { fileIndexPartialWarningRoots.clear(); },
+  seedFileIndexPartialWarningRootForTest(root) { fileIndexPartialWarningRoots.add(normalizeStoredFileExplorerIndexedDir(root)); },
+  fileIndexPartialWarningRootWarnedForTest(root) { return fileIndexPartialWarningRoots.has(normalizeStoredFileExplorerIndexedDir(root)); },
   fileExplorerDirectoryIsIndexed,
   fileExplorerIndexBadgeText,
   gitStatusRowClass,
@@ -1309,6 +1311,11 @@ globalThis.__layoutTestApi = {
         hasSource: clientEventTransportState.disconnectEpisode.source !== null,
       } : null,
       enabled: clientEventTransportState.enabled,
+      candidateEpisode: clientEventTransportState.candidateEpisode ? {
+        source: clientEventTransportState.candidateEpisode.source,
+        attempts: clientEventTransportState.candidateEpisode.attempts,
+        demandSignature: clientEventTransportState.candidateEpisode.demandSignature,
+      } : null,
       demand: clientEventTransportState.demand,
       demandSignature: clientEventTransportState.demandSignature,
       resourceEpoch: clientEventTransportState.resourceEpoch,
@@ -2261,6 +2268,12 @@ globalThis.__layoutTestApi = {
   fileEditorScrollSyncBlockedForTest: fileEditorScrollSyncBlocked,
   setFileEditorPanelStatusForTest: setFileEditorPanelStatus,
   reloadOpenFileFromDiskForTest: reloadOpenFileFromDisk,
+  refreshOpenFilesIfChangedForTest: refreshOpenFilesIfChanged,
+  replaceOpenFileStateFromDiskForTest: replaceOpenFileStateFromDisk,
+  loadOpenFileStateFromDiskForTest: loadOpenFileStateFromDisk,
+  loadFileEditorStateForTest: loadFileEditorState,
+  commandPaletteValidateFileTabPathsForTest: commandPaletteValidateFileTabPaths,
+  fileEditorItemForTest: fileEditorItemFor,
   saveFileEditorForTest: saveFileEditor,
   refreshOpenFileDiffForTest: refreshOpenFileDiff,
   renderEditorPreviewPane,
@@ -2449,6 +2462,15 @@ globalThis.__layoutTestApi = {
   scheduleFileQuickOpenSearchForTest: scheduleFileQuickOpenSearch,
   refreshFileQuickOpenCandidatesForTest: refreshFileQuickOpenCandidates,
   abortFileQuickOpenSearchForTest: abortFileQuickOpenSearch,
+  sha256HexForTest: sha256HexOfString,
+  fileSearchScopeIdForTest: fileSearchScopeId,
+  mergeFileQuickOpenChangesForTest: mergeFileQuickOpenChanges,
+  rankAndPruneFileQuickOpenCandidatesForTest: rankAndPruneFileQuickOpenCandidates,
+  ingestFileQuickOpenDeltaForTest: ingestFileQuickOpenDeltaPayload,
+  handleFileSearchProgressSignalForTest: handleFileSearchProgressSignal,
+  fileQuickOpenDeltaRootsForTest() {
+    return Array.from(fileQuickOpenState.deltaRoots.values()).map(entry => ({...entry}));
+  },
   setCommandPaletteQueryForTest(value) {
     commandPaletteState.query = String(value || '');
     commandPaletteState.index = 0;

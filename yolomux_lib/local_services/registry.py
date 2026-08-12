@@ -727,6 +727,15 @@ class LocalServiceSpec:
     socket_name: str
     protocol_version: int
     idle_seconds: float = LOCAL_SERVICE_IDLE_SECONDS
+    # How long ensure_started waits for a freshly spawned daemon to answer a
+    # healthy status AND publish its identity record before declaring the start
+    # failed. The default suits lightweight daemons. A service whose on_start
+    # legitimately opens and audits a large on-disk database (statsd reads its
+    # whole retained snapshot before serving) needs a larger budget: with the
+    # default 5.0s a 400MB+ stats database measured ~6.5s to first healthy
+    # status, so every spawn timed out and statsd never confirmed startup —
+    # a permanent crash-loop with empty stderr and an unreaped zombie child.
+    start_timeout_seconds: float = LOCAL_SERVICE_START_TIMEOUT_SECONDS
     extra_args: tuple[str, ...] = ()
     # Optional code-revision stamp: when set, a daemon whose ping reports a DIFFERENT
     # (or missing) revision is unhealthy and gets retired + respawned from current code.
@@ -763,6 +772,13 @@ class LocalServiceRegistry:
         self.lock = threading.Lock()
         self._starts_sealed = threading.Event()
         self.process: subprocess.Popen[Any] | None = None
+        # A generation that adopted a healthy daemon over its socket holds no Popen for it,
+        # so nothing would wait() it when it idle-exits and it would linger as a zombie. This
+        # names the one adopted child a reaper thread is currently parked on; guarded by its
+        # own lock so arming from inside `self.lock` (the file-locked start path) cannot
+        # deadlock against the reaper's own record retirement.
+        self._adopted_reaper_pid = 0
+        self._adopted_reaper_lock = threading.Lock()
         self.spawn_ownership: SpawnProcessOwnership | None = None
         self.failures = 0
         self.next_start_at = 0.0
@@ -1064,12 +1080,6 @@ class LocalServiceRegistry:
         pid = int(status.get("pid") or 0)
         worker_pids = status.get("worker_pids")
         start_identity = str(status.get("process_start_identity") or "")
-        if not start_identity:
-            start_identity = (
-                self.host_identity.process_start_identity
-                if pid == self.host_identity.pid
-                else process_start_identity(pid) or ""
-            )
         record = {
             **self.host_identity.process_record_fields(pid=pid, start_identity=start_identity),
             "version": LOCAL_SERVICE_REGISTRY_VERSION,
@@ -1116,7 +1126,29 @@ class LocalServiceRegistry:
             return "missing_process_start_identity"
         return ""
 
-    def _publish_record(self, status: dict[str, Any]) -> bool:
+    def _validated_status_identity(
+        self,
+        status: dict[str, Any],
+        *,
+        require_carried_identity: bool = False,
+    ) -> tuple[dict[str, Any], str]:
+        """Build and validate one status identity, requiring wire proof for a final probe."""
+
+        try:
+            record = self._record_from_status(status)
+            if not recorded_start_identity(record) and not require_carried_identity:
+                pid = int(record.get("pid") or 0)
+                start_identity = (
+                    self.host_identity.process_start_identity
+                    if pid == self.host_identity.pid
+                    else process_start_identity(pid) or ""
+                )
+                record.update(self.host_identity.process_record_fields(pid=pid, start_identity=start_identity))
+            return record, self._record_publication_refusal(status, record)
+        except (TypeError, ValueError) as error:
+            return {}, f"malformed_status ({type(error).__name__})"
+
+    def _publish_record(self, status: dict[str, Any], *, require_carried_identity: bool = False) -> bool:
         """Publish the durable identity record, and only from a proven status.
 
         This is the one place a service record is written.  0.7.0 published
@@ -1131,14 +1163,7 @@ class LocalServiceRegistry:
         so the next attempt re-probes, and let the caller continue through
         bounded startup and retry.  Never report success from here.
         """
-        try:
-            record = self._record_from_status(status)
-            refusal = self._record_publication_refusal(status, record)
-        except (TypeError, ValueError) as error:
-            # A malformed status is an expected peer outcome, not a crash for
-            # the caller: keep the cause and treat it as a refusal.
-            refusal = f"malformed_status ({type(error).__name__})"
-            record = {}
+        record, refusal = self._validated_status_identity(status, require_carried_identity=require_carried_identity)
         if refusal:
             self._record_refusal_reason = redact_local_service_text(
                 f"{self.spec.name} service record refused before publication "
@@ -1147,10 +1172,15 @@ class LocalServiceRegistry:
             self._failure_reason = self._record_refusal_reason
             self.invalidate_rpc_health()
             return False
-        if self._failure_reason and self._failure_reason == self._record_refusal_reason:
-            # A refusal that has now been repaired must not keep describing a
-            # service whose identity is published and provable.
-            self._failure_reason = ""
+        # A successfully published, identity-proven record means the daemon is healthy and current,
+        # so ANY latched non-spawn reason is now stale -- not only a prior publication refusal but
+        # also a `_record_blocked_start` guard message (e.g. "start blocked by remove_stale_record
+        # (reason=current_local_process)"): that guard fires when the web process tries to replace a
+        # daemon that is in fact the healthy current one, and once this same registry adopts and
+        # publishes that daemon the reason must not keep describing it as an Issue. Spawn-failure
+        # latches (`_terminal_failure`, exit code, backoff) are owned by `_accept_started_child` and
+        # are deliberately left untouched here.
+        self._failure_reason = ""
         self._record_refusal_reason = ""
         self._write_record(record)
         return True
@@ -1390,6 +1420,22 @@ class LocalServiceRegistry:
         proof = self.refresh_spawn_ownership_proof()
         return proof.ownership if proof is not None else None
 
+    def _retire_record_naming_pid(self, pid: int) -> None:
+        """Remove the durable record only while it still names this exact reaped pid.
+
+        The one owner of that retirement, shared by the fresh-spawn reaper and the adopted
+        reaper. `_remove_stale_record` re-reads and re-fences the record under the file lock,
+        so a record that has already been replaced by a newer generation, or that names a
+        process this host still proves live, is left untouched.
+        """
+        record = self._read_record()
+        if int(record.get("pid") or 0) != pid:
+            return
+        with file_lock(self.lock_path, dir_mode=0o700):
+            current = self._read_record()
+            if int(current.get("pid") or 0) == pid:
+                self._remove_stale_record()
+
     def _reap_exited_child(self, process: subprocess.Popen[Any]) -> None:
         """Wait for one child and retire only the record that names that exact child."""
         try:
@@ -1402,13 +1448,7 @@ class LocalServiceRegistry:
             self.process = None
             self._last_exit_code = exit_code
             self.invalidate_rpc_health()
-            record = self._read_record()
-            if int(record.get("pid") or 0) != process.pid:
-                return
-            with file_lock(self.lock_path, dir_mode=0o700):
-                current = self._read_record()
-                if int(current.get("pid") or 0) == process.pid:
-                    self._remove_stale_record()
+            self._retire_record_naming_pid(process.pid)
 
     def _start_child_reaper(self, process: subprocess.Popen[Any]) -> None:
         """Reap an idle service at exit instead of deferring it to its next caller."""
@@ -1416,6 +1456,67 @@ class LocalServiceRegistry:
             target=self._reap_exited_child,
             args=(process,),
             name=f"{self.spec.name}-reaper",
+            daemon=True,
+        ).start()
+
+    def _reap_adopted_child(self, pid: int) -> None:
+        """Wait for one adopted demand daemon to exit and reap it, then retire its record.
+
+        The web process is this child's parent, so `os.waitpid(pid, 0)` parks until the child
+        dies and reaps it in place instead of leaving a zombie that reads as alive. It targets
+        one specific pid this generation holds no Popen for, so it can never race the fresh-spawn
+        path's `Popen.wait()`. A child already reaped elsewhere -- CPython's own dropped-Popen
+        cleanup, or a superseding spawn -- raises `ChildProcessError`; that is a recorded outcome,
+        not a failure, and the retirement below is fenced by `_remove_stale_record`, which will
+        not remove a live or foreign process.
+        """
+        try:
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            with self.lock:
+                # A fresh spawn in this generation now owns reaping through its own Popen; the
+                # record it published names a different pid and is not this thread's to retire.
+                if self.process is None:
+                    self._retire_record_naming_pid(pid)
+        except OSError:
+            # Supervisor boundary for this one reaping unit: end the thread rather than let an
+            # unexpected wait error crash the daemon lifecycle it was arming.
+            return
+        finally:
+            with self._adopted_reaper_lock:
+                if self._adopted_reaper_pid == pid:
+                    self._adopted_reaper_pid = 0
+
+    def _arm_adopted_reaper(self) -> None:
+        """Reap a healthy daemon this generation adopted but holds no Popen for.
+
+        The fresh-spawn path arms `_start_child_reaper` against its own Popen. The healthy-socket
+        early returns in `ensure_started` adopt a daemon an earlier generation spawned, whose
+        Popen was dropped: nothing will `wait()` it, so it becomes an unreaped zombie the moment
+        it idle-exits and then reads as alive to every liveness check. Arm a reaper for the
+        recorded pid so the web process reaps its own adopted child -- only while this generation
+        holds no Popen of its own, because the spawn path owns reaping then.
+        """
+        if self.process is not None:
+            return
+        record = self._read_record()
+        pid = int(record.get("pid") or 0)
+        if pid <= 1:
+            return
+        if not process_record_diagnostic(record, host_identity=self.host_identity).current:
+            return
+        if self.process is not None:
+            return
+        with self._adopted_reaper_lock:
+            if self._adopted_reaper_pid == pid:
+                return
+            self._adopted_reaper_pid = pid
+        threading.Thread(
+            target=self._reap_adopted_child,
+            args=(pid,),
+            name=f"{self.spec.name}-adopted-reaper",
             daemon=True,
         ).start()
 
@@ -1429,11 +1530,15 @@ class LocalServiceRegistry:
         if self._upgrade_required is not None:
             return False
         if self.recently_healthy():
+            self._arm_adopted_reaper()
             return True
+        if self._terminal_failure:
+            return False
         # A healthy ping is not a started service until its identity record is
         # published. When the follow-up status is lost, fall through to bounded
         # startup and retry instead of reporting a success nothing can prove.
         if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
+            self._arm_adopted_reaper()
             return True
         if self._upgrade_required is not None:
             return False
@@ -1443,6 +1548,7 @@ class LocalServiceRegistry:
             if not self.starts_allowed():
                 return False
             if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
+                self._arm_adopted_reaper()
                 return True
             if self._upgrade_required is not None:
                 return False
@@ -1452,6 +1558,7 @@ class LocalServiceRegistry:
                 return False
             with file_lock(self.lock_path, dir_mode=0o700):
                 if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
+                    self._arm_adopted_reaper()
                     return True
                 if self._upgrade_required is not None:
                     return False
@@ -1471,23 +1578,51 @@ class LocalServiceRegistry:
                     self._mark_failure(self._failure_reason or f"{self.spec.name} spawn failed")
                     return False
                 self.process = process
-                deadline = self.clock() + LOCAL_SERVICE_START_TIMEOUT_SECONDS
+                deadline = self.clock() + self.spec.start_timeout_seconds
                 while self.clock() < deadline:
                     if self.healthy() and self._publish_record(self._request("status", timeout=0.2)):
-                        self.failures = 0
-                        self.next_start_at = 0.0
-                        self._start_exit_count = 0
-                        self._last_exit_code = None
-                        self._failure_reason = ""
-                        self._terminal_failure = False
-                        self.refresh_spawn_ownership()
-                        self._start_child_reaper(process)
-                        return True
+                        return self._accept_started_child(process)
                     exit_code = process.poll()
                     if exit_code is not None:
                         break
                     self.sleep(0.03)
                 exit_code = process.poll()
+                # W7 clause 4: ONE final identity-bearing startup probe -- a single `status`
+                # request, no `ping` first -- decides a child still alive past the deadline.
+                # The one status response is itself the identity used for protocol/identity/
+                # readiness validation, and classifies into exactly three outcomes:
+                #   late-valid     -- ok, this service and protocol, and the pid/start-identity
+                #                     it carries match the exact leader we spawned -> publish the
+                #                     record, accept, NO Error, and NO second generation.
+                #   wrong-identity -- otherwise-healthy but the WRONG pid/start-identity: a
+                #                     reused-pid imposter (our pid is alive but now carries a
+                #                     different start-identity) or a peer answering our socket
+                #                     with a valid status naming a process we did not spawn ->
+                #                     one terminal-episode Error, no respawn while backoff
+                #                     ownership forbids re-entry.
+                #   transient      -- not-ok or dropped while our own leader is still alive and
+                #                     ours -> hold THIS child for the caller's bounded retry,
+                #                     NO Error, no respawn.
+                # A child that exited (`exit_code is not None`), or a spawn that never captured
+                # ownership, keeps the terminal path below unchanged.
+                if exit_code is None and self.spawn_ownership is not None:
+                    status = self._request("status", timeout=0.2)
+                    if (
+                        self._spawned_leader_identity_matches()
+                        and self._status_matches_spawned_leader(status)
+                        and self._publish_record(status, require_carried_identity=True)
+                    ):
+                        return self._accept_started_child(process)
+                    if self._status_is_wrong_identity(status):
+                        self._mark_failure(
+                            self._wrong_identity_reason(status),
+                            exit_code=exit_code,
+                            exited_before_ready=True,
+                        )
+                        self._terminal_failure = True
+                        return False
+                    self.next_start_at = self.clock() + LOCAL_SERVICE_BACKOFF_SECONDS
+                    return False
                 # A child that answered ping but never published a provable
                 # identity failed for that reason, not for the generic
                 # "did not become ready" one; keep the real cause.
@@ -1498,6 +1633,98 @@ class LocalServiceRegistry:
                     exited_before_ready=exit_code is not None,
                 )
         return False
+
+    def _accept_started_child(self, process: subprocess.Popen[Any]) -> bool:
+        """Record one proven-healthy startup and clear every failure latch. One owner."""
+
+        self.failures = 0
+        self.next_start_at = 0.0
+        self._start_exit_count = 0
+        self._last_exit_code = None
+        self._failure_reason = ""
+        self._terminal_failure = False
+        self.refresh_spawn_ownership()
+        self._start_child_reaper(process)
+        return True
+
+    def _spawned_leader_identity_matches(self) -> bool:
+        """Prove the live pid we spawned is still that exact process, not a reused-pid imposter.
+
+        Reuses the spawn-ownership identity proof captured at spawn: the leader's start-identity.
+        A pid that is alive but now carries a DIFFERENT start-identity has been recycled to an
+        unrelated process, which is the imposter case; a missing or empty captured identity
+        cannot prove ownership and is treated as unproven.
+        """
+
+        ownership = self.spawn_ownership
+        if ownership is None:
+            return False
+        leader_pid = ownership.leader_pid
+        expected = dict(ownership.member_identities).get(leader_pid, "")
+        if not expected or not pid_is_alive(leader_pid):
+            return False
+        return process_start_identity(leader_pid) == expected
+
+    def _status_matches_spawned_leader(self, status: dict[str, Any]) -> bool:
+        """Prove the identity carried IN the status response is the exact leader we spawned.
+
+        `_publish_record`/`_record_publication_refusal` prove a status is a VALID publishable
+        identity -- ok, this service and protocol, a usable pid and start-identity -- but not
+        that the pid it names is the process THIS generation spawned. Reuse the one spawn-ledger
+        identity (`spawn_ownership.member_identities` for the leader pid; the same source
+        `_spawned_leader_identity_matches` uses) so a healthy status answering for a DIFFERENT
+        process is never mistaken for our own late-but-valid child. No second RPC.
+        """
+
+        ownership = self.spawn_ownership
+        if ownership is None:
+            return False
+        leader_pid = ownership.leader_pid
+        expected = dict(ownership.member_identities).get(leader_pid, "")
+        if not expected:
+            return False
+        if int(status.get("pid") or 0) != leader_pid:
+            return False
+        record, refusal = self._validated_status_identity(status, require_carried_identity=True)
+        if refusal:
+            return False
+        return recorded_start_identity(record) == expected
+
+    def _status_is_wrong_identity(self, status: dict[str, Any]) -> bool:
+        """Classify a live-past-deadline child as carrying the WRONG identity (terminal).
+
+        Two terminal shapes: the pid we spawned is alive but now carries a different
+        start-identity -- a reused-pid imposter, so the OS-level proof fails -- or our leader is
+        alive and ours yet the status response is an otherwise-VALID healthy identity naming a
+        DIFFERENT process, a peer answering our socket. A not-ok or dropped status from our own
+        still-alive leader is transient not-ready, never this.
+        """
+
+        if not self._spawned_leader_identity_matches():
+            return True
+        record, refusal = self._validated_status_identity(status, require_carried_identity=True)
+        if refusal in {"service_name_mismatch", "protocol_version_mismatch"}:
+            return True
+        if refusal:
+            return False
+        return not self._status_matches_spawned_leader(status)
+
+    def _wrong_identity_reason(self, status: dict[str, Any]) -> str:
+        """Name which wrong-identity shape declared this terminal startup episode."""
+
+        leader_pid = self.spawn_ownership.leader_pid if self.spawn_ownership is not None else 0
+        _record, refusal = self._validated_status_identity(status, require_carried_identity=True)
+        if refusal in {"service_name_mismatch", "protocol_version_mismatch"}:
+            return f"{self.spec.name} startup status identity mismatch: {refusal}"
+        if self._spawned_leader_identity_matches():
+            return (
+                f"{self.spec.name} startup status identity mismatch: peer answered with "
+                f"pid {int(status.get('pid') or 0)}, not spawned leader {leader_pid}"
+            )
+        return (
+            f"{self.spec.name} startup pid {leader_pid} "
+            "start-identity mismatch (reused-pid imposter)"
+        )
 
     def acquire_lease(self, existing_lease_id: str = "") -> dict[str, Any]:
         if not self.ensure_started():

@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from pathlib import Path
 import atexit
+import contextlib
 import difflib
 import functools
 from http import HTTPStatus
@@ -45,6 +46,8 @@ from tests.browser_helpers.browser_console import assert_browser_console_error_f
 from tests.browser_helpers.browser_console import assert_browser_journey_error_free
 from tests.browser_helpers.browser_console import read_browser_console_log
 from tests.browser_helpers.browser_console import retire_browser_after_strict_diagnostic_gate
+from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tests.browser_helpers.webdriver_lease import retire_all
 from tests.gate_harness import finish_browser_fixture_boundary
 from tests.gate_harness import patch_imported_writable_constants
 from tests.gate_harness import prepare_fixture_http_app
@@ -229,6 +232,13 @@ LOCAL_GOLDEN_SCREENSHOT_DIR = REPO_ROOT / ".yolomux-test-goldens"
 _FIXTURE_HTTP_BASE: str | None = None
 _FIXTURE_HTTP_LOCK = threading.Lock()
 _FIXTURE_PAGE_SEQ = 0
+# The canonical gate runs e2e, browser, and non-browser as separate `python3 -m pytest` PROCESSES
+# concurrently. Each process reuses the same xdist worker names (gw0, gw1, ...) and keeps its own
+# process-local _FIXTURE_PAGE_SEQ, so a bare `<worker>-<seq>-<filename>` path collided across lanes:
+# one lane overwrote another lane's fixture file at the shared REPO_ROOT, and a test then loaded a
+# foreign page (e.g. a stats fixture whose expected bucket `.start` was absent, crashing the reader).
+# Stamp a per-process PID+nonce namespace so two processes can never choose the same fixture path.
+_FIXTURE_PAGE_NAMESPACE = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 _EMPTY_FAVICON_HTML = '<link rel="icon" data-yolomux-favicon href="data:,">'
 _FIXTURE_PIXEL_GIF = bytes.fromhex(
     "47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b"
@@ -322,7 +332,7 @@ def serve_repo_fixture_page(filename: str, html: str) -> Path:
     with _FIXTURE_HTTP_LOCK:
         _FIXTURE_PAGE_SEQ += 1
         seq = _FIXTURE_PAGE_SEQ
-    page = REPO_ROOT / f".browser-fixture-{worker}-{seq}-{filename}"
+    page = REPO_ROOT / f".browser-fixture-{worker}-{_FIXTURE_PAGE_NAMESPACE}-{seq}-{filename}"
     page.write_text(html, encoding="utf-8")
     atexit.register(page.unlink, missing_ok=True)
     return page
@@ -899,15 +909,17 @@ class _BrowserDriverLease:
         return self._driver.get(url)
 
     def replace_after_invalid_session(self):
+        # Retire the crashed driver through the one shared owner - bounded quit -> TERM -> KILL ->
+        # reap -> final proof, guarded by the driver's captured generation - so a wedged chromedriver
+        # from the invalid session cannot linger while we spawn its replacement.
         previous = self._driver
-        try:
-            previous.quit()
-        except WebDriverException:
-            pass
+        retire_all([WebDriverLease.from_driver(previous)])
         self._driver = new_chrome_driver()
 
     def quit(self):
-        self._driver.quit()
+        # One owner retires this driver: a bare best-effort quit leaves a chromedriver behind when
+        # quit() hangs, and the lease proves the leased process gone (or records why it could not).
+        retire_all([WebDriverLease.from_driver(self._driver)])
 
 
 def _reset_browser_windows(driver):
@@ -3599,6 +3611,71 @@ def wait_for_dockview_pointer_target(browser, selector, x_ratio=0.5, y_ratio=0.5
             y_ratio,
         )
     )
+
+
+@contextlib.contextmanager
+def trusted_touch_emulation(browser, *, user_agent=None):
+    """Own the trusted-touch emulation lifecycle and restore every override on exit.
+
+    One owner for enable/restore so no touch test hand-rolls its own pair and forgets to
+    undo it. Control is yielded with touch emulation on; on exit - even if the body raised -
+    touch emulation is disabled, any device-metrics override is cleared, and the user-agent
+    override is restored. Device metrics are set by the caller (they can change within one
+    body) and always cleared here.
+    """
+    original_user_agent = browser.execute_script("return navigator.userAgent")
+    if user_agent is not None:
+        browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": user_agent})
+    browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": True, "maxTouchPoints": 1})
+    try:
+        yield
+    finally:
+        browser.execute_cdp_cmd("Emulation.setTouchEmulationEnabled", {"enabled": False})
+        browser.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+        if user_agent is not None:
+            browser.execute_cdp_cmd("Network.setUserAgentOverride", {"userAgent": original_user_agent})
+
+
+def trusted_touch_long_press(browser, selector, *, until, x_ratio=0.5, y_ratio=0.5, timeout=3):
+    """Long-press the CURRENT semantic target named by ``selector`` with a trusted CDP touch.
+
+    The target is re-resolved and its hit point re-verified (``document.elementFromPoint``)
+    immediately before the press, so a legitimate repaint between resolve and touch simply
+    re-resolves instead of raising a stale-element error - there is no retained WebElement and
+    no retry/catch. ``Input.dispatchTouchEvent`` reaches the page as a trusted pointerdown with
+    ``pointerType`` ``'touch'``, which this helper asserts on every call; a synthetic
+    ``dispatchEvent`` could not, so this is the identity guarantee callers rely on. ``until`` is
+    polled while the touch is held and its result returned; the touch is always released.
+    """
+    point = wait_for_dockview_pointer_target(browser, selector, x_ratio, y_ratio)
+    browser.execute_script(
+        """
+        window.__yolomuxTrustedTouchProbe = [];
+        window.__yolomuxTrustedTouchHandler = event => window.__yolomuxTrustedTouchProbe.push({trusted: event.isTrusted, pointerType: event.pointerType || ''});
+        document.addEventListener('pointerdown', window.__yolomuxTrustedTouchHandler, true);
+        """
+    )
+    browser.execute_cdp_cmd(
+        "Input.dispatchTouchEvent",
+        {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "radiusX": 1, "radiusY": 1, "force": 1, "id": 1}]},
+    )
+    pointerdown = []
+    try:
+        result = WebDriverWait(browser, timeout).until(until)
+    finally:
+        browser.execute_cdp_cmd("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        pointerdown = browser.execute_script(
+            """
+            const handler = window.__yolomuxTrustedTouchHandler;
+            if (handler) document.removeEventListener('pointerdown', handler, true);
+            const events = window.__yolomuxTrustedTouchProbe || [];
+            window.__yolomuxTrustedTouchProbe = null;
+            window.__yolomuxTrustedTouchHandler = null;
+            return events;
+            """
+        )
+    assert any(event["trusted"] and event["pointerType"] == "touch" for event in pointerdown), pointerdown
+    return result
 
 
 def cdp_drag(browser, start, end, steps=24):

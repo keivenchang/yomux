@@ -33,6 +33,7 @@ CLIENT_EVENT_TYPES: frozenset[str] = frozenset({
     "fs_changed",
     "operation_terminal",
     "roots_changed",
+    "search_progress",
     "session_files_ready",
     "settings_changed",
     "stats_sample",
@@ -79,6 +80,11 @@ CLIENT_EVENT_TYPE_CHANNELS: dict[str, frozenset[str]] = {
     "fs_changed": frozenset({"files"}),
     "operation_terminal": frozenset({"core", "files"}),
     "roots_changed": frozenset({"files"}),
+    # Streaming Quick Open (step 5): the signal-only per-root progress nudge. It rides `core` -- the
+    # channel every page subscribes to -- so any process holding an open palette hears it, and it is
+    # retained (below) so a page connecting between two publications still learns the latest revision.
+    # The payload is redacted upstream to {scope_id, generation, revision, coverage}; no path/query.
+    "search_progress": frozenset({"core"}),
     "session_files_ready": frozenset({"files"}),
     "settings_changed": frozenset({"core"}),
     # One compact durable owner sample for a visible YO!stats graph.  This
@@ -102,7 +108,7 @@ CLIENT_EVENT_SNAPSHOT_CLIENT_LIMIT = 32
 # asking; backend health has no endpoint the browser is allowed to poll on a timer, so the newest
 # revision has to be replayed here or a page that connects between two transitions would show
 # nothing at all until the next one.
-CLIENT_EVENT_RETAINED_TYPES: frozenset[str] = frozenset({"backend_health_changed"})
+CLIENT_EVENT_RETAINED_TYPES: frozenset[str] = frozenset({"backend_health_changed", "search_progress"})
 # One retained event per resource, and the retained types own a fixed, tiny resource set.
 CLIENT_EVENT_RETAINED_LIMIT = 8
 
@@ -143,6 +149,12 @@ def client_event_resource(event_type: str, payload: dict[str, Any] | None = None
             scope_digest = hashlib.sha256(scope.encode("utf-8", errors="replace")).hexdigest()[:16]
             return f"background:{role}:{scope_digest}"
         return f"background:{role}"
+    if safe_type == "search_progress":
+        # Per-root ordering + latest-per-resource retention keyed by the OPAQUE scope digest the
+        # producer already redacted to. Never the filesystem path: this resource name is part of the
+        # globally fanned-out, persisted SSE envelope, so a path here would leak across clients.
+        scope_id = str(data.get("scope_id") or "")
+        return f"search_progress:{scope_id}" if scope_id else safe_type
     if safe_type == "operation_terminal":
         operation = data.get("operation")
         operation_id = str(operation.get("id") if isinstance(operation, dict) else "")

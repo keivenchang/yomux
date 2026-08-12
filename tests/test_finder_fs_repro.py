@@ -4,6 +4,45 @@
 from tools import finder_fs_repro as tool
 
 
+class _CaptureApp:
+    def __init__(self, records):
+        self.performance_capture_records = list(records)
+
+    def performance_metrics_payload(self, measurement_scope=""):
+        assert measurement_scope == "capture"
+        return {"recent": [dict(row) for row in self.performance_capture_records]}
+
+
+def _capture_row(marker: str, surface: str, compute_ms: float):
+    return {
+        "role": "http-endpoint",
+        "surface": surface,
+        "compute_ms": compute_ms,
+        "payload_bytes": 10,
+        "details": {
+            "measurement_scope": "capture",
+            "measurement_request_id": tool.measurement_request_id(marker),
+        },
+    }
+
+
+def test_capture_server_measurements_retains_prior_phase_but_reports_only_current_identity():
+    phase_a = "capture-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    phase_b = "capture-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    app = _CaptureApp([
+        _capture_row(phase_a, "GET /api/fs/watch-diff", 11.0),
+        _capture_row(phase_b, "POST /api/fs/batch", 7.0),
+    ])
+
+    report = tool.capture_server_measurements(app, tool.measurement_request_id(phase_b))
+
+    assert [row["surface"] for row in report["summary"]] == ["POST /api/fs/batch"]
+    assert [row["details"]["measurement_request_id"] for row in report["recent"]] == [
+        tool.measurement_request_id(phase_b),
+    ]
+    assert len(app.performance_capture_records) == 2
+
+
 def test_summarize_fetch_log_counts_watch_diff_batch_and_rejections():
     summary = tool.summarize_fetch_log([
         {"path": "/api/fs/watch-diff", "method": "GET", "result": "fulfilled"},

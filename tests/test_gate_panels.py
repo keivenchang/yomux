@@ -85,7 +85,7 @@ def _schema_two_payload_script(states=None):
           owner: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {budget_percent: 30},
           tmux_signal_watcher: {state: 'attached', demanded: true, sessions: ['debug'], process_pid: 9001},
           local_services: {
-            schema_version: 2,
+            schema_version: 3,
             inventory,
             totals: {processes: 6, cpu_percent: 12, rss_bytes: 799014912},
             health: {available: true, reason_code: '', port: 7999, observer_epoch: 'ab12cd34', revision: 812, written_at: 1900, age_seconds: 2, history_coverage: 'full', history_reset_reason: '', persistence_state: 'ok', persistence_reason_code: '', resources: 6},
@@ -192,7 +192,7 @@ def test_h2_system_status_metrics_are_not_null(monkeypatch, gate_runtime_paths):
         webapp.control_server.stop()
 
     local_services = payload["local_services"]
-    assert local_services["schema_version"] == 2, local_services
+    assert local_services["schema_version"] == 3, local_services
     assert tuple(local_services["inventory"]) == SYSTEM_STATUS_SERVICE_IDS, local_services
     services = local_services["services"]
     assert tuple(service["id"] for service in services) == SYSTEM_STATUS_SERVICE_IDS, services
@@ -887,7 +887,7 @@ def test_system_panel_reports_each_typed_tmux_signal_watcher_state(browser, tmp_
             ok: true, generated_at: Date.now() / 1000,
             server: {}, owner: {}, refresh: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {},
             top_endpoints: [], top_background_work: [],
-            local_services: {schema_version: 2, inventory: [], totals: {}, services: []},
+            local_services: {schema_version: 3, inventory: [], totals: {}, services: []},
             tmux_signal_watcher: watcher,
           };
           refreshDebugSystemViews();
@@ -947,7 +947,7 @@ def test_system_status_corruption_recovery_names_quarantine_and_destination_in_o
           server: {}, owner: {}, refresh: {}, search_index: {}, caches: {}, client_events: {}, chat: {}, cpu_budget: {},
           top_endpoints: [], top_background_work: [],
           local_services: {
-            schema_version: 2,
+            schema_version: 3,
             inventory: [],
             services: [],
             recovery_events: [{

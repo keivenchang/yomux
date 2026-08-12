@@ -14,6 +14,12 @@ from pathlib import Path
 # The package installs the host-local prefix; suppress its own first cache until then.
 sys.dont_write_bytecode = True
 
+# Cap glibc malloc arenas before any allocation-heavy import or thread pool spawns,
+# so a direct `python yolomux.py` launch stays lean like a boot.sh launch does.
+from yolomux_lib.infra.malloc_tuning import cap_malloc_arenas
+
+cap_malloc_arenas()
+
 from yolomux_lib.infra.root_paths import YolomuxRootError
 
 # This must happen before importing yolomux_lib: common.py resolves every mutable

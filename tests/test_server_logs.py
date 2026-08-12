@@ -66,24 +66,29 @@ def test_server_log_ring_redacts_recognized_fields_before_retention_and_emits_pt
 
 def test_server_log_ring_is_bounded_and_deduplicates_for_a_window(monkeypatch):
     clock = iter([10.0, 10.0, 10.0, 10.0, 11.0, 11.0, 30.0, 30.0])
-    monkeypatch.setattr("yolomux_lib.server_logs.time.monotonic", lambda: next(clock))
-    monkeypatch.setattr("yolomux_lib.server_logs.time.time", lambda: next(clock))
-    ring = ServerLogRing(capacity=2)
+    # Scope the process-global time patch to the exercised body only: monkeypatch.context()
+    # restores the real clock at block exit, BEFORE the autouse file-index teardown reads
+    # time.monotonic(). The finite iterator is kept exactly as before, so any UNEXPECTED extra
+    # monotonic()/time() call INSIDE this block still exhausts it and raises -- the oracle bites.
+    with monkeypatch.context() as m:
+        m.setattr("yolomux_lib.server_logs.time.monotonic", lambda: next(clock))
+        m.setattr("yolomux_lib.server_logs.time.time", lambda: next(clock))
+        ring = ServerLogRing(capacity=2)
 
-    assert ring.emit("warning", "sessions", "fallback", dedupe_key="pid:1", dedupe_seconds=15) is not None
-    assert ring.emit("warning", "sessions", "duplicate", dedupe_key="pid:1", dedupe_seconds=15) is None
-    assert ring.emit("info", "server", "later") is not None
-    assert ring.emit("error", "server", "newest") is not None
+        assert ring.emit("warning", "sessions", "fallback", dedupe_key="pid:1", dedupe_seconds=15) is not None
+        assert ring.emit("warning", "sessions", "duplicate", dedupe_key="pid:1", dedupe_seconds=15) is None
+        assert ring.emit("info", "server", "later") is not None
+        assert ring.emit("error", "server", "newest") is not None
 
-    assert [entry["message"] for entry in ring.payload()["logs"]] == ["later", "newest"]
-    assert ring.payload()["dropped"] == {
-        "count": 1,
-        "first_id": 1,
-        "last_id": 1,
-        "by_level": {"warning": 1},
-    }
-    with pytest.raises(ValueError):
-        ring.emit("verbose", "tests", "unsupported")
+        assert [entry["message"] for entry in ring.payload()["logs"]] == ["later", "newest"]
+        assert ring.payload()["dropped"] == {
+            "count": 1,
+            "first_id": 1,
+            "last_id": 1,
+            "by_level": {"warning": 1},
+        }
+        with pytest.raises(ValueError):
+            ring.emit("verbose", "tests", "unsupported")
 
 
 def test_logs_route_reads_the_shared_bounded_ring():

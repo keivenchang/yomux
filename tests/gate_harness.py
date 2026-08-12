@@ -25,7 +25,7 @@ import tempfile
 import threading
 import time
 import traceback
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import quote
 from urllib.parse import parse_qs
 from urllib.parse import urlsplit
@@ -138,18 +138,39 @@ class HttpPortLease:
         for candidate in candidates:
             if isinstance(candidate, bool) or not isinstance(candidate, int) or not 0 <= candidate <= 65535:
                 raise ValueError(f"invalid HTTP port candidate: {candidate!r}")
-            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                listener.bind((host, candidate))
+                listener = cls._bind_listen(host, candidate)
             except OSError as error:
-                listener.close()
                 failures.append((candidate, error))
                 continue
             port = int(listener.getsockname()[1])
             return cls(host=host, port=port, _socket=listener)
         detail = ", ".join(f"{port}: {error}" for port, error in failures)
         raise OSError(f"no requested HTTP port could be reserved on {host}: {detail}")
+
+    @staticmethod
+    def _bind_listen(host: str, candidate: int) -> socket.socket:
+        """The one reservation primitive: an exclusive listening hold on the port.
+
+        The reservation must exclude the same thing the real subject excludes. The gate's
+        subject server (`TmuxWebtermHTTPServer.allow_reuse_address == 1`) binds AND listens
+        with SO_REUSEADDR, so a bind-only reservation does not hold the port against a
+        like-for-like reuse-enabled server -- two SO_REUSEADDR sockets can both bind the same
+        NON-listening address. Binding and then listening makes the hold exclusive against a
+        reuse-enabled competitor (a second SO_REUSEADDR bind to an actively listening address
+        is refused), while SO_REUSEADDR still lets the owner rebind through a predecessor
+        TIME_WAIT. Both `reserve` and `reacquire` route through here so they cannot drift.
+        """
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            listener.bind((host, candidate))
+            listener.listen(1)
+        except OSError:
+            listener.close()
+            raise
+        return listener
 
     @property
     def address(self) -> tuple[str, int]:
@@ -176,14 +197,7 @@ class HttpPortLease:
 
         if self._socket is not None:
             return self.port
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind((self.host, self.port))
-        except OSError:
-            listener.close()
-            raise
-        self._socket = listener
+        self._socket = self._bind_listen(self.host, self.port)
         return self.port
 
     def close(self) -> None:
@@ -761,6 +775,94 @@ def prepare_fixture_http_app(monkeypatch: pytest.MonkeyPatch, app: Any) -> None:
             monkeypatch.setattr(app, method_name, lambda: None, raising=False)
     if not callable(getattr(app, "record_performance_sample", None)):
         monkeypatch.setattr(app, "record_performance_sample", lambda *_args, **_kwargs: None, raising=False)
+
+
+@runtime_checkable
+class FixtureSchedulerClient(Protocol):
+    """The jobd scheduler-lease seam the gate fixture pins on setup and releases on teardown.
+
+    Both halves act on one object: the real ``JobClient`` (``yolomux_lib/infra/jobd.py``) and any
+    fixture stand-in must expose the SAME two calls, so setup pins and teardown releases can never
+    diverge onto different owners.  ``start_for_scheduler`` takes the lease that pins jobd up;
+    ``stop_for_scheduler`` releases it; ``holds_scheduler_lease`` reports whether the lease is held.
+    """
+
+    def start_for_scheduler(self) -> bool: ...
+
+    def stop_for_scheduler(self) -> bool: ...
+
+    @property
+    def holds_scheduler_lease(self) -> bool: ...
+
+
+class FixtureSchedulerApp(Protocol):
+    """The app-ownership seam ``pin_fixture_jobd_scheduler`` requires of any fixture app.
+
+    Both the real gate ``TmuxWebtermApp`` and the rollback fake app satisfy this one contract, so
+    the pin routes through a typed seam rather than an ad-hoc attribute assumption, and the same
+    ``job_client`` that setup pins is the one teardown's ``demote_background_owner`` releases.
+    """
+
+    job_client: FixtureSchedulerClient
+
+
+class RecordingSchedulerClient:
+    """A jobd scheduler-lease stand-in that records every pin and release for fixture tests.
+
+    It satisfies ``FixtureSchedulerClient`` so a fixture app with no real broker still exercises
+    the exact pin/release seam, and its counters prove exactly-once release on the rollback
+    teardown path.  It models the real ``JobClient.stop_for_scheduler`` idempotence: teardown
+    calls the release from two owners (``demote_background_owner`` and ``stop_auto_approve_all``),
+    but only the first, while a lease is held, actually releases -- so ``releases`` counts the one
+    effective release, not the two idempotent calls.
+    """
+
+    def __init__(self) -> None:
+        self.start_for_scheduler_calls = 0
+        self.stop_for_scheduler_calls = 0
+        self.releases = 0
+        self._leased = False
+
+    def start_for_scheduler(self) -> bool:
+        self.start_for_scheduler_calls += 1
+        self._leased = True
+        return True
+
+    def stop_for_scheduler(self) -> bool:
+        self.stop_for_scheduler_calls += 1
+        if not self._leased:
+            return True
+        self._leased = False
+        self.releases += 1
+        return True
+
+    @property
+    def holds_scheduler_lease(self) -> bool:
+        return self._leased
+
+
+def pin_fixture_jobd_scheduler(app: FixtureSchedulerApp) -> None:
+    """Pin jobd for the whole fixture window, exactly as the elected owner does in production.
+
+    The gate app is a local background owner: ``DisabledBackgroundOwner.is_owner()`` and
+    ``can_run(role)`` both return True, so a Finder/session-files interaction starts the
+    owner-side session-files background refresh worker, and that worker submits
+    ``session_files_view`` to jobd (``submit_session_files_job`` -> ``job_client.submit``).
+    In production the owner first takes the scheduler lease
+    (``handle_background_owner_acquired`` -> ``job_client.start_for_scheduler``), which spawns
+    jobd and keeps its Unix socket present and warm before any refresh worker submits.  Without
+    this pin the fixture served those owner-side producers against an unpinned jobd, so every
+    jobd interaction was an on-demand cold start that, under -n16 CPU contention, raced an
+    absent socket (``FileNotFoundError`` at ``client.connect``) or timed out on a 0.5s per-call
+    budget -- and the strict browser-journey gate caught the emitted ``local-service:jobd``
+    transport error.  The 5s spawn budget of this single setup pin, plus the 60s idle the
+    fixture sets, guarantees the socket stays present for the bounded window.  Teardown already
+    releases the lease symmetrically via ``demote_background_owner`` -> ``stop_for_scheduler``;
+    only setup was missing its half.  ``start_for_scheduler`` is the same primitive the stateful
+    journey reaches through ``start_background_owner``, so there is one jobd-pin owner, not two.
+    """
+
+    app.job_client.start_for_scheduler()
 
 
 @dataclass
@@ -3225,13 +3327,18 @@ def _serve_gate_live_server(
     # Every fixture owns one server-log epoch. A reused xdist worker must not carry the prior
     # fixture's IDs or failures into this fixture's browser/server retirement boundary.
     SERVER_LOGS.clear()
-    server_log_boundary = SERVER_LOGS.payload()
     app = make_tmux_webterm_app(tuple(gate_tmux.sessions))
     prepare_fixture_http_app(monkeypatch, app)
     gate_http_port.release()
     server = None
     thread = None
     try:
+        # Pin jobd first, so the owner-side background refresh workers this fixture serves submit
+        # to a present, warm socket -- production parity that keeps a cold-start transport error
+        # from racing into the strict browser-journey ring gate.  Inside the try and before the
+        # server/thread are built so the SAME rollback that owns a failed start also releases this
+        # lease exactly once via ``stop_fixture_app_runtime`` -> ``demote_background_owner``.
+        pin_fixture_jobd_scheduler(app)
         server = TmuxWebtermHTTPServer(gate_http_port.address, app)
         track_fixture_http_requests(server)
         thread = threading.Thread(target=server.serve_forever, name="gate-http-server", daemon=True)
@@ -3248,6 +3355,7 @@ def _serve_gate_live_server(
         except BaseException as rollback_error:
             raise start_error.with_traceback(start_error.__traceback__) from rollback_error
         raise
+    server_log_boundary = SERVER_LOGS.payload()
     runtime = GateLiveServer(
         app=app,
         server=server,

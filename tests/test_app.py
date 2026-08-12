@@ -29,6 +29,30 @@ from yolomux_lib import common
 from yolomux_lib import jobd
 from yolomux_lib import metadata
 from yolomux_lib import state_services
+from yolomux_lib.local_service_projection import LOCAL_SERVICES_SCHEMA_VERSION
+
+
+class _StubOperationReservation:
+    """Stand-in completion reservation handle with exactly-once release for test doubles."""
+
+    def __init__(self, on_release=None):
+        self._on_release = on_release
+        self._released = False
+
+    def release(self):
+        if self._released:
+            return
+        self._released = True
+        if self._on_release is not None:
+            self._on_release()
+
+    @property
+    def released(self):
+        return self._released
+
+
+def _reservation_must_not_release():
+    raise AssertionError("an accepted operation owns its completion reservation")
 from yolomux_lib import statusd_protocol
 from yolomux_lib import transcripts
 from yolomux_lib import uploads as uploads_module
@@ -44,10 +68,13 @@ from yolomux_lib.backend_health.store import ResourceObservation
 from yolomux_lib.local_services.rpc import encode_metadata
 from yolomux_lib.local_services.rpc import LOCAL_RPC_MAX_METADATA_BYTES
 from yolomux_lib.local_services.rpc import new_envelope
+from yolomux_lib.local_services import runtime as local_service_runtime
 from yolomux_lib import server_logs
 from yolomux_lib.yoagent import session_summaries as session_summaries_module
 from yolomux_lib.yoagent import controller as controller_module
 from yolomux_lib.yoagent import transports as transport_module
+
+from tests.gate_harness import stop_fixture_app_runtime
 
 from _git_helpers import git
 from _git_helpers import init_repo
@@ -783,7 +810,7 @@ def test_the_system_status_row_publishes_the_retained_health_it_was_attached_to(
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
 
-    assert payload["schema_version"] == 2, payload["schema_version"]
+    assert payload["schema_version"] == LOCAL_SERVICES_SCHEMA_VERSION, payload["schema_version"]
     assert payload["health"]["available"] is True and payload["health"]["revision"] == 2
     assert payload["health"]["port"] == 7802 and payload["health"]["reason_code"] == ""
     rows = {row["id"]: row for row in payload["services"]}
@@ -1665,6 +1692,27 @@ def test_capture_measurement_metrics_exclude_other_browser_records():
     assert row["request_total_ms_max"] == 9.0
     assert row["accept_to_route_ms_max"] == 4.0
     assert webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "other"}) == {"ok": False, "error": "unsupported measurement scope"}
+
+
+def test_capture_measurement_metrics_retains_a_200_request_run_amid_global_churn():
+    webapp = app_module.TmuxWebtermApp([])
+    try:
+        for index in range(200):
+            webapp.record_performance_sample(
+                "http-endpoint",
+                "GET /api/system-status",
+                details={"measurement_scope": "capture", "measurement_request_id": f"run-{index}"},
+            )
+        for index in range(app_module.PERFORMANCE_RECORD_LIMIT + 10):
+            webapp.record_performance_sample("http-endpoint", f"GET /api/churn/{index}")
+        response = webapp.handle_control_request({"action": "runtime_measurement_metrics", "scope": "capture"})
+    finally:
+        webapp.control_server.stop()
+
+    assert response["ok"] is True
+    recent = response["performance"]["recent"]
+    assert len(recent) == 200
+    assert [row["details"]["measurement_request_id"] for row in recent] == [f"run-{index}" for index in range(200)]
 
 
 def test_server_cpu_budget_warns_after_sustained_window_with_top_consumers(monkeypatch):
@@ -3280,7 +3328,10 @@ def test_status_generation_waiter_uses_immediate_probe_and_stop_aware_cadence(mo
     assert events[0][1]["generation"] == 8
 
 
-def test_status_generation_waiter_suppresses_generation_only_snapshot_change(monkeypatch):
+def test_status_generation_waiter_publishes_a_minimal_revision_only_patch(monkeypatch):
+    # W4: a generation-only snapshot change (rows identical, revision 7 -> 8) is no longer suppressed.
+    # The browser needs the new revision to clear its own stale marker, and it must learn it from a
+    # minimal patch rather than an HTTP refetch, so exactly one revision-only patch is published.
     webapp = app_module.TmuxWebtermApp([])
     events = []
     record = webapp.client_watch_service.event_watcher_record
@@ -3306,7 +3357,15 @@ def test_status_generation_waiter_suppresses_generation_only_snapshot_change(mon
     finally:
         webapp.control_server.stop()
 
-    assert events == []
+    assert len(events) == 1
+    event_type, event_payload = events[0]
+    assert event_type == "auto_approve_changed"
+    assert event_payload["patch"] is True
+    assert event_payload["collection"] == "sessions"
+    assert event_payload["changes"] == {}
+    assert event_payload["fields"] == {"agent_window_snapshot_revision": 8}
+    # A valid re-measured snapshot means the browser applies the patch directly, never refetches.
+    assert event_payload["refresh"] is False
     assert record.status_generation == 8
     assert webapp.client_watch_service.auto_approve_payload["agent_window_snapshot_revision"] == 8
 
@@ -3471,12 +3530,26 @@ def test_auto_approve_client_event_patch_suppresses_noop_and_sends_changed_sessi
     changed = copy.deepcopy(same)
     changed["agent_window_snapshot_revision"] = 9
     changed["sessions"]["2"]["agent_windows"][0]["state"] = "needs-input"
+    identical = copy.deepcopy(same)
     try:
-        assert webapp.auto_approve_client_event_patch(previous, same) is None
+        # W4: a genuine no-op (same rows AND same revision) still suppresses the patch entirely.
+        assert webapp.auto_approve_client_event_patch(same, identical) is None
+        # W4: a revision-only advance (rows unchanged, revision 7 -> 8) must still emit a MINIMAL
+        # patch so the browser learns the new revision and clears its stale marker without an HTTP
+        # refetch. Empty changes, no row rebuild, one field.
+        revision_only = webapp.auto_approve_client_event_patch(previous, same)
         patch = webapp.auto_approve_client_event_patch(same, changed)
     finally:
         webapp.control_server.stop()
 
+    assert revision_only == {
+        "patch": True,
+        "collection": "sessions",
+        "changes": {},
+        "removed_keys": [],
+        "fields": {"agent_window_snapshot_revision": 8},
+        "removed_fields": [],
+    }
     assert patch == {
         "patch": True,
         "collection": "sessions",
@@ -8051,12 +8124,22 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert webapp.metadata_warm_record.worker is not None
 
         root_index = app_module.file_index.RootIndex(tmp_path)
-        fail_once(lambda: app_module.file_index._start_build(root_index, set()))
-        assert root_index.building is False
-        assert root_index.thread is None
-        app_module.file_index._start_build(root_index, set())
-        assert root_index.building is True
-        assert root_index.thread is not None
+        # `_start_build` now (P0-3) only installs a worker on the registry owner for the key AND only
+        # when the background owner can build; register the owner and (this app is not the elected
+        # owner in this test) allow builds, as every real caller's precondition does.
+        monkeypatch.setattr(app_module.file_index, "background_owner_can_build", lambda: True)
+        with app_module.file_index._REGISTRY_LOCK:
+            app_module.file_index._REGISTRY[str(tmp_path)] = root_index
+        try:
+            fail_once(lambda: app_module.file_index._start_build(root_index, set()))
+            assert root_index.building is False
+            assert root_index.thread is None
+            app_module.file_index._start_build(root_index, set())
+            assert root_index.building is True
+            assert root_index.thread is not None
+        finally:
+            with app_module.file_index._REGISTRY_LOCK:
+                app_module.file_index._REGISTRY.pop(str(tmp_path), None)
 
         fail_once(lambda: webapp.yoagent_controller.start_yoagent_action_result_watcher({"session": "1"}, {}))
         assert webapp.yoagent_action_waits == {}
@@ -8071,6 +8154,178 @@ def test_record_owned_threads_rollback_failed_start_and_retry(monkeypatch, tmp_p
         assert webapp.yoagent_prewarm_record.prewarm_worker is not None
     finally:
         webapp.control_server.stop()
+
+
+def test_metadata_warm_publish_and_start_are_atomic_under_fixture_teardown(monkeypatch):
+    # A metadata-warm worker must never be observable to the fixture teardown between the moment its
+    # record is published under metadata_warm_lock and the moment Thread.start actually runs. Before
+    # the fix the start owner released metadata_warm_lock after publishing and started the worker
+    # outside the lock, so gate_harness.stop_fixture_app_runtime could acquire the same lock in that
+    # gap, capture a published-but-unstarted worker, and raise
+    # `RuntimeError: cannot join thread before it is started` from join_metadata_warmer.
+
+    class FixtureApp:
+        def __init__(self) -> None:
+            self.metadata_warm_lock = threading.Lock()
+            self.metadata_warm_record = app_module.MetadataWarmRecord()
+
+        def background_can_run(self, _role):
+            return True
+
+        def request_background_refresh(self, _role, _detail):  # pragma: no cover - unreached here
+            raise AssertionError("background owner should be able to run in this test")
+
+        def warm_metadata_cache(self, _sessions, _stop_event):
+            # Model the production worker's terminal self-eviction so the record retains no worker
+            # after the teardown joins it (records must not survive root cleanup).
+            with self.metadata_warm_lock:
+                if self.metadata_warm_record.worker is threading.current_thread():
+                    self.metadata_warm_record.worker = None
+
+        # The remaining owners gate_harness.stop_fixture_app_runtime drives are irrelevant to this
+        # race; stub them so only the real metadata capture-and-join path is exercised.
+        def stop_client_event_watcher(self):
+            pass
+
+        def stop_jobd_operation_service(self):
+            pass
+
+        def demote_background_owner(self):
+            pass
+
+        def stop_auto_approve_all(self):
+            pass
+
+    fixture = FixtureApp()
+
+    producer_at_start = threading.Event()
+    proceed = threading.Event()
+    original_start = threading.Thread.start
+
+    def paused_start(self):
+        # Pause the worker immediately before the real Thread.start so the teardown thread has a
+        # deterministic window to attempt its capture while the worker is still unstarted.
+        if self.name == "metadata-warm":
+            producer_at_start.set()
+            assert proceed.wait(10), "metadata-warm worker was never released"
+        return original_start(self)
+
+    monkeypatch.setattr(app_module.threading.Thread, "start", paused_start)
+
+    def run_producer():
+        app_module.TmuxWebtermApp.warm_metadata_cache_async(fixture, {})
+
+    teardown_error: list[BaseException] = []
+
+    def run_teardown():
+        try:
+            stop_fixture_app_runtime(fixture, label="metadata-warm publish/start race")
+        except BaseException as error:  # noqa: BLE001 - capture so the assertion can inspect it
+            teardown_error.append(error)
+
+    producer = threading.Thread(target=run_producer, name="race-producer")
+    teardown = threading.Thread(target=run_teardown, name="race-teardown")
+
+    producer.start()
+    assert producer_at_start.wait(10), "producer never reached the pre-start pause"
+    # Producer is parked immediately before metadata-warm Thread.start. After the fix it still holds
+    # metadata_warm_lock here, so the teardown blocks; before the fix the lock is already free and the
+    # teardown captures the unstarted worker.
+    teardown.start()
+    # Before the fix the teardown runs to completion (capturing + joining the unstarted worker) without
+    # blocking; after the fix it is blocked on metadata_warm_lock until the producer is released.
+    teardown.join(timeout=1)
+    proceed.set()
+    teardown.join(timeout=10)
+    producer.join(timeout=10)
+
+    assert teardown_error == [], f"teardown observed a published-but-unstarted worker: {teardown_error!r}"
+    with fixture.metadata_warm_lock:
+        assert fixture.metadata_warm_record.worker is None
+
+
+def test_tabber_warmer_publish_and_start_are_atomic_under_fixture_teardown(monkeypatch):
+    # tabber_warmer_record.thread is captured by gate_harness.capture_thread_owners under the same
+    # tabber_cache_lock the start owner uses, then joined by stop_tabber_warmer - the identical
+    # capture-and-join shape that broke metadata-warm. Before the fix start_tabber_activity_cache_warmer
+    # published record.thread under the lock, released it, then started the worker outside it, so the
+    # teardown could capture a published-but-unstarted warmer thread and raise
+    # `RuntimeError: cannot join thread before it is started`.
+
+    class FixtureApp:
+        def __init__(self) -> None:
+            self.activity_transcript_service = SimpleNamespace(
+                tabber_cache_lock=threading.RLock(),
+                tabber_warmer_record=state_services.TabberActivityWarmerRecord(),
+            )
+
+        def background_can_run(self, _role):
+            return True
+
+        def request_background_refresh(self, _role, _detail):  # pragma: no cover - unreached here
+            raise AssertionError("background owner should be able to run in this test")
+
+        def tabber_activity_cache_warmer_loop(self, record):
+            # Model the production warmer's terminal self-eviction so no thread survives cleanup.
+            with self.activity_transcript_service.tabber_cache_lock:
+                if (
+                    self.activity_transcript_service.tabber_warmer_record is record
+                    and record.thread is threading.current_thread()
+                ):
+                    record.thread = None
+                    record.running = False
+
+        def stop_client_event_watcher(self):
+            pass
+
+        def stop_jobd_operation_service(self):
+            pass
+
+        def demote_background_owner(self):
+            pass
+
+        def stop_auto_approve_all(self):
+            pass
+
+    fixture = FixtureApp()
+
+    producer_at_start = threading.Event()
+    proceed = threading.Event()
+    original_start = threading.Thread.start
+
+    def paused_start(self):
+        if self.name == "tabber-activity-cache":
+            producer_at_start.set()
+            assert proceed.wait(10), "tabber-activity warmer was never released"
+        return original_start(self)
+
+    monkeypatch.setattr(app_module.threading.Thread, "start", paused_start)
+
+    def run_producer():
+        app_module.TmuxWebtermApp.start_tabber_activity_cache_warmer(fixture)
+
+    teardown_error: list[BaseException] = []
+
+    def run_teardown():
+        try:
+            stop_fixture_app_runtime(fixture, label="tabber-warmer publish/start race")
+        except BaseException as error:  # noqa: BLE001 - capture so the assertion can inspect it
+            teardown_error.append(error)
+
+    producer = threading.Thread(target=run_producer, name="race-producer")
+    teardown = threading.Thread(target=run_teardown, name="race-teardown")
+
+    producer.start()
+    assert producer_at_start.wait(10), "producer never reached the pre-start pause"
+    teardown.start()
+    teardown.join(timeout=1)
+    proceed.set()
+    teardown.join(timeout=10)
+    producer.join(timeout=10)
+
+    assert teardown_error == [], f"teardown observed a published-but-unstarted warmer: {teardown_error!r}"
+    with fixture.activity_transcript_service.tabber_cache_lock:
+        assert fixture.activity_transcript_service.tabber_warmer_record.thread is None
 
 
 def test_cache_hash_helpers_reuse_client_event_payload_signature(monkeypatch):
@@ -8429,56 +8684,6 @@ def test_filesystem_change_summary_counts_entry_changes():
 
 
 
-def test_publish_filesystem_ready_event_sends_initial_diff_then_keyframe(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    events = []
-    submitted_roots = []
-    signatures = [
-        (("/repo", ("/repo", "dir", 100, 0, (("one.txt", "file", 100, 10),))),),
-        (("/repo", ("/repo", "dir", 200, 0, (("two.txt", "file", 200, 20),))),),
-        (("/repo", ("/repo", "dir", 300, 0, (("three.txt", "file", 300, 30),))),),
-    ]
-
-    class ReadyBatchJob:
-        def produce(self, task, payload, **kwargs):
-            assert task == "filesystem_batch"
-            signature = signatures[0 if not submitted_roots else 2][0][1]
-            submitted_roots.append([request["path"] for request in payload["requests"]])
-            responses = [
-                {
-                    "id": request["id"],
-                    "ok": True,
-                    "status": 200,
-                    "payload": {"path": request["path"], "entries": []},
-                    "watch_signature": list(signature),
-                }
-                for request in payload["requests"]
-            ]
-            return {
-                "ok": True,
-                "state": "ready",
-                "job": {"job_id": f"job-{len(submitted_roots)}", "status": "completed", "generation": kwargs["generation"]},
-                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": kwargs["generation"]},
-            }, json.dumps({"responses": responses, "performance": {"operation_ms": 1.0}}).encode("utf-8")
-
-    webapp.job_client = ReadyBatchJob()
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: events.append((event_type, payload or {})))
-    try:
-        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[0]) == ["fs_changed"]
-        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[1]) == ["fs_changed"]
-        webapp.client_watch_service.filesystem_last_full_at = time.monotonic() - app_module.FILESYSTEM_WATCH_KEYFRAME_SECONDS - 1.0
-        assert webapp.publish_filesystem_ready_event(["/repo"], current_signature=signatures[2]) == ["fs_changed"]
-    finally:
-        webapp.control_server.stop()
-
-    assert [payload["mode"] for _event_type, payload in events] == ["full", "diff", "full"]
-    assert events[0][1]["directories"]
-    assert events[1][1]["refresh"] is True
-    assert "directories" not in events[1][1]
-    assert events[2][1]["directories"]
-    assert submitted_roots == [["/repo"], ["/repo"]]
-
-
 def test_filesystem_watch_signature_for_roots_matches_watch_batch_signature(tmp_path):
     root = tmp_path / "repo"
     root.mkdir()
@@ -8776,13 +8981,10 @@ def test_filesystem_watch_diff_force_full_acceptance_does_not_submit_refresh_or_
     class CapturingCompletionService:
         stop_event = threading.Event()
 
-        def reserve(self):
-            return True
+        def reserve(self, lane="bulk"):
+            return _StubOperationReservation(on_release=_reservation_must_not_release)
 
-        def release_reservation(self):
-            raise AssertionError("accepted operation must retain its completion reservation")
-
-        def submit_reserved(self, function, *args):
+        def submit_reserved(self, reservation, function, *args):
             self.submission = (function, args)
             return True
 
@@ -8825,13 +9027,10 @@ def test_filesystem_watch_diff_completion_worker_start_failure_is_a_produce_fail
     class RejectingCompletionService:
         stop_event = threading.Event()
 
-        def reserve(self):
-            return True
+        def reserve(self, lane="bulk"):
+            return _StubOperationReservation(on_release=_reservation_must_not_release)
 
-        def release_reservation(self):
-            raise AssertionError("submit_reserved owns the accepted reservation")
-
-        def submit_reserved(self, _function, *_args):
+        def submit_reserved(self, reservation, _function, *_args):
             return False
 
         def stop(self):
@@ -8880,13 +9079,10 @@ def test_filesystem_watch_diff_accepts_105_roots_and_partitions_them_without_dro
         stop_event = threading.Event()
         submission = None
 
-        def reserve(self):
-            return True
+        def reserve(self, lane="bulk"):
+            return _StubOperationReservation(on_release=_reservation_must_not_release)
 
-        def release_reservation(self):
-            raise AssertionError("an accepted operation owns its completion reservation")
-
-        def submit_reserved(self, function, *args):
+        def submit_reserved(self, reservation, function, *args):
             self.submission = (function, args)
             return True
 
@@ -8966,19 +9162,19 @@ def test_filesystem_watch_diff_releases_completion_reservation_when_operation_ac
             self.reservations = 0
             self.workers = []
 
-        def reserve(self):
+        def reserve(self, lane="bulk"):
             self.reservations += 1
-            return True
+            return _StubOperationReservation(on_release=self._release)
 
-        def release_reservation(self):
+        def _release(self):
             self.reservations -= 1
 
-        def submit_reserved(self, function, *args):
+        def submit_reserved(self, reservation, function, *args):
             def run():
                 try:
                     function(*args)
                 finally:
-                    self.release_reservation()
+                    reservation.release()
 
             worker = threading.Thread(target=run)
             self.workers.append(worker)
@@ -9016,127 +9212,6 @@ def test_filesystem_watch_diff_releases_completion_reservation_when_operation_ac
         webapp.control_server.stop()
 
     assert completion_service.reservations == 0
-
-
-def test_periodic_filesystem_full_frame_submits_jobd_without_inline_listing(monkeypatch):
-    current = tuple(
-        (f"/repo-{index:03d}", (f"/repo-{index:03d}", "dir", index + 1, 0, ()))
-        for index in range(64)
-    )
-    roots = [item[0] for item in current]
-    submitted = []
-    published = []
-
-    class PendingBatchJob:
-        def produce(self, task, payload, **kwargs):
-            submitted.append((task, payload, kwargs))
-            index = len(submitted)
-            return {
-                "ok": True,
-                "state": "queued",
-                "job": {"job_id": f"job-{index}", "status": "queued", "generation": kwargs["generation"]},
-                "product": {"coalesce_key": kwargs["coalesce_key"], "generation": 0},
-            }, b""
-
-    class CapturingCompletionService:
-        stop_event = threading.Event()
-
-        def reserve(self):
-            return True
-
-        def release_reservation(self):
-            return None
-
-        def submit_reserved(self, function, *args):
-            self.submission = (function, args)
-            return True
-
-        def stop(self):
-            self.stop_event.set()
-
-    webapp = app_module.TmuxWebtermApp([])
-    webapp.job_client = PendingBatchJob()
-    webapp.jobd_operation_service = CapturingCompletionService()
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published.append((event_type, payload or {})))
-    monkeypatch.setattr(
-        app_module.filesystem,
-        "list_directory",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("periodic full frame must not list in web")),
-    )
-    try:
-        events = webapp.publish_filesystem_ready_event(roots, current_signature=current, force_full=True)
-        repeated_events = webapp.publish_filesystem_ready_event(roots, current_signature=current, force_full=True)
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-
-    assert events == []
-    assert repeated_events == []
-    assert published == []
-    assert [len(call[1]["requests"]) for call in submitted] == [64]
-    assert all(call[0] == "filesystem_batch" for call in submitted)
-    assert all(call[2]["delivery"] == "ready_or_receipt" for call in submitted)
-
-
-def test_completed_filesystem_full_frame_publishes_latest_token_and_discards_stale_token(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    published = []
-    monkeypatch.setattr(webapp, "publish_client_event", lambda event_type, payload=None, **_kwargs: published.append((event_type, payload or {})))
-    first_signature = (("/repo", ("/repo", "dir", 1, 0, ())),)
-    second_signature = (("/repo", ("/repo", "dir", 2, 0, ())),)
-    try:
-        first_token = webapp.record_filesystem_watch_snapshot(first_signature)
-        with webapp.client_watch_service.lock:
-            webapp.client_watch_service.filesystem_full_inflight_token = first_token
-            webapp.client_watch_service.filesystem_payload_signature = "previous-token"
-        first_payload = {"mode": "full", "token": first_token, "roots": ["/repo"], "directories": []}
-        assert webapp.publish_completed_filesystem_full_payload(first_token, "watch", first_payload) == ["fs_changed"]
-        with webapp.client_watch_service.lock:
-            first_full_at = webapp.client_watch_service.filesystem_last_full_at
-            assert webapp.client_watch_service.filesystem_payload_signature == first_token
-            assert webapp.client_watch_service.filesystem_full_inflight_token == ""
-
-        second_token = webapp.record_filesystem_watch_snapshot(second_signature)
-        with webapp.client_watch_service.lock:
-            webapp.client_watch_service.filesystem_full_inflight_token = first_token
-            webapp.client_watch_service.filesystem_payload_signature = second_token
-        assert webapp.publish_completed_filesystem_full_payload(first_token, "watch", first_payload) == []
-        with webapp.client_watch_service.lock:
-            assert webapp.client_watch_service.filesystem_payload_signature == second_token
-            assert webapp.client_watch_service.filesystem_full_inflight_token == ""
-            assert webapp.client_watch_service.filesystem_last_full_at == first_full_at
-    finally:
-        webapp.control_server.stop()
-
-    assert published == [("fs_changed", first_payload)]
-
-
-def test_periodic_filesystem_full_frame_shutdown_clears_inflight_without_error(monkeypatch):
-    webapp = app_module.TmuxWebtermApp([])
-    token = webapp.record_filesystem_watch_snapshot((("/repo", ("/repo", "dir", 1, 0, ())),))
-    batch = app_module.FilesystemWatchBatchProduct(
-        producer=app_module.JobdProductOperation(job_id="job-1", product_key="fs-watch:test", generation=1),
-    )
-    failures = []
-    monkeypatch.setattr(webapp, "record_filesystem_watch_product_failure", lambda error, trigger: failures.append((error, trigger)))
-    with webapp.client_watch_service.lock:
-        webapp.client_watch_service.filesystem_full_inflight_token = token
-    webapp.jobd_operation_service.stop_event.set()
-    try:
-        webapp.complete_filesystem_ready_event(
-            token,
-            "watch",
-            {"mode": "full", "token": token, "removed_roots": []},
-            ["/repo"],
-            (batch,),
-            time.time() + 1.0,
-        )
-    finally:
-        webapp.stop_jobd_operation_service()
-        webapp.control_server.stop()
-
-    assert failures == []
-    assert webapp.client_watch_service.filesystem_full_inflight_token == ""
 
 
 def test_filesystem_watch_diff_plan_returns_full_when_since_is_stale():
@@ -10796,6 +10871,96 @@ def test_transient_product_metadata_is_retried_inside_the_operation_budget(monke
     }
 
 
+def test_real_unix_product_receive_timeout_recovers_then_exhausts_with_one_terminal_diagnostic(
+    monkeypatch, tmp_path,
+):
+    """A receive timeout is transient until the operation's owner deadline, not a lost product."""
+    socket_path = tmp_path / "jobd-timeout.sock"
+    lock_path = tmp_path / "jobd-timeout.lock"
+    stop_event = threading.Event()
+    release_slow = threading.Event()
+    mode = ["recover"]
+    product_calls = [0]
+    ready_body = json.dumps({"path": "/fixture/note.md", "content": "recovered"}).encode("utf-8")
+
+    def handle(request, _request_binary):
+        if request.get("action") == "product":
+            product_calls[0] += 1
+            if mode[0] == "exhaust" or product_calls[0] == 1:
+                release_slow.wait(timeout=2.0)
+            return {
+                "ok": True,
+                "state": "ready",
+                "generation": 1,
+                "inflight": False,
+                "product": _filesystem_json_product(ready_body),
+            }, ready_body
+        if request.get("action") == "result":
+            return {"ok": True, "job": {"job_id": "job-timeout", "status": "running"}}, b""
+        return {"ok": True, "version": jobd.JOBD_PROTOCOL_VERSION, "pid": os.getpid()}, b""
+
+    monkeypatch.setattr(local_service_runtime, "peer_uid", lambda _connection: os.getuid())
+    worker = threading.Thread(
+        target=lambda: local_service_runtime.run_local_rpc_service(
+            socket_path=socket_path,
+            lock_path=lock_path,
+            service_name="jobd",
+            stop_event=stop_event,
+            handle=handle,
+            on_idle=lambda: False,
+            on_client=lambda: None,
+            concurrent_handlers=8,
+        ),
+        daemon=True,
+    )
+    worker.start()
+    deadline = time.monotonic() + 2.0
+    while not socket_path.exists() and time.monotonic() < deadline:
+        stop_event.wait(0.01)
+    assert socket_path.exists()
+    real_client = jobd.JobClient(socket_path)
+
+    class ShortReceiveClient:
+        def product(self, key):
+            return real_client.product(key, timeout=0.03)
+
+        def result(self, job_id):
+            return real_client.result(job_id)
+
+    webapp = app_module.TmuxWebtermApp([], status_service_mode=True)
+    webapp.job_client = ShortReceiveClient()
+    producer = app_module.JobdProductOperation(job_id="job-timeout", product_key="timeout-product", generation=1)
+    boundary = server_logs.SERVER_LOGS.payload()["sequence"]
+    try:
+        product, body, schedule = webapp.wait_for_filesystem_operation_product(producer, time.time() + 1.0)
+        assert product["format"] == "json"
+        assert body == ready_body
+        assert schedule == {"transient_polls": 1}
+
+        mode[0] = "exhaust"
+        product_calls[0] = 0
+        with pytest.raises(app_module.JobdOperationUnavailable) as raised:
+            webapp.wait_for_filesystem_operation_product(producer, time.time() + 0.14)
+        assert raised.value.code == "deadline_expired"
+        assert raised.value.failure["status"] == "deadline_expired"
+        errors = [
+            row for row in server_logs.SERVER_LOGS.payload()["logs"]
+            if int(row.get("id") or 0) > boundary
+            and row.get("level") == "error"
+            and row.get("source") == "local-service:jobd"
+            and row.get("category") == "transport"
+        ]
+        assert len(errors) == 1
+        assert errors[0]["delivery"] == "timeout"
+    finally:
+        release_slow.set()
+        stop_event.set()
+        worker.join(timeout=2.0)
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+    assert worker.is_alive() is False
+
+
 @pytest.mark.parametrize("producer_state", ["failed", "cancelled", "superseded", "timed_out"])
 def test_real_producer_terminal_states_still_fail_the_operation_immediately(monkeypatch, tmp_path, producer_state):
     """The transient retry must not swallow a producer that genuinely ended."""
@@ -11015,7 +11180,12 @@ def test_editor_open_still_stalls_when_the_point_lane_itself_is_held(monkeypatch
     assert terminal_status == HTTPStatus.OK
 
 
-def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receipt():
+def test_filesystem_operation_relay_forwards_one_opaque_product_via_zero_wait_produce():
+    """The retired blocking `relay` is gone: the byte download uses zero-wait produce.
+
+    A warm product returns immediately from `produce` with no second `product` read and no daemon
+    handler ever blocking on the job.
+    """
     body = b"\x00raw\xff"
     product = {
         "format": "opaque_bytes",
@@ -11028,9 +11198,15 @@ def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receip
     calls = []
 
     class RelayJob:
-        def relay(self, task, payload, **kwargs):
+        def produce(self, task, payload, **kwargs):
             calls.append((task, payload, kwargs))
             return {"ok": True, "state": "ready", "product": product}, body
+
+        def relay(self, *_args, **_kwargs):
+            raise AssertionError("the blocking relay action has been retired")
+
+        def product(self, *_args, **_kwargs):
+            raise AssertionError("a warm produce needs no second product read")
 
     webapp = app_module.TmuxWebtermApp([])
     webapp.job_client = RelayJob()
@@ -11045,13 +11221,20 @@ def test_filesystem_operation_relay_forwards_one_opaque_product_without_a_receip
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
 
-    assert calls == [("filesystem_operation", {
+    assert len(calls) == 1
+    task, payload, kwargs = calls[0]
+    assert task == "filesystem_operation"
+    assert payload == {
         "op": "raw",
         "path": "/repo/payload.bin",
         "args": {"download": False, "max_bytes": 1024},
         # A relayed byte product takes the same descriptor owner, so it carries the same policy.
         app_module.filesystem.FS_ACCESS_POLICY_FIELD: app_module.filesystem.access_policy_descriptor(),
-    }, {"deadline_ms": int(app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)})]
+    }
+    # Zero-wait produce, a real coalesce key, and no receipt-only wait in the daemon.
+    assert kwargs["delivery"] == "ready_or_receipt"
+    assert kwargs["deadline_ms"] == int(app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS * 1000)
+    assert kwargs["coalesce_key"].startswith("filesystem-operation-relay:")
     assert response.status == HTTPStatus.OK
     assert response.payload is None
     assert response.body == body
@@ -11068,7 +11251,7 @@ def test_filesystem_operation_relay_uses_shared_typed_failure_normalizer():
     }
 
     class RelayFailureJob:
-        def relay(self, *_args, **_kwargs):
+        def produce(self, *_args, **_kwargs):
             return {
                 "ok": False,
                 "job": {"status": "failed", "failure": {"filesystem_error": filesystem_error, "status": int(HTTPStatus.NOT_FOUND)}},
@@ -11475,11 +11658,11 @@ def test_filesystem_batch_ready_product_reuses_stable_key_and_materializes_curre
         def __init__(self):
             self.reservations = 0
 
-        def reserve(self):
+        def reserve(self, lane="bulk"):
             self.reservations += 1
-            return True
+            return _StubOperationReservation(on_release=self._release)
 
-        def release_reservation(self):
+        def _release(self):
             self.reservations -= 1
 
         def submit_reserved(self, *_args):
@@ -11529,7 +11712,8 @@ def test_filesystem_batch_capacity_refusal_does_not_submit_an_orphan_job(monkeyp
     monkeypatch.setattr(app_module, "SESSION_FILES_OPERATION_STATE_PATH", tmp_path / "operations.json")
     webapp = app_module.TmuxWebtermApp([])
     webapp.jobd_operation_service = state_services.JobdOperationService(worker_limit=1, operation_limit=1)
-    assert webapp.jobd_operation_service.reserve() is True
+    held_reservation = webapp.jobd_operation_service.reserve("bulk")
+    assert held_reservation is not None
     submissions = []
     webapp.job_client = SimpleNamespace(produce=lambda *args, **kwargs: submissions.append((args, kwargs)))
     try:
@@ -11537,7 +11721,7 @@ def test_filesystem_batch_capacity_refusal_does_not_submit_an_orphan_job(monkeyp
             "requests": [{"id": "list", "type": "list", "path": "/repo", "trigger_counts": {"tree-render": 1}}],
         })
     finally:
-        webapp.jobd_operation_service.release_reservation()
+        held_reservation.release()
         webapp.stop_jobd_operation_service()
         webapp.control_server.stop()
 
@@ -11556,15 +11740,73 @@ def test_jobd_operation_service_bounds_accepted_completion_capacity():
         started.set()
         assert release.wait(2.0)
 
-    assert service.reserve() is True
-    assert service.submit_reserved(work) is True
+    reservation = service.reserve("bulk")
+    assert reservation is not None
+    assert service.submit_reserved(reservation, work) is True
     assert started.wait(2.0)
-    assert service.reserve() is False
+    assert service.reserve("bulk") is None
     future = next(iter(service.futures))
     release.set()
     future.result(timeout=2.0)
-    assert service.reserve() is True
-    service.release_reservation()
+    replacement = service.reserve("bulk")
+    assert replacement is not None
+    replacement.release()
+    service.stop()
+
+
+def test_jobd_operation_reservation_release_is_exactly_once():
+    """The handle owns its slot: a double release must not over-admit the lane."""
+    service = state_services.JobdOperationService(worker_limit=1, operation_limit=1)
+    reservation = service.reserve("bulk")
+    assert reservation is not None
+    assert service.reserve("bulk") is None
+    reservation.release()
+    assert reservation.released is True
+    # A second, racing release (manual cleanup vs. the done-callback) is a no-op, not an
+    # over-release that would let the bounded lane admit a phantom second slot.
+    reservation.release()
+    first = service.reserve("bulk")
+    assert first is not None
+    assert service.reserve("bulk") is None
+    first.release()
+    service.stop()
+
+
+def test_jobd_completion_point_and_mutation_run_while_every_bulk_worker_and_slot_is_held():
+    """A point read and a bounded mutation completion must RUN while the bulk lane is saturated.
+
+    This is the P1-1 defect at the completion boundary: before named completion lanes, every held
+    bulk product-poll occupied the one shared pool, so a point/mutation completion was accepted yet
+    could not run until a bulk worker freed.  Separate lanes give point and mutation their own
+    workers and admission slots, so they run on this same held-bulk state.
+    """
+    service = state_services.JobdOperationService(worker_limit=2, operation_limit=2)
+    release_bulk = threading.Event()
+    bulk_started = [threading.Event() for _ in range(2)]
+
+    def bulk_work(index):
+        bulk_started[index].set()
+        assert release_bulk.wait(3.0)
+
+    bulk_reservations = []
+    for index in range(2):
+        held = service.reserve("bulk")
+        assert held is not None
+        assert service.submit_reserved(held, bulk_work, index) is True
+        bulk_reservations.append(held)
+    for event in bulk_started:
+        assert event.wait(2.0)
+    # Every bulk worker AND both bulk admission slots are now held.
+    assert service.reserve("bulk") is None
+
+    for lane in ("point", "mutation"):
+        ran = threading.Event()
+        reservation = service.reserve(lane)
+        assert reservation is not None, f"{lane} lane refused admission while bulk was held"
+        assert service.submit_reserved(reservation, ran.set) is True
+        assert ran.wait(2.0), f"{lane} completion could not run while bulk held every worker/slot"
+
+    release_bulk.set()
     service.stop()
 
 
@@ -17201,7 +17443,6 @@ def test_an_absent_statsd_reads_starting_while_this_process_is_still_taking_its_
     assert health[0] not in BACKEND_HEALTH_DEGRADED_STATES, health
     assert panel["state"] == "idle", panel
     assert panel["alerting"] is False, panel
-    assert app_module.local_services_alert([panel]) == {}
 
 
 def test_a_statsd_that_is_genuinely_dead_at_boot_is_never_excused(monkeypatch):
@@ -17223,7 +17464,6 @@ def test_a_statsd_that_is_genuinely_dead_at_boot_is_never_excused(monkeypatch):
         assert health == ("down", "service_absent"), (runtime_status, health)
         assert panel["state"] == "unavailable", (runtime_status, panel)
         assert panel["alerting"] is True, (runtime_status, panel)
-        assert app_module.local_services_alert([panel])["count"] == 1
 
 
 def test_a_process_that_does_not_own_the_statsd_pin_still_reports_it_down(monkeypatch):
@@ -17377,8 +17617,6 @@ def test_the_system_panel_and_the_health_indicator_never_disagree_about_one_row(
         assert panel["alerting"] is degraded, (row, state, panel)
         assert (panel["state"] == "running") is (state == "ready"), (row, state, panel)
         assert (panel["state"] == "idle") is (state == "starting"), (row, state, panel)
-        # A row nobody alarms on must not reach the persistent topbar indicator either.
-        assert (app_module.local_services_alert([panel]) != {}) is degraded, (row, state, panel)
 
 
 def test_an_absent_jobd_without_the_scheduler_lease_is_quiet_in_both_owners():
@@ -17398,7 +17636,6 @@ def test_an_absent_jobd_without_the_scheduler_lease_is_quiet_in_both_owners():
     assert panel["reason_code"] == "not_started", panel
     assert panel["alerting"] is False, panel
     assert panel["essential"] is True, panel
-    assert app_module.local_services_alert([panel]) == {}
     # And the other side of the same lease still alarms: this process owns scheduling, so an
     # absent jobd is a verified outage rather than an expected absence.
     owning = {"service": "jobd", "pid": 0, "absence_expected_reason": ""}

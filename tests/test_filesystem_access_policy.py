@@ -276,6 +276,14 @@ _DESCRIPTOR_LITERAL_ALLOWLIST: dict[tuple[str, str], tuple[int, str]] = {
     ("tests/test_jobd.py", '"payload": {"op": "read", "path": "/repo/note.md"},'): (
         1, "a `json_compact` payload; it never reaches a filesystem operation",
     ),
+    ("tests/test_search_indexer.py",
+     'jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})'): (
+        1, "authorizer-dispatch test; proves the opaque `cursor` param reaches `filesystem.search_files`, not a production descriptor site",
+    ),
+    ("tests/test_search_indexer.py",
+     'jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})'): (
+        1, "authorizer-dispatch test; an absent cursor is a snapshot read, not a production descriptor site",
+    ),
 }
 # DESCRIPTOR-ALLOWLIST-END
 

@@ -291,17 +291,26 @@ def test_redact_chrome_query_credentials():
 
 
 def test_cleanup_driver_terminates_only_its_webdriver_service_when_quit_hangs():
-    class Process:
-        def __init__(self): self.terminated = False
-        def terminate(self): self.terminated = True
-    class Driver:
-        def __init__(self): self.service = type("Service", (), {"process": Process()})()
-        def quit(self): threading.Event().wait(1)
-    driver = Driver()
-    error = tool.cleanup_driver(driver, timeout_seconds=0)
-    assert error["terminal"] == "WebDriverCleanupTimeout"
-    assert "terminated its WebDriver service process" in error["message"]
-    assert driver.service.process.terminated
+    # Migrated from the pinned process.terminate() contract to the shared lease's equivalent: a hung
+    # quit must not become the next orphan owner. The lease TERM/KILLs the EXACT chromedriver service
+    # process it captured a generation for and proves it gone - here a real subprocess standing in for
+    # chromedriver, so the assertion is that the leased process is actually reaped, not merely poked.
+    service_process = subprocess.Popen(["sleep", "60"])
+    try:
+        class Driver:
+            def __init__(self):
+                self.service = type("Service", (), {"process": service_process})()
+            def quit(self):
+                threading.Event().wait(60)
+        error = tool.cleanup_driver(Driver(), timeout_seconds=0.1)
+        assert error["terminal"] == "WebDriverCleanupTimeout"
+        assert "terminated its WebDriver service process" in error["message"]
+        # The lease proved it gone by actually signalling the captured PID - the process is reaped.
+        assert service_process.wait(timeout=5) is not None
+    finally:
+        if service_process.poll() is None:
+            service_process.kill()
+            service_process.wait(timeout=5)
 
 
 def test_cleanup_timeout_is_preserved_as_a_typed_terminal_artifact(tmp_path, monkeypatch):
@@ -1932,17 +1941,67 @@ def test_atomic_finalizer_accepts_observed_browser_ring_eviction_during_retireme
     assert setup.get("error") is None, setup
     assert setup["length"] == setup["limit"], setup
     assert setup["lastId"] - setup["firstId"] + 1 == setup["limit"], setup
-    # Force the pre-atomic shift this test exists to tolerate. Under load, benign events
-    # arrive between the setup snapshot and the finalizer's fence and slide a saturated
-    # ring forward; at low load they often do not, so the shift is injected deterministically
-    # rather than left to timing. Four is arbitrary but fixed, and must stay below the limit.
+    # Inject a deterministic pre-atomic shift, then ONE deliberate benign interleaving event.
+    # The shift models the load this test exists to tolerate; the interleaving models a single
+    # benign event that arrives between the setup snapshot and the finalizer's fence - which is
+    # exactly why anchoring the retained window to `setup["firstId"] + shift` was the stale
+    # oracle. Both counts are arbitrary but fixed and must stay below the ring limit, and each
+    # is measured synchronously so the immediate-shift relation is exact with no async gap.
     PRE_ATOMIC_SHIFT = 4
+    # Deterministically model the one producer that made the cross-round-trip oracle flaky: a real
+    # long_task PerformanceObserver event can fire between the setup snapshot and the shift script
+    # under load, sliding the saturated ring one extra id. Recording it here proves the tolerance
+    # without depending on host load to (occasionally) produce it.
+    browser.execute_script("recordJsDebugEvent('long_task', {durationMs: 2});")
+    SHIFT_TAG = "retirement-pre-atomic-shift"
     shifted = browser.execute_script(
-        "for (let i = 0; i < arguments[0]; i += 1) { recordJsDebugEvent('long_task', {durationMs: 3}); }"
-        "return {firstId: jsDebugEvents[0].id, lastId: jsDebugEvents[jsDebugEvents.length - 1].id};",
+        "const baselineFirstId = jsDebugEvents[0].id;"
+        "const baselineLastId = jsDebugEvents[jsDebugEvents.length - 1].id;"
+        "const injected = [];"
+        "for (let i = 0; i < arguments[0]; i += 1) {"
+        "  recordJsDebugEvent('long_task', {durationMs: 3, testTag: arguments[1]});"
+        "  const event = jsDebugEvents[jsDebugEvents.length - 1];"
+        "  injected.push({id: event.id, type: event.type, tag: event.testTag});"
+        "}"
+        "return {baselineFirstId, baselineLastId, injected, firstId: jsDebugEvents[0].id, lastId: jsDebugEvents[jsDebugEvents.length - 1].id};",
         PRE_ATOMIC_SHIFT,
+        SHIFT_TAG,
     )
-    assert shifted["firstId"] == setup["firstId"] + PRE_ATOMIC_SHIFT, {"shifted": shifted, "setup": setup}
+    # Ownership-safe immediate-shift relation, made atomic and proven by exact tagged IDs: baseline
+    # head/tail ids are captured INSIDE the shift script, and the PRE_ATOMIC_SHIFT test-owned events
+    # (uniquely tagged SHIFT_TAG so an ambient untagged long_task can never be mistaken for one) are
+    # the consecutive ids baselineLastId+1..+PRE_ATOMIC_SHIFT that both extend the tail and evict
+    # exactly that many from the head of a saturated ring - no async gap. Anchoring to setup["firstId"]
+    # across the Selenium round-trip was the stale oracle: an ambient long_task landing in that gap
+    # slides the saturated ring and made the cross-round-trip equality false while the shift itself is
+    # still exactly PRE_ATOMIC_SHIFT test-owned events.
+    assert len(shifted["injected"]) == PRE_ATOMIC_SHIFT, {"shifted": shifted, "setup": setup}
+    assert [event["id"] for event in shifted["injected"]] == [shifted["baselineLastId"] + offset for offset in range(1, PRE_ATOMIC_SHIFT + 1)], {"shifted": shifted, "setup": setup}
+    assert all(event["type"] == "long_task" and event["tag"] == SHIFT_TAG for event in shifted["injected"]), {"shifted": shifted, "setup": setup}
+    assert shifted["lastId"] == shifted["baselineLastId"] + PRE_ATOMIC_SHIFT, {"shifted": shifted, "setup": setup}
+    assert shifted["firstId"] == shifted["baselineFirstId"] + PRE_ATOMIC_SHIFT, {"shifted": shifted, "setup": setup}
+    BENIGN_INTERLEAVE = 1
+    INTERLEAVE_TAG = "retirement-benign-interleave"
+    interleaved = browser.execute_script(
+        "const baselineFirstId = jsDebugEvents[0].id;"
+        "const baselineLastId = jsDebugEvents[jsDebugEvents.length - 1].id;"
+        "const injected = [];"
+        "for (let i = 0; i < arguments[0]; i += 1) {"
+        "  recordJsDebugEvent('long_task', {durationMs: 4, testTag: arguments[1]});"
+        "  const event = jsDebugEvents[jsDebugEvents.length - 1];"
+        "  injected.push({id: event.id, type: event.type, tag: event.testTag});"
+        "}"
+        "return {baselineFirstId, baselineLastId, injected, firstId: jsDebugEvents[0].id, lastId: jsDebugEvents[jsDebugEvents.length - 1].id};",
+        BENIGN_INTERLEAVE,
+        INTERLEAVE_TAG,
+    )
+    # The one deliberate benign interleaving, tagged distinctly from the shift and proven by exact id,
+    # atomically self-baselined so a further ambient long_task between the shift and this script cannot
+    # perturb the accounting.
+    assert len(interleaved["injected"]) == BENIGN_INTERLEAVE, {"interleaved": interleaved, "shifted": shifted}
+    assert [event["id"] for event in interleaved["injected"]] == [interleaved["baselineLastId"] + offset for offset in range(1, BENIGN_INTERLEAVE + 1)], {"interleaved": interleaved, "shifted": shifted}
+    assert all(event["type"] == "long_task" and event["tag"] == INTERLEAVE_TAG for event in interleaved["injected"]), {"interleaved": interleaved, "shifted": shifted}
+    assert interleaved["firstId"] == interleaved["baselineFirstId"] + BENIGN_INTERLEAVE, {"interleaved": interleaved, "shifted": shifted}
     baseline_projection = soak.validate_negative_probe_baseline(setup["projection"])
     browser.get_log("browser")
 
@@ -1973,10 +2032,14 @@ def test_atomic_finalizer_accepts_observed_browser_ring_eviction_during_retireme
         ), {"atomic": atomic_ring, "retirement": ring}
         # The retained-window arithmetic itself is owned by the validator called above; a
         # local recomputation here would be a second copy of one fact and would drift again.
-        assert atomic_ring["retainedFirstId"] == setup["firstId"] + PRE_ATOMIC_SHIFT, {
+        # Anchoring the retained window to `setup["firstId"] + PRE_ATOMIC_SHIFT` was the stale
+        # oracle: the deliberate benign interleaving above already slid the saturated ring past
+        # it, and any further legitimate repaint before the fence slides it more. So this asserts
+        # only the monotone floor - the interleaved window is the least the atomic snapshot could
+        # retain - and leaves the exact value to the observed-window relations.
+        assert atomic_ring["retainedFirstId"] >= interleaved["firstId"], {
             "atomic": atomic_ring,
-            "setup": setup,
-            "shift": PRE_ATOMIC_SHIFT,
+            "interleaved": interleaved,
         }
         assert len(boundary["evidence"]["browserEvents"]) == setup["limit"], boundary["evidence"]["browserEvents"]
         delta = soak.validate_browser_retirement_delta(boundary["eventRing"]["delta"])

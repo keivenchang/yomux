@@ -27,7 +27,9 @@ const allSuiteFiles = [
   'tests/layout_async.test.js',
   'tests/backend_health_indicator.test.js',
   'tests/system_health_panel.test.js',
+  'tests/diagnostic_redaction.test.js',
   'tests/gate_panels.test.js',
+  'tests/open_file_missing_guard.test.js',
 ];
 // Keep this in step with NODE_LAYOUT_EXCLUDED_FILES in tools/test_catalog.py, which is what the gate
 // actually passes as argv; tests/test_check_runner.py pins the two sets equal. share_theme.test.js was

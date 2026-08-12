@@ -47,7 +47,6 @@ SNAPSHOT_PAYLOAD_KEYS = frozenset({
     "schema_version",
     "inventory",
     "services",
-    "alert",
     "totals",
     "ledger",
     "recovery_events",
@@ -386,28 +385,30 @@ def test_the_snapshot_schema_is_frozen_and_immutable():
 
     assert tuple(snapshot.__dataclass_fields__) == SNAPSHOT_DATACLASS_FIELDS
     assert tuple(snapshot.rows[0].__dataclass_fields__) == ROW_DATACLASS_FIELDS
-    assert snapshot.schema_version == 2
+    assert snapshot.schema_version == 3
     assert snapshot.observed_at == 160.0
     assert snapshot.inventory == local_service_projection.LOCAL_SERVICE_INVENTORY
     assert snapshot.row("indexd").uptime_seconds == 60.0
     assert snapshot.totals == {"processes": 1, "cpu_percent": 2.5, "rss_bytes": 4096}
     with pytest.raises(Exception):
-        snapshot.schema_version = 3
+        snapshot.schema_version = 99
     with pytest.raises(TypeError):
         snapshot.row("indexd").fields["pid"] = 99
 
 
-def test_the_rendered_payload_publishes_schema_two_and_the_frozen_inventory():
-    """M8 changed the row shape, so the version moved with it. Both are pinned together.
+def test_the_rendered_payload_publishes_schema_three_and_the_frozen_inventory():
+    """W13 removed the dead `alert` key, so the version moved with it. Both are pinned together.
 
     This is the negative control for "a schema change without a version bump": the key set
-    and the version number are asserted in ONE statement, so adding a field without moving
-    the number fails here rather than in a browser that silently rendered the old shape.
+    and the version number are asserted in ONE statement, so removing (or adding) a field
+    without moving the number fails here rather than in a browser that silently rendered the
+    old shape. The key set no longer carries `alert`.
     """
     collector = local_service_projection.LocalServicesCollector(lambda: _stub_producers())
-    payload = collector.collect().payload(lambda row: dict(row), lambda services: {})
+    payload = collector.collect().payload(lambda row: dict(row))
 
-    assert (payload["schema_version"], frozenset(payload)) == (2, SNAPSHOT_PAYLOAD_KEYS)
+    assert (payload["schema_version"], frozenset(payload)) == (3, SNAPSHOT_PAYLOAD_KEYS)
+    assert "alert" not in payload
     assert payload["inventory"] == ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
     assert [service["service"] for service in payload["services"]] == list(payload["inventory"])
 
@@ -467,7 +468,7 @@ def test_no_producer_field_is_lost_in_the_extraction():
     collector = local_service_projection.LocalServicesCollector(
         lambda: _stub_producers(jobd=produced), clock=lambda: 560.0
     )
-    payload = collector.collect().payload(lambda row: dict(row), lambda services: {})
+    payload = collector.collect().payload(lambda row: dict(row))
     rendered = next(service for service in payload["services"] if service["service"] == "jobd")
 
     assert frozenset(rendered) == frozenset(produced) | {"uptime_seconds"}

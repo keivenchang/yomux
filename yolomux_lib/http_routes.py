@@ -668,7 +668,14 @@ def get_background_status(request: Any, parsed: Any, route: Route) -> None:
 
 
 def get_performance_diagnostics(request: Any, parsed: Any, route: Route) -> None:
-    del parsed, route
+    del route
+    scope = str(query_one(request_query(request, parsed), "measurement_scope", "") or "")
+    if scope not in {"", "capture"}:
+        request.write_json({"ok": False, "error": "unsupported measurement scope"}, status=HTTPStatus.BAD_REQUEST)
+        return
+    if scope:
+        request.write_json({"perf": request.server.app.performance_metrics_payload(measurement_scope=scope)})
+        return
     request.write_json(request.server.app.performance_diagnostics_payload())
 
 

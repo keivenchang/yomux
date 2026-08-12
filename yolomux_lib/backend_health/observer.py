@@ -181,6 +181,13 @@ REASON_PROBE_TIMEOUT = "probe_timeout"
 REASON_PROBE_FAILED = "probe_failed"
 REASON_START_BLOCKED = "start_blocked"
 REASON_TERMINAL_FAILURE = "terminal_failure"
+# A RUNNING service (pid>0) that reports a fault THIS cycle -- `healthy=False`, or a recorded
+# `last_failure`. It is DISTINCT from `terminal_failure` on purpose: `terminal_failure` is the
+# registry's latched, permanent start-failure fence that a not-running service carries into
+# `down` and that recovery is forbidden to clear. A live pid is by definition not terminally
+# failed; a transient running-degraded reconnect window (a lease reacquire reads `errored`/
+# `not_running` with pid>0) is a `degraded`/`service_unhealthy`, not a permanent death.
+REASON_SERVICE_UNHEALTHY = "service_unhealthy"
 REASON_UPGRADE_REQUIRED = "upgrade_required"
 REASON_EXITED = "exited"
 # The two ways a row can be self-contradictory or unreadable about its own absence. Both are a
@@ -317,7 +324,11 @@ def observed_health(fields: Mapping[str, Any], probe_outcome: str = PROBE_OK) ->
         if transport_reason:
             return "degraded", transport_code
         if fields.get("healthy") is False or last_failure:
-            return "degraded", REASON_TERMINAL_FAILURE
+            # A RUNNING service reporting a fault is `service_unhealthy`, NOT `terminal_failure`.
+            # The state stays `degraded` -- the warning is preserved, nothing is hidden -- but the
+            # machine-readable reason no longer borrows the registry's latched permanent-death
+            # token. `terminal_failure` is reserved for the not-running latched fence below.
+            return "degraded", REASON_SERVICE_UNHEALTHY
         return "ready", REASON_NONE
     if fields.get("terminal_failure"):
         return "down", REASON_TERMINAL_FAILURE
@@ -1239,9 +1250,9 @@ class BackendHealthObserver:
     ) -> dict[str, Any]:
         """Build the ``backend_health_changed`` payload: exactly four keys, no history.
 
-        ``degraded_resources`` is the shape ``local_services_alert`` (``app.py:589-612``) already
-        produces, minus its free-text ``reason``. Free text can carry a path or a socket name;
-        the bounded ``reason_code`` is the machine-readable half and is what the indicator reads.
+        ``degraded_resources`` names each degraded resource by its bounded, machine-readable
+        ``reason_code`` and never its free-text ``reason``. Free text can carry a path or a socket
+        name; the bounded ``reason_code`` is the machine-readable half and is what the client reads.
         """
 
         degraded = [

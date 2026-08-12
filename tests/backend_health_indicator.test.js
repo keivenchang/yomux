@@ -6,6 +6,12 @@
 // The node DOM stub does not build a real `.topbar` (the product resolves its host from it), so the
 // tests hand the renderer their own `.topbar-right-tools` host. There is still exactly one renderer,
 // one state object and one insertion point.
+//
+// The control is now PERMANENTLY mounted and a fixed-size icon shell (DOIT.topbar-health-layout-shift):
+// a health transition repaints the same node instead of inserting or removing a variable-size pill, so
+// healthy is a STATE of the node (`data-backend-health === ''`, disabled, inert), not its absence. The
+// full localized sentence lives in the `.backend-health-indicator-text` role=status live region and on
+// the control's title; the whole control is the System details route (no separate Details button).
 const {
   assert,
   fs,
@@ -45,6 +51,15 @@ function messageText(indicator) {
   return String(indicator?.querySelector('.backend-health-indicator-text')?.textContent || '');
 }
 
+// role=status now lives on the live-region owner (the text span), not the control button.
+function liveRegionRole(indicator) {
+  return String(indicator?.querySelector('.backend-health-indicator-text')?.getAttribute('role') || '');
+}
+
+function severityOf(indicator) {
+  return String(indicator?.dataset?.backendHealth ?? '');
+}
+
 function renderHealth(api, payload) {
   const host = topbarHost();
   api.handleClientPushEventNowForTest('backend_health_changed', payload);
@@ -70,8 +85,9 @@ async function runBackendHealthIndicatorSuite() {
     assert.ok(indicator, 'a down service must render the indicator');
     assert.equal(host.children.length, 1, 'the indicator is the single node added to .topbar-right-tools');
     assert.equal(host.children[0], indicator, 'it is inserted into .topbar-right-tools, not somewhere else');
-    assert.equal(indicator.getAttribute('role'), 'status');
+    assert.equal(liveRegionRole(indicator), 'status');
     assert.equal(indicator.dataset.backendHealth, 'down');
+    assert.equal(indicator.disabled, false, 'a warning is an actionable control');
     assert.equal(EN['backendHealth.down.single'], '{label} is not running', 'pins the exact user-facing wording');
     assert.equal(messageText(indicator), 'File watching is not running');
   });
@@ -179,8 +195,10 @@ async function runBackendHealthIndicatorSuite() {
     assert.equal(messageText(afterOne), 'File watching is not running', 'the warning keeps naming the failure it is still describing');
 
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({revision: 3, overall_state: 'ready'}));
-    assert.equal(api.syncBackendHealthIndicatorForTest(host), null, 'the debounced healthy revision clears it');
-    assert.equal(host.children.length, 0, 'the node is removed, not just hidden');
+    const cleared = api.syncBackendHealthIndicatorForTest(host);
+    assert.equal(severityOf(cleared), '', 'the debounced healthy revision clears the warning severity');
+    assert.equal(cleared.disabled, true, 'the cleared control is inert');
+    assert.equal(host.children.length, 1, 'the node persists as an inert fixed slot, it is not removed');
   });
 
   test('a replayed or older revision cannot walk the state backwards', () => {
@@ -208,10 +226,10 @@ async function runBackendHealthIndicatorSuite() {
     }));
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({revision: 5, overall_state: 'ready'}));
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({epoch: 'observer-2', revision: 1, overall_state: 'ready'}));
-    assert.ok(api.syncBackendHealthIndicatorForTest(host), 'the first healthy revision of a new epoch does not inherit the old count');
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), 'down', 'the first healthy revision of a new epoch does not inherit the old count');
 
     api.handleClientPushEventNowForTest('backend_health_changed', healthPayload({epoch: 'observer-2', revision: 2, overall_state: 'ready'}));
-    assert.equal(api.syncBackendHealthIndicatorForTest(host), null);
+    assert.equal(severityOf(api.syncBackendHealthIndicatorForTest(host)), '');
   });
 
   test('starting and ready never raise the indicator', () => {
@@ -222,8 +240,9 @@ async function runBackendHealthIndicatorSuite() {
         overall_state: state,
         degraded_resources: [resource({state})],
       }));
-      assert.equal(indicator, null, `${state} is not a failure and must not warn during startup`);
-      assert.equal(host.children.length, 0);
+      assert.equal(severityOf(indicator), '', `${state} is not a failure and must not warn during startup`);
+      assert.equal(indicator.disabled, true, `${state} leaves the control inert`);
+      assert.equal(host.children.length, 1, 'the fixed slot is permanently mounted, warning or not');
     }
   });
 
@@ -247,24 +266,24 @@ async function runBackendHealthIndicatorSuite() {
     assert.ok(downText.includes('is not running'), 'the down state is stated in text');
     assert.ok(degradedText.includes('is degraded'), 'the degraded state is stated in text');
     assert.notEqual(downText, degradedText, 'severity must be distinguishable with every colour token removed');
-    assert.equal(down.getAttribute('role'), 'status', 'both states stay in the same live region');
-    assert.equal(degraded.getAttribute('role'), 'status');
+    assert.equal(liveRegionRole(down), 'status', 'both states stay in the same live region');
+    assert.equal(liveRegionRole(degraded), 'status');
   });
 
-  test('the indicator offers a details action that reuses the existing System view route', () => {
+  test('the whole control is a details action that reuses the existing System view route', () => {
     const api = loadYolomux();
     const {indicator} = renderHealth(api, healthPayload({
       overall_state: 'down',
       degraded_resources: [resource()],
     }));
-    const details = indicator.querySelector('.backend-health-indicator-details');
 
-    assert.ok(details, 'a warning with no way to see what broke is a dead end');
-    assert.equal(details.localName, 'button', 'native button semantics give Enter/Space and focus for free');
-    assert.equal(details.type, 'button');
-    assert.equal(details.textContent, EN['common.details']);
-    assert.equal(details.getAttribute('aria-label'), EN['backendHealth.detailsAria']);
+    assert.equal(indicator.localName, 'button', 'native button semantics give Enter/Space and focus for free');
+    assert.equal(indicator.type, 'button');
+    // The accessible NAME describes the action; the STATE sentence is announced by the live region
+    // and shown on the tooltip, so the fixed slot never has to widen to a variable-length pill.
+    assert.equal(indicator.getAttribute('aria-label'), EN['backendHealth.detailsAria']);
     assert.equal(EN['backendHealth.detailsAria'], 'Show backend service details', 'pins the exact user-facing wording');
+    assert.equal(indicator.getAttribute('title'), 'File watching is not running', 'the tooltip carries the full sentence');
     // Reuse proof: the same two calls the System sub-tab button itself makes, not a second route in.
     assert.match(
       CORE_SOURCE,
@@ -333,7 +352,10 @@ async function runBackendHealthIndicatorSuite() {
     api.syncBackendHealthIndicatorForTest(host);
 
     assert.equal(host.querySelectorAll('[data-backend-health]').length, 1, 'repeated renders must never build a second widget');
-    assert.equal([...CORE_SOURCE.matchAll(/createElement\('span'\);\n {4}indicator\.className = 'backend-health-indicator'/g)].length, 1);
+    // One builder for the single control, and one insertion point (the fallback mount). The healthy
+    // path repaints the same node instead of removing it, so there is no second DOM owner.
+    assert.equal([...CORE_SOURCE.matchAll(/className: 'backend-health-indicator',/g)].length, 1, 'one control builder');
+    assert.equal([...CORE_SOURCE.matchAll(/function createBackendHealthIndicator\(\)/g)].length, 1, 'one control factory');
     assert.equal([...CORE_SOURCE.matchAll(/const backendHealthState = \{/g)].length, 1, 'one state object');
     assert.equal([...CORE_SOURCE.matchAll(/host\.prepend\(indicator\)/g)].length, 1, 'one insertion point');
   });

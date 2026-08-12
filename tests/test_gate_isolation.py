@@ -2366,6 +2366,11 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
     calls = []
 
     class App:
+        def __init__(self):
+            # The shared fixture scheduler-lease seam: setup pins this exact client and teardown's
+            # demote releases it, so the rollback path can prove exactly-once release of the pin.
+            self.job_client = gate_harness_module.RecordingSchedulerClient()
+
         def stop_client_event_watcher(self):
             calls.append("client-watcher")
 
@@ -2373,9 +2378,15 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
             calls.append("jobd-operations")
 
         def demote_background_owner(self):
+            # Production's ``demote_background_owner`` releases the jobd scheduler lease here; the
+            # fake models that release so the rollback teardown cannot leak the pinned lease.
+            self.job_client.stop_for_scheduler()
             calls.append("background-owner")
 
         def stop_auto_approve_all(self):
+            # ``stop_auto_approve_all`` also calls ``stop_for_scheduler`` in production; the fake
+            # models that second, idempotent call so the test proves it does NOT double-release.
+            self.job_client.stop_for_scheduler()
             calls.append("auto-approve")
 
     class Server:
@@ -2397,15 +2408,21 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
         release=lambda: calls.append("release"),
         reacquire=lambda: calls.append("reacquire"),
     )
+    created_apps = []
     monkeypatch.setattr(gate_harness_module, "TmuxWebtermHTTPServer", Server)
     monkeypatch.setattr(gate_harness_module, "track_fixture_http_requests", lambda _server: None)
     monkeypatch.setattr(gate_harness_module, "prepare_fixture_http_app", lambda *_args: None)
     monkeypatch.setattr(gate_harness_module.threading, "Thread", FailingThread)
 
+    def make_app(_sessions):
+        app = App()
+        created_apps.append(app)
+        return app
+
     generator = gate_harness_module._serve_gate_live_server(
         SimpleNamespace(node=SimpleNamespace(funcargs={})),
         monkeypatch,
-        lambda _sessions: App(),
+        make_app,
         SimpleNamespace(),
         port_lease,
         SimpleNamespace(sessions=("fixture",)),
@@ -2416,6 +2433,14 @@ def test_gate_server_start_rolls_back_thread_creation_failure_and_reacquires_por
     assert calls == [
         "release", "client-watcher", "jobd-operations", "background-owner", "auto-approve", "server-close", "reacquire",
     ]
+    # The pin was taken before the thread-construction failure, and the rollback released it
+    # exactly once -- no leaked lease, no double release -- even though two teardown owners each
+    # call the idempotent release.
+    [app] = created_apps
+    assert app.job_client.start_for_scheduler_calls == 1
+    assert app.job_client.stop_for_scheduler_calls == 2
+    assert app.job_client.releases == 1
+    assert app.job_client.holds_scheduler_lease is False
 
 
 def test_browser_fixture_ring_rejects_changed_logs_without_sequence_increment(monkeypatch):

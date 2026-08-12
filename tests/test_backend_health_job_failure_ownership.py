@@ -31,7 +31,7 @@ import pytest
 from yolomux_lib.backend_health.observer import PROBE_OK
 from yolomux_lib.backend_health.observer import REASON_EXITED
 from yolomux_lib.backend_health.observer import REASON_NONE
-from yolomux_lib.backend_health.observer import REASON_TERMINAL_FAILURE
+from yolomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
 from yolomux_lib.backend_health.observer import observed_health
 from yolomux_lib.infra.jobd import JobRecord
 from yolomux_lib.infra.jobd import PersistentJobBroker
@@ -138,19 +138,27 @@ def test_a_healthy_running_jobd_with_a_stale_job_failure_reduces_to_ready(tmp_pa
 
 
 def test_a_running_daemon_reporting_itself_unhealthy_still_degrades(tmp_path):
-    """Negative control for the reducer: `healthy is False` must keep alarming."""
+    """Negative control for the reducer: `healthy is False` must keep alarming.
+
+    The STATE stays `degraded` (the warning is preserved); the reason is `service_unhealthy`,
+    not `terminal_failure`, because a live pid is not the registry's latched permanent death.
+    """
 
     row = {"service": "jobd", "pid": 2353349, "healthy": False, "last_failure": ""}
 
-    assert observed_health(row, PROBE_OK) == ("degraded", REASON_TERMINAL_FAILURE)
+    assert observed_health(row, PROBE_OK) == ("degraded", REASON_SERVICE_UNHEALTHY)
 
 
 def test_a_running_daemon_with_a_current_registry_failure_still_degrades():
-    """Negative control: a real CURRENT failure reaching `last_failure` must keep alarming."""
+    """Negative control: a real CURRENT failure reaching `last_failure` must keep alarming.
+
+    A running process reporting a fault is `service_unhealthy` -- distinct from the not-running
+    latched `terminal_failure` fence, which the absent-daemon control below still exercises.
+    """
 
     row = {"service": "jobd", "pid": 2353349, "healthy": True, "last_failure": "jobd exited (1)"}
 
-    assert observed_health(row, PROBE_OK) == ("degraded", REASON_TERMINAL_FAILURE)
+    assert observed_health(row, PROBE_OK) == ("degraded", REASON_SERVICE_UNHEALTHY)
 
 
 def test_an_absent_daemon_with_a_current_failure_is_still_down():

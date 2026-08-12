@@ -53,6 +53,63 @@ def test_warm_index_load_latency_budget_scales_below_linux_baseline_cores():
     assert _warm_index_load_latency_budget_seconds(cpu_count=10) == pytest.approx(1.6)
 
 
+def test_search_progress_signal_is_redacted_to_four_opaque_keys(monkeypatch):
+    # Step 5 SECURITY boundary: the frame emitted onto the shared, globally fanned-out bus carries
+    # ONLY {scope_id, generation, revision, coverage}. Even when the writer's coverage dict carries the
+    # filesystem path (`_coverage_shape` always includes `root`), the redaction drops it: the scope id
+    # is an opaque digest, and coverage is rebuilt from a numeric allowlist. Fail closed, not filtered.
+    file_index._reset_search_progress_coalescing()
+    captured = []
+    monkeypatch.setattr(file_index, "_SEARCH_PROGRESS_NOTIFIER", captured.append)
+
+    root = Path("/home/someone/secret-project")
+    coverage_with_a_path = {
+        "root": str(root),
+        "source": "live",
+        "published_depth": 2,
+        "frontier_depth": 3,
+        "frontier_size": 7,
+        "entry_count": 41,
+        "full_coverage": False,
+        "truncated": False,
+    }
+    file_index.notify_search_progress(root, generation=4, revision=88, coverage=coverage_with_a_path)
+
+    assert len(captured) == 1
+    frame = captured[0]
+    assert set(frame) == {"scope_id", "generation", "revision", "coverage"}
+    assert frame["generation"] == 4 and frame["revision"] == 88
+    assert frame["scope_id"] == file_index._root_scope_id(root)
+    # The opaque digest is not the path and does not contain any path segment.
+    assert "secret-project" not in frame["scope_id"] and "/" not in frame["scope_id"]
+    assert set(frame["coverage"]) == {"published_depth", "frontier_depth", "frontier_size", "entry_count", "full_coverage", "truncated"}
+    assert "root" not in frame["coverage"] and "source" not in frame["coverage"]
+    assert "secret-project" not in json.dumps(frame)
+    file_index._reset_search_progress_coalescing()
+
+
+def test_search_progress_coalesces_to_a_leading_signal_plus_the_latest_trailing(monkeypatch):
+    # Step 5: at most one signal per root per window, but the LATEST revision is always delivered. A
+    # burst of publications yields exactly the leading edge and a trailing latest, never one-per-commit.
+    file_index._reset_search_progress_coalescing()
+    monkeypatch.setattr(file_index, "SEARCH_PROGRESS_COALESCE_SECONDS", 0.2)
+    captured = []
+    monkeypatch.setattr(file_index, "_SEARCH_PROGRESS_NOTIFIER", captured.append)
+    root = Path("/repo")
+
+    for revision in (10, 11, 12, 13):
+        file_index.notify_search_progress(root, generation=1, revision=revision, coverage={"published_depth": revision})
+
+    # Leading edge fired immediately; the three follow-ups coalesced to one pending trailing frame.
+    assert [frame["revision"] for frame in captured] == [10]
+    deadline = time.monotonic() + 2.0
+    while len(captured) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert [frame["revision"] for frame in captured] == [10, 13]
+    assert captured[1]["coverage"]["published_depth"] == 13
+    file_index._reset_search_progress_coalescing()
+
+
 @pytest.fixture(autouse=True)
 def no_detached_local_services(monkeypatch):
     """Ownership unit tests must not leave five-minute service daemons behind."""
@@ -593,13 +650,23 @@ def test_managed_instance_starts_private_workers_through_the_local_owner_adapter
     webapp.warm_start_tabber_activity_cache = lambda: calls.append("tabber")
     webapp.start_tabber_activity_cache_warmer = lambda: calls.append("tabber-worker")
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
+    # Item 1 (Slice B): owner acquisition also leases indexd for configured roots via
+    # refresh_search_indexer_schedule(), between stats start and the cache-warm calls. With no
+    # configured roots the lease is a bounded no-op; the private-worker startup order is the contract.
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": []}}}
+    webapp.indexed_repo_discovery_dirs = lambda _fe: []
+    webapp.search_indexer = type(
+        "Indexer",
+        (),
+        {"lease_configured_roots": lambda _self, _roots: (calls.append("search-indexer") or {"ok": True, "scheduled_roots": [], "leased": False})},
+    )()
 
     try:
         assert webapp.start_background_owner(port=9911, managed_instance=True) is True
         assert isinstance(webapp.background_owner, app_module.DisabledBackgroundOwner)
         assert webapp.background_owner.status_payload()["status"] == "local"
         assert webapp.background_owner.owner_payload()["port"] == 9911
-        assert calls == ["event", "job", "pricing", "stats", "session-files", "tabber", "tabber-worker", "publish"]
+        assert calls == ["event", "job", "pricing", "stats", "search-indexer", "session-files", "tabber", "tabber-worker", "publish"]
     finally:
         file_index.set_background_owner_checker(None)
 
@@ -1584,10 +1651,17 @@ def test_search_index_start_publishes_building_before_worker_runs(monkeypatch, t
     events = []
     file_index.set_background_owner_done_notifier(lambda role, payload: events.append((role, payload)))
     monkeypatch.setattr(file_index, "start_thread_with_rollback", lambda _thread, _rollback: None)
+    # `_start_build` now (P0-3) verifies the object is still the registry owner for its key before it
+    # installs a worker, so a retired/orphaned object cannot be revived. Register the owner first, as
+    # every real caller (`ensure_index`/`schedule_refreshes`) does.
+    with file_index._REGISTRY_LOCK:
+        file_index._REGISTRY[str(tmp_path)] = index
     try:
-        file_index._start_build(index, set())
+        assert file_index._start_build(index, set()) is True
     finally:
         file_index.set_background_owner_done_notifier(None)
+        with file_index._REGISTRY_LOCK:
+            file_index._REGISTRY.clear()
 
     assert events == [(BACKGROUND_ROLE_SEARCH_INDEX, {"root": str(tmp_path), "state": "building", "generation": 1})]
     assert index.building is True
@@ -1624,7 +1698,11 @@ def test_search_index_build_error_clears_building_and_publishes_terminal_state(m
     _pin_search_index_root(index, tmp_path)
     events = []
     file_index.set_background_owner_done_notifier(lambda role, payload: events.append((role, payload)))
-    monkeypatch.setattr(file_index, "_walk_root_with_metrics", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
+    # A configured-root FULL build now runs through the breadth-first runner, not the DFS
+    # `_walk_root_with_metrics`; inject the failure at the runner the cutover actually consults so the
+    # error path is exercised regardless of test order (importing search_indexer registers the runner
+    # process-globally).
+    monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")))
     try:
         file_index._run_build(index, set(), generation=1)
     finally:
@@ -1643,8 +1721,9 @@ def test_directory_rename_invalidates_and_rebuilds_search_index(monkeypatch, tmp
     (old_dir / "manifest.yaml").write_text("name: old\n", encoding="utf-8")
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
 
-    def synchronous_start(index, skip_dirs, exclude_path=None, exclude_signature=""):
+    def synchronous_start(index, skip_dirs, exclude_path=None, exclude_signature="", operation="", build_reason=""):
         file_index._run_build(index, set(skip_dirs), exclude_path=exclude_path, exclude_signature=exclude_signature)
+        return True
 
     monkeypatch.setattr(file_index, "_start_build", synchronous_start)
     file_index.set_background_owner_checker(lambda _role: True)

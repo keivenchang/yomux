@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import threading
@@ -22,6 +23,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from tests.browser_helpers.webdriver_lease import WebDriverLease
+from tests.browser_helpers.webdriver_lease import retire_all
 from tests.browser_helpers.browser_layout import (
     WebDriverWait,
     new_chrome_driver,
@@ -34,9 +37,9 @@ from tests.browser_helpers.browser_layout import (
 
 FETCH_PROBE_SOURCE = """
 (() => {
+  window.__finderFsReproMarker = %s;
   if (window.__finderFsReproInstalled) return;
   window.__finderFsReproInstalled = true;
-  window.__finderFsReproMarker = %s;
   window.__finderFsReproLog = [];
   window.__finderFsReproFailNextWatchDiff = 0;
   const originalFetch = window.fetch.bind(window);
@@ -202,27 +205,65 @@ def summarize_fetch_log(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def clear_server_measurements(app) -> None:
-    with app.performance_record_lock:
-        app.performance_records.clear()
-
-
-def capture_server_measurements(app) -> dict[str, Any]:
+def capture_server_measurements(app, request_id: str) -> dict[str, Any]:
     payload = app.performance_metrics_payload(measurement_scope="capture")
-    summary = [
-        row for row in payload.get("summary", [])
-        if str(row.get("surface") or "") in {"GET /api/fs/watch-diff", "POST /api/fs/batch"}
+    recent = [
+        row for row in payload.get("recent", [])
+        if isinstance(row, dict)
+        and isinstance(row.get("details"), dict)
+        and row["details"].get("measurement_request_id") == request_id
+        and str(row.get("surface") or "") in {"GET /api/fs/watch-diff", "POST /api/fs/batch"}
     ]
+    summaries: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in recent:
+        key = (str(row.get("role") or ""), str(row.get("surface") or ""))
+        summary = summaries.setdefault(key, {
+            "role": key[0],
+            "surface": key[1],
+            "count": 0,
+            "compute_ms_total": 0.0,
+            "compute_ms_max": 0.0,
+            "payload_bytes_total": 0,
+            "cache": {},
+            "request_total_ms_total": 0.0,
+            "request_total_ms_max": 0.0,
+            "accept_to_route_ms_total": 0.0,
+            "accept_to_route_ms_max": 0.0,
+        })
+        compute_ms = max(0.0, float(row.get("compute_ms") or 0.0))
+        summary["count"] += 1
+        summary["compute_ms_total"] += compute_ms
+        summary["compute_ms_max"] = max(summary["compute_ms_max"], compute_ms)
+        summary["payload_bytes_total"] += max(0, int(row.get("payload_bytes") or 0))
+        cache_status = str(row.get("cache_status") or "")
+        if cache_status:
+            summary["cache"][cache_status] = int(summary["cache"].get(cache_status, 0)) + 1
+        details = row["details"]
+        for field in ("request_total_ms", "accept_to_route_ms"):
+            value = max(0.0, float(details.get(field) or 0.0))
+            summary[f"{field}_total"] += value
+            summary[f"{field}_max"] = max(summary[f"{field}_max"], value)
+    summary = []
+    for row in summaries.values():
+        count = max(1, int(row["count"]))
+        row["compute_ms_total"] = round(float(row["compute_ms_total"]), 3)
+        row["compute_ms_avg"] = round(float(row["compute_ms_total"]) / count, 3)
+        row["compute_ms_max"] = round(float(row["compute_ms_max"]), 3)
+        row["request_total_ms_avg"] = round(float(row.pop("request_total_ms_total")) / count, 3)
+        row["request_total_ms_max"] = round(float(row["request_total_ms_max"]), 3)
+        row["accept_to_route_ms_avg"] = round(float(row.pop("accept_to_route_ms_total")) / count, 3)
+        row["accept_to_route_ms_max"] = round(float(row["accept_to_route_ms_max"]), 3)
+        summary.append(row)
     summary.sort(key=lambda row: str(row.get("surface") or ""))
-    return {"summary": summary}
+    return {"summary": summary, "recent": recent}
 
 
-def wait_for_server_measurements_quiet(app, timeout: float, quiet_seconds: float = 0.5, drivers: dict[str, Any] | None = None) -> None:
+def wait_for_server_measurements_quiet(app, request_id: str, timeout: float, quiet_seconds: float = 0.5, drivers: dict[str, Any] | None = None) -> None:
     deadline = time.monotonic() + timeout
     stable_since = time.monotonic()
     previous = None
     while time.monotonic() < deadline:
-        current = capture_server_measurements(app)["summary"]
+        current = capture_server_measurements(app, request_id)["summary"]
         signature = tuple((row.get("surface"), row.get("count"), row.get("compute_ms_total")) for row in current)
         if signature != previous:
             previous = signature
@@ -385,8 +426,8 @@ def stop_watchd_revision_bridge(app: Any, timeout: float) -> None:
             raise RuntimeError(f"Timed out after {timeout:.1f}s stopping the fixture watchd revision bridge")
 
 
-def capture_phase(app, drivers: dict[str, Any], process_cpu_started: float) -> dict[str, Any]:
-    server = capture_server_measurements(app)
+def capture_phase(app, drivers: dict[str, Any], process_cpu_started: float, request_id: str) -> dict[str, Any]:
+    server = capture_server_measurements(app, request_id)
     server["process_cpu_seconds"] = round(max(0.0, time.process_time() - process_cpu_started), 6)
     return {
         "clients": {
@@ -400,6 +441,19 @@ def capture_phase(app, drivers: dict[str, Any], process_cpu_started: float) -> d
 
 def measurement_marker() -> str:
     return f"capture-{uuid.uuid4().hex}"
+
+
+def measurement_request_id(marker: str) -> str:
+    return hashlib.sha256(marker.encode("ascii")).hexdigest()[:16]
+
+
+def start_measurement_phase(drivers: dict[str, Any]) -> str:
+    marker = measurement_marker()
+    for driver in drivers.values():
+        # Re-registering also makes this phase marker the last new-document script for reloads.
+        # The installed fetch wrapper reads the marker dynamically for every request.
+        install_fetch_probe(driver, marker)
+    return measurement_request_id(marker)
 
 
 def open_clients(drivers: dict[str, Any], base_url: str, search: str, fixture: dict[str, str], timeout: float) -> None:
@@ -427,7 +481,7 @@ def trigger_forced_watch_diff_refresh(driver) -> None:
         raise RuntimeError(result.get("error") or "forced watch-diff refresh failed")
 
 
-def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_seconds: float = 2.0, event_timeout: float = 8.0, force_full_filesystem_event: bool = False) -> dict[str, Any]:
+def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_seconds: float = 2.0, event_timeout: float = 8.0) -> dict[str, Any]:
     fixture = create_fixture_tree(tmp_path)
     runtime = start_isolated_browser_share_app(monkeypatch, tmp_path, session_count=1, session_cwd=fixture["root"])
     server = thread = None
@@ -451,18 +505,19 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
             "both fixture clients to register only the fixture-owned watch root",
         )
         assert runtime.app.client_watch_roots_snapshot() == [fixture["root"]]
-        wait_for_server_measurements_quiet(runtime.app, event_timeout, drivers=drivers)
+        setup_request_id = measurement_request_id(marker)
+        wait_for_server_measurements_quiet(runtime.app, setup_request_id, event_timeout, drivers=drivers)
 
         phases: dict[str, Any] = {}
 
         idle_deadline = time.monotonic() + event_timeout
         while True:
+            phase_request_id = start_measurement_phase(drivers)
             for driver in drivers.values():
                 clear_browser_log(driver)
-            clear_server_measurements(runtime.app)
             phase_cpu_started = time.process_time()
             time.sleep(max(0.1, idle_seconds))
-            idle_phase = capture_phase(runtime.app, drivers, phase_cpu_started)
+            idle_phase = capture_phase(runtime.app, drivers, phase_cpu_started, phase_request_id)
             no_client_finder_traffic = all(
                 not client["request_counts"]
                 for client in idle_phase["clients"].values()
@@ -475,41 +530,10 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
 
         for driver in drivers.values():
             clear_browser_log(driver)
-        clear_server_measurements(runtime.app)
+        phase_request_id = start_measurement_phase(drivers)
         phase_cpu_started = time.process_time()
         file_change_before = {name: finder_change_state(driver) for name, driver in drivers.items()}
-        if force_full_filesystem_event:
-            # Native filesystem delivery is intentionally compact. Suppress it
-            # here so this measurement deterministically exercises the periodic
-            # full-SSE keyframe path instead of racing the native watcher.
-            stop_watchd_revision_bridge(runtime.app, event_timeout)
-            with runtime.app.client_watch_service.lock:
-                runtime.app.client_watch_service.filesystem_last_full_at = 0.0
         append_line(fixture["watched_file"], "file-change\n")
-        if force_full_filesystem_event:
-            current_signature = runtime.app.filesystem_watch_signature_for_roots([fixture["root"]])
-            runtime.app.publish_filesystem_ready_event(
-                [fixture["root"]],
-                current_signature=current_signature,
-                force_full=True,
-            )
-            with runtime.app.client_watch_service.lock:
-                expected_token = str(runtime.app.client_watch_service.filesystem_history[-1]["token"])
-            try:
-                wait_for_condition(
-                    lambda: runtime.app.client_watch_service.filesystem_payload_signature == expected_token,
-                    event_timeout,
-                    "the explicit full filesystem event to publish its completed payload",
-                )
-            except RuntimeError as error:
-                with runtime.app.client_watch_service.lock:
-                    full_state = {
-                        "expected_token": expected_token,
-                        "payload_signature": runtime.app.client_watch_service.filesystem_payload_signature,
-                        "inflight_token": runtime.app.client_watch_service.filesystem_full_inflight_token,
-                        "history": list(runtime.app.client_watch_service.filesystem_history[-3:]),
-                    }
-                raise RuntimeError(f"{error}: {full_state!r}") from error
         wait_for_condition(
             lambda: all(
                 finder_change_state(driver) != file_change_before[name]
@@ -519,51 +543,49 @@ def run_measurement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, idle_sec
             "both Finder clients to apply a real file change",
         )
         time.sleep(0.25)
-        phases["file_change"] = capture_phase(runtime.app, drivers, phase_cpu_started)
+        phases["file_change"] = capture_phase(runtime.app, drivers, phase_cpu_started, phase_request_id)
 
+        phase_request_id = start_measurement_phase(drivers)
         for driver in drivers.values():
             clear_browser_log(driver)
             set_fail_next_watch_diff(driver, 1)
-        clear_server_measurements(runtime.app)
         phase_cpu_started = time.process_time()
         for driver in drivers.values():
             trigger_forced_watch_diff_refresh(driver)
         time.sleep(0.25)
-        phases["forced_watch_diff_failure"] = capture_phase(runtime.app, drivers, phase_cpu_started)
+        phases["forced_watch_diff_failure"] = capture_phase(runtime.app, drivers, phase_cpu_started, phase_request_id)
 
+        phase_request_id = start_measurement_phase(drivers)
         for driver in drivers.values():
             clear_browser_log(driver)
-        clear_server_measurements(runtime.app)
         phase_cpu_started = time.process_time()
         for driver in drivers.values():
             driver.get(f"{base_url}/{search}")
             wait_for_app(driver, event_timeout)
             open_root(driver, fixture["root"], fixture["expected_row"], event_timeout)
         wait_for_finder_settled(drivers, event_timeout)
-        wait_for_server_measurements_quiet(runtime.app, event_timeout, drivers=drivers)
-        phases["reload"] = capture_phase(runtime.app, drivers, phase_cpu_started)
+        wait_for_server_measurements_quiet(runtime.app, phase_request_id, event_timeout, drivers=drivers)
+        phases["reload"] = capture_phase(runtime.app, drivers, phase_cpu_started, phase_request_id)
 
+        phase_request_id = start_measurement_phase(drivers)
         for driver in drivers.values():
             clear_browser_log(driver)
-        clear_server_measurements(runtime.app)
         phase_cpu_started = time.process_time()
         for driver in drivers.values():
             open_root(driver, fixture["nested_root"], fixture["nested_row"], event_timeout)
-        phases["navigation"] = capture_phase(runtime.app, drivers, phase_cpu_started)
+        phases["navigation"] = capture_phase(runtime.app, drivers, phase_cpu_started, phase_request_id)
 
         return {
             "version": 2,
             "base_url": base_url,
             "fixture": fixture,
-            "file_change_delivery": "full-sse" if force_full_filesystem_event else "native-watcher",
+            "file_change_delivery": "native-watcher",
             "phases": phases,
         }
     finally:
-        for driver in drivers.values():
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        # One shared owner retires both drivers: bounded quit -> TERM -> KILL -> reap -> final proof,
+        # never a bare best-effort quit that leaves a chromedriver behind when quit() hangs.
+        retire_all([WebDriverLease.from_driver(driver) for driver in drivers.values()])
         if server is not None and thread is not None:
             stop_browser_share_server(server, thread)
         stop_isolated_browser_share_app(runtime)

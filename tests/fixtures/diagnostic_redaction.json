@@ -1,0 +1,807 @@
+{
+  "note": "W2 shared diagnostic-redaction contract. Generated from yolomux_lib/diagnostic_redaction.py (source of truth). Both the Python and JavaScript (94_share_replay.js shareRedactDiagnosticValue) conformance implementations must reproduce every expected value.",
+  "cases": [
+    {
+      "category": "credentials",
+      "name": "bearer_and_password",
+      "input": "Bearer browser-secret password=server-secret",
+      "expected": "Bearer [redacted-secret] password=[redacted-secret]"
+    },
+    {
+      "category": "credentials",
+      "name": "noncredential_context",
+      "input": "request failed because password validation rejected the ordinary input; mode=debug",
+      "expected": "request failed because password validation rejected the ordinary input; mode=debug"
+    },
+    {
+      "category": "headers",
+      "name": "authorization_basic_trailing",
+      "input": "upstream Authorization: Basic abc failed at /api/ping after 503",
+      "expected": "upstream Authorization: [redacted-secret] failed at /api/ping after 503"
+    },
+    {
+      "category": "headers",
+      "name": "authorization_bearer_json",
+      "input": "request failed with {\"Authorization\":\"Bearer browser-secret\"}",
+      "expected": "request failed with {\"Authorization\":\"[redacted-secret]\"}"
+    },
+    {
+      "category": "headers",
+      "name": "cookie_json",
+      "input": "request failed with {\"Cookie\":\"sid=browser-secret; csrf=csrf-secret\"}",
+      "expected": "request failed with {\"Cookie\":\"[redacted-secret]\"}"
+    },
+    {
+      "category": "headers",
+      "name": "set_cookie_trailing",
+      "input": "request Set-Cookie: sid=abc failed after reconnect",
+      "expected": "request Set-Cookie: [redacted-secret] failed after reconnect"
+    },
+    {
+      "category": "headers",
+      "name": "proxy_authorization_unknown_scheme",
+      "input": "Proxy-Authorization:\tDigest username=\"proxy-user\", response=\"proxy-secret\" failed\nnext safe line",
+      "expected": "Proxy-Authorization:\t[redacted-secret]\nnext safe line"
+    },
+    {
+      "category": "headers",
+      "name": "authorization_unknown_multitoken",
+      "input": "Authorization: token first-secret second-secret",
+      "expected": "Authorization: [redacted-secret]"
+    },
+    {
+      "category": "headers",
+      "name": "cookie_missing_separator_failclosed",
+      "input": "safe Cookie: sid=first-secret csrf=second-secret failed after reconnect\nnext safe line",
+      "expected": "safe Cookie: [redacted-secret]\nnext safe line"
+    },
+    {
+      "category": "headers",
+      "name": "empty_authorization_no_next_line",
+      "input": "Authorization:\nstatus=healthy",
+      "expected": "Authorization:\nstatus=healthy"
+    },
+    {
+      "category": "headers",
+      "name": "empty_cookie_no_next_line",
+      "input": "Cookie: \nstatus=healthy",
+      "expected": "Cookie: \nstatus=healthy"
+    },
+    {
+      "category": "assignments",
+      "name": "quoted_double",
+      "input": "password=\"owner's-secret\" failed at /api/ping",
+      "expected": "password=\"[redacted-secret]\" failed at /api/ping"
+    },
+    {
+      "category": "assignments",
+      "name": "quoted_single",
+      "input": "password='owner\"s-secret' failed after reconnect",
+      "expected": "password='[redacted-secret]' failed after reconnect"
+    },
+    {
+      "category": "assignments",
+      "name": "unterminated_double",
+      "input": "safe prefix password=\"unterminated-secret failed at /api/ping\nnext safe line",
+      "expected": "safe prefix password=[redacted-secret]\nnext safe line"
+    },
+    {
+      "category": "assignments",
+      "name": "json_escaped",
+      "input": "{\"password\":\"first\\\"second\"}",
+      "expected": "{\"password\":\"[redacted-secret]\"}"
+    },
+    {
+      "category": "assignments",
+      "name": "unquoted_authorization",
+      "input": "authorization=Digest username=\"alice\", response=\"digest-secret\" failed at /api/ping",
+      "expected": "authorization=[redacted-secret]"
+    },
+    {
+      "category": "assignments",
+      "name": "api_key_unquoted",
+      "input": "X_API_KEY=x-api-secret failed at /api/ping",
+      "expected": "X_API_KEY=[redacted-secret] failed at /api/ping"
+    },
+    {
+      "category": "assignments",
+      "name": "empty_assignment_no_next_line",
+      "input": "password=\nvalidation failed",
+      "expected": "password=\nvalidation failed"
+    },
+    {
+      "category": "urls",
+      "name": "share_url_query_fragment",
+      "input": "https://example.test/api?password=url-secret&mode=debug#token=fragment-secret",
+      "expected": "https://example.test/api?password=[redacted-secret]&mode=debug#token=[redacted-share-token]"
+    },
+    {
+      "category": "urls",
+      "name": "share_path",
+      "input": "opened /share/AbC-123_xyz for review",
+      "expected": "opened [redacted-share-url] for review"
+    },
+    {
+      "category": "urls",
+      "name": "share_token_query",
+      "input": "GET /api/thing?shareToken=qqq&ok=1 failed",
+      "expected": "GET /api/thing?shareToken=[redacted-share-token]&ok=1 failed"
+    },
+    {
+      "category": "nested",
+      "name": "dict_mixed",
+      "input": {
+        "tokenizer": "gpt2",
+        "secretary": "alice",
+        "token": "token-secret",
+        "Authorization": "Basic basic-secret",
+        "message": "Bearer deep-secret"
+      },
+      "expected": {
+        "tokenizer": "gpt2",
+        "secretary": "alice",
+        "token": "[redacted-share-token]",
+        "Authorization": "[redacted-share-token]",
+        "message": "Bearer [redacted-secret]"
+      }
+    },
+    {
+      "category": "nested",
+      "name": "array_of_strings",
+      "input": [
+        "Bearer a-secret",
+        "ordinary text",
+        "password=b-secret failed"
+      ],
+      "expected": [
+        "Bearer [redacted-secret]",
+        "ordinary text",
+        "password=[redacted-secret] failed"
+      ]
+    },
+    {
+      "category": "nested",
+      "name": "deep_nested",
+      "input": {
+        "a": {
+          "b": {
+            "c": {
+              "token": "deep-token",
+              "note": "ok"
+            }
+          }
+        }
+      },
+      "expected": {
+        "a": {
+          "b": {
+            "c": {
+              "token": "[redacted-share-token]",
+              "note": "ok"
+            }
+          }
+        }
+      }
+    },
+    {
+      "category": "nested",
+      "name": "array_under_secret_key",
+      "input": {
+        "token": [
+          "should",
+          "all",
+          "vanish"
+        ]
+      },
+      "expected": {
+        "token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "token",
+      "input": {
+        "token": "matrix-secret"
+      },
+      "expected": {
+        "token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "TOKEN",
+      "input": {
+        "TOKEN": "matrix-secret"
+      },
+      "expected": {
+        "TOKEN": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "secret",
+      "input": {
+        "secret": "matrix-secret"
+      },
+      "expected": {
+        "secret": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "SECRET",
+      "input": {
+        "SECRET": "matrix-secret"
+      },
+      "expected": {
+        "SECRET": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "password",
+      "input": {
+        "password": "matrix-secret"
+      },
+      "expected": {
+        "password": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "PASSWORD",
+      "input": {
+        "PASSWORD": "matrix-secret"
+      },
+      "expected": {
+        "PASSWORD": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "passwd",
+      "input": {
+        "passwd": "matrix-secret"
+      },
+      "expected": {
+        "passwd": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "PASSWD",
+      "input": {
+        "PASSWD": "matrix-secret"
+      },
+      "expected": {
+        "PASSWD": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "authorization",
+      "input": {
+        "authorization": "matrix-secret"
+      },
+      "expected": {
+        "authorization": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "AUTHORIZATION",
+      "input": {
+        "AUTHORIZATION": "matrix-secret"
+      },
+      "expected": {
+        "AUTHORIZATION": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "proxy_authorization",
+      "input": {
+        "proxy_authorization": "matrix-secret"
+      },
+      "expected": {
+        "proxy_authorization": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "PROXY_AUTHORIZATION",
+      "input": {
+        "PROXY_AUTHORIZATION": "matrix-secret"
+      },
+      "expected": {
+        "PROXY_AUTHORIZATION": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "proxy-authorization",
+      "input": {
+        "proxy-authorization": "matrix-secret"
+      },
+      "expected": {
+        "proxy-authorization": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "PROXY-AUTHORIZATION",
+      "input": {
+        "PROXY-AUTHORIZATION": "matrix-secret"
+      },
+      "expected": {
+        "PROXY-AUTHORIZATION": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "cookie",
+      "input": {
+        "cookie": "matrix-secret"
+      },
+      "expected": {
+        "cookie": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "COOKIE",
+      "input": {
+        "COOKIE": "matrix-secret"
+      },
+      "expected": {
+        "COOKIE": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "set-cookie",
+      "input": {
+        "set-cookie": "matrix-secret"
+      },
+      "expected": {
+        "set-cookie": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "SET-COOKIE",
+      "input": {
+        "SET-COOKIE": "matrix-secret"
+      },
+      "expected": {
+        "SET-COOKIE": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "bearer",
+      "input": {
+        "bearer": "matrix-secret"
+      },
+      "expected": {
+        "bearer": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "BEARER",
+      "input": {
+        "BEARER": "matrix-secret"
+      },
+      "expected": {
+        "BEARER": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "api_key",
+      "input": {
+        "api_key": "matrix-secret"
+      },
+      "expected": {
+        "api_key": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "API_KEY",
+      "input": {
+        "API_KEY": "matrix-secret"
+      },
+      "expected": {
+        "API_KEY": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "api-key",
+      "input": {
+        "api-key": "matrix-secret"
+      },
+      "expected": {
+        "api-key": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "API-KEY",
+      "input": {
+        "API-KEY": "matrix-secret"
+      },
+      "expected": {
+        "API-KEY": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "client_secret",
+      "input": {
+        "client_secret": "matrix-secret"
+      },
+      "expected": {
+        "client_secret": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "CLIENT_SECRET",
+      "input": {
+        "CLIENT_SECRET": "matrix-secret"
+      },
+      "expected": {
+        "CLIENT_SECRET": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "access_token",
+      "input": {
+        "access_token": "matrix-secret"
+      },
+      "expected": {
+        "access_token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "ACCESS_TOKEN",
+      "input": {
+        "ACCESS_TOKEN": "matrix-secret"
+      },
+      "expected": {
+        "ACCESS_TOKEN": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "refresh_token",
+      "input": {
+        "refresh_token": "matrix-secret"
+      },
+      "expected": {
+        "refresh_token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "REFRESH_TOKEN",
+      "input": {
+        "REFRESH_TOKEN": "matrix-secret"
+      },
+      "expected": {
+        "REFRESH_TOKEN": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "share_token",
+      "input": {
+        "share_token": "matrix-secret"
+      },
+      "expected": {
+        "share_token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "SHARE_TOKEN",
+      "input": {
+        "SHARE_TOKEN": "matrix-secret"
+      },
+      "expected": {
+        "SHARE_TOKEN": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "x_share_token",
+      "input": {
+        "x_share_token": "matrix-secret"
+      },
+      "expected": {
+        "x_share_token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "X_SHARE_TOKEN",
+      "input": {
+        "X_SHARE_TOKEN": "matrix-secret"
+      },
+      "expected": {
+        "X_SHARE_TOKEN": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key",
+      "name": "x-api-key",
+      "input": {
+        "x-api-key": "matrix-secret"
+      },
+      "expected": {
+        "x-api-key": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "exact_key_upper",
+      "name": "X-API-KEY",
+      "input": {
+        "X-API-KEY": "matrix-secret"
+      },
+      "expected": {
+        "X-API-KEY": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "tokenizer_struct",
+      "input": {
+        "tokenizer": "ordinary-value"
+      },
+      "expected": {
+        "tokenizer": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "tokenizer_free",
+      "input": "tokenizer=ordinary-value failed at /api/ping",
+      "expected": "tokenizer=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "secretary_struct",
+      "input": {
+        "secretary": "ordinary-value"
+      },
+      "expected": {
+        "secretary": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "secretary_free",
+      "input": "secretary=ordinary-value failed at /api/ping",
+      "expected": "secretary=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "password_validation_struct",
+      "input": {
+        "password_validation": "ordinary-value"
+      },
+      "expected": {
+        "password_validation": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "password_validation_free",
+      "input": "password_validation=ordinary-value failed at /api/ping",
+      "expected": "password_validation=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "authorization_status_struct",
+      "input": {
+        "authorization_status": "ordinary-value"
+      },
+      "expected": {
+        "authorization_status": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "authorization_status_free",
+      "input": "authorization_status=ordinary-value failed at /api/ping",
+      "expected": "authorization_status=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "cookiejar_struct",
+      "input": {
+        "cookiejar": "ordinary-value"
+      },
+      "expected": {
+        "cookiejar": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "cookiejar_free",
+      "input": "cookiejar=ordinary-value failed at /api/ping",
+      "expected": "cookiejar=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "bearer_count_struct",
+      "input": {
+        "bearer_count": "ordinary-value"
+      },
+      "expected": {
+        "bearer_count": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "bearer_count_free",
+      "input": "bearer_count=ordinary-value failed at /api/ping",
+      "expected": "bearer_count=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "api_keyring_struct",
+      "input": {
+        "api_keyring": "ordinary-value"
+      },
+      "expected": {
+        "api_keyring": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "api_keyring_free",
+      "input": "api_keyring=ordinary-value failed at /api/ping",
+      "expected": "api_keyring=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "client_secrets_struct",
+      "input": {
+        "client_secrets": "ordinary-value"
+      },
+      "expected": {
+        "client_secrets": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "client_secrets_free",
+      "input": "client_secrets=ordinary-value failed at /api/ping",
+      "expected": "client_secrets=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "access_tokens_struct",
+      "input": {
+        "access_tokens": "ordinary-value"
+      },
+      "expected": {
+        "access_tokens": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "access_tokens_free",
+      "input": "access_tokens=ordinary-value failed at /api/ping",
+      "expected": "access_tokens=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "refresh_tokenizer_struct",
+      "input": {
+        "refresh_tokenizer": "ordinary-value"
+      },
+      "expected": {
+        "refresh_tokenizer": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "refresh_tokenizer_free",
+      "input": "refresh_tokenizer=ordinary-value failed at /api/ping",
+      "expected": "refresh_tokenizer=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "share_tokenizer_struct",
+      "input": {
+        "share_tokenizer": "ordinary-value"
+      },
+      "expected": {
+        "share_tokenizer": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "share_tokenizer_free",
+      "input": "share_tokenizer=ordinary-value failed at /api/ping",
+      "expected": "share_tokenizer=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "near_name",
+      "name": "x_share_tokenizer_struct",
+      "input": {
+        "x_share_tokenizer": "ordinary-value"
+      },
+      "expected": {
+        "x_share_tokenizer": "ordinary-value"
+      }
+    },
+    {
+      "category": "near_name",
+      "name": "x_share_tokenizer_free",
+      "input": "x_share_tokenizer=ordinary-value failed at /api/ping",
+      "expected": "x_share_tokenizer=ordinary-value failed at /api/ping"
+    },
+    {
+      "category": "utf8",
+      "name": "multibyte_passthrough",
+      "input": "café résumé 日本語 emoji 😀 ok",
+      "expected": "café résumé 日本語 emoji 😀 ok"
+    },
+    {
+      "category": "utf8",
+      "name": "multibyte_with_secret",
+      "input": "café Bearer utf8-secret 日本語",
+      "expected": "café Bearer [redacted-secret] 日本語"
+    },
+    {
+      "category": "utf8",
+      "name": "multibyte_struct",
+      "input": {
+        "note": "日本語 ok",
+        "token": "utf8-token-secret"
+      },
+      "expected": {
+        "note": "日本語 ok",
+        "token": "[redacted-share-token]"
+      }
+    },
+    {
+      "category": "idempotent",
+      "name": "authorization_redacted",
+      "input": "Authorization: [redacted-secret] failed at /api/ping",
+      "expected": "Authorization: [redacted-secret] failed at /api/ping"
+    },
+    {
+      "category": "idempotent",
+      "name": "assignment_redacted",
+      "input": "password=[redacted-secret] failed at /api/ping",
+      "expected": "password=[redacted-secret] failed at /api/ping"
+    },
+    {
+      "category": "scalar",
+      "name": "number",
+      "input": 42,
+      "expected": 42
+    },
+    {
+      "category": "scalar",
+      "name": "bool",
+      "input": true,
+      "expected": true
+    },
+    {
+      "category": "scalar",
+      "name": "null",
+      "input": null,
+      "expected": null
+    }
+  ]
+}

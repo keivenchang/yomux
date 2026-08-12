@@ -25,6 +25,16 @@ SOCKET_FILENAME = storage.SOCKET_FILENAME
 LEASE_TIMEOUT_SECONDS = 3.0
 STATUS_TIMEOUT_SECONDS = LEASE_TIMEOUT_SECONDS
 BROWSER_PROFILES_TIMEOUT_SECONDS = 0.5
+# statsd runs its full migration audit -- opening the retained on-disk database
+# and reading its whole snapshot -- inside on_start, before it opens its socket
+# to answer a status ping or publish its identity record. That cost scales with
+# the retained database, not with a constant: a 400MB+ stats database measured
+# ~6.5s to first healthy status, well past the shared 5.0s spawn budget that
+# suits lightweight daemons. Under the default the spawn always timed out, so
+# statsd never confirmed startup and crash-looped (empty stderr, unreaped
+# zombie child, "service_absent"). This budget keeps a genuinely hung migration
+# bounded while giving a real large-database open room to finish.
+STATS_START_TIMEOUT_SECONDS = 30.0
 
 
 def _plain_json_value(value: object) -> object:
@@ -296,6 +306,7 @@ class _CurrentTransport(LocalServiceClient):
             SERVICE_MODULE,
             socket_path,
             storage.MIN_WRITER_PROTOCOL,
+            start_timeout_seconds=STATS_START_TIMEOUT_SECONDS,
             extra_args=("--database", str(database_path)),
             code_revision=revision.CURRENT_CODE_REVISION,
             build_revision=storage.MIN_WRITER_BUILD,

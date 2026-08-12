@@ -984,6 +984,7 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.topbar-nav',
   '.topbar-search',
   '.topbar-language-menu',
+  '#backendHealthIndicator',
   '#topbarOwnerStatus',
   '#topbarActivity',
   '.actions > :not(#topbarActivity):not(#status)',
@@ -1378,6 +1379,13 @@ function createTopbarCenterTools() {
 function createTopbarRightTools() {
   const group = document.createElement('div');
   group.className = 'topbar-right-tools';
+  // GUI.md invariant: the backend-health control is the ONE permanently mounted, fixed icon-sized
+  // shell in .topbar-right-tools, built once HERE and first in the row so it holds a stable slot
+  // while healthy (data-backend-health=""). It is never inserted or removed on a health transition;
+  // syncBackendHealthIndicator only repaints THIS same node (and its fallback re-mounts one solely
+  // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
+  // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
+  group.append(createBackendHealthIndicator());
   group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
   return group;
 }

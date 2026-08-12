@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from watchfiles import Change
@@ -26,6 +28,11 @@ from yolomux_lib.watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
 from yolomux_lib.watchd_protocol import WATCHD_SERVICE_NAME
 from yolomux_lib.watchd_protocol import WATCHD_PROTOCOL_VERSION
 from yolomux_lib.watchd_protocol import EffectiveWatchConfiguration
+from yolomux_lib.watchd_protocol import WATCHD_CODE_REVISION
+from yolomux_lib.watchd_protocol import validate_descriptor
+from yolomux_lib.watchd_protocol import WATCHD_MAX_PATHS
+from yolomux_lib.watchd_protocol import WATCHD_MAX_NATIVE_REGISTRATIONS
+from yolomux_lib.local_services import registry as registry_mod
 from yolomux_lib import watchd_client
 from yolomux_lib.watchd_client import WatchClient
 from yolomux_lib import app as app_module
@@ -34,6 +41,7 @@ from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 from yolomux_lib.workspace.session_files import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from yolomux_lib.filesystem import exclusions
+from _git_helpers import git, init_repo
 
 
 def _request(action: str, **fields: object) -> dict[str, object]:
@@ -1113,31 +1121,36 @@ def test_watchd_failure_episode_logs_typed_failure_once_and_bounded_recovery(mon
     webapp.client_watch_service.event_watcher_record = record
     emitted = []
     published = []
-    now = iter((10.0, 11.0, 12.1, 13.0, 14.0))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(now))
     monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: emitted.append((args, kwargs)))
     monkeypatch.setattr(webapp, "publish_client_event", lambda *args, **kwargs: published.append((args, kwargs)))
 
-    response = {"ok": False, "retryable": True, "error_code": "producer_failed"}
-    webapp.publish_watchd_failure(record, response, action="wait_revision")
-    webapp.publish_watchd_failure(record, response, action="wait_revision")
+    now = iter((10.0, 11.0, 12.1, 13.0, 14.0))
+    # Scope the finite monotonic iterator to the exercised body: monkeypatch.context() restores
+    # the real clock before the autouse file-index teardown reads time.monotonic(). Keeping the
+    # finite iter() means any UNEXPECTED extra monotonic() call inside this block still raises.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.time, "monotonic", lambda: next(now))
 
-    assert published == []
-    assert emitted == []
-    webapp.publish_watchd_failure(record, response, action="wait_revision")
-    webapp.publish_watchd_failure(record, response, action="wait_revision")
-    assert emitted == [(('warning', 'watchd', 'watchd wait_revision failed (producer_failed); retrying'), {
-        'category': 'transport',
-        'dedupe_key': 'watchd-failure:1',
-        'request_id': 'watchd-episode-1',
-        'route': 'local-service:watchd',
-        'event': 'watchd_wait_revision_failure',
-        'delivery': 'retrying',
-    })]
-    webapp.apply_watchd_revision(record, {"epoch": "epoch", "revision": 1, "healthy": True})
-    assert emitted[-1][0] == ('info', 'watchd', 'watchd recovered after 4.0s and 4 failed attempt(s)')
-    assert emitted[-1][1]["event"] == "watchd_recovered"
-    assert emitted[-1][1]["delivery"] == "recovered:retrying"
+        response = {"ok": False, "retryable": True, "error_code": "producer_failed"}
+        webapp.publish_watchd_failure(record, response, action="wait_revision")
+        webapp.publish_watchd_failure(record, response, action="wait_revision")
+
+        assert published == []
+        assert emitted == []
+        webapp.publish_watchd_failure(record, response, action="wait_revision")
+        webapp.publish_watchd_failure(record, response, action="wait_revision")
+        assert emitted == [(('warning', 'watchd', 'watchd wait_revision failed (producer_failed); retrying'), {
+            'category': 'transport',
+            'dedupe_key': 'watchd-failure:1',
+            'request_id': 'watchd-episode-1',
+            'route': 'local-service:watchd',
+            'event': 'watchd_wait_revision_failure',
+            'delivery': 'retrying',
+        })]
+        webapp.apply_watchd_revision(record, {"epoch": "epoch", "revision": 1, "healthy": True})
+        assert emitted[-1][0] == ('info', 'watchd', 'watchd recovered after 4.0s and 4 failed attempt(s)')
+        assert emitted[-1][1]["event"] == "watchd_recovered"
+        assert emitted[-1][1]["delivery"] == "recovered:retrying"
     assert record.watchd_failure_episode == 0
 
 
@@ -1217,17 +1230,22 @@ def test_watchd_unhealthy_newer_revision_does_not_claim_recovery(monkeypatch):
     record = ClientEventWatcherRecord()
     webapp.client_watch_service.event_watcher_record = record
     emitted = []
-    now = iter((10.0, 12.1))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(now))
     monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: emitted.append((args, kwargs)))
     monkeypatch.setattr(webapp, "publish_client_event", lambda *_args, **_kwargs: None)
-    webapp.publish_watchd_failure(record, {"ok": False, "error_code": "producer_failed"}, action="upsert")
-    webapp.publish_watchd_failure(record, {"ok": False, "error_code": "producer_failed"}, action="upsert")
 
-    webapp.apply_watchd_revision(record, {"epoch": "epoch", "revision": 2, "healthy": False})
+    now = iter((10.0, 12.1))
+    # Scope the finite monotonic iterator to the exercised body: monkeypatch.context() restores
+    # the real clock before the autouse file-index teardown reads time.monotonic(). Keeping the
+    # finite iter() means any UNEXPECTED extra monotonic() call inside this block still raises.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.time, "monotonic", lambda: next(now))
+        webapp.publish_watchd_failure(record, {"ok": False, "error_code": "producer_failed"}, action="upsert")
+        webapp.publish_watchd_failure(record, {"ok": False, "error_code": "producer_failed"}, action="upsert")
 
-    assert record.watchd_failure_episode == 1
-    assert [entry[1]["event"] for entry in emitted] == ["watchd_upsert_failure"]
+        webapp.apply_watchd_revision(record, {"epoch": "epoch", "revision": 2, "healthy": False})
+
+        assert record.watchd_failure_episode == 1
+        assert [entry[1]["event"] for entry in emitted] == ["watchd_upsert_failure"]
 
 
 def test_watchd_revision_outside_filesystem_roots_does_not_publish_fs_changed(monkeypatch):
@@ -1641,6 +1659,52 @@ def test_watchd_coarse_reconcile_projects_ancestor_change_to_nested_repo_generat
     assert changed["repo_generations"] == {str(repo): initial_repo_generation + 1}
 
 
+def test_watchd_reconcile_bumps_repo_generation_on_same_commit_branch_switch(tmp_path):
+    """A same-commit branch switch changes checked-out HEAD identity with NO working-tree event.
+
+    Reconcile must still advance ``repo_generations`` -- through the ONE typed generation owner
+    ``filesystem.git_ops.repository_generation`` -- so the Differ consumer's
+    ``repo_dirty_generations`` refreshes.  The published revision must isolate two tenants and must
+    never name a ``.git`` control path.
+    """
+    tenant_a = tmp_path / "tenant_a"
+    tenant_b = tmp_path / "tenant_b"
+    for repo in (tenant_a, tenant_b):
+        repo.mkdir()
+        init_repo(repo)
+        (repo / "file.txt").write_text("content", encoding="utf-8")
+        git(repo, "add", "file.txt")
+        git(repo, "commit", "-m", "initial")
+        # A second branch at the SAME commit: switching to it leaves the working tree byte-identical.
+        git(repo, "branch", "feature")
+
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    # Repo roots only (not directory watch roots): the ONLY signal for a same-commit branch switch
+    # is the typed repository generation, since no directory or file signature changes.
+    service.configuration = EffectiveWatchConfiguration(
+        repo_roots=(str(tenant_a), str(tenant_b)),
+        configured_roots=(str(tmp_path),),
+        watch_paths=(str(tmp_path),),
+    )
+    # First reconcile records a per-repo baseline generation without a spurious bump.
+    service.reconcile(reason="configuration", watch_generation=1)
+    assert service.repo_generations == {}, "the baseline observation must not bump any repo"
+
+    # Same-commit branch switch in tenant A only: identical tree, no filesystem event.
+    git(tenant_a, "checkout", "feature")
+    revision = service.reconcile(reason="fallback", watch_generation=1)
+
+    assert revision is not None, "an identical-tree branch switch must still publish a revision"
+    assert revision["changed_paths"] == [], "no working-tree path changed"
+    # Only tenant A advanced; tenant B is untouched -- two tenants isolated.
+    assert service.repo_generations[str(tenant_a)] == 1
+    assert str(tenant_b) not in service.repo_generations
+    assert revision["repo_generations"] == {str(tenant_a): 1}
+    # No .git control path anywhere in the published payload (fail closed on disclosure).
+    assert ".git" not in json.dumps(revision)
+
+
 def test_watchd_initial_scan_failure_does_not_activate_polling_generation(tmp_path, monkeypatch):
     service, _root, _signature = _polling_generation_service(tmp_path)
 
@@ -1968,15 +2032,19 @@ def test_watchd_failure_preserves_fixed_action_and_error_code(monkeypatch, actio
     record = ClientEventWatcherRecord()
     webapp.client_watch_service.event_watcher_record = record
     emitted = []
-    now = iter((10.0, 12.1))
-    monkeypatch.setattr(app_module.time, "monotonic", lambda: next(now))
     monkeypatch.setattr(app_module, "emit_server_log", lambda *args, **kwargs: emitted.append((args, kwargs)))
 
-    webapp.publish_watchd_failure(record, {"ok": False, "error_code": error_code}, action=action)
-    webapp.publish_watchd_failure(record, {"ok": False, "error_code": error_code}, action=action)
+    now = iter((10.0, 12.1))
+    # Scope the finite monotonic iterator to the exercised body: monkeypatch.context() restores
+    # the real clock before the autouse file-index teardown reads time.monotonic(). Keeping the
+    # finite iter() means any UNEXPECTED extra monotonic() call inside this block still raises.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.time, "monotonic", lambda: next(now))
+        webapp.publish_watchd_failure(record, {"ok": False, "error_code": error_code}, action=action)
+        webapp.publish_watchd_failure(record, {"ok": False, "error_code": error_code}, action=action)
 
-    assert emitted[0][1]["event"] == f"watchd_{action}_failure"
-    assert f"({error_code})" in emitted[0][0][2]
+        assert emitted[0][1]["event"] == f"watchd_{action}_failure"
+        assert f"({error_code})" in emitted[0][0][2]
 
 
 def test_web_starts_watchd_bridge_without_native_or_notify_thread(monkeypatch):
@@ -2659,3 +2727,1011 @@ def test_apply_watchd_revision_child_repo_generation_increment_is_not_masked_by_
     for entry in webapp.client_watch_service.filesystem_history:
         assert raw_git not in entry.get("changed_paths", ()), entry
         assert all(".git" not in path for path in entry.get("changed_paths", ())), entry
+
+
+# --- P0: bounded native watch scope (DOIT.p0.watchd-bounded-scope) ----------------
+
+
+def _full_descriptor(**overrides: object) -> object:
+    """A validated WatchDescriptor with every field, for effective_configuration tests."""
+    payload: dict[str, object] = {
+        "descriptor_generation": 1,
+        "expires_at": time.monotonic() + 60.0,
+        "roots": [],
+        "files": [],
+        "background_files": [],
+        "transcripts": [],
+        "repo_roots": [],
+        "indexed_dirs": [],
+        "skip_dirs": [],
+        "exclude_rules": [],
+        "settings_path": "/nonexistent/settings.json",
+        "attention_path": "/nonexistent/attention.json",
+        "configured_roots": [],
+    }
+    payload.update(overrides)
+    return validate_descriptor(payload)
+
+
+def test_compact_watch_paths_preserves_distinct_descendants(tmp_path):
+    parent = str(tmp_path)
+    child = str(tmp_path / "dev")
+    # Every native registration is recursive=False, so a root registers ONLY
+    # itself: /home/keivenc must NOT subsume /home/keivenc/dev. compact only
+    # deduplicates -- this is the exact Finder-saved shape that a recursive
+    # collapse used to swallow.
+    assert watchd.compact_watch_paths((parent, child, parent)) == tuple(sorted((parent, child)))
+
+
+def test_effective_configuration_preserves_distinct_shallow_descendants(tmp_path):
+    home = tmp_path / "home"
+    dev = home / "dev"
+    home.mkdir()
+    dev.mkdir()
+    descriptor = _full_descriptor(
+        roots=[str(home), str(dev)],
+        configured_roots=[str(home)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    # The non-recursive /home watch does NOT subsume the non-recursive /home/dev watch.
+    assert str(home) in configuration.shallow_watch_paths
+    assert str(dev) in configuration.shallow_watch_paths
+    assert str(home) in configuration.watch_paths
+    assert str(dev) in configuration.watch_paths
+
+
+def test_effective_configuration_splits_shallow_and_exact_and_never_watches_indexed(tmp_path):
+    visible = tmp_path / "visible"
+    exact_dir = tmp_path / "exact"
+    indexed = tmp_path / "indexed"
+    for path in (visible, exact_dir, indexed):
+        path.mkdir()
+    transcript = exact_dir / "agent.jsonl"
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        transcripts=[str(transcript)],
+        indexed_dirs=[str(indexed)],
+        configured_roots=[str(tmp_path)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    # (a) shallow visible + (b) exact-file parent are both registered non-recursively.
+    assert str(visible) in configuration.shallow_watch_paths
+    assert str(exact_dir) in configuration.shallow_watch_paths
+    # (b) the exact file is admitted by exact match.
+    assert str(transcript) in configuration.exact_watch_paths
+    # There is NO recursive native class: the indexed root is NEVER registered
+    # natively (a recursive descent would recreate the whole-workspace incident).
+    # Its coverage comes from periodic reconciliation, which still scans its
+    # signature.
+    assert str(indexed) not in configuration.shallow_watch_paths
+    assert not hasattr(configuration, "recursive_watch_paths")
+    assert str(indexed) in watchd.PersistentWatchService._directory_signature_paths(configuration)
+
+
+def test_exact_file_parent_is_registered_even_outside_configured_roots(tmp_path):
+    visible = tmp_path / "visible"
+    outside = tmp_path / "runtime_state"
+    visible.mkdir()
+    outside.mkdir()
+    attention = outside / "attention.json"
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        settings_path=str(attention),
+        attention_path=str(attention),
+        configured_roots=[str(visible)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    # Explicit ownership: the exact file's parent survives the configured-roots
+    # boundary that would drop a broad visible root, so settings/attention outside
+    # the displayed tree are still watched.
+    assert str(outside) in configuration.shallow_watch_paths
+    assert str(attention) in configuration.exact_watch_paths
+
+
+def test_registration_excludes_ignored_and_outside_root_trees(tmp_path):
+    visible = tmp_path / "visible"
+    ignored = tmp_path / "node_modules" / "pkg"
+    ignored.mkdir(parents=True)
+    visible.mkdir()
+    descriptor = _full_descriptor(
+        roots=[str(visible), str(ignored), "/definitely/outside/root"],
+        indexed_dirs=[str(ignored)],
+        skip_dirs=["node_modules"],
+        configured_roots=[str(tmp_path)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    # An ignored (node_modules) or outside-configured-roots visible root is never
+    # registered natively -- exclusion is applied at REGISTRATION, not only events.
+    assert str(visible) in configuration.shallow_watch_paths
+    assert not any("node_modules" in path for path in configuration.shallow_watch_paths)
+    assert "/definitely/outside/root" not in configuration.shallow_watch_paths
+
+
+def test_registration_applies_configured_exclude_rules(tmp_path):
+    visible = tmp_path / "visible"
+    build = tmp_path / "build"
+    visible.mkdir()
+    build.mkdir()
+    descriptor = _full_descriptor(
+        roots=[str(visible), str(build)],
+        exclude_rules=["glob:build/**", "regex:build$"],
+        skip_dirs=[],
+        configured_roots=[str(tmp_path)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    assert str(visible) in configuration.shallow_watch_paths
+    # The index_exclude_paths rules -- carried through the descriptor and compiled
+    # by the one shared owner -- exclude the build tree at registration too.
+    assert str(build) not in configuration.shallow_watch_paths
+
+
+def test_no_recursive_registration_regardless_of_indexed_root_count(tmp_path, monkeypatch):
+    """The real invariant: descriptor count is O(visible + exact parents) and NO
+    watchfiles registration is recursive, so a large indexed-root set cannot
+    reintroduce a whole-subtree descent of kernel inotify descriptors.
+
+    A root-count cap on a recursive class is NOT enough -- one recursive root
+    still descends its whole subtree (601 dirs => 601 descriptors). So this
+    asserts the registration itself is recursive=False and that indexed roots do
+    not inflate the native watch set at all.
+    """
+    roots = []
+    for index in range(5):
+        root = tmp_path / f"visible{index}"
+        root.mkdir()
+        roots.append(str(root))
+    indexed = []
+    for index in range(200):
+        path = tmp_path / f"indexed{index}"
+        path.mkdir()
+        indexed.append(str(path))
+    descriptor = _full_descriptor(
+        roots=roots,
+        indexed_dirs=indexed,
+        configured_roots=[str(tmp_path)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    # Shallow registration is O(visible dirs + exact-file parents): here 5 visible
+    # roots plus the one exact-file parent (the shared /nonexistent settings dir).
+    # The 200 indexed roots add ZERO native watches.
+    assert len(configuration.shallow_watch_paths) <= len(roots) + 2
+    for indexed_path in indexed:
+        assert indexed_path not in configuration.shallow_watch_paths
+
+    # Prove the ACTUAL registration is recursive=False (the real descriptor
+    # invariant, not a tuple-entry count).
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = configuration
+    calls: list[object] = []
+
+    def fake_watch(*paths, **kwargs):
+        calls.append(kwargs.get("recursive"))
+        service.stop_event.set()
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(watchd, "watchfiles_watch", fake_watch)
+    service.native_watch_loop()
+    assert calls == [False]
+
+
+def test_native_loop_registers_shallow_paths_non_recursively(tmp_path, monkeypatch):
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = EffectiveWatchConfiguration(
+        roots=(str(visible),),
+        configured_roots=(str(tmp_path),),
+        watch_paths=(str(visible),),
+        shallow_watch_paths=(str(visible),),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_watch(*paths, **kwargs):
+        captured["paths"] = paths
+        captured["recursive"] = kwargs.get("recursive")
+        service.stop_event.set()
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(watchd, "watchfiles_watch", fake_watch)
+    service.native_watch_loop()
+
+    assert captured["paths"] == (str(visible),)
+    assert captured["recursive"] is False
+
+
+def test_native_loop_starts_no_recursive_second_watcher(tmp_path, monkeypatch):
+    """indexed_dirs must never spawn a recursive watcher or any second thread.
+
+    The whole recursive class is gone; the only native registration is the
+    single shallow recursive=False iterator. A second recursive watcher was the
+    exact mechanism that re-descended a whole subtree of inotify descriptors.
+    """
+    visible = tmp_path / "visible"
+    indexed = tmp_path / "indexed"
+    visible.mkdir()
+    indexed.mkdir()
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        indexed_dirs=[str(indexed)],
+        configured_roots=[str(tmp_path)],
+    )
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = watchd.effective_configuration([descriptor])
+    calls: list[tuple[tuple[str, ...], object]] = []
+    threads_before = threading.active_count()
+
+    def fake_watch(*paths, **kwargs):
+        calls.append((paths, kwargs.get("recursive")))
+        service.stop_event.set()
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(watchd, "watchfiles_watch", fake_watch)
+    service.native_watch_loop()
+
+    # Exactly one registration, recursive=False, and no recursive worker thread.
+    assert [recursive for _paths, recursive in calls] == [False]
+    assert not any(str(indexed) in paths for paths, _recursive in calls)
+    assert not any(
+        thread.name == "watchd-native-recursive" for thread in threading.enumerate()
+    )
+    assert threading.active_count() <= threads_before
+
+
+def test_exact_admission_is_narrow_and_ignores_parent_siblings(tmp_path):
+    visible = tmp_path / "visible"
+    exact_dir = tmp_path / "exact"
+    visible.mkdir()
+    exact_dir.mkdir()
+    transcript = exact_dir / "agent.jsonl"
+    sibling = exact_dir / "other.jsonl"
+    transcript.write_text("{}", encoding="utf-8")
+    sibling.write_text("{}", encoding="utf-8")
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        transcripts=[str(transcript)],
+        configured_roots=[str(tmp_path)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    # The exact transcript is admitted; a sibling in its parent is NOT, because the
+    # exact-file parent is registered but only its exact child is owned.
+    assert service._path_allowed(transcript, configuration) is True
+    assert service._path_allowed(sibling, configuration) is False
+    # A file inside the visible root is still admitted (shallow within-admission).
+    child = visible / "seen.txt"
+    child.write_text("x", encoding="utf-8")
+    assert service._path_allowed(child, configuration) is True
+
+
+def test_unchanged_lease_renewal_preserves_generation_and_native_worker(tmp_path, monkeypatch):
+    """An unchanged 5-min renewal must not bump watch_generation or rebuild the worker.
+
+    Regression lock for DOIT item 4: stable_payload() excludes expiry, so a
+    renewal that only bumps expires_at leaves the effective configuration hash --
+    and therefore the native worker identity -- untouched.
+    """
+    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+
+    hold = threading.Event()
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+
+    def fake_watch(*paths, **kwargs):
+        # Block so the worker thread stays a single stable identity for the test.
+        hold.wait(10.0)
+        service.stop_event.set()
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(watchd, "watchfiles_watch", fake_watch)
+
+    lease_id = _lease(service, 101)
+    base = _descriptor(tmp_path / "repo")
+    service.handle(_request("upsert", lease_id=lease_id, descriptor_id="browser", descriptor=dict(base, expires_at=time.monotonic() + 300.0)))
+    service.start_watcher()
+    try:
+        worker_before = service.native_worker
+        generation_before = service.watch_generation
+        service.reconfigure_event.clear()
+        # Pure renewal: identical stable payload, only the expiry advances.
+        renewal, _ = service.handle(_request("upsert", lease_id=lease_id, descriptor_id="browser", descriptor=dict(base, expires_at=time.monotonic() + 600.0)))
+        assert renewal["changed"] is False
+        assert renewal["descriptor_unchanged"] is True
+        assert service.watch_generation == generation_before
+        assert service.reconfigure_event.is_set() is False
+        assert service.native_worker is worker_before
+        assert worker_before.is_alive()
+    finally:
+        hold.set()
+        service.stop_event.set()
+        service.native_stop_event.set()
+        with service.lock:
+            service.lock.notify_all()
+        if service.native_worker is not None:
+            service.native_worker.join(timeout=10.0)
+
+
+def test_stale_same_protocol_watchd_is_retired_before_descriptors(tmp_path, monkeypatch):
+    """ensure_started retires a stale same-protocol daemon and spawns v3 in ORDER.
+
+    P0-2: the wire stays backward-compatible, so a stale v2 daemon accepts the new
+    exclude_rules but ignores them and keeps recursive behavior. A `healthy()`-only
+    assertion proves none of the mechanism. This drives the real `ensure_started`
+    path against a current identity-fenced stale record and a stateful RPC/spawn
+    fixture, and asserts the ORDERED sequence stale-ping -> shutdown/retirement ->
+    v3 spawn -> v3 status publication, with NO descriptor/upsert/lease work before
+    v3 health.
+    """
+    stale_pid = 424242
+    v3_pid = os.getpid()
+    phase = {"revision": "stale"}
+    alive = {stale_pid: True}
+    events: list[str] = []
+    now = [1000.0]
+
+    spec = LocalServiceSpec(
+        WATCHD_SERVICE_NAME,
+        "yolomux_lib.watchd",
+        "watchd.sock",
+        WATCHD_PROTOCOL_VERSION,
+        code_revision=WATCHD_CODE_REVISION,
+        build_revision=1,
+    )
+
+    class _FakeChild:
+        # No pid attribute: _spawn returns it before ownership capture, exactly like the
+        # publication-path stand-in, so the daemon identity comes from the v3 status.
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            # Never-exiting: the reaper daemon parks here instead of racing to reap a
+            # stand-in with no pid. It is a daemon thread and dies with the interpreter.
+            threading.Event().wait()
+
+    def fake_popen(*args, **kwargs):
+        events.append("spawn")
+        phase["revision"] = "v3"
+        return _FakeChild()
+
+    registry = LocalServiceRegistry(
+        tmp_path,
+        spec,
+        clock=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        popen=fake_popen,
+    )
+
+    def fake_request(method, payload=None, timeout=0.2, protocol_version=None):
+        events.append(method)
+        if method == "ping":
+            if phase["revision"] == "stale":
+                # Old pre-fix daemon: same protocol, same build, prior code revision.
+                return {"ok": True, "version": WATCHD_PROTOCOL_VERSION, "build": 1, "code_revision": "watchd-v2", "pid": stale_pid}
+            return {"ok": True, "version": WATCHD_PROTOCOL_VERSION, "build": 1, "code_revision": WATCHD_CODE_REVISION, "pid": v3_pid}
+        if method == "shutdown":
+            alive[stale_pid] = False
+            return {"ok": True}
+        if method == "status":
+            return {
+                "ok": True,
+                "version": WATCHD_PROTOCOL_VERSION,
+                "pid": v3_pid,
+                "service": WATCHD_SERVICE_NAME,
+                "started_at": 1.0,
+            }
+        return {}
+
+    # The stale record identifies exactly the stale pid on this socket (current, removable).
+    registry._write_record({
+        "service": WATCHD_SERVICE_NAME,
+        "pid": stale_pid,
+        "socket": str(registry.socket_path),
+        "protocol_version": WATCHD_PROTOCOL_VERSION,
+        "version": registry_mod.LOCAL_SERVICE_REGISTRY_VERSION,
+        "launcher_pid": os.getpid(),
+    })
+    monkeypatch.setattr(registry, "_request", fake_request)
+    monkeypatch.setattr(registry, "_record_process_diagnostic", lambda record: SimpleNamespace(
+        current=True, may_remove_stale_record=True, may_remove_unidentifiable_record=False,
+        pid=int(record.get("pid") or 0), reason=None,
+    ))
+    monkeypatch.setattr(registry_mod, "pid_is_alive", lambda pid: alive.get(pid, pid == v3_pid))
+
+    assert registry.ensure_started() is True
+
+    # Ordered: a stale ping precedes shutdown; shutdown precedes the v3 spawn; the v3
+    # status publication comes after the spawn. No descriptor/upsert/lease ran anywhere.
+    assert "shutdown" in events, events
+    assert "spawn" in events, events
+    shutdown_i = events.index("shutdown")
+    spawn_i = events.index("spawn")
+    status_i = events.index("status")
+    assert events.index("ping") < shutdown_i < spawn_i < status_i, events
+    assert not any(method in {"upsert", "remove", "lease"} for method in events), events
+    # v3 is what ended up published, and the stale daemon was told to shut down.
+    assert registry._read_record()["pid"] == v3_pid
+    assert alive[stale_pid] is False
+
+
+def test_current_revision_watchd_is_accepted(tmp_path, monkeypatch):
+    """Positive control: a daemon reporting the current code revision stays healthy."""
+    registry = LocalServiceRegistry(
+        tmp_path,
+        LocalServiceSpec(
+            WATCHD_SERVICE_NAME,
+            "yolomux_lib.watchd",
+            "watchd.sock",
+            WATCHD_PROTOCOL_VERSION,
+            code_revision=WATCHD_CODE_REVISION,
+            build_revision=1,
+        ),
+    )
+
+    def current_ping(method, payload=None, timeout=0.2):
+        return {
+            "ok": True,
+            "version": WATCHD_PROTOCOL_VERSION,
+            "build": 1,
+            "code_revision": WATCHD_CODE_REVISION,
+            "pid": 4242,
+        }
+
+    monkeypatch.setattr(registry, "_request", current_ping)
+    assert registry.healthy() is True
+
+
+def test_primary_iterator_failure_enters_bounded_polling_fallback_and_retries(tmp_path, monkeypatch):
+    """P0-3: a primary backend failure must poll and RETRY, not return with no worker.
+
+    The generation stop event must NOT be pre-set when the fallback is entered:
+    the buggy path set it in the primary finally, so the fallback got an immediate
+    "stopped" and returned leaving no worker while polling_fallback was advertised.
+    """
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    descriptor = _full_descriptor(roots=[str(visible)], configured_roots=[str(tmp_path)])
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    service.watch_generation = 1
+    service.configuration = watchd.effective_configuration([descriptor])
+
+    calls: list[object] = []
+
+    def flaky_watch(*paths, **kwargs):
+        calls.append(kwargs.get("recursive"))
+        if len(calls) == 1:
+            raise OSError("inotify instance limit reached")
+        # The retried registration succeeds; stop the loop cleanly.
+        service.stop_event.set()
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(watchd, "watchfiles_watch", flaky_watch)
+    monkeypatch.setattr(watchd, "WATCHD_RETRY_SECONDS", 0.05)
+    monkeypatch.setattr(watchd, "WATCHD_POLL_SECONDS", 0.01)
+
+    entry: dict[str, object] = {}
+    real_poll = service._poll_fallback_until_native_retry
+
+    def spy_poll(generation, stop_event, *, error=None):
+        entry["stop_set_on_entry"] = stop_event.is_set()
+        entry["fallback_advertised"] = service.polling_fallback
+        return real_poll(generation, stop_event, error=error)
+
+    monkeypatch.setattr(service, "_poll_fallback_until_native_retry", spy_poll)
+
+    service.native_watch_loop()
+
+    # Entered fallback with an UNSET generation stop event, advertising polling.
+    assert entry["stop_set_on_entry"] is False
+    assert entry["fallback_advertised"] is True
+    # And it RETRIED the native registration rather than returning with no worker,
+    # every attempt recursive=False.
+    assert len(calls) >= 2
+    assert set(calls) == {False}
+
+
+def test_per_descriptor_exclusion_does_not_suppress_another_tenants_watch(tmp_path):
+    """P1: allow-if-any-owner -- one descriptor's rule cannot suppress another's watch.
+
+    Descriptor A excludes blocked/** under its own root; descriptor B explicitly
+    owns B/blocked. The buggy global union compiled A's rule against B's root and
+    dropped B/blocked. Per-descriptor normalization keeps B/blocked registered and
+    admitted.
+    """
+    a_root = tmp_path / "A"
+    b_root = tmp_path / "B"
+    b_blocked = b_root / "blocked"
+    a_root.mkdir()
+    b_root.mkdir()
+    b_blocked.mkdir()
+    descriptor_a = _full_descriptor(
+        roots=[str(a_root)],
+        exclude_rules=["glob:blocked/**"],
+        configured_roots=[str(a_root)],
+    )
+    descriptor_b = _full_descriptor(
+        roots=[str(b_root), str(b_blocked)],
+        configured_roots=[str(b_root)],
+    )
+    configuration = watchd.effective_configuration([descriptor_a, descriptor_b])
+    # B/blocked stays REGISTERED (A's rule compiled against B's root can't reach it).
+    assert str(b_blocked) in configuration.shallow_watch_paths
+    # ...and stays ADMITTED: at least one owning descriptor (B) admits the event.
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    changed = b_blocked / "file.txt"
+    changed.write_text("x", encoding="utf-8")
+    assert service._path_allowed(changed, configuration) is True
+    # A's own blocked tree, which A really does exclude, is still not admitted for A.
+    a_blocked = a_root / "blocked"
+    a_blocked.mkdir()
+    a_changed = a_blocked / "file.txt"
+    a_changed.write_text("x", encoding="utf-8")
+    assert service._path_allowed(a_changed, configuration) is False
+
+
+def test_explicit_exact_file_does_not_override_configured_exclusion(tmp_path):
+    """Lower priority, locked: an exact file inside an ignored tree is fail-closed.
+
+    Explicit exact ownership waives only the configured-roots boundary; it does
+    NOT override skip_dirs / secrets / exclude rules, so a settings/attention file
+    that lands inside an ignored directory is never admitted merely because it was
+    named. This is the safe behavior and is now locked by a test.
+    """
+    visible = tmp_path / "visible"
+    vault = tmp_path / "vault"
+    visible.mkdir()
+    vault.mkdir()
+    hidden = vault / "attention.json"
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        settings_path=str(hidden),
+        attention_path=str(hidden),
+        skip_dirs=["vault"],
+        configured_roots=[str(tmp_path)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    assert str(hidden) not in configuration.exact_watch_paths
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    assert service._path_allowed(hidden, configuration) is False
+
+
+# --- P0 round 2: lexical ignored symlink aliases (fixed once in the shared owner) ----
+
+
+def test_path_exclusion_verdict_judges_both_lexical_and_resolved_forms(tmp_path):
+    """The shared owner judges the requested lexical path AND its resolved target.
+
+    A symlink named inside an ignored directory (root/.git/link -> root/src/file)
+    resolves to a clean target. Judging only the resolved form admitted the ignored
+    alias -- the fail-closed invariant was false for exactly that alias. The lexical
+    form preserves the ignored-producer identity; the resolved form still catches an
+    alias whose target lands inside an ignored subtree.
+    """
+    (tmp_path / "src").mkdir()
+    target = tmp_path / "src" / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    (tmp_path / ".git").mkdir()
+    alias = tmp_path / ".git" / "link"
+    os.symlink(target, alias)
+
+    # Root-scoped (index) form: the lexical .git alias is excluded, the real file is not.
+    scoped = exclusions.path_exclusion_verdict(alias, relative_to=tmp_path)
+    assert scoped.excluded is True
+    assert scoped.reason_code == exclusions.EXCLUSION_SKIP_DIR
+    assert exclusions.path_exclusion_verdict(target, relative_to=tmp_path).excluded is False
+    # Unscoped (watchd) form catches it too, judging every lexical component.
+    assert exclusions.path_exclusion_verdict(alias).excluded is True
+
+
+@pytest.mark.parametrize(
+    "label, ignored_name, skip_dirs, exclude_rules",
+    (
+        ("git_control", ".git", [], []),
+        ("configured_glob", "build", [], ["glob:**/build/**"]),
+        ("configured_regex", "cache", [], ["regex:(^|/)cache(/|$)"]),
+        ("secret_dir", ".ssh", [], []),
+    ),
+)
+def test_exact_file_alias_into_ignored_tree_is_never_registered_or_admitted(
+    tmp_path, label, ignored_name, skip_dirs, exclude_rules
+):
+    """An exact file NAMED through an ignored-tree symlink is fail-closed.
+
+    Both surfaces: it is never registered natively (its resolved target is not an
+    owned exact watch), and the ignored ALIAS is never admitted as an event even
+    though its resolved target is a real file inside a watched root. The resolved
+    target itself stays legitimately watched -- only the ignored producer identity
+    is rejected.
+    """
+    root = tmp_path / "repo"
+    visible = root / "visible"
+    ignored = root / ignored_name
+    visible.mkdir(parents=True)
+    ignored.mkdir(parents=True)
+    target = visible / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    alias = ignored / "link"
+    os.symlink(target, alias)
+
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        files=[str(alias)],
+        skip_dirs=skip_dirs,
+        exclude_rules=exclude_rules,
+        configured_roots=[str(root)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+
+    # Registration: the ignored alias is not an owned exact watch path.
+    assert str(alias) not in configuration.exact_watch_paths
+    assert str(target) not in configuration.exact_watch_paths
+    # The visible root is still registered (control).
+    assert str(visible) in configuration.shallow_watch_paths
+    # Event admission: the ignored alias is rejected...
+    assert service._path_allowed(alias, configuration) is False
+    # ...while the real resolved file inside the watched root is admitted.
+    assert service._path_allowed(target, configuration) is True
+
+
+def test_ordinary_symlink_exact_file_is_registered_and_admitted(tmp_path):
+    """Positive control: a symlink NOT inside any ignored tree is admitted normally."""
+    root = tmp_path / "repo"
+    visible = root / "visible"
+    data = root / "data"
+    visible.mkdir(parents=True)
+    data.mkdir(parents=True)
+    target = data / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    alias = visible / "shortcut.txt"
+    os.symlink(target, alias)
+
+    descriptor = _full_descriptor(
+        roots=[str(visible)],
+        files=[str(alias)],
+        configured_roots=[str(root)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    # The ordinary alias resolves to a clean file: its resolved target is an owned
+    # exact watch, its parent is registered, and the alias is admitted as an event.
+    assert str(target) in configuration.exact_watch_paths
+    assert str(data) in configuration.shallow_watch_paths
+    assert service._path_allowed(alias, configuration) is True
+
+
+def test_clean_exact_target_is_not_admitted_through_a_separately_ignored_alias(tmp_path):
+    """Exact-match event admission runs the owner exclusion verdict on the LEXICAL path.
+
+    The exact target ``root/src/file.txt`` is named DIRECTLY (a clean owned exact
+    watch), so registration keeps it -- unlike the alias-in-descriptor case, which
+    drops ownership. A SEPARATE ``root/build/link -> root/src/file.txt`` alias (not
+    in the descriptor) resolves to that clean exact target. Judging only the resolved
+    form admitted the ignored alias; the fix judges the lexical event path through the
+    owner (configured-roots boundary waived, skip_dirs/secrets/rules still enforced),
+    so the ignored ``build/`` alias is fail-closed while the target itself is admitted.
+    """
+    root = tmp_path / "repo"
+    src = root / "src"
+    build = root / "build"
+    data = root / "data"
+    src.mkdir(parents=True)
+    build.mkdir(parents=True)
+    data.mkdir(parents=True)
+    target = src / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    ignored_alias = build / "link"
+    os.symlink(target, ignored_alias)
+    ordinary_alias = data / "shortcut.txt"
+    os.symlink(target, ordinary_alias)
+
+    descriptor = _full_descriptor(
+        roots=[str(src)],
+        files=[str(target)],
+        exclude_rules=["glob:**/build/**"],
+        configured_roots=[str(root)],
+    )
+    configuration = watchd.effective_configuration([descriptor])
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+
+    # The clean exact target is a registered owned exact watch.
+    assert str(target) in configuration.exact_watch_paths
+    # REPRO: the separately-ignored alias resolves to the exact target but its LEXICAL
+    # event path is under the excluded build/ -- it must NOT be admitted.
+    assert service._path_allowed(ignored_alias, configuration) is False
+    # Positive control: the direct exact target is admitted.
+    assert service._path_allowed(target, configuration) is True
+    # Positive control: an ordinary (non-ignored) alias to the exact target is admitted.
+    assert service._path_allowed(ordinary_alias, configuration) is True
+
+
+def test_legacy_exact_admission_fails_closed_on_a_separately_ignored_alias(tmp_path):
+    """The legacy/no-owner exact set also runs the owner verdict on the lexical path.
+
+    A directly-constructed configuration carries a single legacy exact set and no
+    per-descriptor admissions. Its exact match must still fail-closed on a lexical
+    event path inside an ignored directory (here a skip_dir), rather than admitting
+    any alias that happens to resolve to an owned exact target.
+    """
+    root = tmp_path / "repo"
+    src = root / "src"
+    build = root / "build"
+    src.mkdir(parents=True)
+    build.mkdir(parents=True)
+    target = src / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    ignored_alias = build / "link"
+    os.symlink(target, ignored_alias)
+
+    # A legacy configuration: exact set + legacy skip_dirs, NO descriptor_admissions.
+    configuration = watchd.EffectiveWatchConfiguration(
+        exact_watch_paths=(str(target),),
+        skip_dirs=("build",),
+    )
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    admitter = watchd._ConfigurationAdmitter(configuration)
+    assert admitter._has_owners is False
+    # The lexical build/ alias is fail-closed even in the legacy path...
+    assert service._path_allowed(ignored_alias, configuration, admitter=admitter) is False
+    # ...while the clean exact target is still admitted.
+    assert service._path_allowed(target, configuration, admitter=admitter) is True
+
+
+def test_visible_root_symlink_escaping_configured_roots_is_never_registered(tmp_path):
+    """resolved-escape control: a visible root whose target escapes stays excluded.
+
+    A visible Finder root that is a symlink resolving OUTSIDE the configured roots
+    must not register the escape target natively, and events under it are not
+    admitted. The dual-form judgement must not accidentally admit the escape.
+    """
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    escape = root / "escape"
+    os.symlink(outside, escape)
+
+    descriptor = _full_descriptor(
+        roots=[str(escape), str(root / "kept")],
+        configured_roots=[str(root)],
+    )
+    (root / "kept").mkdir()
+    configuration = watchd.effective_configuration([descriptor])
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    assert str(outside) not in configuration.shallow_watch_paths
+    assert str(escape) not in configuration.shallow_watch_paths
+    # The in-bounds sibling root is still registered (control).
+    assert str(root / "kept") in configuration.shallow_watch_paths
+    # An event reached through the escape symlink is not admitted.
+    leaked = escape / "secret.txt"
+    assert service._path_allowed(leaked, configuration) is False
+
+
+# --- P0 round 2: daemon-wide native-registration union cap ---------------------------
+
+
+def _capacity_descriptor(
+    tmp_path, *, generation=1, root_count=0, file_parent_count=0, distinct_meta_parents=True, prefix="d"
+):
+    """A raw descriptor PAYLOAD (dict) with N distinct visible roots and M distinct exact-file parents."""
+    roots = [str(tmp_path / f"{prefix}_root_{index:03d}") for index in range(root_count)]
+    files = [str(tmp_path / f"{prefix}_fp_{index:03d}" / "watched.txt") for index in range(file_parent_count)]
+    settings = str(tmp_path / f"{prefix}_settings" / "settings.json")
+    attention = str(tmp_path / f"{prefix}_attention" / "attention.json") if distinct_meta_parents else settings
+    return {
+        "descriptor_generation": generation,
+        "expires_at": time.monotonic() + 60.0,
+        "roots": roots,
+        "files": files,
+        "background_files": [],
+        "transcripts": [],
+        "repo_roots": [],
+        "indexed_dirs": [],
+        "skip_dirs": [],
+        "exclude_rules": [],
+        "settings_path": settings,
+        "attention_path": attention,
+        "configured_roots": [str(tmp_path)],
+    }
+
+
+def _upsert(service, lease_id, descriptor_id, descriptor):
+    response, _body = service.handle(
+        _request("upsert", lease_id=lease_id, descriptor_id=descriptor_id, descriptor=descriptor)
+    )
+    return response
+
+
+def _capacity_service(tmp_path, monkeypatch):
+    service = PersistentWatchService(tmp_path / "watchd.sock")
+    monkeypatch.setattr("yolomux_lib.watchd.process_start_identity", lambda pid: f"proc:{pid}")
+    monkeypatch.setattr("yolomux_lib.watchd.pid_is_alive", lambda pid: True)
+    return service
+
+
+def test_single_descriptor_crossing_union_cap_is_rejected_and_preserves_last_good(tmp_path, monkeypatch):
+    """One descriptor whose native-registration UNION exceeds the cap is rejected atomically."""
+    assert WATCHD_MAX_NATIVE_REGISTRATIONS == 512
+    service = _capacity_service(tmp_path, monkeypatch)
+    lease = _lease(service, 101)
+
+    # 256 roots + 256 exact-file parents + 2 distinct meta parents = 514 > 512.
+    crossing = _capacity_descriptor(
+        tmp_path, root_count=WATCHD_MAX_PATHS, file_parent_count=WATCHD_MAX_PATHS
+    )
+    response = _upsert(service, lease, "browser", crossing)
+    assert response["ok"] is False
+    assert response["error_code"] == "native_capacity_exceeded"
+    assert response["native_registration_paths"] == 514
+    assert response["native_registration_limit"] == 512
+    # Last-good preserved: no descriptor stored, empty configuration, generation untouched.
+    assert service.descriptors == {}
+    assert service.watch_generation == 0
+    assert service.effective_configuration().shallow_registration_paths() == ()
+
+
+def test_exact_file_parents_are_deduplicated_before_the_union_cap(tmp_path, monkeypatch):
+    """Two exact files sharing a parent count once against the cap."""
+    service = _capacity_service(tmp_path, monkeypatch)
+    lease = _lease(service, 101)
+    shared_parent = tmp_path / "shared"
+    descriptor = {
+        "descriptor_generation": 1,
+        "expires_at": time.monotonic() + 60.0,
+        "roots": [],
+        "files": [str(shared_parent / "a.txt"), str(shared_parent / "b.txt"), str(shared_parent / "c.txt")],
+        "background_files": [],
+        "transcripts": [],
+        "repo_roots": [],
+        "indexed_dirs": [],
+        "skip_dirs": [],
+        "exclude_rules": [],
+        "settings_path": str(tmp_path / "meta" / "settings.json"),
+        "attention_path": str(tmp_path / "meta" / "attention.json"),
+        "configured_roots": [str(tmp_path)],
+    }
+    response = _upsert(service, lease, "browser", descriptor)
+    assert response["ok"] is True
+    shallow = service.effective_configuration().shallow_registration_paths()
+    assert str(shared_parent) in shallow
+    # The three files fold to one registered parent (plus the two meta parents).
+    assert sum(1 for path in shallow if path == str(shared_parent)) == 1
+
+
+def test_second_descriptor_crossing_union_cap_is_rejected_and_preserves_first(tmp_path, monkeypatch):
+    """A second descriptor that pushes the UNION over the cap is rejected; the first survives."""
+    service = _capacity_service(tmp_path, monkeypatch)
+    first_lease = _lease(service, 101)
+    second_lease = _lease(service, 202)
+
+    first = _capacity_descriptor(tmp_path, root_count=WATCHD_MAX_PATHS, prefix="a", distinct_meta_parents=False)
+    assert _upsert(service, first_lease, "a", first)["ok"] is True
+    good_generation = service.watch_generation
+    good_config = service.effective_configuration()
+    assert len(good_config.shallow_registration_paths()) <= WATCHD_MAX_NATIVE_REGISTRATIONS
+
+    second = _capacity_descriptor(tmp_path, root_count=256, prefix="b", distinct_meta_parents=False)
+    response = _upsert(service, second_lease, "b", second)
+    assert response["ok"] is False
+    assert response["error_code"] == "native_capacity_exceeded"
+    # The first descriptor's configuration, generation and worker identity are preserved.
+    assert set(service.descriptors) == {(first_lease, "a")}
+    assert service.watch_generation == good_generation
+    assert service.effective_configuration().stable_payload() == good_config.stable_payload()
+
+
+def test_removing_a_descriptor_frees_native_registration_capacity(tmp_path, monkeypatch):
+    """EXPLICIT removal frees capacity so a previously-rejected upsert can land.
+
+    This exercises only the ``remove`` handler. The already-expired-descriptor path
+    (an expired first descriptor's registrations freeing capacity for a second
+    within-cap upsert, reaped inside ``upsert`` before the cap proposal) is a
+    distinct surface covered by
+    ``test_expired_descriptor_frees_native_registration_capacity_before_the_cap``.
+    """
+    service = _capacity_service(tmp_path, monkeypatch)
+    first_lease = _lease(service, 101)
+    second_lease = _lease(service, 202)
+
+    first = _capacity_descriptor(tmp_path, root_count=WATCHD_MAX_PATHS, prefix="a", distinct_meta_parents=False)
+    assert _upsert(service, first_lease, "a", first)["ok"] is True
+    second = _capacity_descriptor(tmp_path, root_count=256, prefix="b", distinct_meta_parents=False)
+    assert _upsert(service, second_lease, "b", second)["ok"] is False
+
+    removed, _body = service.handle(_request("remove", lease_id=first_lease, descriptor_id="a"))
+    assert removed["ok"] is True and removed["removed"] is True
+    # Capacity freed: the same second upsert now lands.
+    assert _upsert(service, second_lease, "b", second)["ok"] is True
+    assert len(service.effective_configuration().shallow_registration_paths()) <= WATCHD_MAX_NATIVE_REGISTRATIONS
+
+
+def test_expired_descriptor_frees_native_registration_capacity_before_the_cap(tmp_path, monkeypatch):
+    """An already-EXPIRED descriptor's registrations never consume the native cap.
+
+    ``upsert`` reaps expired (and orphaned-lease) descriptors -- with NO liveness
+    I/O -- before proposing the effective UNION against the cap. So a second valid
+    descriptor that WOULD fit once the first expires lands, and the expired key is
+    gone rather than silently occupying capacity until the next idle sweep.
+    """
+    service = _capacity_service(tmp_path, monkeypatch)
+    first_lease = _lease(service, 101)
+    second_lease = _lease(service, 202)
+
+    # First descriptor is accepted (reap on its own upsert sees an empty set) but is
+    # ALREADY expired: 256 roots + 1 shared meta parent = 257 effective registrations.
+    first = _capacity_descriptor(tmp_path, root_count=WATCHD_MAX_PATHS, prefix="a", distinct_meta_parents=False)
+    first["expires_at"] = time.monotonic() - 1.0
+    assert _upsert(service, first_lease, "a", first)["ok"] is True
+    assert set(service.descriptors) == {(first_lease, "a")}
+    good_generation = service.watch_generation
+
+    # Without the pre-cap reap this second (256-root) descriptor would push the union
+    # past 512 and be rejected. The lease stays alive (pid_is_alive is mocked True), so
+    # ONLY expiry -- not orphaning -- frees the capacity here.
+    second = _capacity_descriptor(tmp_path, root_count=256, prefix="b", distinct_meta_parents=False)
+    response = _upsert(service, second_lease, "b", second)
+    assert response["ok"] is True
+    # The expired first descriptor is reaped, not merely shadowed by the accept.
+    assert set(service.descriptors) == {(second_lease, "b")}
+    assert len(service.effective_configuration().shallow_registration_paths()) <= WATCHD_MAX_NATIVE_REGISTRATIONS
+    # The reap + accept both advanced the committed generation.
+    assert service.watch_generation > good_generation
+
+
+def test_expired_descriptor_reap_is_committed_even_when_the_upsert_is_rejected(tmp_path, monkeypatch):
+    """A reap that fires on a REJECTED upsert is still committed, not discarded.
+
+    If reaping an expired descriptor changes the committed set but the triggering
+    upsert is then rejected (here: stale generation), the freed capacity must be
+    committed -- otherwise the expired registrations linger until the next idle sweep.
+    """
+    service = _capacity_service(tmp_path, monkeypatch)
+    first_lease = _lease(service, 101)
+    second_lease = _lease(service, 202)
+
+    # A live, valid descriptor whose committed generation we will race with a stale upsert.
+    live = _capacity_descriptor(tmp_path, generation=5, root_count=10, prefix="live", distinct_meta_parents=False)
+    assert _upsert(service, second_lease, "live", live)["ok"] is True
+    generation_after_live = service.watch_generation
+
+    # A separate ALREADY-expired descriptor occupying capacity/state.
+    expired = _capacity_descriptor(tmp_path, root_count=10, prefix="exp", distinct_meta_parents=False)
+    expired["expires_at"] = time.monotonic() - 1.0
+    assert _upsert(service, first_lease, "exp", expired)["ok"] is True
+    assert (first_lease, "exp") in service.descriptors
+    generation_after_expired = service.watch_generation
+
+    # Now a STALE-generation upsert for the live descriptor: it is rejected, but the
+    # reap of the expired descriptor still fires and must be committed.
+    stale = _capacity_descriptor(tmp_path, generation=1, root_count=10, prefix="live", distinct_meta_parents=False)
+    response = _upsert(service, second_lease, "live", stale)
+    assert response["ok"] is False
+    assert response["error_code"] == "stale_generation"
+    # The expired descriptor was reaped and the reap was committed despite the rejection...
+    assert (first_lease, "exp") not in service.descriptors
+    assert set(service.descriptors) == {(second_lease, "live")}
+    # ...advancing the committed generation, and the live descriptor is unchanged.
+    assert service.watch_generation > generation_after_expired
+    assert response["watch_generation"] == service.watch_generation
+
+
+def test_native_registration_never_exceeds_the_cap_after_any_accepted_upsert(tmp_path, monkeypatch):
+    """The set handed to watchfiles_watch never exceeds the cap across accepted upserts."""
+    service = _capacity_service(tmp_path, monkeypatch)
+    for index in range(4):
+        lease = _lease(service, 100 + index)
+        descriptor = _capacity_descriptor(
+            tmp_path, root_count=200, prefix=f"t{index}", distinct_meta_parents=False
+        )
+        response = _upsert(service, lease, f"browser-{index}", descriptor)
+        # Accepted or rejected, the committed native set is always within the cap.
+        assert len(service.effective_configuration().shallow_registration_paths()) <= WATCHD_MAX_NATIVE_REGISTRATIONS
+        if not response["ok"]:
+            assert response["error_code"] == "native_capacity_exceeded"

@@ -17,8 +17,9 @@ def test_jobd_operation_service_wait_for_idle_keeps_completion_service_running()
         operation_started.set()
         assert release_operation.wait(timeout=2)
 
-    assert service.reserve() is True
-    assert service.submit_reserved(accepted_operation) is True
+    reservation = service.reserve("bulk")
+    assert reservation is not None
+    assert service.submit_reserved(reservation, accepted_operation) is True
     assert operation_started.wait(timeout=1)
     assert service.wait_for_idle(timeout=0.01) is False
     assert service.stop_event.is_set() is False
@@ -42,8 +43,9 @@ def test_jobd_operation_service_stop_joins_running_accepted_operation_before_ret
         if stop_returned.is_set():
             late_rpc.set()
 
-    assert service.reserve() is True
-    assert service.submit_reserved(accepted_operation) is True
+    reservation = service.reserve("bulk")
+    assert reservation is not None
+    assert service.submit_reserved(reservation, accepted_operation) is True
     assert operation_started.wait(timeout=1)
 
     def stop_service():

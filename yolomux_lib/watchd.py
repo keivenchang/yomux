@@ -14,6 +14,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from typing import Callable
 
 try:
     from watchfiles import DefaultFilter as WatchfilesDefaultFilter
@@ -23,6 +24,8 @@ except ImportError:
     watchfiles_watch = None
 
 from . import filesystem
+from .filesystem.exclusions import CompiledExclusionPolicy
+from .filesystem.exclusions import ExclusionPolicy
 from .filesystem.exclusions import ExclusionVerdict
 from .filesystem.exclusions import path_exclusion_verdict
 from .background_owner import pid_is_alive
@@ -36,10 +39,12 @@ from .local_services.runtime import apply_service_process_priority
 from .local_services.runtime import reap_dead_client_leases
 from .local_services.runtime import release_client_lease
 from .local_services.runtime import run_local_rpc_service
+from .watchd_protocol import DescriptorAdmission
 from .watchd_protocol import EffectiveWatchConfiguration
 from .watchd_protocol import WATCHD_CODE_REVISION
 from .watchd_protocol import WATCHD_DESCRIPTOR_TTL_SECONDS
 from .watchd_protocol import WATCHD_MAX_CHANGED_PATHS
+from .watchd_protocol import WATCHD_MAX_NATIVE_REGISTRATIONS
 from .watchd_protocol import WATCHD_PROTOCOL_VERSION
 from .watchd_protocol import WATCHD_SERVICE_NAME
 from .watchd_protocol import WATCHD_SNAPSHOT_DEADLINE_SECONDS
@@ -79,45 +84,317 @@ def default_socket_path() -> Path:
 
 
 def compact_watch_paths(paths: tuple[str, ...] | list[str]) -> tuple[str, ...]:
-    candidates = sorted(set(paths), key=lambda item: (len(Path(item).parts), item))
-    compacted: list[str] = []
-    for candidate in candidates:
-        path = Path(candidate)
-        if any(path == Path(parent) or filesystem._path_is_within(path, Path(parent)) for parent in compacted):
-            continue
-        compacted.append(candidate)
-    return tuple(compacted)
+    """Deduplicate a set of NON-recursive native watch roots, preserving descendants.
+
+    Every native registration is recursive=False, so a root registers ONLY
+    itself: ``/home/keivenc`` does NOT subsume ``/home/keivenc/dev``, and within
+    the shallow class every distinct directory is a distinct inotify registration
+    that must be preserved. Collapsing an ancestor over its descendants was the
+    exact bug that let one shallow ancestor silently swallow every expanded child
+    the Finder displays, so this only deduplicates.
+    """
+
+    return tuple(sorted(set(paths)))
+
+
+def _compiled_exclusion_rule_matcher(
+    *,
+    skip_dirs: tuple[str, ...],
+    configured_roots: tuple[str, ...],
+    exclude_rules: tuple[str, ...],
+) -> Callable[[Path], bool] | None:
+    """Compile the shared policy's index_exclude_paths rules once per configured root.
+
+    Returns one ``exclude_path`` predicate that ``path_exclusion_verdict`` can
+    consume, or ``None`` when there is nothing to compile. Compiling once and
+    reusing keeps the daemon's hot admission path off a per-event recompile.
+    """
+
+    if not exclude_rules or not configured_roots:
+        return None
+    policy = ExclusionPolicy(skip_dir_names=tuple(skip_dirs), exclude_rules=tuple(exclude_rules))
+    compiled: tuple[CompiledExclusionPolicy, ...] = tuple(
+        policy.compiled_for(Path(root)) for root in configured_roots
+    )
+
+    def rule_match(path: Path) -> bool:
+        return any(compiled_policy.matches_configured_rule(path) for compiled_policy in compiled)
+
+    return rule_match
+
+
+def _registration_excluded(
+    candidate: str,
+    *,
+    skip_dirs: tuple[str, ...],
+    configured_roots: tuple[str, ...],
+    rule_match: Callable[[Path], bool] | None,
+    apply_configured_roots: bool = True,
+) -> bool:
+    """Judge one native watch root through the ONE shared exclusion owner.
+
+    Every native REGISTRATION decision routes through the same exclusion owner
+    the index and event admission already use (directory names, secrets, the
+    configured-roots boundary, AND index_exclude_paths rules). There is no second
+    ignore list. ``apply_configured_roots`` is waived only for the exact-file
+    class, whose parents are explicitly owned and may legitimately sit outside the
+    displayed roots (a settings/attention file under a runtime state dir).
+    """
+
+    return path_exclusion_verdict(
+        Path(candidate),
+        skip_dirs=skip_dirs,
+        configured_roots=configured_roots if apply_configured_roots else (),
+        exclude_path=rule_match,
+    ).excluded
+
+
+def _descriptor_admission(descriptor: WatchDescriptor) -> tuple[DescriptorAdmission, tuple[str, ...]]:
+    """Normalize ONE descriptor's registration through its OWN exclusion policy.
+
+    Each descriptor's paths are judged only by that descriptor's own policy
+    (skip_dirs, secrets, configured-roots boundary, and index_exclude_paths
+    rules), so a rule one tenant configured against its own root can never
+    suppress another tenant's valid watch. Returns the descriptor's admission
+    owner (raw data for allow-if-any-owner event admission) and its admitted
+    shallow REGISTRATION paths (visible roots + exact-file parents).
+    """
+
+    skip_dirs = tuple(sorted(set(descriptor.skip_dirs)))
+    # configured_roots and exclude-rule roots are canonicalised: the outside-roots and
+    # configured-path boundaries compare canonical targets, so a canonical configured
+    # root judges a canonical candidate consistently. The CANDIDATE paths below stay
+    # LEXICAL through the verdict so an ignored/secret/rule alias is caught before it is
+    # collapsed; only the admitted survivors are canonicalised for registration/dedupe.
+    configured_roots = tuple(sorted({
+        str(Path(root).expanduser().resolve(strict=False)) for root in descriptor.configured_roots
+    }))
+    exclude_rules = tuple(sorted(set(descriptor.exclude_rules)))
+    rule_match = _compiled_exclusion_rule_matcher(
+        skip_dirs=skip_dirs, configured_roots=configured_roots, exclude_rules=exclude_rules
+    )
+
+    def _canonical(raw: str) -> str:
+        return str(Path(raw).expanduser().resolve(strict=False))
+
+    # (a) SHALLOW visible directories -- this descriptor's Finder root and each
+    # expanded directory, judged as the LEXICAL path through its own exclusion owner
+    # so an ignored/internal/outside-root/aliased visible root is never registered.
+    # Admitted survivors are canonicalised for the within-admission and registration
+    # sets, which are matched against canonical filesystem events.
+    visible_roots = compact_watch_paths(tuple(
+        _canonical(path)
+        for path in compact_watch_paths(descriptor.roots)
+        if not _registration_excluded(
+            path, skip_dirs=skip_dirs, configured_roots=configured_roots, rule_match=rule_match
+        )
+    ))
+
+    # (b) EXACT files -- settings/attention/transcript/watched files. Explicit
+    # narrow ownership: admitted by exact match, so the configured-roots boundary
+    # is WAIVED (a settings/attention file under a runtime root the browser never
+    # displays is still legitimately owned). It may still not sit inside an
+    # ignored directory or match a configured exclude rule -- those are fail-closed
+    # even for the exact class, judged on the LEXICAL path so a ``.git``/secret/rule
+    # alias (root/.git/link -> root/src/file) can never be admitted just because it
+    # was named explicitly and resolves to a clean target.
+    exact_paths = tuple(sorted({
+        _canonical(path)
+        for path in (
+            *descriptor.files,
+            *descriptor.background_files,
+            *descriptor.transcripts,
+            descriptor.settings_path,
+            descriptor.attention_path,
+        )
+        if path and not _registration_excluded(
+            path,
+            skip_dirs=skip_dirs,
+            configured_roots=configured_roots,
+            rule_match=rule_match,
+            apply_configured_roots=False,
+        )
+    }))
+    exact_parents = tuple(
+        parent
+        for parent in compact_watch_paths(tuple(str(Path(path).parent) for path in exact_paths))
+        if not _registration_excluded(
+            parent,
+            skip_dirs=skip_dirs,
+            configured_roots=configured_roots,
+            rule_match=rule_match,
+            apply_configured_roots=False,
+        )
+    )
+
+    admission = DescriptorAdmission(
+        visible_roots=visible_roots,
+        exact_paths=exact_paths,
+        skip_dirs=skip_dirs,
+        configured_roots=configured_roots,
+        exclude_rules=exclude_rules,
+    )
+    return admission, compact_watch_paths((*visible_roots, *exact_parents))
 
 
 def effective_configuration(descriptors: list[WatchDescriptor]) -> EffectiveWatchConfiguration:
+    # Descriptor path fields are LEXICAL (unresolved) so the exclusion owner can judge an
+    # ignored alias before it is collapsed. Every path field that feeds signatures,
+    # generation matching, snapshot roots, or exact-match admission is matched against
+    # canonical filesystem events, so the union canonicalises here -- AFTER the descriptor
+    # carried the lexical form far enough for _descriptor_admission to judge it. skip_dirs
+    # and exclude_rules are policy names/rules, not paths, so they union unchanged.
+    def union_paths(field: str) -> tuple[str, ...]:
+        return tuple(sorted({
+            str(Path(item).expanduser().resolve(strict=False))
+            for descriptor in descriptors
+            for item in getattr(descriptor, field)
+        }))
+
     def union(field: str) -> tuple[str, ...]:
         return tuple(sorted({item for descriptor in descriptors for item in getattr(descriptor, field)}))
 
-    settings_paths = tuple(sorted({descriptor.settings_path for descriptor in descriptors}))
-    attention_paths = tuple(sorted({descriptor.attention_path for descriptor in descriptors}))
-    roots = union("roots")
-    files = union("files")
-    background_files = union("background_files")
-    transcripts = union("transcripts")
-    indexed_dirs = union("indexed_dirs")
-    watch_paths = compact_watch_paths((
-        *roots,
-        *indexed_dirs,
-        *(str(Path(path).parent) for path in (*files, *background_files, *transcripts, *settings_paths, *attention_paths)),
-    ))
+    settings_paths = tuple(sorted({
+        str(Path(descriptor.settings_path).expanduser().resolve(strict=False)) for descriptor in descriptors
+    }))
+    attention_paths = tuple(sorted({
+        str(Path(descriptor.attention_path).expanduser().resolve(strict=False)) for descriptor in descriptors
+    }))
+    roots = union_paths("roots")
+    files = union_paths("files")
+    background_files = union_paths("background_files")
+    transcripts = union_paths("transcripts")
+    indexed_dirs = union_paths("indexed_dirs")
+    skip_dirs = union("skip_dirs")
+    configured_roots = union_paths("configured_roots")
+    exclude_rules = union("exclude_rules")
+
+    # Normalize each descriptor with ITS OWN policy, then union the admitted typed
+    # paths. There is NO recursive native class: ``indexed_dirs`` are covered by
+    # periodic reconciliation (their signatures below), never by a recursive
+    # native watch that would descend a whole subtree of inotify descriptors.
+    admissions: list[DescriptorAdmission] = []
+    shallow_paths: set[str] = set()
+    exact_paths: set[str] = set()
+    for descriptor in descriptors:
+        admission, descriptor_shallow = _descriptor_admission(descriptor)
+        admissions.append(admission)
+        shallow_paths.update(descriptor_shallow)
+        exact_paths.update(admission.exact_paths)
+
+    visible_watch_paths = compact_watch_paths(
+        tuple(root for admission in admissions for root in admission.visible_roots)
+    )
+    shallow_watch_paths = compact_watch_paths(tuple(shallow_paths))
+    exact_watch_paths = tuple(sorted(exact_paths))
+
     return EffectiveWatchConfiguration(
         roots=roots,
         files=files,
         background_files=background_files,
         transcripts=transcripts,
-        repo_roots=union("repo_roots"),
+        repo_roots=union_paths("repo_roots"),
         indexed_dirs=indexed_dirs,
-        skip_dirs=union("skip_dirs"),
+        skip_dirs=skip_dirs,
         settings_paths=settings_paths,
         attention_paths=attention_paths,
-        configured_roots=union("configured_roots"),
-        watch_paths=watch_paths,
+        configured_roots=configured_roots,
+        exclude_rules=exclude_rules,
+        watch_paths=visible_watch_paths,
+        shallow_watch_paths=shallow_watch_paths,
+        exact_watch_paths=exact_watch_paths,
+        descriptor_admissions=tuple(admissions),
     )
+
+
+class _ConfigurationAdmitter:
+    """Allow-if-any-owner event admission, compiled once per generation/batch.
+
+    A path is admitted when it is an explicitly owned exact file, OR when at
+    least ONE owning descriptor admits it under THAT descriptor's own exclusion
+    policy. A rule one descriptor configured against its own root can never
+    suppress another descriptor's valid watch (the deny-if-any-global defect).
+    Every verdict routes through the ONE shared exclusion owner; there is no
+    second ignore list. Direct-construction configs (and older descriptors)
+    carry no per-descriptor admissions and fall back to the single legacy owner.
+    """
+
+    def __init__(self, configuration: EffectiveWatchConfiguration) -> None:
+        self._exact = frozenset(configuration.exact_watch_paths)
+        self._owners: list[tuple[tuple[Path, ...], DescriptorAdmission, Callable[[Path], bool] | None, frozenset[str]]] = []
+        for admission in configuration.descriptor_admissions:
+            rule_match = _compiled_exclusion_rule_matcher(
+                skip_dirs=admission.skip_dirs,
+                configured_roots=admission.configured_roots,
+                exclude_rules=admission.exclude_rules,
+            )
+            roots = tuple(Path(root) for root in admission.visible_roots)
+            self._owners.append((roots, admission, rule_match, frozenset(admission.exact_paths)))
+        self._has_owners = bool(configuration.descriptor_admissions)
+        self._legacy_roots = tuple(Path(root) for root in configuration.watch_paths)
+        self._legacy_skip = configuration.skip_dirs
+        self._legacy_configured_roots = configuration.configured_roots
+        self._legacy_rule_match = _compiled_exclusion_rule_matcher(
+            skip_dirs=configuration.skip_dirs,
+            configured_roots=configuration.configured_roots,
+            exclude_rules=configuration.exclude_rules,
+        )
+
+    def admits(self, path: Path, *, resolved: Path | None = None) -> bool:
+        # Within-matching uses the resolved target (events arrive under the canonical
+        # registered dirs), but exclusion judges the LEXICAL event path so an admitted
+        # dir's ignored/secret/aliased child cannot slip through by resolving clean.
+        lexical = path.expanduser()
+        if resolved is None:
+            try:
+                resolved = lexical.resolve(strict=False)
+            except OSError:
+                return False
+        resolved_text = str(resolved)
+        if self._has_owners:
+            for roots, admission, rule_match, exact in self._owners:
+                # EXACT ownership: the parent may legitimately sit outside the
+                # displayed roots, so waive ONLY the configured-roots boundary --
+                # skip_dirs, secrets, and compiled rules still judge the LEXICAL
+                # event path, so a separately-ignored alias resolving to a clean
+                # exact target is fail-closed here, not silently admitted.
+                if resolved_text in exact and not path_exclusion_verdict(
+                    lexical,
+                    skip_dirs=admission.skip_dirs,
+                    configured_roots=(),
+                    exclude_path=rule_match,
+                    resolved=resolved,
+                ).excluded:
+                    return True
+                if any(resolved == root or filesystem._path_is_within(resolved, root) for root in roots) and not path_exclusion_verdict(
+                    lexical,
+                    skip_dirs=admission.skip_dirs,
+                    configured_roots=admission.configured_roots,
+                    exclude_path=rule_match,
+                    resolved=resolved,
+                ).excluded:
+                    return True
+            return False
+        # Legacy/no-owner fallback: the single exact set is still judged through the
+        # shared owner (configured-roots boundary waived, everything else enforced)
+        # so a separately-ignored alias cannot bypass exclusion by exact resolution.
+        if resolved_text in self._exact:
+            return not path_exclusion_verdict(
+                lexical,
+                skip_dirs=self._legacy_skip,
+                configured_roots=(),
+                exclude_path=self._legacy_rule_match,
+                resolved=resolved,
+            ).excluded
+        if path_exclusion_verdict(
+            lexical,
+            skip_dirs=self._legacy_skip,
+            configured_roots=self._legacy_configured_roots,
+            exclude_path=self._legacy_rule_match,
+            resolved=resolved,
+        ).excluded:
+            return False
+        return any(resolved == root or filesystem._path_is_within(resolved, root) for root in self._legacy_roots)
 
 
 class PersistentWatchService:
@@ -146,6 +423,14 @@ class PersistentWatchService:
         self.root_signatures: dict[str, tuple[Any, ...]] = {}
         self.root_generations: dict[str, int] = {}
         self.repo_generations: dict[str, int] = {}
+        # Last typed private-repository generation observed per repo root.  A same-commit branch
+        # switch changes the checked-out HEAD identity but leaves the working tree byte-for-byte
+        # identical, so no watchfiles/native or directory-signature event reports it.  Reconcile
+        # polls filesystem.git_ops.repository_generation -- the ONE typed generation owner -- for
+        # each repo root and, when its generation advances past what we last saw, bumps
+        # repo_generations so the Differ consumer refreshes.  Baseline is recorded silently on the
+        # first observation so startup does not manufacture a spurious refresh.
+        self.repo_head_generations: dict[str, int] = {}
         self.native_worker: threading.Thread | Any | None = None
         self.native_stop_event = threading.Event()
         self.reconfigure_event = threading.Event()
@@ -209,8 +494,13 @@ class PersistentWatchService:
         with self.lock:
             return self.configuration
 
-    def _refresh_configuration_locked(self) -> bool:
-        configuration = effective_configuration(list(self.descriptors.values()))
+    def _refresh_configuration_locked(self, configuration: EffectiveWatchConfiguration | None = None) -> bool:
+        # The upsert boundary computes the PROPOSED configuration to enforce the
+        # daemon-wide native-registration cap before committing; it passes that exact
+        # object here so the committed configuration is the one that was capacity-checked
+        # (no second, unchecked recompute).
+        if configuration is None:
+            configuration = effective_configuration(list(self.descriptors.values()))
         signature = self._configuration_hash(configuration)
         if signature == self.configuration_hash:
             return False
@@ -444,49 +734,64 @@ class PersistentWatchService:
             self.lock.notify_all()
             return dict(revision)
 
+    @staticmethod
+    def _configuration_admitter(configuration: EffectiveWatchConfiguration) -> _ConfigurationAdmitter:
+        """Compile the configuration's allow-if-any-owner admitter once for reuse.
+
+        The daemon's hottest paths (event admission and the native filter) must
+        not recompile the shared policy per change, so callers build this once
+        per generation/batch and reuse it across every path.
+        """
+
+        return _ConfigurationAdmitter(configuration)
+
     def _path_verdict(
         self,
         path: Path,
         configuration: EffectiveWatchConfiguration,
         *,
         resolved: Path | None = None,
+        rule_match: Callable[[Path], bool] | None = None,
     ) -> ExclusionVerdict:
-        """Decide one path through the single shared exclusion owner.
+        """Decide one path against the union exclusion policy through the shared owner.
 
-        ``resolved`` is threaded through by callers that already resolved the
-        path.  This runs once per native change, and resolving twice would
-        double the syscalls on the daemon's hottest path.
+        This reports the GLOBAL verdict (union skip_dirs / configured_roots /
+        rules) and exists for diagnostics and direct-construction tests.  Event
+        admission does NOT use it -- that is allow-if-any-owner via
+        :class:`_ConfigurationAdmitter`, so one descriptor's rule cannot suppress
+        another's watch.  ``resolved`` is threaded through by callers that already
+        resolved the path to avoid a second resolve on the hot path.
         """
 
         return path_exclusion_verdict(
             path,
             skip_dirs=configuration.skip_dirs,
             configured_roots=configuration.configured_roots,
+            exclude_path=rule_match,
             resolved=resolved,
         )
 
-    def _path_allowed(self, path: Path, configuration: EffectiveWatchConfiguration) -> bool:
-        try:
-            resolved = path.expanduser().resolve(strict=False)
-        except OSError:
-            return False
-        if self._path_verdict(path, configuration, resolved=resolved).excluded:
-            return False
-        return any(
-            resolved == Path(root) or filesystem._path_is_within(resolved, Path(root))
-            for root in configuration.watch_paths
-        )
+    def _path_allowed(
+        self,
+        path: Path,
+        configuration: EffectiveWatchConfiguration,
+        *,
+        admitter: _ConfigurationAdmitter | None = None,
+    ) -> bool:
+        return (admitter or self._configuration_admitter(configuration)).admits(path)
 
     def native_watch_filter(self, configuration: EffectiveWatchConfiguration):
         default_filter = WatchfilesDefaultFilter()
+        admitter = self._configuration_admitter(configuration)
 
         def watch_filter(change: Any, raw_path: str) -> bool:
-            # Every ignored directory is decided by the one exclusion owner, not
-            # only Git internals: watchfiles' own default filter does not know
-            # this deployment's configured skip_dirs or excluded paths, so a
-            # cache, virtualenv, dependency tree or build output would otherwise
-            # be admitted here and only rejected later, if at all.
-            if self._path_verdict(Path(raw_path), configuration).excluded:
+            # Admission is allow-if-any-owner through the one shared exclusion
+            # owner: an explicitly owned exact file, or a path at least one owning
+            # descriptor admits under its own policy. watchfiles' own default
+            # filter does not know this deployment's configured skip_dirs or
+            # excluded paths, so a cache, virtualenv, dependency tree or build
+            # output would otherwise be admitted here and only rejected later.
+            if not admitter.admits(Path(raw_path)):
                 return False
             return bool(default_filter(change, raw_path))
 
@@ -545,12 +850,13 @@ class PersistentWatchService:
             configuration = self.configuration
         if len(changes) > WATCHD_EVENT_BATCH_LIMIT:
             return self.reconcile(reason="overflow", watch_generation=watch_generation, coarse=True)
+        admitter = self._configuration_admitter(configuration)
         admitted: list[Path] = []
         for _change, raw_path in changes:
             if not isinstance(raw_path, str) or not raw_path.startswith("/"):
                 continue
             path = Path(raw_path)
-            if self._path_allowed(path, configuration):
+            if self._path_allowed(path, configuration, admitter=admitter):
                 admitted.append(path.resolve(strict=False))
         changed_paths = sorted(set(admitted), key=str)
         if not changed_paths:
@@ -613,14 +919,33 @@ class PersistentWatchService:
             [Path(path) for path in changed_paths],
             project_descendants=True,
         )
+        # Poll the typed private-repository generation for each repo root OUTSIDE the lock (it
+        # shells out to git): an identical-tree branch switch advances this generation with no
+        # working-tree event, so it is the only signal that reports a same-commit HEAD change.
+        observed_repo_generations = {
+            repo: filesystem.git_ops.repository_generation(Path(repo))
+            for repo in configuration.repo_roots
+        }
         with self.lock:
             if watch_generation != self.watch_generation:
                 return None
             self.scanned_watch_generation = watch_generation
             self.root_signatures = signatures
-            self._apply_generation_bumps_locked(bumps)
+            # A repo whose typed generation moved past the last one we recorded had its HEAD
+            # identity change (e.g. a same-commit branch switch).  Bump only when a prior baseline
+            # exists, so the first observation seeds state without a spurious refresh.  Merge into
+            # the change-set repos so a repo already bumped by a working-tree event is not counted
+            # twice.
+            repo_head_bumps = [
+                repo
+                for repo, generation in observed_repo_generations.items()
+                if repo in self.repo_head_generations and self.repo_head_generations[repo] != generation
+            ]
+            self.repo_head_generations = dict(observed_repo_generations)
+            merged_bumps = (bumps[0], sorted(set(bumps[1]) | set(repo_head_bumps)))
+            self._apply_generation_bumps_locked(merged_bumps)
             self.next_reconcile_at = time.monotonic() + WATCHD_RECONCILE_SECONDS
-            if not changed_paths and self.revision:
+            if not changed_paths and not repo_head_bumps and self.revision:
                 return None
             watched_files = set((*configuration.files, *configuration.background_files))
             files_changed = [
@@ -1013,7 +1338,8 @@ class PersistentWatchService:
                     self.native_stop_event = threading.Event()
                     stop_event = self.native_stop_event
                     self.reconfigure_event.clear()
-                if not configuration.watch_paths:
+                shallow_paths = configuration.shallow_registration_paths()
+                if not shallow_paths:
                     with self.lock:
                         self.native_healthy = False
                         self.polling_fallback = False
@@ -1040,12 +1366,19 @@ class PersistentWatchService:
                 backend_error: BaseException | None = None
                 scan_error = configuration_scan_error
                 watch_iterator = None
+                # Every native registration is recursive=False: no single root
+                # descends a whole subtree of inotify descriptors. There is no
+                # secondary/recursive worker whose lifecycle could confuse this
+                # generation's stop event, so a primary backend failure below
+                # enters _poll_fallback_until_native_retry with an UNSET event and
+                # retries in bounded polling instead of returning with no worker.
                 try:
                     with self.lock:
                         self.native_healthy = False
                         self.polling_fallback = False
                     watch_iterator = watchfiles_watch(
-                        *configuration.watch_paths,
+                        *shallow_paths,
+                        recursive=False,
                         watch_filter=self.native_watch_filter(configuration),
                         debounce=WATCHD_DEBOUNCE_MS,
                         step=WATCHD_STEP_MS,
@@ -1218,12 +1551,44 @@ class PersistentWatchService:
             with self.lock:
                 if key[0] not in self.leases:
                     return {"ok": False, "error": "unknown lease", "error_code": "unknown_lease"}, b""
+                # Reap expired descriptors and orphaned-lease descriptors (no liveness
+                # I/O) BEFORE the stale-generation check and the cap proposal, so an
+                # expired descriptor's native registrations never consume the cap a
+                # valid within-cap upsert needs. If the reap changed the committed set
+                # but the upsert is then REJECTED (stale generation or cap), still
+                # commit the reap so the freed capacity is not silently discarded.
+                reaped = self._reap_locked()
                 previous = self.descriptors.get(key)
                 if previous is not None and descriptor.descriptor_generation < previous.descriptor_generation:
+                    if reaped:
+                        self._refresh_configuration_locked()
                     return {"ok": False, "error": "stale descriptor generation", "error_code": "stale_generation", "watch_generation": self.watch_generation}, b""
+                # Enforce the daemon-wide native-registration cap at this PROPOSED-configuration
+                # boundary, on the effective UNION handed to watchfiles_watch -- not per field.
+                # An upsert that would cross it is REJECTED atomically: self.descriptors is not
+                # mutated, so the last-good descriptor/configuration/generation/worker are
+                # preserved and paths are never silently truncated. Deduplicated parents count
+                # once (the union is a set), and an expired/removed descriptor frees capacity on
+                # its next refresh.
+                proposed_descriptors = dict(self.descriptors)
+                proposed_descriptors[key] = descriptor
+                proposed = effective_configuration(list(proposed_descriptors.values()))
+                native_registration_count = len(proposed.shallow_registration_paths())
+                if native_registration_count > WATCHD_MAX_NATIVE_REGISTRATIONS:
+                    if reaped:
+                        self._refresh_configuration_locked()
+                    return {
+                        "ok": False,
+                        "error": "native registration capacity exceeded",
+                        "error_code": "native_capacity_exceeded",
+                        "native_registration_paths": native_registration_count,
+                        "native_registration_limit": WATCHD_MAX_NATIVE_REGISTRATIONS,
+                        "watch_generation": self.watch_generation,
+                        "active_watch_generation": self.active_watch_generation,
+                    }, b""
                 stable_unchanged = previous is not None and descriptor.stable_payload() == previous.stable_payload()
                 self.descriptors[key] = descriptor
-                changed = self._refresh_configuration_locked()
+                changed = self._refresh_configuration_locked(proposed)
                 return {"ok": True, "changed": changed, "descriptor_unchanged": stable_unchanged, "watch_generation": self.watch_generation, "active_watch_generation": self.active_watch_generation, "epoch": self.epoch}, b""
         if action == "remove":
             key = (str(request["lease_id"]), str(request["descriptor_id"]))

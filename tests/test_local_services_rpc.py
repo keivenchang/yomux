@@ -183,16 +183,21 @@ def test_current_rpc_timeout_never_replays_work_through_legacy_fallback(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("service_duration_ms", "expected_error"),
+    ("service_duration_ms", "expected_attribution"),
     [
         (15.0, "peer_handler_slow"),
         (3.0, "unattributed_latency"),
     ],
 )
-def test_current_rpc_deadline_attributes_only_measured_peer_handler_time(
-    tmp_path, monkeypatch, service_duration_ms, expected_error,
+def test_current_rpc_deadline_returns_the_delivered_response_with_a_budget_breach_label(
+    tmp_path, monkeypatch, service_duration_ms, expected_attribution,
 ):
-    """A response over the client deadline names only a proven handler span."""
+    """A complete, request-id-matched response past the telemetry budget is DELIVERED, not raised.
+
+    The deadline is a telemetry budget, not a correctness bound: the response is returned and the
+    measured attribution (a slow handler versus latency before the handler ran) is recorded as a
+    diagnostic on the delivered record, never as an error.
+    """
     envelope = rpc.new_envelope("testd", "status", {"action": "status"}, timeout_seconds=0.01)
     response_envelope = rpc.LocalRpcEnvelope(
         service="testd",
@@ -229,8 +234,23 @@ def test_current_rpc_deadline_attributes_only_measured_peer_handler_time(
     monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: DelayedResponseSocket())
     monkeypatch.setattr(rpc, "monotonic_clock", lambda: next(clock))
 
-    with pytest.raises(rpc.LocalRpcError, match=expected_error):
-        rpc.request(tmp_path / "testd.sock", envelope, timeout_seconds=0.1)
+    delivered_envelope, payload, binary = rpc.request_with_envelope(
+        tmp_path / "testd.sock", envelope, timeout_seconds=0.1
+    )
+
+    # The past-budget response is returned intact, not raised.
+    assert delivered_envelope is not None
+    assert delivered_envelope.request_id == envelope.request_id
+    assert payload == {"ok": True}
+    assert binary == b""
+
+    # The budget breach is telemetry on the delivered record, not a failure. `status` is a probe
+    # method, so the completion lands in the probe class.
+    probe = rpc.local_service_traffic_ledger("testd").snapshot()["probe"]
+    assert (probe["completed"], probe["errors"]) == (1, 0)
+    assert probe["errors_by_reason"] == {}
+    assert probe["over_budget"] == 1
+    assert probe["over_budget_by_reason"] == {expected_attribution: 1}
 
 
 def test_current_rpc_absent_socket_never_replays_work_through_legacy_fallback(tmp_path, monkeypatch):
@@ -971,15 +991,20 @@ def test_a_peer_that_closed_without_writing_still_reports_the_write_failure(tmp_
 
 
 @pytest.mark.parametrize(
-    ("service_duration_ms", "expected_reason"),
+    ("service_duration_ms", "expected_attribution"),
     [
-        (15.0, rpc.LOCAL_SERVICE_REASON_DEADLINE_HANDLER),
-        (3.0, rpc.LOCAL_SERVICE_REASON_DEADLINE_UNATTRIBUTED),
+        (15.0, rpc.LOCAL_RPC_OVER_BUDGET_HANDLER),
+        (3.0, rpc.LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED),
     ],
 )
-def test_local_service_traffic_separates_expiry_after_and_before_the_handler(
-    tmp_path, monkeypatch, service_duration_ms, expected_reason,
+def test_local_service_traffic_labels_a_delivered_over_budget_response_as_diagnostics(
+    tmp_path, monkeypatch, service_duration_ms, expected_attribution,
 ):
+    """A delivered response past the budget is a COMPLETION that carries a diagnostic label.
+
+    It separates a slow handler from latency before the handler ran, but it is never an error:
+    the deadline is a telemetry budget, not a correctness bound.
+    """
     envelope = rpc.new_envelope("trafficd", "history", {"action": "history"}, timeout_seconds=0.01)
     response_envelope = rpc.LocalRpcEnvelope(
         service="trafficd",
@@ -1016,14 +1041,18 @@ def test_local_service_traffic_separates_expiry_after_and_before_the_handler(
     monkeypatch.setattr(rpc.socket, "socket", lambda *_args, **_kwargs: DelayedResponseSocket())
     monkeypatch.setattr(rpc, "monotonic_clock", lambda: next(clock))
 
-    with pytest.raises(rpc.LocalRpcError):
-        rpc.request(tmp_path / "trafficd.sock", envelope, timeout_seconds=0.1)
+    payload, _binary = rpc.request(tmp_path / "trafficd.sock", envelope, timeout_seconds=0.1)
+    assert payload == {"ok": True}
 
     work = _traffic("trafficd")["work"]
-    assert (work["accepted"], work["completed"], work["errors"]) == (1, 0, 1)
-    assert work["errors_by_reason"] == {expected_reason: 1}
-    # An expired request contributes no latency: the published average is total/completed.
-    assert work["client_latency_ms"] == {"count": 0, "total_ms": 0.0, "max_ms": 0.0, "avg_ms": 0.0}
+    # Delivered, so it is a completion with zero errors -- and it carries a diagnostic breach label.
+    assert (work["accepted"], work["completed"], work["errors"]) == (1, 1, 0)
+    assert work["errors_by_reason"] == {}
+    assert work["over_budget"] == 1
+    assert work["over_budget_by_reason"] == {expected_attribution: 1}
+    # A delivered response contributes latency, unlike the former raised expiry.
+    assert work["client_latency_ms"]["count"] == 1
+    assert work["client_latency_ms"]["max_ms"] == pytest.approx(12.0, abs=0.5)
 
 
 def test_local_service_traffic_counts_every_transport_failure_attempt(tmp_path):

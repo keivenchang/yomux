@@ -15,6 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from . import bfs_index
 from . import file_index
 from ..filesystem import search
 from ..infra.common import RUNTIME_DIR
@@ -30,6 +31,18 @@ from ..local_services.runtime import redact_local_service_text
 from ..local_services.runtime import release_client_lease
 from ..local_services.runtime import run_local_rpc_service
 
+
+# Route every configured-root FULL build through the breadth-first, directory-at-a-time frontier.
+# The persistent indexer is the process that actually runs those builds, so importing it wires the
+# one runner `file_index._run_build` consults; a process that never imports this module (a pure
+# file_index unit test) keeps the DFS fallback. This is the injector pattern `file_index` already
+# uses for the background-owner checker, not a function-local import.
+file_index.set_bfs_full_build_runner(bfs_index.build_root_into_index)
+
+# The bounded token the health observer reads when a configured/scheduled obligation, not demand,
+# is what keeps `indexd` hot. It replaces the static `demand_started=True` for configured roots so
+# an absent-but-scheduled indexer reads "starting", never "Idle - Starts on demand".
+INDEXER_SCHEDULED_ABSENCE_REASON = "configured_roots_scheduled"
 
 INDEXER_PROTOCOL_VERSION = 1
 # Keep the wire protocol at v1 while older YOLOmux servers are alive.  A v2
@@ -68,6 +81,37 @@ class PersistentSearchIndexer:
         self.started_at = time.time()
         self.last_client_at = time.monotonic()
         self.leases: dict[str, object] = {}
+        self.progress_lock = threading.Lock()
+        # Latest-per-scope Quick Open progress frames buffered for the web to drain. The breadth-first
+        # crawl runs in THIS daemon, so `bfs_index._emit_progress_signal` -> `file_index.notify_search_progress`
+        # builds its redacted `{scope_id, generation, revision, coverage}` frame here; registering the
+        # notifier below deposits that frame into this buffer. The daemon holds no App/broker and cannot
+        # reach the shared client-events bus itself, so a follower web process drains these over the
+        # existing indexd RPC and republishes each UNCHANGED via `app.publish_search_progress`. Latest per
+        # scope is sufficient -- the client pulls every ordered delta by cursor, so only the newest
+        # revision must survive a coalescing window; the buffer is bounded by the number of roots.
+        self.progress_frames: dict[str, dict[str, Any]] = {}
+        file_index.set_search_progress_notifier(self._buffer_search_progress)
+
+    def _buffer_search_progress(self, frame: dict[str, Any]) -> None:
+        """Daemon-side `search_progress` notifier: keep the newest frame per opaque scope for draining."""
+        scope_id = str(frame.get("scope_id") or "")
+        if not scope_id:
+            return
+        with self.progress_lock:
+            self.progress_frames[scope_id] = dict(frame)
+
+    def drain_search_progress(self) -> dict[str, Any]:
+        """Hand the web the progress frames committed since its last drain, newest-per-scope, then clear.
+
+        A passive read for a FOLLOWER web process: it takes no lease and starts no work, it only moves
+        the already-redacted frames this daemon built onto the caller so the caller can fan them out over
+        the shared client-events bus. Clearing on drain delivers each latest frame once; the client's
+        cursor read, not this signal, is what guarantees the stream is complete."""
+        with self.progress_lock:
+            frames = list(self.progress_frames.values())
+            self.progress_frames.clear()
+        return {"ok": True, "frames": frames}
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         clean_root = str(Path(root).expanduser().resolve(strict=False))
@@ -92,6 +136,25 @@ class PersistentSearchIndexer:
         self.pending_reasons.pop(clean_root, None)
         file_index.unindex(Path(clean_root))
         return {"ok": True, "accepted": True, "root": clean_root}
+
+    def promote(self, root: str) -> dict[str, Any]:
+        """Promote a root's pending frontier to user-visible-demand (item 5).
+
+        A Quick Open query whose scope is not yet fully covered reaches this bounded operation. It
+        raises the priority of that root's existing pending frontier through the one durable owner
+        (``file_index.promote_frontier``) rather than launching a second crawl. A root that has no
+        snapshot yet has nothing to promote, so it is kicked with a normal ``startup-depth-1``
+        enqueue instead -- the same demand path an initial Quick Open already uses.
+        """
+        clean_root = str(Path(root).expanduser().resolve(strict=False))
+        if not clean_root.startswith("/"):
+            return {"ok": False, "error": "root must be absolute"}
+        promoted = file_index.promote_frontier(Path(clean_root))
+        kicked = False
+        if promoted == 0 and file_index.read_index_coverage(Path(clean_root)) is None:
+            self.enqueue(clean_root, [], reason=bfs_index.REASON_STARTUP)
+            kicked = True
+        return {"ok": True, "accepted": True, "root": clean_root, "promoted": promoted, "kicked": kicked}
 
     def process_due(self) -> int:
         now = time.monotonic()
@@ -163,7 +226,11 @@ class PersistentSearchIndexer:
             processed = self.process_due()
             return {"ok": True, "processed": processed, "status": self.common_status()}
         if action == "lease":
-            response = acquire_client_lease(self.leases, request.get("client_pid"))
+            # `existing_lease_id` makes the shared owner idempotent: a still-valid lease returns the
+            # SAME id (unchanged-settings reuse) while a missing/stale id yields a fresh one (daemon
+            # restart recovery), so a scheduler that refreshes on every settings change never leaks
+            # or strands leases.
+            response = acquire_client_lease(self.leases, request.get("client_pid"), request.get("existing_lease_id"))
             return {**response, "version": INDEXER_PROTOCOL_VERSION}
         if action == "release":
             return release_client_lease(self.leases, request.get("lease_id"))
@@ -177,14 +244,23 @@ class PersistentSearchIndexer:
             paths = raw_paths if isinstance(raw_paths, list) else []
             return self.enqueue(str(request.get("root") or ""), paths, str(request.get("reason") or ""))
         if action == "search":
+            # Step 4: carry the opaque delta cursor through the indexer read path too, so a follower
+            # that reaches indexd for a committed-delta read gets the same fenced journal deltas the
+            # in-process reader serves. An absent/empty cursor is a snapshot read (recursive full-tree).
+            cursor = str(request.get("cursor") or "") or None
             return {"ok": True, "payload": search.search_files(
                 str(request.get("root") or ""),
                 str(request.get("query") or ""),
                 request.get("limit"),
                 recursive=True,
+                cursor=cursor,
             )}
+        if action == "drain_search_progress":
+            return self.drain_search_progress()
         if action == "unindex":
             return self.unindex(str(request.get("root") or ""))
+        if action == "promote":
+            return self.promote(str(request.get("root") or ""))
         if action == "shutdown":
             self.stop_event.set()
             return {"ok": True}
@@ -228,6 +304,141 @@ class SearchIndexerClient:
             socket_path=self.socket_path,
             service_dir=requested_service_dir,
         )
+        # The configured-root scheduler obligation this process is holding. Set by the elected
+        # background owner in `app.handle_background_owner_acquired`, cleared on demotion/shutdown.
+        # `runtime_status()` reads it to report measured scheduled work instead of demand-only idle.
+        self.scheduled_roots: list[str] = []
+        self.scheduler_lease_id: str | None = None
+        self.scheduler_leased_at: float = 0.0
+        # Roots removed from the configured set whose cancel/unindex did not confirm; retried on the
+        # next reconcile so a transient daemon failure cannot strand a removed root indexed.
+        self._pending_removals: set[str] = set()
+
+    @staticmethod
+    def _clean_configured_roots(roots: Any) -> list[str]:
+        if not isinstance(roots, (list, tuple, set)):
+            return []
+        cleaned: set[str] = set()
+        for raw in roots:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            resolved = str(Path(raw).expanduser().resolve(strict=False))
+            if resolved.startswith("/"):
+                cleaned.add(resolved)
+        return sorted(cleaned)
+
+    def _unindex_removed(self, roots: set[str]) -> set[str]:
+        """Cancel/unindex each removed root through the existing indexd operation.
+
+        Returns the roots whose unindex did NOT confirm, so the caller can retry them and never drop
+        the lease over a transient removal failure.
+        """
+        still_failed: set[str] = set()
+        for root in sorted(roots):
+            response = self.request({"action": "unindex", "root": root})
+            if not response.get("ok"):
+                still_failed.add(root)
+        return still_failed
+
+    def lease_configured_roots(self, roots: Any) -> dict[str, Any]:
+        """Reconcile the configured indexed roots against the running schedule, DELTA-based.
+
+        Item 1 of DOIT.fs-interactivity: the elected background owner keeps `indexd` alive past its
+        60-second idle timeout and enqueues a `startup-depth-1` listing for each configured root,
+        instead of waiting for a Quick Open query. This runs on acquisition and on settings changes,
+        so it must be idempotent: enqueue only ADDED roots, leave UNCHANGED roots alone (never
+        re-crawl a completed root just because some unrelated setting changed), cancel/unindex every
+        REMOVED root, and release the one lease only when nothing is configured. It reuses the one
+        service and its `lease`/`enqueue`/`unindex` operations; it starts no second scheduler.
+        """
+        old_roots = set(self.scheduled_roots)
+        clean = self._clean_configured_roots(roots)
+        new_roots = set(clean)
+        removed = (old_roots - new_roots) | self._pending_removals
+        self._pending_removals = self._unindex_removed(removed - new_roots)
+
+        if not new_roots:
+            self.scheduled_roots = []
+            # A failed removal keeps the lease so the obligation to finish cleaning up survives.
+            if self._pending_removals:
+                return {"ok": True, "scheduled_roots": [], "leased": self.scheduler_lease_id is not None, "enqueued": [], "removed_pending": sorted(self._pending_removals)}
+            released = self.release_scheduler_lease()
+            return {"ok": True, "scheduled_roots": [], "leased": self.scheduler_lease_id is not None, "enqueued": [], "removed": sorted(removed), "release": released}
+
+        if not self.ensure_started():
+            return {"ok": False, "error": "persistent indexer unavailable", "scheduled_roots": clean, "leased": self.scheduler_lease_id is not None}
+        # ONE idempotent keep-alive lease for the whole ownership, resolved through the shared
+        # `acquire_client_lease` owner: passing our current id back returns the SAME id when it is
+        # still valid (so refreshing on every settings change does not leak leases) and a NEW id
+        # when the daemon has restarted with an empty table. We adopt whatever id it returns.
+        lease = self.request({"action": "lease", "client_pid": os.getpid(), "existing_lease_id": self.scheduler_lease_id or ""})
+        if lease.get("ok"):
+            lease_id = str(lease.get("lease_id") or "")
+            if lease_id:
+                self.scheduler_lease_id = lease_id
+                self.scheduler_leased_at = time.time()
+        added = sorted(new_roots - old_roots)
+        enqueued: list[str] = []
+        for root in added:
+            response = self.request({"action": "enqueue", "root": root, "paths": [], "reason": bfs_index.REASON_STARTUP})
+            if response.get("ok"):
+                enqueued.append(root)
+        self.scheduled_roots = clean
+        return {
+            "ok": True,
+            "scheduled_roots": clean,
+            "leased": self.scheduler_lease_id is not None,
+            "enqueued": enqueued,
+            "removed": sorted(removed - new_roots),
+        }
+
+    def release_scheduler_lease(self) -> dict[str, Any]:
+        """Release the scheduler lease on demotion/shutdown so the daemon may idle out honestly.
+
+        A failed release (transport error, daemon momentarily unreachable) PRESERVES the lease id so
+        a later call can retry it; erasing the only handle would strand the lease on the daemon and
+        keep indexd alive forever. The obligation (scheduled roots) is always cleared.
+        """
+        self.scheduled_roots = []
+        if not self.scheduler_lease_id:
+            self.scheduler_leased_at = 0.0
+            return {"ok": True, "released": False}
+        released = self.request({"action": "release", "lease_id": self.scheduler_lease_id})
+        if not released.get("ok"):
+            return released
+        self.scheduler_lease_id = None
+        self.scheduler_leased_at = 0.0
+        return released
+
+    def scheduled_root_coverage(self) -> list[dict[str, Any]]:
+        """One measured per-root coverage projection from the persisted breadth-first manifests."""
+        coverage: list[dict[str, Any]] = []
+        for root in self.scheduled_roots:
+            measured = file_index.read_index_coverage(Path(root))
+            if measured is None:
+                coverage.append({
+                    "root": root,
+                    "lifecycle": "scheduled",
+                    "built_at": 0.0,
+                    "snapshot_age_seconds": None,
+                    "active_generation": 0,
+                    "published_generation": 0,
+                    "published_depth": 0,
+                    "frontier_depth": 0,
+                    "frontier_size": 0,
+                    "full_coverage": False,
+                    "entry_count": 0,
+                    "truncated": False,
+                    "last_progress_at": 0.0,
+                })
+                continue
+            measured["lifecycle"] = (
+                "indexed"
+                if measured.get("full_coverage")
+                else ("indexing" if int(measured.get("frontier_size") or 0) > 0 or int(measured.get("published_depth") or 0) > 0 else "scheduled")
+            )
+            coverage.append(measured)
+        return coverage
 
     def request(self, payload: dict[str, Any], timeout: float = 0.5) -> dict[str, Any]:
         try:
@@ -296,10 +507,30 @@ class SearchIndexerClient:
     def service_status(self) -> dict[str, Any]:
         return self.registry.status()
 
+    def _apply_scheduled_absence(self, row: dict[str, Any], has_obligation: bool) -> None:
+        """Swap the demand-started default for a scheduled-absence reason when indexd is kept hot.
+
+        indexd carries two mutually-exclusive absence vocabularies: `demand_started` when it is
+        genuinely idle, and a scheduled-absence reason when a configured/scheduled obligation --
+        not demand -- is what keeps it hot. They may never coexist in one row (the observer
+        resolves a row claiming both as `down`). `runtime_status` sets the `demand_started`
+        default; this helper performs the swap so the `absence_expected_reason` literal stays OUT
+        of that scanned body and the backend-health catalog sees exactly one absence vocabulary
+        declared there. Runtime behavior is unchanged: scheduled -> reason, otherwise -> demand.
+        """
+        if has_obligation:
+            # A configured or scheduled obligation means indexd is NOT demand-scoped: its absence
+            # reads `starting` with a scheduled reason, never "Idle - Starts on demand".
+            row.pop("demand_started", None)
+            row["absence_expected_reason"] = INDEXER_SCHEDULED_ABSENCE_REASON
+
     def runtime_status(self) -> dict[str, Any]:
         status = self.service_status()
         payload = status.get("status") if isinstance(status.get("status"), dict) else {}
-        return {
+        scheduled_roots = list(self.scheduled_roots)
+        has_obligation = bool(scheduled_roots) or self.scheduler_lease_id is not None
+        root_coverage = self.scheduled_root_coverage()
+        row = {
             "service": "indexd",
             "pid": int(payload.get("pid") or 0),
             "started_at": float(payload.get("started_at") or 0.0),
@@ -312,14 +543,28 @@ class SearchIndexerClient:
             "cache": payload.get("cache") if isinstance(payload.get("cache"), dict) else {},
             "last_success": float(payload.get("last_success") or 0.0),
             "last_failure": local_service_failure_text(status, payload),
-            # Quick Open starts the indexer on its first query, so "absent" is only an
-            # error once a start was attempted and refused -- which is what last_failure says.
-            "demand_started": True,
             "restart_backoff_seconds": max(0.0, float(status.get("next_start_at") or 0.0) - time.monotonic()),
             "generation": int(payload.get("generation") or 0),
             "record": status.get("record") if isinstance(status.get("record"), dict) else {},
             "resources": self.registry.resources(int(payload.get("pid") or 0)),
+            # Item 8 projection: the measured configured-root obligations this owner is scheduling.
+            "scheduled_roots": scheduled_roots,
+            "scheduled_root_count": len(scheduled_roots),
+            "scheduler_leased": self.scheduler_lease_id is not None,
+            "root_coverage": root_coverage,
+            "frontier_size": sum(int(entry.get("frontier_size") or 0) for entry in root_coverage),
+            "indexing_root_count": sum(1 for entry in root_coverage if entry.get("lifecycle") == "indexing"),
+            "indexed_root_count": sum(1 for entry in root_coverage if entry.get("lifecycle") == "indexed"),
+            # Quick Open starts the indexer on its first query, so an absent indexer is only an error
+            # once a start was attempted and refused -- which is what last_failure says. A configured
+            # or scheduled obligation overrides this in `_apply_scheduled_absence` below.
+            "demand_started": True,
         }
+        # TWO ABSENCE VOCABULARIES, EXACTLY ONE SET (see backend_health/observer.py). Only the
+        # `demand_started` default is declared in this scanned body; the scheduled-absence swap
+        # lives in `_apply_scheduled_absence` so both literals never coexist here.
+        self._apply_scheduled_absence(row, has_obligation)
+        return row
 
     def enqueue(self, root: str, paths: list[str], reason: str = "") -> dict[str, Any]:
         if not self.ensure_started():
@@ -332,6 +577,32 @@ class SearchIndexerClient:
             return {"ok": False, "accepted": False, "error": "persistent indexer unavailable"}
         response = self.request({"action": "unindex", "root": root})
         return {**response, "accepted": bool(response.get("ok"))}
+
+    def promote_user_visible(self, root: str, directory: str = "") -> dict[str, Any]:
+        """Promote a root's frontier to user-visible-demand on behalf of a Quick Open query (item 5).
+
+        The read path dispatches this off the query thread, so it may start the daemon (an initial
+        Quick Open on a not-yet-scheduled root is exactly when a promotion is most useful), but it
+        never blocks the query itself.
+        """
+        if not self.ensure_started():
+            return {"ok": False, "accepted": False, "error": "persistent indexer unavailable"}
+        payload = {"action": "promote", "root": root}
+        if directory:
+            payload["directory"] = directory
+        response = self.request(payload)
+        return {**response, "accepted": bool(response.get("ok"))}
+
+    def drain_search_progress(self) -> list[dict[str, Any]]:
+        """Drain the daemon's buffered Quick Open progress frames WITHOUT starting or leasing it.
+
+        A passive follower read: it never `ensure_started` (draining must not spin indexd up) and uses a
+        short timeout so an absent or idle daemon fails closed to an empty list instead of blocking the
+        web's client-event loop. The web republishes each returned frame onto the shared client-events
+        bus through the one forwarder (`app.publish_search_progress`)."""
+        response = self.request({"action": "drain_search_progress"}, timeout=0.3)
+        frames = response.get("frames") if response.get("ok") else None
+        return [frame for frame in frames if isinstance(frame, dict)] if isinstance(frames, list) else []
 
     def search(self, root: str, query: str, limit: int) -> dict[str, Any]:
         payload = {"action": "search", "root": root, "query": query, "limit": limit}

@@ -158,7 +158,6 @@ def test_session_files_payload_types_cover_builder_shapes_and_annotations():
     assert {"hours", "warnings", "cache", "error", "refreshing_elsewhere"} <= set(SessionFilesPayload.__annotations__)
 
     assert get_type_hints(session_files.session_file_entry)["return"] is SessionFileEntry
-    assert get_type_hints(session_files.refreshing_session_files_payload_for_info)["return"] is SessionFilesPayload
     assert get_type_hints(session_files.session_files_payload_for_info)["return"] is SessionFilesPayload
     assert tuple_return_args(get_type_hints(session_files.session_files_payload)["return"]) == (SessionFilesPayload, HTTPStatus)
 

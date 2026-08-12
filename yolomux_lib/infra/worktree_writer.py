@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,15 @@ WRITER_RECORD_NAME = "owner.json"
 WRITER_SCHEMA = 1
 DEFAULT_STALE_SECONDS = 30.0
 DEFAULT_HEARTBEAT_SECONDS = 5.0
+
+# Package directories that were part of the abandoned 0.6.12 topology and were removed from
+# the tree. A rolling worktree update deletes their tracked `.py` sources, but a `__pycache__/`
+# that Git ignores survives inside the otherwise-empty directory, and that directory alone is
+# enough for `importlib.util.find_spec("yolomux_lib.<name>")` to resolve a PEP 420 namespace
+# package. The backend-health catalog forbids exactly that (a retired topology name coming back
+# as an importable module), and manual cache deletion is not a real answer. Purging the residue
+# on package import fixes it for every upgraded checkout without touching the oracle.
+ABANDONED_NAMESPACE_RESIDUE = ("daemon", "storaged", "storaged_process")
 
 
 @dataclass(frozen=True)
@@ -81,6 +91,28 @@ def _resolved(path: Path) -> Path:
 
 def _path_is_inside(path: Path, parent: Path) -> bool:
     return _resolved(path).is_relative_to(_resolved(parent))
+
+
+def purge_abandoned_namespace_residue(package_dir: Path) -> list[str]:
+    """Remove ignored bytecode-only residue of abandoned-topology packages.
+
+    Returns the names purged. A directory is removed only when it is pure cache
+    residue -- it carries no importable `.py` source anywhere beneath it -- so a
+    genuine re-introduction of one of these names (a real `.py` reappearing) is
+    left in place for the catalog oracle to fail on, and never silently deleted.
+    """
+
+    purged: list[str] = []
+    for name in ABANDONED_NAMESPACE_RESIDUE:
+        candidate = Path(package_dir) / name
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        if any(candidate.rglob("*.py")):
+            # Real source, not residue: this is a reintroduction, not upgrade debris.
+            continue
+        shutil.rmtree(candidate)
+        purged.append(name)
+    return purged
 
 
 def worktree_declaration_slot(worktree_root: Path) -> Path:

@@ -1,6 +1,26 @@
+import json
+from pathlib import Path
+from types import MappingProxyType
+
 import pytest
 
 from yolomux_lib.diagnostic_redaction import redact_diagnostic_value
+
+SHARED_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "diagnostic_redaction.json").read_text(encoding="utf-8")
+)
+SHARED_FIXTURE_CASES = SHARED_FIXTURE["cases"]
+
+# The exact credential fragments the shared fixture inputs embed. The negative "zero secrets" proof
+# below asserts none survive Python redaction; the JavaScript half asserts the same fragments against
+# the browser redactor (tests/diagnostic_redaction.test.js), so both conformance implementations of
+# the one neutral contract are held to the identical evidence.
+SHARED_FIXTURE_SECRET_FRAGMENTS = (
+    "browser-secret", "server-secret", "csrf-secret", "proxy-secret", "proxy-user", "digest-secret",
+    "first-secret", "second-secret", "s-secret", "url-secret", "fragment-secret",
+    "unterminated-secret", "x-api-secret", "token-secret", "basic-secret", "deep-secret", "deep-token",
+    "a-secret", "b-secret", "matrix-secret", "utf8-secret", "utf8-token-secret", "AbC-123_xyz",
+)
 
 
 @pytest.mark.parametrize(
@@ -930,3 +950,57 @@ def test_diagnostic_structured_keys_redact_only_credential_names():
         "access_token": "[redacted-share-token]",
         "Authorization": "[redacted-share-token]",
     }
+
+
+def test_redacts_a_readonly_mapping_instead_of_returning_it_unchanged():
+    """W2: validated payloads arrive as MappingProxyType; the neutral redactor must
+    walk any Mapping (not only dict) and return a plain redacted dict."""
+    src = MappingProxyType({"message": "Bearer admission-secret", "note": "safe"})
+    out = redact_diagnostic_value(src)
+
+    assert isinstance(out, dict)
+    assert out["message"] == "Bearer [redacted-secret]"
+    assert out["note"] == "safe"
+    assert "admission-secret" not in str(out)
+
+
+def test_redactor_is_idempotent_over_a_mapping():
+    """W2: applying the redactor twice yields the same result (no double-marking)."""
+    once = redact_diagnostic_value(MappingProxyType({"message": "Bearer admission-secret"}))
+    twice = redact_diagnostic_value(once)
+    assert once == twice
+
+
+@pytest.mark.parametrize(
+    "case",
+    SHARED_FIXTURE_CASES,
+    ids=[f"{case['category']}:{case['name']}" for case in SHARED_FIXTURE_CASES],
+)
+def test_shared_contract_fixture_matches_the_python_owner(case):
+    """W2: the one neutral contract. The Python owner must reproduce every checked-in expected value,
+    guarding against silent drift between the fixture and the redactor that generated it."""
+    assert redact_diagnostic_value(case["input"]) == case["expected"]
+
+
+@pytest.mark.parametrize(
+    "case",
+    SHARED_FIXTURE_CASES,
+    ids=[f"{case['category']}:{case['name']}" for case in SHARED_FIXTURE_CASES],
+)
+def test_shared_contract_fixture_is_idempotent_in_python(case):
+    once = redact_diagnostic_value(case["input"])
+    assert redact_diagnostic_value(once) == once
+
+
+def test_no_fixture_secret_fragment_survives_python_redaction():
+    """W2 negative proof: zero fixture secrets anywhere in redacted output. Every credential fragment
+    the fixture inputs embed must be absent from the serialized redacted value."""
+    for case in SHARED_FIXTURE_CASES:
+        serialized_input = json.dumps(case["input"], ensure_ascii=False)
+        serialized_output = json.dumps(redact_diagnostic_value(case["input"]), ensure_ascii=False)
+        for fragment in SHARED_FIXTURE_SECRET_FRAGMENTS:
+            if fragment not in serialized_input:
+                continue
+            assert fragment not in serialized_output, (
+                f"{case['category']}/{case['name']} leaked {fragment!r} in {serialized_output}"
+            )

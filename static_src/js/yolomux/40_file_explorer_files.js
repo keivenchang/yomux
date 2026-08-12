@@ -3978,12 +3978,40 @@ function fileIndexFreshnessMessage(freshness) {
   return lines.join(' ');
 }
 
+// A live progressive BFS crawl publishes usable rows while it keeps walking. Its authoritative live
+// state is `progressive_coverage`, not the top-level `coverage`/`too_large` fields, which can still
+// carry a superseded generation's terminal verdict. While the crawl is actively walking and has
+// neither been truncated nor reached full coverage, the root is BUILDING (partial-but-growing), not
+// the terminal "file limit reached" state — so results keep flowing and no capped-index warning fires.
+function fileIndexProgressiveCoverage(payload) {
+  const coverage = payload && typeof payload.progressive_coverage === 'object' ? payload.progressive_coverage : null;
+  return coverage;
+}
+
+function fileIndexProgressiveStillBuilding(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  return Boolean(coverage && coverage.truncated === false && coverage.full_coverage === false);
+}
+
+function fileIndexPublishedGeneration(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  const published = coverage ? Number(coverage.published_generation) : NaN;
+  if (Number.isFinite(published) && published > 0) return published;
+  const generation = Number(payload?.generation || payload?.completed_generation || 0);
+  return Number.isFinite(generation) && generation > 0 ? generation : 0;
+}
+
 // Warm the backend index for a root (kicks the build) and preserve partial coverage as a distinct,
 // user-visible terminal state instead of silently presenting a capped index as complete.
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
   const freshness = fileIndexFreshnessFromPayload(payload);
+  // A live progressive crawl that has not been truncated and has not reached full coverage is still
+  // building: it is not the terminal capped state, even if an older persisted snapshot for this root
+  // was truncated. This must be read before the too_large/partial derivation below so an in-progress
+  // BFS is never mislabelled "file limit reached".
+  if (fileIndexProgressiveStillBuilding(payload)) return 'building';
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
   if (state === 'error' || payload.error) return 'error';
   // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
@@ -4009,7 +4037,10 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || fileIndexPartialWarningRoots.has(normalized)) return false;
   fileIndexPartialWarningRoots.add(normalized);
-  const count = Math.max(0, Number(payload.count) || 0);
+  // Report the live indexed count, not a stale 0 from a superseded snapshot: prefer the progressive
+  // crawl's entry_count when present, then the top-level count.
+  const progressiveCount = Number(fileIndexProgressiveCoverage(payload)?.entry_count);
+  const count = Math.max(0, Number.isFinite(progressiveCount) && progressiveCount > 0 ? progressiveCount : (Number(payload.count) || 0));
   const limit = Math.max(0, Number(payload.max_files) || count);
   emitNotification('indexCoverage', {
     key: normalized,
@@ -4032,11 +4063,24 @@ function applyFileIndexStatusPayload(root, payload) {
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
   if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
-  else if (status === 'ready' || status === 'stale') fileIndexPartialWarningRoots.delete(normalized);
+  // Any non-capped status clears a prior "file limit reached" warning: a superseded truncated
+  // generation must not keep a stale banner (with its stale count) on screen once the live crawl is
+  // partial-but-growing, ready, or stale again.
+  else fileIndexPartialWarningRoots.delete(normalized);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
+  // Track the progressive published generation so newly-published BFS rows re-surface in an open
+  // Quick Open palette without a retype (below), independently of the top-level lifecycle generation.
+  const publishedGeneration = fileIndexPublishedGeneration(payload);
+  const previousPublished = Number(fileExplorerIndexPublishedGeneration.get(normalized) || 0);
+  if (publishedGeneration > previousPublished) fileExplorerIndexPublishedGeneration.set(normalized, publishedGeneration);
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+  // An open Quick Open palette no longer re-issues the WHOLE query on every index-status poll or
+  // published-generation tick: the server-pushed search_progress signal now streams the newly-committed
+  // matches by cursor (steps 6-8), so the redundant full re-query per tick is retired here. The one
+  // explicit full-snapshot repair remains for the cases a cursor cannot bridge (rebase_required, a root
+  // with no committed baseline yet, or an authoritative background-refresh completion).
   return true;
 }
 

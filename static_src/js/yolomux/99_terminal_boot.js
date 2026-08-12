@@ -6944,6 +6944,11 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
+  // /api/event is host-only (share_access=none); the server returns 403 for a share token, and a real
+  // 403 during teardown fails the strict browser server-log-ring gate. Gate every event producer
+  // (terminal_disconnected, state_changed, notifications, watched-PR, yoagent) at this one owner rather
+  // than per call site, so no share-reachable caller can leak a forbidden host-only request.
+  if (!clientCanUseUnscopedHostRequests()) return Promise.resolve(false);
   const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
   if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
   return apiFetch('/api/event', {
@@ -7504,7 +7509,7 @@ const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -7641,9 +7646,9 @@ function handleClientPushEventNowByType(type, payload = {}) {
       // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
       // immediately recreates the retired building-index poll and can race a newer generation.
       if (payload.root && !applied) refreshFileIndexStatus(payload.root);
-      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
-        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
-      }
+      // A completed search-index refresh is authoritative: re-issue the open palette query through the
+      // one re-query owner, forcing past any in-flight search so the new snapshot's rows win.
+      requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');
@@ -7741,6 +7746,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
   }
   if (type === 'roots_changed') {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    return;
+  }
+  if (type === 'search_progress') {
+    // A per-root crawl-advance signal (path-free {scope_id, generation, revision, coverage}). The
+    // open Quick Open palette streams the newly-committed matches by cursor instead of re-querying.
+    if (typeof handleFileSearchProgressSignal === 'function') handleFileSearchProgressSignal(payload);
   }
 }
 
@@ -7878,12 +7889,29 @@ function scheduleClientEventDisconnectEpisode(source) {
   return true;
 }
 
+function clearClientEventCandidateEpisode(source) {
+  const episode = clientEventTransportState.candidateEpisode;
+  if (!episode || (source !== undefined && episode.source !== source)) return false;
+  clientEventTransportState.candidateEpisode = null;
+  return true;
+}
+
+// Abandon a pre-ready CANDIDATE stream and its retry episode without touching the ACTIVE stream.
+function abandonClientEventCandidate(source) {
+  if (clientEventTransportState.replacementSource !== source) return false;
+  clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode(source);
+  source?.close?.();
+  return true;
+}
+
 function closeClientEventStream() {
   const source = clientEventTransportState.source;
   clearClientEventDisconnectEpisode(source);
   clientEventTransportState.source = null;
   const replacementSource = clientEventTransportState.replacementSource;
   clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode();
   clientEventTransportState.connected = false;
   source?.close?.();
   if (replacementSource !== source) replacementSource?.close?.();
@@ -7920,6 +7948,14 @@ function openClientEventStream(descriptor, options = {}) {
   if (replacing) {
     const priorReplacement = clientEventTransportState.replacementSource;
     clientEventTransportState.replacementSource = source;
+    // One bounded retry episode per candidate: opening a new candidate (whether the first for this
+    // demand or a corrected one for changed demand) starts a fresh episode.
+    clientEventTransportState.candidateEpisode = {
+      source,
+      demandSignature: String(options.demandSignature || ''),
+      attempts: 0,
+      startedAt: performance.now(),
+    };
     priorReplacement?.close?.();
   } else {
     clientEventTransportState.source = source;
@@ -7930,6 +7966,7 @@ function openClientEventStream(descriptor, options = {}) {
       const demandedSignature = String(options.demandSignature || '');
       if (demandedSignature && demandedSignature !== clientEventDemandSignature(clientEventDemandDescriptor())) {
         clientEventTransportState.replacementSource = null;
+        clearClientEventCandidateEpisode(source);
         source.close();
         syncClientEventDemand({immediate: true});
         return;
@@ -7937,6 +7974,8 @@ function openClientEventStream(descriptor, options = {}) {
       const previousSource = clientEventTransportState.source;
       clientEventTransportState.source = source;
       clientEventTransportState.replacementSource = null;
+      // The candidate is now the ACTIVE stream; its bounded retry episode is over.
+      clearClientEventCandidateEpisode(source);
       previousSource?.close?.();
     } else if (clientEventTransportState.source !== source) {
       return;
@@ -7976,7 +8015,33 @@ function openClientEventStream(descriptor, options = {}) {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    if (clientEventTransportState.replacementSource === source) return;
+    if (clientEventTransportState.replacementSource === source) {
+      // A CANDIDATE that errors before it is ever ready must not be silently retried forever while the
+      // ACTIVE stream keeps claiming to serve demand it no longer covers. Bound the retry episode: the
+      // browser EventSource auto-reconnects the same URL, so tolerate a few transient errors, then
+      // abandon the candidate and re-drive demand so a fresh stream + HTTP resync repair current state.
+      const episode = clientEventTransportState.candidateEpisode;
+      if (!episode || episode.source !== source) return;
+      episode.attempts += 1;
+      if (episode.attempts < clientEventCandidateRetryLimit) return;
+      abandonClientEventCandidate(source);
+      // The active stream does not serve the new demand: demote it so consumers fall back to HTTP
+      // instead of trusting a stream that covers only the old channel set.
+      clientEventTransportState.connected = false;
+      clientEventTransportState.reconnectPending = true;
+      if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+      recordSseDebugEvent('client_events_candidate_failed', {
+        attempts: episode.attempts,
+        demandSignature: episode.demandSignature,
+        diagnosticFailure: true,
+      });
+      // Force demand to be re-driven (the signature was already advanced when this candidate opened),
+      // opening one corrected candidate, and schedule an HTTP resync so no channel is left stranded.
+      clientEventTransportState.demandSignature = '';
+      scheduleReconnectResync('candidate-failed');
+      syncClientEventDemand({immediate: true});
+      return;
+    }
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
     clientEventTransportState.reconnectPending = true;

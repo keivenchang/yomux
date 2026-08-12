@@ -70,7 +70,7 @@ EXPECTED_PUBLIC_ROUTES = PUBLIC_ROUTES_BEFORE_LIVENESS | {("GET", "/healthz")}
 
 # Attribute lookups the shared response parent makes on the app for every request. A liveness
 # probe must never grow this: anything else means /healthz started consulting a subsystem.
-RESPONSE_PARENT_APP_ATTRIBUTES = {"observe_http_delivery", "record_performance_sample"}
+RESPONSE_PARENT_APP_ATTRIBUTES = {"observe_http_commit", "observe_http_receipt", "record_performance_sample"}
 
 
 def auth_yaml() -> str:

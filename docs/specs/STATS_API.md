@@ -159,7 +159,7 @@ The general coarse rule is a maximum one-minute interval, but `600s` is not a cu
 
 CPU observations can therefore change a 1s chart every second. Slower or sparse families such as Agent/Model tokens, cost, GPU, Agent Status, and memory do not repeat values into artificial 1s observations: their existing geometry drifts left with the live axis, or remains empty, until a real source observation changes the materialized result.
 
-A Range/Resolution selection, reconnect, missed generation, server identity change, or visibility restoration triggers one immediate exact snapshot. One-second activity never downloads a complete 5m/1s snapshot every second. Hidden documents and fixed historical zooms have no live delivery or repaint work and recover from one exact snapshot when activated.
+A Range/Resolution selection, reconnect, missed generation, server identity change, or document-visibility restoration triggers one immediate exact snapshot. One-second activity never downloads a complete 5m/1s snapshot every second. A hidden document and a fixed historical zoom are the two states that do no live delivery and no repaint work, and each recovers from one exact snapshot when reactivated. A hidden panel is a third, distinct state and is NOT the same: the page is still visible but the YO!stats/YO!cost pane is not the active tab, so its poll loop and repaint stop while the live stream — which follows document visibility, not the active tab — stays open and keeps applying deltas, and reactivating the tab repaints the already-current view without a new snapshot.
 
 ## Native collection and materialization
 

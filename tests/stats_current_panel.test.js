@@ -115,8 +115,10 @@ test('Logs normalizes browser and server records without duplicate IDs or unsafe
     Set,
     result: null,
     jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
+    jsDebugClientLogEpoch: 'client-epoch',
     jsDebugLogsState: {
-      clearedAt: 0,
+      serverEpoch: 'server-epoch',
+      clearedCursors: {server: null, client: null},
       levels: new Set(['warning', 'error']),
       payload: [
         {id: 7, timestamp: 100, level: 'error', source: 'watchd', category: 'transport', message: tokenized('timeout'), request_id: tokenized('r-watchd'), route: tokenized('/api/fs/watch-diff'), event_type: tokenized('watch-update'), delivery_outcome: tokenized('timeout'), unsafe: secret},
@@ -285,21 +287,178 @@ test('Services omits the duplicated web process while CPU names it clearly', () 
   assert.match(serviceSource, /if \(key === 'web'\) continue;/);
 });
 
-test('CPU promotes the newest sampled owner instead of covering it with a duplicate fallback', () => {
+test('CPU keeps the exact serving port as the only solid series and shows a gap, never promoting a peer', () => {
+  // W5 truthfulness: the exact serving `port:N` is ALWAYS the one solid series even
+  // with zero samples (it renders as an honest gap), a peer is NEVER promoted to
+  // "current", and there is NO aggregate fallback. The old code promoted the newest
+  // sampled owner to solid; these assertions are red against that behavior.
   const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const helpers = sourceFunction('debugGraphProcessCpuBucketValue', 'debugGraphHostMetricBucketItem');
   const context = {
-    result: null,
+    result: null, Number,
     location: {port: '9001', protocol: 'https:'},
     jsDebugGraphProcessCpuColors: {current: 'green', peers: ['red']},
-    debugGraphProcessCpuBucketValue: () => 0,
-    debugGraphProcessCpuBucketHasData: () => true,
   };
-  vm.runInNewContext(`${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([{servers: new Map([['port:9000', {cpuCount: 1, label: 'port:9000'}]])}]);`, context);
+  const bucket = "{servers: new Map([['port:9000', {cpuCount: 1, cpuTotalPercent: 40, label: 'port:9000'}]])}";
+  vm.runInNewContext(`${helpers}\n${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([${bucket}]);`, context);
+  const solid = context.result.filter(series => series.linePattern === 'solid');
+  assert.equal(solid.length, 1);
+  assert.equal(solid[0].key, 'cpu:port:9001');
+  assert.equal(solid[0].color, 'green');
+  assert.equal(solid[0].labelParams.process, 'yolomux.py (web)');
+  // The serving port had no sample in this bucket, so it is an honest gap, not a value.
+  vm.runInNewContext(`${helpers}\nresult = debugGraphProcessCpuBucketHasData(${bucket}, 'port:9001');`, context);
+  assert.equal(context.result, false);
+  // The one sampled peer stays dotted and port-labelled, never promoted to current.
+  vm.runInNewContext(`${helpers}\n${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([${bucket}]);`, context);
+  const dotted = context.result.filter(series => series.linePattern === 'dot');
+  assert.equal(dotted.length, 1);
+  assert.equal(dotted[0].key, 'cpu:port:9000');
+  assert.equal(dotted[0].labelParams.process, 'yolomux.py (web) :9000');
+  assert.equal(dotted[0].color, 'red');
+});
+
+test('CPU serving-port series stands alone on the default port with no aggregate fallback', () => {
+  // W5: on the default port (empty location.port) with zero sampled servers, the
+  // serving port is still the one solid series and there is NO aggregate `cpu`
+  // fallback series. The old code returned a single aggregate `{key:'cpu'}` here.
+  const cpuSource = sourceFunction('debugGraphProcessCpuSeriesDefs', 'debugGraphGpuDeviceSeriesDefs');
+  const helpers = sourceFunction('debugGraphProcessCpuBucketValue', 'debugGraphHostMetricBucketItem');
+  const context = {
+    result: null, Number,
+    location: {port: '', protocol: 'http:'},
+    jsDebugGraphProcessCpuColors: {current: 'green', peers: ['red']},
+  };
+  vm.runInNewContext(`${helpers}\n${cpuSource}\nresult = debugGraphProcessCpuSeriesDefs([{servers: new Map()}]);`, context);
   assert.equal(context.result.length, 1);
-  assert.equal(context.result[0].key, 'cpu:port:9000');
-  assert.equal(context.result[0].labelParams.process, 'yolomux.py (web)');
-  assert.equal(context.result[0].color, 'green');
+  assert.equal(context.result[0].key, 'cpu:port:80');
   assert.equal(context.result[0].linePattern, 'solid');
+  assert.equal(context.result.some(series => series.key === 'cpu'), false);
+});
+
+test('Logs Clear hides at/below a per-producer sequence cursor, ignores wall time, and survives an epoch reset', () => {
+  // W5: Clear uses validated (epoch, sequence) cursors, never wall time. A same-tick
+  // record above the cursor stays; a clock rollback cannot resurface a hidden record;
+  // a server epoch reset makes the old cursor stop matching so post-reset records show.
+  const logsSource = source.slice(
+    source.indexOf('function debugClientLogRecord('),
+    source.indexOf('\nfunction debugVisibleLogRecords('),
+  );
+  const context = {
+    result: null, Number, Object, String, Set, Array, Date,
+    jsDebugLogLevels: ['info', 'warning', 'debug', 'error'],
+    jsDebugClientLogEpoch: 'client-1',
+    shareRedactDiagnosticValue: value => value,
+    diagnosticPacificWallTime: () => '',
+    debugClientLogLevel: event => event.level || 'info',
+    debugEventDetailText: event => String(event.message || ''),
+    debugEventStatusText: () => '',
+    debugPhaseTimingText: () => '',
+    jsDebugEvents: [
+      {id: 5, ts: '1970-01-01T00:00:05.000Z', level: 'error', message: 'c5'},
+      {id: 6, ts: '1970-01-01T00:00:06.000Z', level: 'error', message: 'c6'},
+    ],
+    jsDebugLogsState: {
+      serverEpoch: 'e1', serverSequence: 3, clearedCursors: {server: null, client: null},
+      payload: [
+        {id: 1, timestamp: 100, level: 'error', message: 's1'},
+        {id: 2, timestamp: 100, level: 'error', message: 's2'},
+        {id: 3, timestamp: 90, level: 'error', message: 's3'},
+      ],
+    },
+  };
+  const run = 'result = debugMergedLogRecords().map(record => record.id);';
+  vm.runInNewContext(`${logsSource}\n${run}`, context);
+  assert.deepEqual([...context.result].sort(), ['client:5', 'client:6', 'server:1', 'server:2', 'server:3']);
+  // Clear at server seq 2 / client seq 5. Same-tick s2 (ts 100) is hidden while s3
+  // (higher seq but EARLIER ts 90 — a clock rollback) stays: sequence, not wall time.
+  context.jsDebugLogsState.clearedCursors = {server: {epoch: 'e1', sequence: 2}, client: {epoch: 'client-1', sequence: 5}};
+  vm.runInNewContext(`${logsSource}\n${run}`, context);
+  assert.deepEqual([...context.result].sort(), ['client:6', 'server:3']);
+  // Server ring reset (new epoch) — the old cursor no longer matches, so every
+  // server record shows again even though its id is at/below the cleared sequence.
+  context.jsDebugLogsState.serverEpoch = 'e2';
+  vm.runInNewContext(`${logsSource}\n${run}`, context);
+  assert.deepEqual([...context.result].sort(), ['client:6', 'server:1', 'server:2', 'server:3']);
+});
+
+test('Logs poll validation rejects malformed, missing-epoch, and inconsistent envelopes but accepts duplicate ids', () => {
+  const validatorSource = sourceFunction('jsDebugValidateServerLogEnvelope', 'debugVisibleLogRecords');
+  const run = envelope => {
+    const context = {result: null, Number, Array, JSON, payload: envelope};
+    vm.runInNewContext(`${validatorSource}\nresult = jsDebugValidateServerLogEnvelope(payload);`, context);
+    return context.result;
+  };
+  assert.equal(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 1}, {id: 2}]}).ok, true);
+  assert.match(run({ok: false, epoch: 'e', sequence: 0, logs: []}).reason, /malformed/);
+  assert.match(run({ok: true, epoch: '', sequence: 1, logs: []}).reason, /epoch/);
+  // Duplicate or nonmonotonic ids are accepted and stored raw; render-time dedup owns them.
+  assert.equal(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 1}, {id: 1}]}).ok, true);
+  assert.equal(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 2}, {id: 1}]}).ok, true);
+  assert.match(run({ok: true, epoch: 'e', sequence: 2, logs: [{id: 3}]}).reason, /exceeds/);
+});
+
+test('an API observation finalizes its enriched bytes exactly once and ignores late arrivals', () => {
+  // W5: reserve immediately, finalize once after bounded byte/timing enrichment
+  // (Content-Length or a response clone). A second, later measurement for an
+  // already-finalized observation cannot rewrite its immutable content.
+  const finalizeSource = sourceFunction('jsDebugCurrentObservationEventSnapshot', 'queueJsDebugCurrentObservation');
+  const bytesSource = sourceFunction('finalizeJsDebugCurrentObservationBytes', 'recordJsDebugDisconnectedSpan');
+  const context = {
+    result: null, Number, String, Object,
+    reloadClientJourneyId: 'j', jsDebugCodeRevision: () => 'rev', jsDebugBrowserFamily: () => 'chromium',
+    jsDebugCurrentObservationState: {epoch: 'ep', queue: []},
+  };
+  const live = {type: 'api', id: 7, ts: '1970-01-01T00:00:01.000Z', requestBytes: 100};
+  context.jsDebugCurrentObservationState.queue.push({
+    key: 'ep:7', epoch: 'ep', event: {...live}, liveEvent: live, releaseBlocking: false, finalized: false,
+  });
+  const program = `
+    ${finalizeSource}
+    ${bytesSource}
+    live.responseBytes = 345;
+    finalizeJsDebugCurrentObservationBytes(live);
+    const entry = jsDebugCurrentObservationState.queue[0];
+    const afterFirst = {bytes: entry.event.responseBytes, finalized: entry.finalized, live: entry.liveEvent};
+    live.responseBytes = 999;
+    finalizeJsDebugCurrentObservationBytes(live);
+    result = {afterFirst, afterSecond: entry.event.responseBytes};
+  `;
+  context.live = live;
+  vm.runInNewContext(program, context);
+  assert.equal(context.result.afterFirst.bytes, 345);
+  assert.equal(context.result.afterFirst.finalized, true);
+  assert.equal(context.result.afterFirst.live, null);
+  assert.equal(context.result.afterSecond, 345);
+});
+
+test('a reserved failure and a restored observation finalize without a live event', () => {
+  // W5: a failure reserves identity immediately and finalizes its already-complete
+  // content unchanged; a restored (pre-finalized) entry is never re-snapshotted.
+  const finalizeSource = sourceFunction('finalizeJsDebugCurrentObservation', 'queueJsDebugCurrentObservation');
+  const snapshotSource = sourceFunction('jsDebugCurrentObservationEventSnapshot', 'finalizeJsDebugCurrentObservation');
+  const context = {
+    result: null, Object, String,
+    reloadClientJourneyId: 'j', jsDebugCodeRevision: () => 'rev', jsDebugBrowserFamily: () => 'chromium',
+  };
+  const program = `
+    ${snapshotSource}
+    ${finalizeSource}
+    const failure = {key: 'ep:1', event: {type: 'error', message: 'boom'}, liveEvent: {type: 'error', message: 'boom', id: 1}, finalized: false};
+    finalizeJsDebugCurrentObservation(failure);
+    const restored = {key: 'ep:2', event: {type: 'error', message: 'kept', responseBytes: 12}, liveEvent: null, finalized: true};
+    finalizeJsDebugCurrentObservation(restored);
+    result = {
+      failureFinalized: failure.finalized, failureLive: failure.liveEvent, failureMessage: failure.event.message,
+      restoredMessage: restored.event.message, restoredBytes: restored.event.responseBytes,
+    };
+  `;
+  vm.runInNewContext(program, context);
+  assert.equal(context.result.failureFinalized, true);
+  assert.equal(context.result.failureLive, null);
+  assert.equal(context.result.failureMessage, 'boom');
+  assert.equal(context.result.restoredMessage, 'kept');
+  assert.equal(context.result.restoredBytes, 12);
 });
 
 test('chart popup uses the full localized chart titles', () => {
@@ -391,6 +550,14 @@ test('Agent-window live detail joins current sessions, diagnoses stale sessions,
   vm.runInNewContext(`${detailSource}\nautoApproveStates.set('one', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 0, kind: 'claude', state: 'working'}]});\nautoApproveStates.set('two', {agent_window_snapshot_revision: 6, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});\nresult = debugGraphLiveAgentWindowDetailHtml('activity');`, context);
   assert.match(context.result, /data-js-debug-agent-window-detail="activity"[^>]*state="stale"/);
   assert.match(context.result, /one → claude → claude → working/);
+  // W4: ONE compact summary carries the stale count; the per-session stale specifics move under
+  // the Live breakdown details rather than being repeated as header prose.
+  assert.match(context.result, /2 agent windows across 2 sessions \(1 stale\)/);
+  const staleSummaryIndex = context.result.indexOf('(1 stale)');
+  const breakdownIndex = context.result.indexOf('Live breakdown');
+  const stalePerSessionIndex = context.result.indexOf('two status is stale (rev 6 vs 7)');
+  assert.ok(stalePerSessionIndex > breakdownIndex, 'per-session stale text lives under Live breakdown');
+  assert.ok(breakdownIndex > staleSummaryIndex, 'compact summary precedes the breakdown');
   assert.match(context.result, /two status is stale \(rev 6 vs 7\)/);
   assert.doesNotMatch(context.result, /waiting for the chart snapshot/);
   context.autoApproveStates.set('two', {agent_window_snapshot_revision: 7, agent_windows: [{window_index: 1, kind: 'codex', state: 'idle'}]});
@@ -780,7 +947,7 @@ test('typed YO!stats warnings use the same durable browser-observation path', ()
 testAsync('browser observation writer fences acknowledge, retry authentication, and discard only rejected batches', async () => {
   const uploaderSource = source.slice(
     source.indexOf('function jsDebugCurrentObservationEventSnapshot('),
-    source.indexOf('\nfunction recordApiDebugResponseBytesForGraph('),
+    source.indexOf('\nfunction finalizeJsDebugCurrentObservationBytes('),
   );
   const endpointStart = coreSource.indexOf('function jsDebugEndpointText(');
   const endpointSource = coreSource.slice(endpointStart, coreSource.indexOf('\nfunction jsDebugRoundedMs(', endpointStart));

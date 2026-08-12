@@ -16,9 +16,9 @@ flowchart LR
 ```
 
 - The existing background-owner election chooses the server that supervises the indexer child.
-- The child starts lazily on the first Quick Open/index invalidation request, then is long-lived and owns every SQLite write connection. An idle browser therefore has no indexer process at all.
+- When the owner is elected it leases `indexd` for every configured indexed root (`file_explorer.indexed_dirs`) and enqueues one `startup-depth-1` item per root, so a configured deployment starts indexing without waiting for a query. With no configured root the child still starts lazily on the first Quick Open/index invalidation request. Either way it is long-lived and owns every SQLite write connection; it exits after 60 seconds only when no lease, client, or queued work remains.
 - Any server can read the latest committed SQLite snapshot with a read-only connection.
-- If ownership changes, the new owner starts/reuses one indexer; no HTTP server becomes a database writer.
+- If ownership changes, the new owner starts/reuses one indexer and re-leases the configured roots on the new daemon; no HTTP server becomes a database writer.
 
 ## Visibility policy
 
@@ -33,9 +33,11 @@ flowchart TB
 
 - Only paths explicitly reported by a visible Finder or Differ receive native watch handling and the two-second refresh target.
 - File editors, transcript/activity views, and hidden browser tabs retain their independent lightweight file/status policies; they do not make an entire Quick Open root hot.
-- A root can still be initially indexed on an explicit Quick Open request. Hidden roots are otherwise reconciled on the long safety interval.
+- Configured indexed roots are indexed proactively at background-owner election (layer 1 first, then breadth-first), not only on an explicit Quick Open request. Change evidence for a configured root refreshes on the hot cadence while the lease keeps `indexd` alive; the long safety interval reconciles anything stronger evidence missed.
 
 ## SQLite model
+
+The on-disk schema is `INDEX_FORMAT_VERSION=5`: `entries` carries a `generation` column, and durable `directory_coverage` and `frontier` tables persist per-directory breadth-first coverage and the pending queue so a restart resumes at the shallowest pending directory instead of rediscovering the tree. A v4 database migrates in place; its rows stay searchable as a stale generation rather than being dropped, and partial rows from an abandoned generation cannot overwrite a newer one.
 
 `entries.path` is the primary key. The indexer applies one transaction per coalesced root batch:
 
@@ -52,14 +54,12 @@ DELETE FROM entries WHERE path = ?;
 DELETE FROM entries WHERE path = ? OR path LIKE ?;
 ```
 
-File changes use one upsert/delete. Directory changes delete only that subtree, walk only that subtree, then insert its rows. A full-table delete and rewrite is permitted only for an initial build, an explicit full reindex, or a schema/policy migration.
+File changes use one upsert/delete. A single-file hot repair updates or deletes that row and its parent-directory metadata. A configured-root full build no longer walks the whole tree recursively before publishing: it runs through the breadth-first, directory-at-a-time frontier (`bfs_index.build_root_into_index`), publishing each directory's direct rows, deletions, and next-layer frontier in one transaction and advancing `published_depth` only after a whole layer is terminal. The recursive `_walk_root_with_metrics` DFS survives only on the incremental dirty path and the no-runner fallback, never the configured-root full path. A full-table delete and rewrite is permitted only for an explicit full reindex outside a configured root, or a schema/policy migration.
 
-## Rollout and verification
+## Breadth-first lifecycle, hot path, and safety refresh
 
-1. Add the indexer child and Unix-socket protocol; keep the old index as a fallback only until the child is healthy.
-2. Route Quick Open build/dirty requests through it and make servers read
-   SQLite snapshots.
-3. Apply row-delta persistence and remove normal full-table rewrites.
-4. Restrict high-frequency watch roots to visible Finder/Differ state.
-5. Verify that a single file save causes one bounded indexer transaction, no
-   `file-index-*` thread in the HTTP server, and no broad-root rewrite.
+The startup layer-1 publication order, breadth-first frontier priorities (`startup-depth-1`, `hot-change`, `user-visible-demand`, `breadth-expansion`, `full-safety-refresh`), the one hot-path change-evidence owner, the lowest-priority `file_explorer.index_refresh_seconds` safety reconciliation (default 1800 seconds, lease-driven and independent of queries), and the truthful `progressive_coverage`/`snapshot_state` status contract are specified in [`FS_INTERACTIVITY.md`](FS_INTERACTIVITY.md), which is now implemented (final validation gate pending). That document also records the two honest caveats: a jobd-executed mutation reaching `indexd` in a multi-server/follower topology is an open question, and the bounded read path reuses the existing 30-second SQLite connect timeout.
+
+## Verification
+
+A single file save causes one bounded indexer transaction, no `file-index-*` thread in the HTTP server, and no broad-root rewrite. Configured-root builds publish layer 1 (a root's direct files) before beginning layer 2, and a restart resumes the shallowest pending directory. Focused coverage lives in `tests/test_bfs_index.py`, `tests/test_search_indexer_bfs_cutover.py`, `tests/test_hot_path_owner.py`, and `tests/test_search_indexer.py`.

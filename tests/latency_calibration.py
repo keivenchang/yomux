@@ -364,6 +364,121 @@ HOST_QUALIFICATION_MEASURED_POPULATIONS: dict[str, dict[str, Any]] = {
 # HOST_QUALIFICATION_EVIDENCE_ONLY and asserted nowhere.
 HOST_QUALIFICATION_GUARD_MARGIN = 2.0
 
+# One owner of the per-platform certification profile. Every asserted limit above was measured on
+# Linux and reads Linux-only kernel surfaces - /proc/pressure (PSI cpu/io/memory stalls),
+# /proc/stat (procs_running) and /proc/diskstats (disk busy, disk in-flight) - and the two work
+# units, though portable in mechanism, carry Linux hardware thresholds. A macOS host exposes none of
+# those surfaces and has different hardware, so reusing this profile there would measure absent
+# signals, not the product. Darwin therefore omits the Linux-only signals and takes thresholds ONLY
+# from retained real quiet/post-lane and deliberately saturated Darwin populations. Until those are
+# recorded (W14 Darwin execution), the Darwin profile is not certifiable and the owner fails closed
+# rather than qualifying a host it has no reference for.
+LINUX_ONLY_SIGNALS = frozenset(
+    {
+        "procs_running_p75",
+        "cpu_stall_some_fraction",
+        "io_stall_some_fraction",
+        "io_stall_full_fraction",
+        "memory_stall_full_fraction",
+        "disk_busy_fraction_max",
+        "disk_in_flight_max",
+    }
+)
+
+# Retained native measurements are the only input allowed to activate Darwin certification. W14
+# will populate this owner with quiet, post-lane and deliberately saturated measurements; keeping
+# the empty dataset here makes today's Darwin release gate fail closed without baking in Linux
+# hardware numbers. Each signal range is [minimum, maximum], matching the Linux population schema.
+DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS: dict[str, dict[str, Any]] = {}
+DARWIN_PROFILE_SIGNALS = frozenset({"cpu_work_median_ms", "storage_work_median_ms"})
+
+
+def _darwin_platform_profile(populations: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    required = ("quiet", "post_lane", "saturated")
+    if any(name not in populations for name in required):
+        return {
+            "system": "Darwin",
+            "certifiable": False,
+            "reason_code": "no_recorded_platform_reference_population",
+            "limits": {},
+            "omitted_signals": sorted(LINUX_ONLY_SIGNALS),
+            "uses_inotify_capacity": False,
+            "reference_populations": sorted(populations),
+        }
+
+    limits: dict[str, float] = {}
+    population_shape_valid = all(
+        isinstance(populations[name].get("probes"), int) and populations[name]["probes"] > 0
+        for name in required
+    )
+    for signal in sorted(DARWIN_PROFILE_SIGNALS):
+        if not population_shape_valid:
+            break
+        ranges = [populations[name].get(signal) for name in required]
+        if any(not isinstance(value, (list, tuple)) or len(value) != 2 for value in ranges):
+            break
+        values = [[float(item) for item in value] for value in ranges]
+        if any(not all(math.isfinite(item) and item > 0 for item in value) or value[0] > value[1] for value in values):
+            break
+        post_lane_high = values[1][1]
+        saturated_low = values[2][0]
+        limit = HOST_QUALIFICATION_GUARD_MARGIN * post_lane_high
+        if limit >= saturated_low:
+            break
+        limits[signal] = limit
+    if set(limits) != set(DARWIN_PROFILE_SIGNALS):
+        return {
+            "system": "Darwin",
+            "certifiable": False,
+            "reason_code": "darwin_reference_population_not_discriminating",
+            "limits": {},
+            "omitted_signals": sorted(LINUX_ONLY_SIGNALS),
+            "uses_inotify_capacity": False,
+            "reference_populations": list(required),
+        }
+    return {
+        "system": "Darwin",
+        "certifiable": True,
+        "reason_code": "",
+        "limits": limits,
+        "omitted_signals": sorted(LINUX_ONLY_SIGNALS),
+        "uses_inotify_capacity": False,
+        "reference_populations": list(required),
+    }
+
+
+def platform_profile(system: str | None = None) -> dict[str, Any]:
+    """The certification profile for one platform. The single source of which signals it asserts.
+
+    Linux keeps inotify capacity admission and every Linux pressure signal. Darwin explicitly omits
+    the Linux-only signals and, absent a recorded Darwin population, is not certifiable: the owner
+    reports that fact with a machine-readable reason instead of silently qualifying or crashing.
+    """
+
+    resolved = platform.system() if system is None else system
+    if resolved == "Linux":
+        return {
+            "system": "Linux",
+            "certifiable": True,
+            "reason_code": "",
+            "limits": dict(HOST_QUALIFICATION_LIMITS),
+            "omitted_signals": [],
+            "uses_inotify_capacity": True,
+            "reference_populations": sorted(HOST_QUALIFICATION_MEASURED_POPULATIONS),
+        }
+    if resolved == "Darwin":
+        return _darwin_platform_profile(DARWIN_HOST_QUALIFICATION_MEASURED_POPULATIONS)
+    return {
+        "system": resolved,
+        "certifiable": False,
+        "reason_code": "no_recorded_platform_reference_population",
+        "limits": {},
+        # Linux-only signals are never asserted off Linux; the whole thing fails closed regardless.
+        "omitted_signals": sorted(LINUX_ONLY_SIGNALS) if resolved == "Darwin" else sorted(HOST_QUALIFICATION_LIMITS),
+        "uses_inotify_capacity": resolved == "Linux",
+        "reference_populations": [],
+    }
+
 HOST_QUALIFICATION_REFERENCE_CONDITIONS = (
     "2026-08-08 keivenc-linux1: Intel i9-14900K, cpufreq reporting 8 P-cores / 16 SMT threads "
     "capped at 3.2 GHz and 16 E-cores capped at 2.4 GHz, 125 GiB, /tmp on LVM over NVMe, "
@@ -684,7 +799,24 @@ def host_qualification(
     """
 
     measured = measure_host_resources(evidence_root=evidence_root, sample_seconds=sample_seconds) if measurement is None else measurement
-    applied = HOST_QUALIFICATION_LIMITS if limits is None else limits
+    if limits is None:
+        # The platform-profile owner decides which signals this host asserts at all. An unprofiled
+        # platform (no recorded reference population) fails closed here rather than qualifying on a
+        # profile measured for a different kernel and different hardware.
+        profile = platform_profile()
+        if not profile["certifiable"]:
+            return {
+                "qualified": False,
+                "reasons": [{"signal": "platform", "measured": profile["system"], "limit": None, "reason": profile["reason_code"]}],
+                "limits": {},
+                "evidence_only": dict(HOST_QUALIFICATION_EVIDENCE_ONLY),
+                "reference_conditions": HOST_QUALIFICATION_REFERENCE_CONDITIONS,
+                "platform_profile": profile,
+                "measurement": measured,
+            }
+        applied = profile["limits"]
+    else:
+        applied = limits
     reasons: list[dict[str, Any]] = []
     for signal, limit in sorted(applied.items()):
         value = measured.get(signal)
@@ -706,6 +838,7 @@ def host_qualification(
         # did assert it, and reporting it as unasserted would be a false machine-readable claim.
         "evidence_only": {signal: reason for signal, reason in HOST_QUALIFICATION_EVIDENCE_ONLY.items() if signal not in applied},
         "reference_conditions": HOST_QUALIFICATION_REFERENCE_CONDITIONS,
+        "platform_profile": platform_profile() if limits is None else {"system": platform.system(), "certifiable": True, "limits": dict(applied), "omitted_signals": [], "uses_inotify_capacity": platform.system() == "Linux", "reference_populations": []},
         "measurement": measured,
     }
 

@@ -7,9 +7,52 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
+from ..diagnostic_redaction import redact_diagnostic_value
+
 
 class BrowserPayloadError(ValueError):
     """A browser observation contains an unsupported or unbounded value."""
+
+
+# Fields whose byte bound a redaction marker can push past, and the endpoint
+# fields a redacted /share/... path can turn into a non-absolute marker.
+_RETAINED_TEXT_BOUNDS = (("message", 500), ("stack", 4000))
+_RETAINED_ENDPOINT_FIELDS = ("source", "route", "endpoint")
+
+
+def _bound_retained_text(text: str, maximum: int) -> str:
+    """UTF-8-safe re-bound with the truncation marker reserved INSIDE the byte
+    limit, so text that a redaction marker expanded can never exceed the bound."""
+    if len(text.encode("utf-8")) <= maximum:
+        return text
+    marker = "[truncated]"
+    budget = max(0, maximum - len(marker.encode("utf-8")))
+    return text.encode("utf-8")[:budget].decode("utf-8", "ignore") + marker
+
+
+def sanitize_retained_payload(validated: Mapping[str, object]) -> dict[str, object]:
+    """W2: redact secrets from a raw-validated browser payload, then restore the
+    typed contract that redaction can violate. `redact_diagnostic_value` markers
+    are longer than short secrets (expanding `message`/`stack` past their byte
+    bound) and turn a valid `/share/...` endpoint into a non-absolute marker, so
+    the mandatory second `families.validate_payload` would otherwise fail closed
+    on a genuinely valid input. Re-bound the bounded-text fields and normalize a
+    redaction-changed endpoint to one safe absolute path; never trim before
+    redaction and never retain the raw value."""
+    redacted = redact_diagnostic_value(dict(validated))
+    if not isinstance(redacted, dict):
+        raise BrowserPayloadError("sanitized browser payload must be an object")
+    for field, maximum in _RETAINED_TEXT_BOUNDS:
+        current = redacted.get(field)
+        if isinstance(current, str):
+            redacted[field] = _bound_retained_text(current, maximum)
+    for field in _RETAINED_ENDPOINT_FIELDS:
+        current = redacted.get(field)
+        if isinstance(current, str) and not current.startswith("/"):
+            # redaction replaced a valid absolute /share/... path with a marker;
+            # restore a safe, type-preserving absolute path rather than reject.
+            redacted[field] = "/share/[redacted]"
+    return redacted
 
 
 EVENT_KINDS = frozenset({

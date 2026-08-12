@@ -720,6 +720,40 @@ test('an exact tail delta rolls one dense window without a full download', () =>
   assert.equal(fullFetches, 0, 'the 1s exact tail stays on SSE');
 });
 
+test('a new source generation adopts its earlier authoritative open-bucket window', () => {
+  const clock = new FakeClock();
+  const controller = loadController({
+    capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'restart-window', clock,
+  });
+  const initial = snapshot({requested: 1});
+  initial.window_start = 1;
+  initial.window_end = 301;
+  initial.generated_at = 301;
+  initial.buckets = buckets(1, 300, 1);
+  controller.acceptSnapshot(initial);
+
+  const newHead = {
+    start: 0,
+    duration: 1,
+    series: {cpu: seriesValue(77, 0)},
+    source: {first_timestamp: 0, last_timestamp: 0, count: 1},
+    open: false,
+  };
+  const newOpen = {...initial.buckets.at(-2), open: true};
+  assert.equal(controller.acceptDelta(delta({
+    sourceGeneration: 2,
+    base: 1,
+    cache: 2,
+    revision: 1,
+    bucketReplacements: [newHead, newOpen],
+    tombstones: [{kind: 'bucket', start: 300, duration: 1}],
+  })), true);
+  assert.equal(controller.generation().window_start, 0);
+  assert.equal(controller.generation().window_end, 300);
+  assert.equal(controller.generation().buckets.at(-1).start, 299);
+  assert.equal(controller.generation().buckets.at(-1).open, true);
+});
+
 test('full no-data replacements and typed tombstones update only their exact identities', () => {
   const controller = loadController({
     capabilities: capabilities(), savedRange: 300, savedResolution: 1, clientId: 'gaps',

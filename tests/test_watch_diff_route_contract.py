@@ -13,6 +13,7 @@ import io
 import json
 import re
 import threading
+import time
 from http import HTTPStatus
 from types import MethodType
 from types import SimpleNamespace
@@ -25,6 +26,20 @@ from yolomux_lib import http_routes
 from yolomux_lib import server
 
 
+class _StubReservation:
+    """Stand-in reservation handle with the exactly-once release contract."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    def release(self) -> None:
+        self._released = True
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+
 class _StoppedCompletionService:
     """Accept the reservation and retain the submitted worker without running it."""
 
@@ -32,13 +47,11 @@ class _StoppedCompletionService:
         self.stop_event = threading.Event()
         self.submissions: list[tuple] = []
 
-    def reserve(self) -> bool:
-        return True
+    def reserve(self, lane: str = "bulk"):
+        return _StubReservation()
 
-    def release_reservation(self) -> None:
-        raise AssertionError("an accepted operation owns its completion reservation")
-
-    def submit_reserved(self, function, *args) -> bool:
+    def submit_reserved(self, reservation, function, *args) -> bool:
+        assert isinstance(reservation, _StubReservation)
         self.submissions.append((function, args))
         return True
 
@@ -510,3 +523,113 @@ def test_watch_diff_request_replays_its_retained_multi_batch_product_without_res
     assert payload["roots"] == roots
     assert payload["listing_summary"]["roots_listed"] == limit + 5
     assert payload["listing_summary"]["roots_error"] == 0
+
+
+def test_accepted_watch_diff_threads_one_absolute_deadline_through_every_child(monkeypatch, tmp_path):
+    """The deadline is fixed at HTTP acceptance and every child shares it, so queue delay is spent
+    against the same wall-clock bound instead of restarting per child."""
+
+    limit = app_module.filesystem.MAX_BATCH_REQUESTS
+    roots = [f"/repo-{index:03d}" for index in range(limit + 1)]
+    webapp = _watch_diff_app(monkeypatch, tmp_path, roots)
+    accepted_at = time.time()
+    try:
+        receipt, status = webapp.filesystem_watch_diff_http_payload(force_full=True, request_id="r-deadline")
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert status == HTTPStatus.ACCEPTED, receipt
+    _function, args = webapp.jobd_operation_service.submissions[0]
+    # args == (receipt_fence, request_id, base_payload, roots, deadline_at, identity_seed)
+    deadline_at = args[4]
+    # One absolute deadline, set at acceptance -- not a per-child relative timeout.
+    assert accepted_at + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS <= deadline_at <= time.time() + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS
+
+    # A child dequeued after a queue delay still waits against that same absolute deadline.
+    batches = tuple(
+        app_module.FilesystemWatchBatchProduct(
+            producer=app_module.JobdProductOperation(job_id=f"job-{index}", product_key=f"fs-watch:c{index}", generation=1),
+            root_offset=index * limit,
+            root_count=min(limit, len(roots) - index * limit),
+        )
+        for index in range(2)
+    )
+    observed_deadlines: list[float] = []
+
+    def wait_for_product(producer, child_deadline_at, *, cancel_event=None):
+        del producer, cancel_event
+        observed_deadlines.append(child_deadline_at)
+        return _chunk_product(0, limit)
+
+    monkeypatch.setattr(webapp, "wait_for_jobd_operation_product", wait_for_product)
+    webapp.resolve_filesystem_watch_batches(batches, deadline_at)
+    assert observed_deadlines == [deadline_at, deadline_at], "every child shares the one acceptance deadline"
+
+
+def test_cancelled_watch_diff_abandons_the_wait_publishes_nothing_and_leaves_children(monkeypatch, tmp_path):
+    """A cancelled receipt fence abandons the parent wait before touching the broker, publishes no
+    terminal result or error, and never issues a broker cancellation for the accepted children."""
+
+    limit = app_module.filesystem.MAX_BATCH_REQUESTS
+    roots = [f"/repo-{index:03d}" for index in range(limit + 1)]
+    webapp = _watch_diff_app(monkeypatch, tmp_path, roots)
+    fence = app_module.FilesystemWatchReceiptFence()
+    fence.cancel()  # a superseding/failed acceptance cancelled this parent before it resolved
+
+    cold_batches = tuple(
+        app_module.FilesystemWatchBatchProduct(
+            producer=app_module.JobdProductOperation(job_id=f"job-{index}", product_key=f"fs-watch:c{index}", generation=1),
+            root_offset=index * limit,
+            root_count=min(limit, len(roots) - index * limit),
+        )
+        for index in range(2)
+    )
+    monkeypatch.setattr(webapp, "submit_filesystem_watch_batches", lambda *_args, **_kwargs: cold_batches)
+
+    broker_calls: list[str] = []
+    monkeypatch.setattr(webapp.job_client, "product", lambda key: broker_calls.append(("product", key)))
+    terminalized: list[tuple] = []
+    monkeypatch.setattr(webapp, "terminalize_operation", lambda *a, **k: terminalized.append((a, k)))
+    try:
+        webapp.complete_filesystem_watch_diff_operation(
+            fence,
+            "r-cancelled",
+            {"mode": "full", "reason": "forced", "token": "", "removed_roots": []},
+            roots,
+            time.time() + app_module.FS_BATCH_OPERATION_DEADLINE_SECONDS,
+            "seed",
+        )
+    finally:
+        webapp.stop_jobd_operation_service()
+        webapp.control_server.stop()
+
+    assert terminalized == [], "a cancelled parent must publish no result or error"
+    assert broker_calls == [], "the abandoned wait must not poll or cancel the broker; children stay reusable"
+
+
+def test_retired_full_sse_watch_keyframe_path_has_no_production_reference():
+    """The orphan periodic full-SSE keyframe subtree is gone; the accepted `/api/fs/watch-diff`
+    operation is the only owner of full and diff frames, so no production module may still name it."""
+
+    lib_root = app_module.Path(app_module.__file__).parent
+    retired = (
+        "publish_filesystem_ready_event",
+        "publish_completed_filesystem_full_payload",
+        "complete_filesystem_ready_event",
+        "filesystem_watch_full_due",
+        "mark_filesystem_watch_full_sent",
+        "clear_filesystem_watch_full_inflight",
+        "record_filesystem_watch_product_failure",
+        "filesystem_full_inflight_token",
+        "filesystem_last_full_at",
+        "filesystem_payload_signature",
+        "FILESYSTEM_WATCH_KEYFRAME_SECONDS",
+    )
+    offenders: dict[str, list[str]] = {}
+    for path in sorted(lib_root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        hits = sorted(name for name in retired if name in text)
+        if hits:
+            offenders[str(path.relative_to(lib_root))] = hits
+    assert offenders == {}, f"retired full-SSE watch symbols still referenced in production: {offenders}"

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from yolomux_lib import activity_summary
+from yolomux_lib import app as app_module
 from yolomux_lib import github_client
 from yolomux_lib import jobd
 from yolomux_lib import metadata as metadata_module
@@ -54,18 +55,50 @@ def _init_repo_with_commit(repo):
     git(repo, "commit", "-m", "init")
 
 
-def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text, started, ready):
-    """Exercise the private cache from an independent spawned worker process."""
+def _build_repository_snapshot_in_child(repo_text, state_dir_text, counter_text, ready, in_builder, release):
+    """Exercise the private cache from an independent spawned worker process.
+
+    Readiness is signalled in two decoupled phases so the parent's single-flight oracle never
+    hangs on cold fork+import latency:
+
+    * ``ready`` fires once this process has spawned and imported ``yolomux_lib`` and is about to
+      enter ``cached_repository_snapshot``.  Everything before this point -- the fork and the cold
+      import -- scales unboundedly with host load, so the parent waits on ``ready`` conditioned on
+      this process staying alive rather than against a wall clock.
+    * ``in_builder`` fires from inside the single-flight builder, i.e. once this worker has won the
+      cross-process ``file_lock``.  The parent bounds only this post-readiness product step, which
+      is load-independent, so a stall here is a genuine lock deadlock rather than a slow start.
+
+    ``YOLOMUX_TEST_WORKER_COLD_DELAY`` is an opt-in load-simulation seam (default ``0`` -- inert in
+    every normal run): it injects a deterministic pre-readiness delay so the acceptance harness can
+    reproduce arbitrary fork+import latency without depending on real host contention.
+    """
     session_files.common.STATE_DIR = Path(state_dir_text)
+    cold_delay = float(os.environ.get("YOLOMUX_TEST_WORKER_COLD_DELAY", "0") or "0")
+    if cold_delay:
+        time.sleep(cold_delay)
+    ready.set()
 
     def build(_repo, _from_ref, _to_ref):
         with Path(counter_text).open("a", encoding="utf-8") as handle:
             handle.write("build\n")
-        started.set()
-        ready.wait(timeout=5.0)
+        in_builder.set()
+        assert release.wait(timeout=10.0), "builder was never released by the parent"
         return {"statuses": {}}
 
     session_files.cached_repository_snapshot(Path(repo_text), None, None, 9, build)
+
+
+def _await_worker_ready(process, ready):
+    """Block until a spawned worker signals readiness, tolerating unbounded cold-start latency.
+
+    This absorbs fork+cold-import time (which scales with host load) without a patience budget: it
+    waits as long as the worker is alive and fails immediately only if the worker crashed before
+    reaching the builder -- a genuine defect, not a slow start.
+    """
+    while not ready.wait(timeout=0.2):
+        if not process.is_alive():
+            raise AssertionError(f"worker exited before readiness (exitcode={process.exitcode})")
 
 
 def test_session_files_view_task_returns_bounded_payload_without_raw_transcript_text(tmp_path):
@@ -239,49 +272,317 @@ def test_filesystem_operation_task_frames_html_preview_as_opaque_bytes(tmp_path)
     assert "&lt;script&gt;window.answer = 42;&lt;/script&gt;" in document
 
 
-def test_filesystem_operation_relay_waits_in_jobd_and_returns_opaque_bytes(tmp_path):
+def test_jobd_broker_past_its_idle_window_stays_up_while_a_client_lease_is_held(tmp_path):
+    """A held client lease pins the broker across a slow interaction; without one it idle-exits.
+
+    This is the ownership seam behind the full-gate e2e differ flake
+    (`test_e2e_browser_harness.py::test_direct_internal_differ_fixture_path_reaches_terminal_state`):
+    the broker is per-test isolated, but its socket is removed when it decides it is idle, and a
+    saturated gate can stretch the gap between two `/api/fs/batch` calls past the idle window while
+    the browser boots and clicks. `_idle_should_stop` and the `shutdown_if_idle` action are the
+    exact guards that keep the broker alive -- but ONLY while a lease is held. Pin both directions
+    deterministically by forcing the clock past the window rather than by waiting under load.
+    """
+    broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", idle_seconds=5.0, workers=1)
+    # Force the broker well past its idle window with no queued or running work.
+    broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+    assert not broker.leases and broker._queued_count() == 0
+    # With no client holding it, an idle broker is free to remove its own socket.
+    assert broker._idle_should_stop() is True
+    idle_response, _ = broker.handle({"action": "shutdown_if_idle"})
+    assert idle_response == {"ok": True, "shutdown": True}
+    # A held client lease is what a request in flight leaves behind; it must veto both guards, so
+    # the broker cannot vanish out from under a slow browser between two filesystem calls.
+    broker.stop_event = multiprocessing.get_context("spawn").Event()
+    broker.leases["lease-1"] = {"client_pid": os.getpid()}
+    assert broker._idle_should_stop() is False
+    leased_response, _ = broker.handle({"action": "shutdown_if_idle"})
+    assert leased_response == {"ok": True, "shutdown": False, "leases": 1}
+    assert broker.stop_event.is_set() is False
+
+
+def test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
+    """The fs-batch/differ completion worker pins the broker with a client lease while it polls.
+
+    W15 #4 root cause: under a saturated gate the completion worker's product poll is starved past
+    the broker's idle window, so between two ``/api/fs/batch`` calls the broker removes its own
+    socket, the next relay fails with ``LocalRpcError: unattributed_latency``, and the Finder shows
+    "request failed". Prove the completion path holds ONE registry client lease that vetoes idle
+    shutdown at the exact moment it polls -- even with the broker forced well past its idle window --
+    and releases it at the end so idle shutdown is NOT weakened (an unheld broker still idles out).
+    """
+    socket_path = tmp_path / "jobd.sock"
+    broker = jobd.PersistentJobBroker(socket_path, idle_seconds=5.0, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    try:
+        app = app_module.TmuxWebtermApp([], status_service_mode=True)
+        app.job_client = jobd.JobClient(socket_path)
+        # The app's fs-batch path holds this exact lease owner; bind it to the test broker's client.
+        app.jobd_fs_batch_lease = app_module.JobdInteractionLease(app.job_client)
+        deadline = time.monotonic() + 2.0
+        while not app.job_client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert app.job_client.registry.healthy() is True
+        # No interaction yet: the broker holds no client lease.
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+
+        observed: dict[str, object] = {}
+
+        def poll_probe(_producer, _deadline_at):
+            # At the poll the lease MUST be held. Force the broker well past its idle window and prove
+            # it refuses to shut down because of the held lease, not because the clock is fresh.
+            broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+            observed["held_during_poll"] = app.jobd_fs_batch_lease.held
+            observed["clients_during_poll"] = broker.handle({"action": "status"})[0]["clients"]
+            observed["idle_should_stop"] = broker._idle_should_stop()
+            observed["shutdown_if_idle"] = broker.handle({"action": "shutdown_if_idle"})[0]
+            return {"responses": [{"id": 0, "ok": True}]}
+
+        monkeypatch.setattr(app, "wait_for_jobd_operation_product", poll_probe)
+        monkeypatch.setattr(app, "terminalize_operation", lambda *args, **kwargs: None)
+
+        producer = app_module.JobdProductOperation(job_id="job-1", product_key="key-1", generation=1)
+        app.complete_filesystem_batch_operation("op-1", "req-1", (0,), producer, time.time() + 5.0)
+
+        assert observed["held_during_poll"] is True
+        assert observed["clients_during_poll"] == 1
+        assert observed["idle_should_stop"] is False, "a held lease must veto idle shutdown mid-poll"
+        assert observed["shutdown_if_idle"] == {"ok": True, "shutdown": False, "leases": 1}
+
+        # Released at the end: idle shutdown is NOT weakened -- an unheld broker still idles out.
+        assert app.jobd_fs_batch_lease.held is False
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+        broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+        assert broker._idle_should_stop() is True
+    finally:
+        broker.handle({"action": "shutdown"})
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
+def test_watch_diff_completion_holds_a_jobd_lease_across_the_broker_idle_window(tmp_path, monkeypatch):
+    """The watch-diff completion worker pins the broker with a client lease while it polls.
+
+    Same Seam-B lease mechanism as
+    ``test_fs_batch_completion_holds_a_jobd_lease_across_the_broker_idle_window`` -- ``GET
+    /api/fs/watch-diff`` simply was not covered. The watch-diff completion worker submits every
+    child batch and then polls each product under one deadline; under a saturated gate the gap
+    between the submit ``produce`` and the product poll can exceed the broker's idle window, so the
+    broker removes its own socket mid-interaction and the poll fails with a jobd 404 (the live
+    ``GET /api/fs/watch-diff`` failure). Prove the completion path holds ONE registry client lease
+    that vetoes idle shutdown at the exact moment it polls -- even with the broker forced well past
+    its idle window -- and releases it at the end so idle shutdown is NOT weakened (an unheld broker
+    still idles out).
+    """
+    socket_path = tmp_path / "jobd.sock"
+    broker = jobd.PersistentJobBroker(socket_path, idle_seconds=5.0, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    try:
+        app = app_module.TmuxWebtermApp([], status_service_mode=True)
+        app.job_client = jobd.JobClient(socket_path)
+        # The app's watch-diff path holds this exact lease owner -- the SAME one fs/batch holds --
+        # so bind it to the test broker's client.
+        app.jobd_fs_batch_lease = app_module.JobdInteractionLease(app.job_client)
+        deadline = time.monotonic() + 2.0
+        while not app.job_client.registry.healthy() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert app.job_client.registry.healthy() is True
+        # No interaction yet: the broker holds no client lease.
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+
+        # A receipt-only child batch forces `resolve_filesystem_watch_batches` to poll the broker
+        # (mirrors a cold submit that returned a receipt, not a warm product). The completion
+        # worker's real acquire/release around submit+resolve is the code under test.
+        producer = app_module.JobdProductOperation(job_id="job-1", product_key="watch-key-0", generation=1)
+        batch = app_module.FilesystemWatchBatchProduct(
+            producer=producer,
+            ready_product=None,
+            root_offset=0,
+            root_count=1,
+        )
+        monkeypatch.setattr(app, "submit_filesystem_watch_batches", lambda *args, **kwargs: (batch,))
+        monkeypatch.setattr(app, "materialize_filesystem_watch_products", lambda *args, **kwargs: {})
+        monkeypatch.setattr(app, "terminalize_operation", lambda *args, **kwargs: None)
+
+        observed: dict[str, object] = {}
+
+        def poll_probe(_producer, _deadline_at, *, cancel_event=None):
+            # At the poll the lease MUST be held. Force the broker well past its idle window and prove
+            # it refuses to shut down because of the held lease, not because the clock is fresh.
+            broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+            observed["held_during_poll"] = app.jobd_fs_batch_lease.held
+            observed["clients_during_poll"] = broker.handle({"action": "status"})[0]["clients"]
+            observed["idle_should_stop"] = broker._idle_should_stop()
+            observed["shutdown_if_idle"] = broker.handle({"action": "shutdown_if_idle"})[0]
+            return {"responses": [{"id": 0, "ok": True}]}
+
+        monkeypatch.setattr(app, "wait_for_jobd_operation_product", poll_probe)
+
+        fence = app_module.FilesystemWatchReceiptFence()
+        fence.accept("op-1")
+        app.complete_filesystem_watch_diff_operation(
+            fence,
+            "req-1",
+            {},
+            ["/tmp/watch-root"],
+            time.time() + 5.0,
+            "seed-1",
+        )
+
+        assert observed["held_during_poll"] is True
+        assert observed["clients_during_poll"] == 1
+        assert observed["idle_should_stop"] is False, "a held lease must veto idle shutdown mid-poll"
+        assert observed["shutdown_if_idle"] == {"ok": True, "shutdown": False, "leases": 1}
+
+        # Released at the end: idle shutdown is NOT weakened -- an unheld broker still idles out.
+        assert app.jobd_fs_batch_lease.held is False
+        assert broker.handle({"action": "status"})[0]["clients"] == 0
+        broker.last_client_at = time.monotonic() - (broker.idle_seconds * 10)
+        assert broker._idle_should_stop() is True
+    finally:
+        broker.handle({"action": "shutdown"})
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
+def _poll_broker_product(broker, coalesce_key, *, wait_seconds=5.0):
+    """Poll one broker's product store the way the web side now does (no blocking `relay`)."""
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        response, returned = broker.handle({"action": "product", "coalesce_key": coalesce_key})
+        if returned and response.get("state") in {"ready", "stale"}:
+            return response, returned
+        if response.get("state") == "none" and response.get("inflight") is not True:
+            return response, returned
+        time.sleep(0.02)
+    raise AssertionError("broker product never became ready")
+
+
+def test_zero_wait_produce_returns_a_browser_opaque_byte_product_without_a_relay(tmp_path):
+    """The retired `relay` action's job -- a browser byte download -- is served by zero-wait produce.
+
+    `produce` submits and inspects the store atomically (no handler blocks), and the web side polls
+    `product` for the bytes.  The former blocking `relay` action must no longer exist.
+    """
     path = tmp_path / "payload.bin"
     body = b"\x00raw\xff"
     path.write_bytes(body)
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     broker._start_scheduler()
     try:
+        assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
+        unknown, _empty = broker.handle({"action": "relay"})
+        assert unknown == {"ok": False, "error": "unknown jobd action"}
+
         response, returned = broker.handle({
-            "action": "relay",
+            "action": "produce",
             "task": "filesystem_operation",
             "payload": _fs_descriptor(op="raw", path=str(path), args={"download": True}),
             "priority": "interactive",
+            "coalesce_key": "relay-raw",
+            "generation": 1,
             "deadline_ms": 5_000,
+            "delivery": "ready_or_receipt",
         })
+        if not returned:
+            response, returned = _poll_broker_product(broker, "relay-raw")
     finally:
         broker.stop_event.set()
         broker._on_shutdown()
 
-    assert response["ok"] is True
-    assert response["state"] == "ready"
+    assert response["state"] in {"ready", "stale"}
     assert response["product"]["format"] == "opaque_bytes"
     assert returned == body
 
 
-def test_filesystem_operation_relay_preserves_typed_filesystem_failure(tmp_path):
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="Unix FIFO saturation fixture is POSIX-only")
+def test_zero_wait_produce_and_shared_product_poll_do_not_hold_former_relay_handler_slots(tmp_path):
+    """Cold byte work occupies the worker, not one RPC handler for its lifetime.
+
+    A FIFO read is a deterministic cold job: the jobd worker cannot finish until this test opens
+    the writer. Both zero-wait produce calls and a product poll must nevertheless complete over
+    the real Unix listener before that release. The retired relay would have parked one handler
+    per request at this point and exhausted a two-slot listener.
+    """
+    socket_path = tmp_path / "jobd.sock"
+    first_fifo = tmp_path / "first.fifo"
+    second_fifo = tmp_path / "second.fifo"
+    os.mkfifo(first_fifo)
+    os.mkfifo(second_fifo)
+    broker = jobd.PersistentJobBroker(socket_path, workers=1)
+    worker = threading.Thread(target=broker.run, daemon=True)
+    worker.start()
+    client = jobd.JobClient(socket_path)
+    deadline = time.monotonic() + 2.0
+    while not client.registry.healthy() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.registry.healthy() is True
+    try:
+        receipts = []
+        for index, path in enumerate((first_fifo, second_fifo), start=1):
+            response, body = client.produce(
+                "filesystem_operation",
+                _fs_descriptor(op="raw", path=str(path), args={"download": True}),
+                priority="interactive",
+                coalesce_key=f"former-relay-{index}",
+                generation=1,
+                deadline_ms=5_000,
+                delivery="receipt",
+            )
+            assert body == b""
+            receipts.append(response)
+        assert [row["job"]["status"] for row in receipts] == ["queued", "queued"]
+
+        pending, body = client.product("former-relay-1")
+        assert body == b""
+        assert pending["ok"] is True
+        assert pending["state"] in {"pending", "none"}
+        assert pending.get("inflight") is True
+
+        with first_fifo.open("wb", buffering=0) as writer:
+            writer.write(b"first")
+        ready, returned = _poll_broker_product(broker, "former-relay-1")
+        assert ready["state"] in {"ready", "stale"}
+        assert returned == b"first"
+    finally:
+        # Unblock the queued second worker before broker shutdown.
+        with second_fifo.open("wb", buffering=0) as writer:
+            writer.write(b"second")
+        broker.stop_event.set()
+        worker.join(timeout=2.0)
+    assert worker.is_alive() is False
+
+
+def test_zero_wait_produce_preserves_typed_filesystem_failure(tmp_path):
     broker = jobd.PersistentJobBroker(tmp_path / "jobd.sock", workers=1)
     broker._start_scheduler()
     try:
-        response, returned = broker.handle({
-            "action": "relay",
+        submit, _empty = broker.handle({
+            "action": "produce",
             "task": "filesystem_operation",
             "payload": _fs_descriptor(op="raw", path=str(tmp_path / "missing.bin"), args={}),
             "priority": "interactive",
+            "coalesce_key": "relay-missing",
+            "generation": 1,
             "deadline_ms": 5_000,
+            "delivery": "receipt",
         })
+        job_id = submit["job"]["job_id"]
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            result = broker.handle({"action": "result", "job_id": job_id})[0]
+            if result["job"]["status"] == "failed":
+                break
+            time.sleep(0.02)
     finally:
         broker.stop_event.set()
         broker._on_shutdown()
 
-    assert response["ok"] is False
-    assert returned == b""
-    assert response["job"]["failure"]["status"] == 404
-    assert response["job"]["failure"]["filesystem_error"]["path"].endswith("missing.bin")
+    assert result["job"]["status"] == "failed"
+    assert result["job"]["failure"]["status"] == 404
+    assert result["job"]["failure"]["filesystem_error"]["path"].endswith("missing.bin")
 
 
 @pytest.mark.parametrize(
@@ -531,23 +832,101 @@ def test_session_files_view_regression_matrix_reuses_git_snapshot_until_repo_gen
 
 
 def test_repository_snapshot_cache_single_flights_across_spawned_workers(tmp_path):
+    """Single-flight holds across real processes on the real cross-process ``file_lock``.
+
+    The oracle is decoupled from cold spawn/import latency by a two-phase readiness handshake (see
+    ``_build_repository_snapshot_in_child``).  The parent waits for the first worker's ``ready`` and
+    its ``in_builder`` before it even starts the second worker, so the second is guaranteed to
+    contend against a lock the first already holds -- genuine cross-process contention -- while no
+    wall-clock budget is placed on fork+import.  A stalled worker still fails the test: a crash
+    surfaces via ``_await_worker_ready``/``exitcode``, and a real lock deadlock surfaces via the
+    bounded ``in_builder`` wait, which measures only the load-independent, post-readiness product
+    step.  ``builds == ["build"]`` remains the single-flight invariant and is not weakened.
+    """
     repo = tmp_path / "repo"
     _init_repo_with_commit(repo)
     context = multiprocessing.get_context("spawn")
-    started = context.Event()
+    first_ready = context.Event()
+    second_ready = context.Event()
+    in_builder = context.Event()
     release = context.Event()
     counter = tmp_path / "build-count.txt"
-    args = (str(repo), str(tmp_path / "state"), str(counter), started, release)
-    first = context.Process(target=_build_repository_snapshot_in_child, args=args)
-    second = context.Process(target=_build_repository_snapshot_in_child, args=args)
+    state_dir = str(tmp_path / "state")
+    counter_text = str(counter)
+    first = context.Process(
+        target=_build_repository_snapshot_in_child,
+        args=(str(repo), state_dir, counter_text, first_ready, in_builder, release),
+    )
+    second = context.Process(
+        target=_build_repository_snapshot_in_child,
+        args=(str(repo), state_dir, counter_text, second_ready, in_builder, release),
+    )
+    # Phase 1: the first worker becomes the builder and holds the cross-process lock.
     first.start()
-    assert started.wait(timeout=5.0), "first worker never entered the snapshot builder"
+    _await_worker_ready(first, first_ready)
+    assert in_builder.wait(timeout=30.0), "first worker never reached the single-flight builder (deadlock)"
+    # Phase 2: only now start the second worker, so it must contend against the held lock rather
+    # than race a not-yet-locked cache.  Its readiness proves it imported and reached the builder
+    # entry; single-flight must then keep it out of the builder entirely.
     second.start()
+    _await_worker_ready(second, second_ready)
     release.set()
-    first.join(timeout=10.0)
-    second.join(timeout=10.0)
+    first.join(timeout=30.0)
+    second.join(timeout=30.0)
+    assert not first.is_alive() and not second.is_alive(), "a worker never retired"
     assert first.exitcode == second.exitcode == 0
     assert counter.read_text(encoding="utf-8").splitlines() == ["build"]
+
+
+def test_repository_snapshot_cache_single_flights_concurrent_callers_deterministically(tmp_path, monkeypatch):
+    """Single-flight, proven without a spawn-latency race: a concurrent second caller waits.
+
+    `test_..._across_spawned_workers` proves the SAME collapse across real processes, but its
+    5s `started.wait` bound is a patience surface -- under a saturated full gate a spawned worker
+    can take longer than that merely to import, which is a scheduling artifact, not a single-flight
+    defect. This companion pins the invariant with in-process threads and an explicit barrier, so
+    ordering is fixed by the handshake rather than by timing: while the first caller holds
+    `file_lock` inside the builder, the second caller blocks on that same lock and, once released,
+    is served the freshly written cache instead of launching a second build.
+    """
+    repo = tmp_path / "repo"
+    _init_repo_with_commit(repo)
+    monkeypatch.setattr(session_files.common, "STATE_DIR", tmp_path / "state")
+    builds: list[int] = []
+    builds_lock = threading.Lock()
+    first_in_builder = threading.Event()
+    release_first = threading.Event()
+
+    def build(_repo, _from_ref, _to_ref):
+        with builds_lock:
+            builds.append(1)
+            ordinal = len(builds)
+        if ordinal == 1:
+            first_in_builder.set()
+            assert release_first.wait(timeout=10.0), "first caller was never released"
+        return {"statuses": {}}
+
+    results: dict[str, tuple[dict, bool]] = {}
+
+    def call(name):
+        results[name] = session_files.cached_repository_snapshot(repo, None, None, 9, build)
+
+    first = threading.Thread(target=call, args=("first",))
+    second = threading.Thread(target=call, args=("second",))
+    first.start()
+    assert first_in_builder.wait(timeout=10.0), "first caller never entered the builder"
+    # The first caller now holds the cross-caller lock inside the builder; the second must block on
+    # it rather than start its own build. Give it a beat to reach the lock, then release the first.
+    second.start()
+    second.join(timeout=2.0)
+    assert second.is_alive(), "second caller did not block behind the single-flight lock"
+    release_first.set()
+    first.join(timeout=10.0)
+    second.join(timeout=10.0)
+    assert not first.is_alive() and not second.is_alive()
+    assert builds == [1], builds
+    assert results["first"][1] is False, results["first"]
+    assert results["second"][1] is True, results["second"]
 
 
 def test_repository_snapshot_cache_keeps_ref_comparisons_separate(tmp_path, monkeypatch):
@@ -1619,8 +1998,9 @@ def test_jobd_task_registry_generation_is_independent_from_transport_version():
     # v4 registered the `session_files_view` task; the version fence retires a v3 daemon that lacks it.
     # v5 registered the `tabber_activity_view` task; the fence retires a v4 daemon that lacks it.
     # v6 registered the `metadata_warm_view` task; v7 adds bounded session-files phase diagnostics;
-    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, and v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority.
-    assert jobd.JOBD_PROTOCOL_VERSION == 21
+    # v8 bounds snapshot expiry, v9 adds bounded requester attribution, v10 adds metadata-warm work totals, v11 exposes timeouts, v12 records requester attribution at acceptance, v13 projects bounded recent paths for Tabber, v14 adds zero-wait ready-or-receipt products, v15 registers bounded filesystem batches, v16 keeps cold worker starts out of RPC handlers, v17 moves session-files cache pruning out of the web process, v18 adds byte-product relay requests for browser filesystem consumers, v19 adds the bounded `point` scheduler lane that a v18 daemon would reject as an invalid priority, v20 binds filesystem execution to the accepting server's access policy, which a v19 daemon ignores while authorizing every port with its launcher's roots, v21 adds the bounded `mutation` scheduler lane that a v20 daemon would likewise reject as an invalid priority, and v22 retires the blocking `relay` action in favor of zero-wait produce plus a web-side product poll.
+    assert jobd.JOBD_PROTOCOL_VERSION == 22
+    assert "relay" not in jobd.JOBD_REQUEST_ACTIONS
     assert "filesystem_batch" in jobd.REGISTERED_TASKS
     assert "session_files_cache_prune" in jobd.REGISTERED_TASKS
     assert "session_files_view" in jobd.REGISTERED_TASKS

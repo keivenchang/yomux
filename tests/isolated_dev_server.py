@@ -381,6 +381,7 @@ def start_isolated_dev_server(
     sessions: tuple[str, ...] = (),
     port: int | None = None,
     env_overrides: dict[str, str] | None = None,
+    exec_plan_json: str | None = None,
 ) -> IsolatedDevServer:
     if port is None:
         lease = HttpPortLease.reserve()
@@ -407,6 +408,22 @@ def start_isolated_dev_server(
         "--sessions",
         session_names[0],
     ]
+    if exec_plan_json is not None:
+        # Launch through the real per-row exec mode the supported launcher uses:
+        # `instance_isolation.py exec --plan-file <p> -- <server cmd>` applies the
+        # captured RowPlan to the environment, then runs the server under it. The
+        # plan lives inside this instance's own root so it cannot escape isolation.
+        plan_path = paths.root / "row-plan.json"
+        plan_path.write_text(exec_plan_json, encoding="utf-8")
+        command = [
+            sys.executable,
+            str(source_root / "tools" / "instance_isolation.py"),
+            "exec",
+            "--plan-file",
+            str(plan_path),
+            "--",
+            *command,
+        ]
     release_lease()
     process = subprocess.Popen(
         command,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -80,7 +81,9 @@ def redact_diagnostic_value(value: Any, key: str = "", depth: int = 0) -> Any:
         return "[truncated-depth]"
     if DIAGNOSTIC_SECRET_KEY_RE.search(str(key or "")):
         return "[redacted-share-token]"
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
+        # Accept any Mapping (e.g. the MappingProxyType returned by
+        # families.validate_payload) and always return a plain redacted dict.
         return {
             str(name)[:120]: redact_diagnostic_value(item, str(name), depth + 1)
             for name, item in value.items()

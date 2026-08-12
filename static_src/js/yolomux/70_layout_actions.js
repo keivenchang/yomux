@@ -3632,6 +3632,15 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
     pruneDeadSession(session);
     return;
   }
+  // A share-scoped viewer cannot confirm liveness against the host roster: /api/tmux-session-exists
+  // is host-only (share_access=none) and the server forbids it for a share token. Reconnect the
+  // share-view socket directly -- the same outcome as an unknown (null) roster answer -- instead of
+  // issuing a request the scope forbids. Gated on the shared scope owner every host-only producer uses.
+  if (!clientCanUseUnscopedHostRequests()) {
+    noteTerminalRemovalLatencyStart('session', session, closeDetails);
+    scheduleTerminalReconnect(session, item, lifecycleToken);
+    return;
+  }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
   // concurrent confirmations, each scheduling a reconnect and double-incrementing reconnectAttempt
   // (distorting the backoff).

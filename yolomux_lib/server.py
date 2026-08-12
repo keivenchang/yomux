@@ -1397,7 +1397,12 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         query = str(query_one(qs, "query", "") or "")
         limit = str(query_one(qs, "limit", "400") or "400")
         recursive = query_bool(qs, "recursive")
-        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive})
+        # Streaming Quick Open (step 4): an opaque delta cursor turns this same route into a bounded,
+        # committed-journal delta read. It rides the existing filesystem-operation descriptor so the
+        # authenticated read path, safe-root containment, and exclusion policy are identical to a
+        # snapshot read. Absent/empty -> a first snapshot read that returns the baseline cursor.
+        cursor = str(query_one(qs, "cursor", "") or "")
+        self.submit_filesystem_operation("GET /api/fs/search", "search", raw_root, {"query": query, "limit": limit, "recursive": recursive, "cursor": cursor})
 
     def handle_fs_index_status(self, parsed: Any) -> None:
         qs = parse_qs(parsed.query)
@@ -2717,13 +2722,22 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
                 return
             encode_started = time.perf_counter()
             data = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            # Commit the queued ticket BEFORE the bytes reach the client. With a threaded server the
+            # client can issue a causally-later read that reaches the app ledger before this writer
+            # thread resumes, so committing after the flush lets an accepted ticket be momentarily
+            # invisible as outstanding. Commit reflects server-side queued state and is honest
+            # regardless of whether the bytes land; the client-receipt outcome is a separate step.
+            if hasattr(self.server.app, "observe_http_commit"):
+                self.server.app.observe_http_commit(value, status)
             self._write_json_representation(
                 data,
                 status=status,
                 json_encode_ms=(time.perf_counter() - encode_started) * 1000,
             )
-            if hasattr(self.server.app, "observe_http_delivery"):
-                self.server.app.observe_http_delivery(value, status)
+            # Record the client receipt only AFTER the write returns: a failed flush (BrokenPipe/
+            # OSError propagates from here) must not claim the accepted receipt reached the client.
+            if hasattr(self.server.app, "observe_http_receipt"):
+                self.server.app.observe_http_receipt(value, status)
             return
 
         if json_bytes:
@@ -3017,13 +3031,18 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         encode_started = time.perf_counter()
         data = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self._route_response_written = True
+        # Commit the queued ticket before the flush (see the note in the route-None branch): a
+        # causally-later client read must not out-race this writer thread's ledger update.
+        if hasattr(self.server.app, "observe_http_commit"):
+            self.server.app.observe_http_commit(envelope, HTTPStatus(status_code))
         self._write_json_representation(
             data,
             status=HTTPStatus(status_code),
             json_encode_ms=(time.perf_counter() - encode_started) * 1000,
         )
-        if hasattr(self.server.app, "observe_http_delivery"):
-            self.server.app.observe_http_delivery(envelope, HTTPStatus(status_code))
+        # Record the client receipt only after a successful write, never on a failed flush.
+        if hasattr(self.server.app, "observe_http_receipt"):
+            self.server.app.observe_http_receipt(envelope, HTTPStatus(status_code))
 
     def _write_bodyless_api_response(self, status: HTTPStatus) -> None:
         """Write an established bodyless protocol result from the shared response parent."""
@@ -3078,6 +3097,19 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
         accept_encoding = headers.get("Accept-Encoding") if hasattr(headers, "get") else None
         body, content_encoding = gzip_response_body(data, content_type, accept_encoding)
         compression_ms = (time.perf_counter() - compression_started) * 1000 if content_encoding else 0.0
+        # W9: the final wire representation is now fully prepared -- `body` holds the exact bytes the
+        # client will receive, already compressed -- but not one header byte has left the socket yet.
+        # This is the stated boundary for `route_to_representation_ready_ms`: route entry (dispatch
+        # start) to the representation being ready. Stamping it HERE, before `send_response`, keeps it
+        # free of header/body write and the client round trip, which is what makes it a server-side
+        # assembly number rather than an end-to-end one. The compute/compression/write metrics below
+        # are retained beside it as diagnostics, not replaced by it.
+        representation_ready_at = time.perf_counter()
+        dispatch_started = getattr(self, "_http_request_dispatch_started_at", None)
+        route_to_representation_ready_ms = (
+            round(max(0.0, (representation_ready_at - dispatch_started) * 1000), 3)
+            if isinstance(dispatch_started, (int, float)) else None
+        )
         head_only = str(getattr(self, "command", "GET") or "GET").upper() == "HEAD"
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -3109,6 +3141,9 @@ class Handler(AuthMixin, BaseHTTPRequestHandler):
             "write_ms": round(write_ms, 3),
             "head_only": head_only,
         }
+        if route_to_representation_ready_ms is not None:
+            # Measured at the boundary above (before headers/body write), not here after the write.
+            details["route_to_representation_ready_ms"] = route_to_representation_ready_ms
         if product_metadata is not None:
             details["product_format"] = product_metadata["format"]
             details["product_bytes"] = product_metadata["length"]

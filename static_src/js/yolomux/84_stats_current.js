@@ -283,10 +283,14 @@
           if (tombstone.kind === 'bucket') bucketsByIdentity.delete(identity);
         }
         for (const [identity, bucket] of bucketReplacements) bucketsByIdentity.set(identity, bucket);
-        const candidateEnd = Math.max(
-          activeGeneration.window_end,
-          ...delta.buckets.map(bucket => bucket.start + bucket.duration),
-        );
+        const openBucketEnd = delta.buckets.find(bucket => bucket.open)?.start + concreteResolution();
+        const candidateEnd = delta.source_generation > activeGeneration.source_generation
+          && Number.isSafeInteger(openBucketEnd)
+          ? openBucketEnd
+          : Math.max(
+            activeGeneration.window_end,
+            ...delta.buckets.map(bucket => bucket.start + bucket.duration),
+          );
         const candidateStart = candidateEnd - selection.range_seconds;
         const buckets = [...bucketsByIdentity.values()]
           .filter(bucket => bucket.start >= candidateStart && bucket.start + bucket.duration <= candidateEnd);

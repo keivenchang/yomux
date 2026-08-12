@@ -789,7 +789,12 @@ def test_token_adapter_does_not_claim_zero_coverage_when_roster_is_cold():
 def test_background_owner_starts_only_the_current_stats_runtime():
     calls = []
     webapp = object.__new__(app_module.TmuxWebtermApp)
-    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True}, can_run=lambda _role: True)
+    webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": True}, can_run=lambda _role: True, is_owner=lambda: True)
+    # Slice B: owner acquisition also leases indexd via refresh_search_indexer_schedule; with no
+    # configured roots the lease is a bounded no-op and must not perturb the private-worker call order.
+    webapp.search_indexer = SimpleNamespace(lease_configured_roots=lambda roots: {"ok": True, "leased": False})
+    webapp.settings_payload = lambda: {"settings": {"file_explorer": {"indexed_dirs": []}}}
+    webapp.indexed_repo_discovery_dirs = lambda _fe: []
     webapp.log_event = lambda *args, **kwargs: calls.append("event")
     webapp.job_client = SimpleNamespace(start_for_scheduler=lambda: calls.append("job"))
     webapp.pricing_refresh_coordinator = SimpleNamespace(
@@ -854,6 +859,9 @@ def test_background_owner_demotion_stops_current_runtime_not_legacy_scheduler(mo
     reserved = webapp.session_files_service.reserve_work(("active",), "stable")
     assert reserved is not None
     webapp.background_owner = SimpleNamespace(status_payload=lambda: {"owner": False})
+    # Slice B: demotion releases the indexd scheduler lease; a bounded no-op here that must not
+    # perturb the asserted stop order.
+    webapp.search_indexer = SimpleNamespace(release_scheduler_lease=lambda: None)
     webapp.publish_background_client_event = lambda *args, **kwargs: calls.append("publish")
     monkeypatch.setattr(app_module.file_index, "clear_memory_indexes", lambda: calls.append("indexes"))
 

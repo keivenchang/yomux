@@ -1,5 +1,7 @@
 from pathlib import Path
 import re
+import subprocess
+import sys
 
 import conftest as suite_conftest
 import pytest
@@ -143,3 +145,44 @@ def test_generated_share_browser_tests_use_isolated_tmux_runtime():
         assert 'TmuxWebtermApp(["1"], dangerously_yolo=True)' not in block, f"{name} must not target a live/default tmux session"
         assert "ensureTerminalRunning('1')" not in block, f"{name} must not open hard-coded tmux session 1"
         assert "sessions: ['1']" not in block, f"{name} must not create a share scoped to hard-coded tmux session 1"
+
+
+def _spawn_fixture_page_path(worker: str, filename: str, sentinel: str) -> str:
+    """Return the fixture path a fresh process picks for a fixed worker/seq/filename."""
+
+    code = (
+        "import os;"
+        f"os.environ['PYTEST_XDIST_WORKER'] = {worker!r};"
+        "import tests.browser_helpers.browser_layout as bl;"
+        "bl._FIXTURE_PAGE_SEQ = 0;"
+        f"print(bl.serve_repo_fixture_page({filename!r}, {sentinel!r}))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return result.stdout.strip()
+
+
+@pytest.mark.no_browser
+def test_concurrent_lane_fixture_pages_never_collide_on_shared_worker_and_seq():
+    """Two processes with identical xdist worker, seq, and filename must not share a fixture path.
+
+    The canonical gate runs e2e/browser/non-browser as separate processes that reuse gw* worker
+    names and each restart ``_FIXTURE_PAGE_SEQ`` at 0, so a bare ``<worker>-<seq>-<filename>`` path
+    let one lane overwrite another's fixture at the shared REPO_ROOT -- a foreign page then loaded
+    (e.g. a stats fixture whose expected bucket ``.start`` was absent, crashing the reader). The
+    per-process PID+nonce namespace must keep the paths distinct even under an identical
+    worker/seq/filename triple.
+    """
+
+    first = _spawn_fixture_page_path("gw0", "collision-regression.html", "sentinel-a")
+    second = _spawn_fixture_page_path("gw0", "collision-regression.html", "sentinel-b")
+    assert first != second, (first, second)
+    assert first.endswith("collision-regression.html"), first
+    assert second.endswith("collision-regression.html"), second

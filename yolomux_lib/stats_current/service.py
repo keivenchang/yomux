@@ -53,6 +53,12 @@ HOST_GPU_CADENCE_SECONDS = 10.0
 VACUUM_INTERVAL_SECONDS = 60.0 * 60.0
 VACUUM_JITTER_SECONDS = 10.0 * 60.0
 VACUUM_RETRY_SECONDS = 5.0 * 60.0
+# A rewrite holds work_lock through the whole SQLite compaction, so on a busy box
+# it is deferred to a quiet window (no RPC within idle_seconds) to keep the serial
+# listener from blocking live requests past the append deadline. But a permanently
+# busy box would then never reclaim the pruned free-list, so once compaction has
+# been owed longer than this cap it runs anyway and accepts the brief stall.
+VACUUM_MAX_DEFER_SECONDS = 60.0 * 60.0
 PrivateClientKey = str | None
 CacheKey = tuple[int, protocol.RequestedResolution, PrivateClientKey]
 DeltaKey = tuple[int, int, PrivateClientKey]
@@ -1109,6 +1115,11 @@ class StatsCurrentService:
         self._vacuum_failure = ""
         self._vacuum_jitter_seconds = self._vacuum_jitter()
         self._next_vacuum_at = self.monotonic() + VACUUM_INTERVAL_SECONDS + self._vacuum_jitter_seconds
+        # Monotonic instant at which compaction first became due and started
+        # waiting for a quiet window; None whenever it is not currently owed. The
+        # max-defer cap is measured from here, not from the last vacuum, so a
+        # steady stream of requests cannot keep resetting the deadline.
+        self._vacuum_due_since: float | None = None
         self._building = False
         self._rejected_old = self._append_requests = self._snapshot_requests = 0
         self._usage_attribution_conflicts = 0
@@ -1236,8 +1247,33 @@ class StatsCurrentService:
         return VACUUM_JITTER_SECONDS * min(1.0, max(0.0, float(self.randomizer())))
 
     def _vacuum_if_due_while_idle(self) -> bool:
-        """Run file-rewriting maintenance only after the service is genuinely idle."""
-        if self.writer is None or self.monotonic() < self._next_vacuum_at:
+        """Run file-rewriting maintenance on the hourly cadence, quiet-gated.
+
+        Compaction becomes DUE on the ``_next_vacuum_at`` cadence, but the rewrite
+        holds ``work_lock`` for the whole SQLite pass, so on a busy box it would
+        block every arriving RPC past the append deadline. Quiet means no RPC has
+        been served within ``idle_seconds`` -- ``_on_client`` stamps
+        ``last_client_at`` on every served request -- so while requests keep
+        arriving compaction DEFERS and re-checks on the next idle tick instead of
+        stalling live traffic. A permanently busy box would then never reclaim the
+        pruned free-list, so once compaction has been owed longer than
+        ``VACUUM_MAX_DEFER_SECONDS`` (measured from when it first became due, via
+        ``_vacuum_due_since``) it runs anyway and accepts the brief stall.
+        """
+        if self.writer is None:
+            return False
+        now = self.monotonic()
+        if now < self._next_vacuum_at:
+            return False
+        # First idle tick at which we are owed: start the max-defer clock here so
+        # the cap measures from when compaction was first due, not the last run.
+        if self._vacuum_due_since is None:
+            self._vacuum_due_since = now
+        quiet = now - self.last_client_at >= self.idle_seconds
+        capped = now - self._vacuum_due_since >= VACUUM_MAX_DEFER_SECONDS
+        if not quiet and not capped:
+            # Due, but the box is busy and the cap has not yet elapsed; wait for a
+            # quiet tick rather than block the serial listener on the rewrite.
             return False
         with self.work_lock:
             pending = (
@@ -1262,6 +1298,9 @@ class StatsCurrentService:
             self._vacuum_count += 1
             self._vacuum_failure = ""
             self._clear_failure("vacuum")
+            # Only a completed rewrite clears the due-since clock; a pending/failed
+            # attempt above keeps it so the cap still counts from the first due tick.
+            self._vacuum_due_since = None
             self._next_vacuum_at = self.monotonic() + VACUUM_INTERVAL_SECONDS + self._vacuum_jitter()
             return True
 
@@ -4041,6 +4080,11 @@ class StatsCurrentService:
     def _idle(self) -> bool:
         self._prune_if_due()
         reap_dead_client_leases(self.leases)
+        # Compaction owns its own quiet-gate and max-defer cap, so it is offered
+        # every idle tick rather than only when the service is fully idle: a busy
+        # box's cap could never fire if the offer were behind the idle gate. Prune
+        # runs first so the rewrite reclaims the free-list retention just released.
+        self._vacuum_if_due_while_idle()
         with self.work_lock:
             pending = (
                 self._pending_full
@@ -4054,8 +4098,6 @@ class StatsCurrentService:
             and not pending
             and self.monotonic() - self.last_client_at >= self.idle_seconds
         )
-        if idle:
-            self._vacuum_if_due_while_idle()
         return idle
 
     def run(self) -> int:

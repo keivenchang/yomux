@@ -46,11 +46,16 @@ from yolomux_lib.backend_health.observer import BACKEND_HEALTH_PROBE_TIMEOUT_SEC
 from yolomux_lib.backend_health.observer import PROBE_FAILED
 from yolomux_lib.backend_health.observer import PROBE_OK
 from yolomux_lib.backend_health.observer import PROBE_TIMEOUT
+from yolomux_lib.backend_health.observer import REASON_PROBE_TIMEOUT
+from yolomux_lib.backend_health.observer import REASON_SERVICE_UNHEALTHY
+from yolomux_lib.backend_health.observer import REASON_TERMINAL_FAILURE
 from yolomux_lib.backend_health.observer import BackendHealthObserver
 from yolomux_lib.backend_health.observer import observed_health
 from yolomux_lib.backend_health.observer import overall_health_state
+from yolomux_lib.backend_health.store import BACKEND_HEALTH_REASON_CODES
 from yolomux_lib.backend_health.store import BACKEND_HEALTH_STATES
 from yolomux_lib.backend_health.store import BackendHealthStore
+from yolomux_lib.stats_current.client import STATUS_TIMEOUT_SECONDS
 from yolomux_lib.local_service_projection import LOCAL_SERVICE_INVENTORY
 from yolomux_lib.local_services.rpc import LOCAL_SERVICE_TRAFFIC_PROBE
 from yolomux_lib.local_services.rpc import LOCAL_SERVICE_TRAFFIC_WORK
@@ -511,6 +516,141 @@ def test_one_failed_probe_cannot_flicker_the_indicator(harness: Harness):
     assert len(harness.published) == published_before + 1
 
 
+# -- item 4: honest classification of the two noisy producers ----------------------------
+#
+# Both are retained-history assertions driven through the real observer + store, so a green
+# result proves what a caller reads off `STATE_DIR/backend-health/<port>.json`, not just what
+# the reducer returns in isolation.
+
+
+def _watchd_transitions(harness: Harness) -> list[dict[str, Any]]:
+    """The retained transition rows for watchd, as they land on disk."""
+    return harness.store.document()["resources"]["watchd"]["transitions"]
+
+
+def test_a_running_service_reporting_a_fault_is_service_unhealthy_not_terminal_failure():
+    """A live pid is not terminally failed.
+
+    `terminal_failure` is the registry's latched PERMANENT start-failure fence; a running-
+    degraded reconnect window (pid>0 with `healthy=False`, or a recorded `last_failure`) is a
+    transient `service_unhealthy`. The STATE stays `degraded` either way -- nothing is hidden --
+    but the machine-readable reason no longer borrows the permanent-death token.
+    """
+    assert observed_health({"service": "watchd", "pid": 100, "healthy": False}) == (
+        "degraded",
+        REASON_SERVICE_UNHEALTHY,
+    )
+    assert observed_health({"service": "watchd", "pid": 100, "last_failure": "reconnecting"}) == (
+        "degraded",
+        REASON_SERVICE_UNHEALTHY,
+    )
+    # The genuine not-running latched fence is untouched: still down/terminal_failure.
+    assert observed_health({"service": "watchd", "pid": 0, "terminal_failure": True}) == (
+        "down",
+        REASON_TERMINAL_FAILURE,
+    )
+    # One vocabulary owner. `service_unhealthy` is a documented reason the store accepts, and it
+    # is a distinct token from `terminal_failure`, so the store can never collapse them.
+    assert REASON_SERVICE_UNHEALTHY in BACKEND_HEALTH_REASON_CODES
+    assert REASON_SERVICE_UNHEALTHY != REASON_TERMINAL_FAILURE
+
+
+def test_the_retained_watchd_reconnect_sequence_never_records_terminal_failure(harness: Harness):
+    """The exact retained sequence `watchd: starting -> degraded(...) -> ready`.
+
+    Its degraded step is a running-degraded reconnect (pid>0, `healthy=False`), the precise
+    window the observer used to stamp `terminal_failure`. The retained history must carry
+    `service_unhealthy` for that step and `terminal_failure` NOWHERE.
+    """
+    watchd = harness.services["watchd"]
+
+    # starting -> ready for everything, so watchd has a `ready` baseline to degrade from.
+    harness.cycle(BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS)
+    assert harness.states()["watchd"] == "ready"
+
+    # A running-degraded reconnect window: the process is alive but reports itself unhealthy.
+    watchd.row["pid"] = 100
+    watchd.row["healthy"] = False
+    watchd.row["last_failure"] = ""
+    harness.cycle(BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS)
+    assert harness.states()["watchd"] == "degraded"
+
+    # ...and the process recovers.
+    watchd.up()
+    harness.cycle(BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS)
+    assert harness.states()["watchd"] == "ready"
+
+    sequence = [(row["previous_state"], row["new_state"], row["reason_code"]) for row in _watchd_transitions(harness)]
+    assert sequence == [
+        ("", "starting", "none"),
+        ("starting", "ready", "none"),
+        ("ready", "degraded", REASON_SERVICE_UNHEALTHY),
+        ("degraded", "ready", "none"),
+    ], sequence
+    assert all(row["reason_code"] != REASON_TERMINAL_FAILURE for row in _watchd_transitions(harness))
+    # The degraded step is still a WARNING -- the state is preserved, only the reason is precise.
+    degraded_row = next(row for row in _watchd_transitions(harness) if row["new_state"] == "degraded")
+    assert degraded_row["reason_code"] == REASON_SERVICE_UNHEALTHY
+
+
+def test_the_statsd_probe_budget_is_tighter_than_statsds_own_status_rpc():
+    """The bound mismatch that makes `probe_timeout` a load-induced MISS, not an outage.
+
+    The observer guillotines every probe at 0.5s; statsd's own status RPC budget is 3.0s. An
+    alive-but-loaded statsd that answers between those two bounds is cut off at 0.5s and honestly
+    reduced to `unknown`/`probe_timeout` -- never `down`. This is CORRECT: raising the 0.5s budget
+    or lengthening the debounce to quiet it is exactly what the DOIT forbids.
+    """
+    assert BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS < STATUS_TIMEOUT_SECONDS
+    assert STATUS_TIMEOUT_SECONDS == 3.0
+    assert BACKEND_HEALTH_PROBE_TIMEOUT_SECONDS == 0.5
+    # A timed-out probe is `unknown`/`probe_timeout`, a bounded typed miss -- not `down`.
+    state, reason = observed_health({"service": "statsd"}, PROBE_TIMEOUT)
+    assert (state, reason) == ("unknown", REASON_PROBE_TIMEOUT)
+
+
+def test_a_single_statsd_probe_timeout_does_not_flap_and_two_are_retained_as_unknown(harness: Harness):
+    """One 0.5s probe miss is swallowed by the 2-observation debounce; two are retained, never `down`.
+
+    Drives the exact `statsd: ready -> unknown(probe_timeout) -> ready` sequence through a GENUINE
+    probe timeout (the injected-clock probe pool spends the whole 0.5s budget and abandons the
+    future), so the retained reason is `probe_timeout`, not a raised-error `probe_failed`. A load-
+    induced miss is a live pid the observer could not reach in time -- not an outage -- so the
+    retained history recovers cleanly and records `down` NOWHERE.
+    """
+    delays: dict[str, float] = {}
+    harness.observer._executor = VirtualProbePool(harness.monotonic, delays)
+
+    harness.cycle(BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS)
+    assert harness.states()["statsd"] == "ready"
+    published_before = len(harness.published)
+
+    # ONE missed probe: statsd is alive but does not answer inside the 0.5s budget this cycle.
+    delays["statsd"] = 10_000.0
+    single = harness.cycle()
+    assert single.probe_outcomes["statsd"] == PROBE_TIMEOUT
+    assert harness.states()["statsd"] == "ready"  # a single miss cannot move the indicator
+    assert single.published is False
+    assert len(harness.published) == published_before
+
+    # A SECOND consecutive miss crosses the debounce and is retained as unknown/probe_timeout.
+    second = harness.cycle()
+    assert second.probe_outcomes["statsd"] == PROBE_TIMEOUT
+    assert harness.states()["statsd"] == "unknown"
+
+    # ...and statsd answers again inside budget: clean recovery, debounced.
+    delays.pop("statsd")
+    harness.cycle(BACKEND_HEALTH_DEBOUNCE_OBSERVATIONS)
+    assert harness.states()["statsd"] == "ready"
+
+    transitions = harness.store.document()["resources"]["statsd"]["transitions"]
+    sequence = [(row["previous_state"], row["new_state"], row["reason_code"]) for row in transitions]
+    assert ("ready", "unknown", REASON_PROBE_TIMEOUT) in sequence, sequence
+    assert ("unknown", "ready", "none") in sequence, sequence
+    # The load-induced miss is NEVER promoted to a verified outage.
+    assert all(row["new_state"] != "down" for row in transitions), transitions
+
+
 def test_a_verified_exit_transitions_to_down_immediately(harness: Harness):
     harness.cycle(2)
     assert harness.states()["statsd"] == "ready"
@@ -923,7 +1063,7 @@ def test_observer_and_service_load_share_one_row_producer_map(monkeypatch):
         def __init__(self) -> None:
             self.rows = rows
 
-        def payload(self, render_row: Any, alert: Any, *, health: Any) -> dict[str, Any]:
+        def payload(self, render_row: Any, *, health: Any) -> dict[str, Any]:
             payload_calls.append("payload")
             return {"services": ["sentinel"]}
 

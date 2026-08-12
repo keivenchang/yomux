@@ -9,12 +9,14 @@ import logging
 import os
 import re
 import stat
+import threading
 import time
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
 from ..search import file_index
+from ..infra.refresh_outcome import RefreshOutcome
 from ..common import is_generated_upload_name
 from ..settings import DEFAULT_INDEX_EXCLUDE_DIR_NAMES
 from ..settings import settings_payload
@@ -34,6 +36,12 @@ MAX_SEARCH_FILES = 50_000
 MAX_SEARCH_LIMIT = 2_000
 LOGGER = logging.getLogger(__name__)
 _LOGGED_BLOCKED_REINDEX_PATHS: set[str] = set()
+# Item 6 visible-path (Finder/Differ) promotion debounce state. Bounded and pruned so a long browsing
+# session cannot grow it without limit.
+_VISIBLE_PROMOTE_DEBOUNCE_SECONDS = 2.0
+_VISIBLE_PROMOTE_MAX_TRACKED = 512
+_VISIBLE_PROMOTE_LOCK = threading.Lock()
+_VISIBLE_PROMOTE_LAST: dict[str, float] = {}
 
 
 def _index_path_is_excluded(
@@ -149,6 +157,79 @@ def _snapshot_freshness(
         index_policy["skip_dirs"],
         index_policy["exclude_signature"],
     )
+
+
+def _progressive_payload_fields(root: Path) -> dict[str, Any]:
+    """The measured breadth-first coverage attached to a full-tree Quick Open response (item 5).
+
+    Reuses the ONE coverage owner (`file_index.read_index_coverage`) so the search payload, the
+    Daemons roster, and `/api/fs/index-status` cannot grow divergent copies of the same metadata.
+    Nested under `progressive_coverage` so it never collides with the freshness fields, plus a
+    compact `snapshot_state`/`refresh_pending` the palette keys on to distinguish ready/current,
+    ready/stale, and partial/warming WITHOUT hiding already-cached matches. Empty when no snapshot
+    exists yet.
+    """
+    coverage = file_index.read_index_coverage(root)
+    if not coverage:
+        return {}
+    published_depth = int(coverage.get("published_depth") or 0)
+    frontier_size = int(coverage.get("frontier_size") or 0)
+    full = bool(coverage.get("full_coverage"))
+    if full:
+        snapshot_state = "current"
+    elif published_depth > 0:
+        snapshot_state = "partial"
+    else:
+        snapshot_state = "warming"
+    return {
+        "progressive_coverage": coverage,
+        "snapshot_state": snapshot_state,
+        "refresh_pending": frontier_size > 0,
+    }
+
+
+def _promote_user_visible_scope(root: Path) -> None:
+    """Asynchronously promote a not-yet-covered Quick Open scope's frontier (item 5).
+
+    Fire-and-forget through `file_index.request_user_visible_promotion`: it dispatches on a daemon
+    thread and debounces per root, so a partial/warming/stale query bumps that root's frontier
+    priority without the query waiting on `jobd`, the crawler, or the RPC, and without launching a
+    second crawl. Only call this when coverage is incomplete.
+    """
+    file_index.request_user_visible_promotion(str(root))
+
+
+def promote_visible_path(raw_path: str) -> list[str]:
+    """Item 6, visible Finder/Differ root: promote the frontier of every indexed root over ``path``.
+
+    A directory a user is actively viewing in Finder, or a repo they opened in the Differ, is
+    concrete visibility evidence that its layer should be covered soon. This routes that evidence to
+    the SAME user-visible-demand promotion owner Quick Open uses (`request_user_visible_promotion`),
+    which dispatches on a daemon thread and debounces per root -- so a directory listing or diff on
+    the interactive worker never blocks on the crawler or the RPC, and never launches a second crawl.
+    Returns the roots for which a promotion was dispatched (empty when none was, e.g. debounced or the
+    path is under no indexed root).
+    """
+    try:
+        target = Path(raw_path).expanduser().resolve(strict=False)
+    except (OSError, ValueError, RuntimeError):
+        return []
+    # Path-level debounce BEFORE the ancestor-root glob: a Finder is a stream of listings, so this
+    # keeps the interactive worker off the filesystem scan except at most once per window per path.
+    now = time.monotonic()
+    with _VISIBLE_PROMOTE_LOCK:
+        last = _VISIBLE_PROMOTE_LAST.get(str(target), 0.0)
+        if now - last < _VISIBLE_PROMOTE_DEBOUNCE_SECONDS:
+            return []
+        _VISIBLE_PROMOTE_LAST[str(target)] = now
+        if len(_VISIBLE_PROMOTE_LAST) > _VISIBLE_PROMOTE_MAX_TRACKED:
+            for stale_key in [key for key, seen in _VISIBLE_PROMOTE_LAST.items() if now - seen >= _VISIBLE_PROMOTE_DEBOUNCE_SECONDS]:
+                _VISIBLE_PROMOTE_LAST.pop(stale_key, None)
+    dispatched: list[str] = []
+    for root in file_index.indexed_ancestor_roots(target):
+        if file_index.request_user_visible_promotion(str(root), str(target)):
+            dispatched.append(str(root))
+    return dispatched
 
 
 def _fuzzy_subsequence_match(query: str, text: str) -> bool:
@@ -379,6 +460,92 @@ def _search_full_tree(
     return visited_dirs, visited_files, truncated
 
 
+def _make_search_match(tokens: list[str]):
+    """One shared entry-projection/scoring builder for BOTH the snapshot and delta search paths.
+
+    The snapshot walk and the cursor-delta read each need the same `match(path, name, rel)` callable
+    that scores against the query tokens and projects the search-result row; keeping it in one owner
+    stops the two paths from growing divergent copies of the sort-key + row shape."""
+    def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
+        sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
+        if sort_key is None:
+            return None
+        return {
+            "name": name,
+            "path": path_str,
+            "relative_path": rel,
+            "kind": "file",
+            "uploaded": is_generated_upload_name(Path(path_str)),
+            "_sort_key": sort_key,
+        }
+    return _match
+
+
+def initial_delta_cursor(root: Path) -> str | None:
+    """The baseline cursor for a root's committed snapshot, or ``None`` when nothing is indexed yet.
+
+    A first Quick Open request serves the immediate snapshot and carries this cursor; the client then
+    asks for committed deltas since it (step 3). Reuses the ONE search policy so the cursor is pinned to
+    the exact policy identity the delta reads are validated against."""
+    policy = _search_index_policy(root)
+    return file_index.current_delta_cursor(root, policy["skip_dirs"], policy["exclude_signature"])
+
+
+def _search_delta_payload(root: Path, query: str, max_results: int, cursor: str) -> dict[str, Any]:
+    """Serve one bounded page of committed journal deltas since ``cursor`` for ``root`` (step 3).
+
+    Reuses the ONE search policy, the same ranking/`_match` construction the snapshot read uses, the
+    shared exclusion + safe-root containment verdict, and the realpath dedupe annotation -- so a
+    streamed match is filtered and annotated IDENTICALLY to a snapshot match, and a repointed symlink
+    can never leak a blocked realpath through the delta path. Returns ``{changes, cursor, more,
+    coverage}`` or a typed ``{rebase_required, reason}`` the client repairs with one full snapshot."""
+    index_policy = _search_index_policy(root)
+    skip_dirs = index_policy["skip_dirs"]
+    exclude_path = index_policy["exclude_path"]
+    tokens = [token for token in str(query or "").split() if token]
+
+    _match = _make_search_match(tokens)
+
+    result = file_index.search_disk_index_delta(
+        root,
+        skip_dirs,
+        index_policy["exclude_signature"],
+        _match,
+        cursor,
+    )
+    if isinstance(result, file_index.DeltaRebaseRequired):
+        return {
+            "root": str(root),
+            "root_realpath": os.path.realpath(root),
+            "query": str(query or ""),
+            "limit": max_results,
+            "rebase_required": True,
+            "reason": result.reason,
+        }
+    changes: list[dict[str, Any]] = []
+    for change in result.changes:
+        change.pop("_sort_key", None)
+        if change.get("operation") == file_index.JOURNAL_OP_UPSERT:
+            path_text = str(change.get("path") or "")
+            # Defense in depth: an upsert whose path escaped its root or is now excluded (a repointed
+            # symlink, a policy the row predates) must not be streamed. The shared exclusion owner judges
+            # both the lexical and the resolved path, so a repoint out of the root is rejected here too.
+            if not path_text or _index_path_is_excluded(root, Path(path_text), skip_dirs, exclude_path):
+                continue
+            _annotate_search_dedupe_fields(change)
+        changes.append(change)
+    return {
+        "root": str(root),
+        "root_realpath": os.path.realpath(root),
+        "query": str(query or ""),
+        "limit": max_results,
+        "changes": changes,
+        "cursor": result.cursor,
+        "more": bool(result.more),
+        "coverage": result.coverage,
+    }
+
+
 def _search_files_from_safe_root(
     raw_root: str,
     query: str = "",
@@ -388,6 +555,7 @@ def _search_files_from_safe_root(
     access_root: Path | None = None,
     access_descriptor: int | None = None,
     inside_repo: bool = False,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     root = Path(raw_root)
     scan_root = access_root or root
@@ -396,6 +564,11 @@ def _search_files_from_safe_root(
     if not scan_root.is_dir():
         raise paths.FilesystemError.not_directory(root)
     max_results = _search_limit(limit)
+    if cursor:
+        # Delta mode (step 3): the caller already holds a snapshot and a cursor. Serve committed
+        # journal deltas since it, WITHOUT traversing -- the safe-root containment was already
+        # established by `search_files` opening the authorized root above.
+        return _search_delta_payload(root, str(query or ""), max_results, cursor)
     tokens = [token for token in str(query or "").split() if token]
     index_policy = _search_index_policy(root)
     skip_dirs = index_policy["skip_dirs"]
@@ -409,18 +582,7 @@ def _search_files_from_safe_root(
         skip_dirs = index_policy["skip_dirs"]
         can_build_index = file_index.background_owner_can_build()
         if tokens:
-            def _match(path_str: str, name: str, rel: str) -> dict[str, Any] | None:
-                sort_key = _search_entry_sort_key(Path(path_str), rel, tokens)
-                if sort_key is None:
-                    return None
-                return {
-                    "name": name,
-                    "path": path_str,
-                    "relative_path": rel,
-                    "kind": "file",
-                    "uploaded": is_generated_upload_name(Path(path_str)),
-                    "_sort_key": sort_key,
-                }
+            _match = _make_search_match(tokens)
 
             indexed_payload_state = ""
             indexed: tuple[list[dict[str, Any]], bool] | None = None
@@ -453,6 +615,7 @@ def _search_files_from_safe_root(
                     "index_state": "too_large" if index.too_large else "ready",
                     "index_coverage": "partial" if index.too_large else "full",
                     "files": indexed_results,
+                    **_progressive_payload_fields(root),
                     **freshness.payload_fields(),
                 }
                 if indexed_payload_state:
@@ -461,6 +624,10 @@ def _search_files_from_safe_root(
                     payload["index_state"] = "follower-ready" if freshness.authoritative else "follower-stale"
                     if not freshness.authoritative:
                         payload["index_coverage"] = "unverified"
+                        # Item 5: a stale/unverified follower read promotes the owner's frontier for
+                        # this scope without blocking, so the served matches stay while the owner
+                        # advances coverage.
+                        _promote_user_visible_scope(root)
                 return payload
             if not index.ready and not can_build_index:
                 # A follower can always read a persisted snapshot.  Ask the
@@ -536,6 +703,29 @@ def _search_files_from_safe_root(
                     child_indexes.append((candidate, child_policy))
                 child_results: list[dict[str, Any]] = []
                 child_truncated = False
+                # The breadth-first builder commits this root's layer-1 rows to its own SQLite as
+                # soon as the root listing finishes, long before the whole crawl drains. Serve those
+                # committed rows through the same SQLite read owner the follower uses, so Quick Open
+                # returns direct files while the deeper crawl is still running instead of falling
+                # through to the synchronous full-tree walk this feature exists to remove.
+                own_indexed = file_index.search_disk_index(
+                    root,
+                    skip_dirs,
+                    index_policy["exclude_signature"],
+                    _match,
+                    max_results,
+                    [_compact_search_text(token) for token in tokens if len(_compact_search_text(token)) >= 3],
+                )
+                # Availability is tracked separately from match count: once ANY progressive snapshot
+                # exists for this root (its own committed layer, or a persisted child), the read path
+                # answers from it -- even when this query matches nothing yet -- instead of falling
+                # through to the synchronous full-tree walk. A name that exists only below the
+                # published frontier must return an honest empty/warming result, not trigger a walk.
+                snapshot_available = own_indexed is not None
+                if own_indexed is not None:
+                    own_rows, own_truncated = own_indexed
+                    child_results.extend(own_rows)
+                    child_truncated = child_truncated or own_truncated
                 for candidate, child_policy in child_indexes:
                     child_indexed = file_index.search_disk_index(
                         candidate,
@@ -547,10 +737,11 @@ def _search_files_from_safe_root(
                     )
                     if child_indexed is None:
                         continue
+                    snapshot_available = True
                     rows, truncated = child_indexed
                     child_results.extend(rows)
                     child_truncated = child_truncated or truncated
-                if child_results:
+                if snapshot_available:
                     child_results.sort(key=lambda entry: entry.get("_sort_key", (999, 999, 0, 999, 999, "")))
                     unique_rows: list[dict[str, Any]] = []
                     seen_paths: set[str] = set()
@@ -568,6 +759,11 @@ def _search_files_from_safe_root(
                     # This process is the build owner: the only refresh that exists is
                     # its own warming build, which is here, not elsewhere.
                     freshness = _snapshot_freshness(index, root, index_policy)
+                    # Item 5: a query for a scope that is not yet fully covered promotes this root's
+                    # frontier to user-visible-demand without blocking (fire-and-forget), so a
+                    # Cmd-P for a not-yet-indexed directory advances that root ahead of ordinary
+                    # background breadth work instead of only waiting for the crawl's own cadence.
+                    _promote_user_visible_scope(root)
                     return {
                         "root": str(root),
                         "root_realpath": os.path.realpath(root),
@@ -577,6 +773,7 @@ def _search_files_from_safe_root(
                         "index_state": "warming",
                         "index_coverage": "partial",
                         "files": unique_rows,
+                        **_progressive_payload_fields(root),
                         **freshness.payload_fields(),
                     }
         if not tokens:
@@ -742,11 +939,17 @@ def _search_files_from_safe_root(
     }
 
 
-def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, recursive: bool = False) -> dict[str, Any]:
+def search_files(
+    raw_root: str,
+    query: str = "",
+    limit: int | str | None = 400,
+    recursive: bool = False,
+    cursor: str | None = None,
+) -> dict[str, Any]:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     with paths.safe_path(raw_root, flags=directory_flags, operation="search_files") as handle:
         inside_repo = git_ops._pinned_repo_root(handle, operation="search_files") is not None
-        return _search_files_from_safe_root(
+        payload = _search_files_from_safe_root(
             str(handle.resolved),
             query,
             limit,
@@ -754,7 +957,16 @@ def search_files(raw_root: str, query: str = "", limit: int | str | None = 400, 
             access_root=handle.descriptor_path(),
             access_descriptor=handle.descriptor,
             inside_repo=inside_repo,
+            cursor=cursor,
         )
+    if not cursor and isinstance(payload, dict) and "changes" not in payload and not payload.get("rebase_required"):
+        # Step 4: the FIRST (snapshot) response carries the baseline cursor the client seeds its
+        # subsequent delta reads with. `None` when nothing is committed yet -- the client then has no
+        # cursor to pull with and repairs from the next snapshot once the writer publishes layer 1.
+        # Pinned to the resolved authorized root and the ONE search policy the delta reads validate
+        # against; a delta response already carries its own `cursor`, so this is snapshot-only.
+        payload["initial_cursor"] = initial_delta_cursor(Path(str(handle.resolved)))
+    return payload
 
 
 def _index_status_from_safe_root(raw_root: str) -> dict[str, Any]:
@@ -829,6 +1041,10 @@ def _index_status_from_safe_root(raw_root: str) -> dict[str, Any]:
         "excluded_paths": policy["excluded_paths"],
         "state": state,
         "ready_elsewhere": state == "follower" and metadata_ready and freshness.authoritative,
+        # Item 8: the measured breadth-first coverage for this root (published depth, frontier
+        # depth/size, generations, snapshot age, full-coverage). Empty until the progressive
+        # builder has published a manifest; nested so it cannot collide with freshness fields.
+        "progressive_coverage": file_index.read_index_coverage(root) or {},
         **freshness.payload_fields(),
     }
 
@@ -850,10 +1066,14 @@ def _unindex_safe_root(raw_root: str) -> dict[str, Any]:
         "operation": "unindex",
         "reason": "unindex",
     })
+    # This branch runs only when THIS process cannot build, so any acceptance is a
+    # remote owner's -- derive both fields from the one control-outcome verdict
+    # rather than reading the raw `accepted` boolean twice.
+    outcome = RefreshOutcome.from_result(result)
     return {
         "root": str(root),
-        "ok": bool(result.get("accepted")),
-        "refreshing_elsewhere": bool(result.get("accepted")),
+        "ok": outcome.accepted,
+        "refreshing_elsewhere": outcome.refreshing_elsewhere,
     }
 
 
@@ -869,22 +1089,66 @@ def reindex_roots_for_path(raw_path: str, reason: str = "filesystem-change") -> 
 
 def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-change") -> list[str]:
     """Coalesce changed subtrees and hand one incremental refresh to the owner."""
+    # Item 6 guard + finding #2 prefilter: materialize the ONE shared validated candidate-root set
+    # (registry + parsed manifests) once. With no roots at all -- OR when every changed path is
+    # excluded by every containing root's shared policy (an all-ignored batch: .git, node_modules,
+    # ...) -- this batch produces no dirty subtree, so short-circuit BEFORE the expensive per-path
+    # `safe_parent` authorization. An empty-config OR all-ignored batch therefore does zero
+    # safe_parent, dirty-mark, promotion, scheduling, and indexd RPC work, through the one exclusion
+    # owner (no second ignore list).
+    candidate_roots = list(file_index._iter_candidate_index_roots())
+    if not candidate_roots:
+        return []
+    policies: dict[Path, dict[str, Any]] = {}
+
+    def _root_policy(root: Path) -> dict[str, Any]:
+        return policies.setdefault(root, _search_index_policy(root))
+
+    def _admits(path: Path) -> bool:
+        # At least one indexed ANCESTOR root must admit the path under that root's shared exclusion
+        # policy. The LEXICAL path is judged (not a pre-resolved one): resolving first collapsed an
+        # ignored/secret alias (root/.git/link -> root/src/file) to a clean target, so the shared
+        # verdict never saw the ignored producer and the all-ignored zero-work short-circuit leaked
+        # into safe_parent. The shared owner judges lexical AND resolved, so a lexical alias inside
+        # an ignored dir is excluded here and an escape (resolved outside the root) is excluded too.
+        for root in candidate_roots:
+            if root == path:
+                continue
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            policy = _root_policy(root)
+            if not _index_path_is_excluded(root, path, policy["skip_dirs"], policy["exclude_path"]):
+                return True
+        return False
+
     normalized_paths: list[Path] = []
     for raw_path in raw_paths:
+        if not _admits(Path(raw_path).expanduser()):
+            continue
         try:
             with paths.safe_parent(raw_path) as handle:
                 normalized_paths.append(handle.resolved_target)
         except FilesystemError as error:
-            if error.message_key != "fs.error.credentialBlocked":
+            # Expected per-path change-evidence outcomes, NOT failures to propagate: a disappearing
+            # path (parent already gone -> 404), a credential-blocked path, and a path whose parent is
+            # outside the authorized roots (403 -- e.g. an indexed root's own top, which
+            # `mark_paths_dirty` skips anyway). watchd, a delete, and a rename all legitimately
+            # reference such paths. Skipping one must never wedge the rest of the batch or kill the
+            # watchd revision handler that fed it (the spec's disappearing-path/permission rule). Any
+            # other error is unexpected and still propagates.
+            if error.message_key != "fs.error.credentialBlocked" and error.status not in (403, 404):
                 raise
             blocked = str(raw_path)
             if blocked not in _LOGGED_BLOCKED_REINDEX_PATHS:
                 _LOGGED_BLOCKED_REINDEX_PATHS.add(blocked)
-                LOGGER.warning("Skipping blocked filesystem watch path: %s", blocked)
-    policies: dict[Path, dict[str, Any]] = {}
+                LOGGER.warning("Skipping unindexable filesystem change path (%s): %s", error.message_key or error.status, blocked)
+    if not normalized_paths:
+        return []
 
     def include_root(root: Path, path: Path) -> bool:
-        policy = policies.setdefault(root, _search_index_policy(root))
+        policy = _root_policy(root)
         return not _index_path_is_excluded(root, path, policy["skip_dirs"], policy["exclude_path"])
 
     owner_can_build = file_index.background_owner_can_build()
@@ -899,6 +1163,18 @@ def reindex_roots_for_paths(raw_paths: list[str], reason: str = "filesystem-chan
         prepare_root=prepare_root if owner_can_build else None,
     )
     if owner_can_build:
+        # Item 6, promote branch: for a root whose breadth-first crawl has NOT yet reached the
+        # changed subtree, raise that root's pending durable frontier to `hot-change` priority so the
+        # crawl reaches the changed area ahead of ordinary breadth work, instead of enqueuing a
+        # competing task for the same directory. This reuses item 5's one bounded `promote_frontier`
+        # UPDATE (only ever RAISING priority); the incremental dirty repair below is the other,
+        # already-covered branch. No second repair path is added.
+        for root in roots_by_path:
+            file_index.promote_frontier(
+                root,
+                to_priority=file_index.HOT_CHANGE_PRIORITY,
+                to_reason=file_index.HOT_CHANGE_REASON,
+            )
         file_index.schedule_refreshes()
     else:
         for root, changed_paths in roots_by_path.items():

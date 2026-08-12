@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -9,11 +10,26 @@ import pytest
 from yolomux_lib import file_index
 from yolomux_lib import filesystem
 from yolomux_lib.filesystem import SEARCH_SKIP_DIRS
+from yolomux_lib.filesystem import search as fs_search
+from yolomux_lib.search import bfs_index
+from yolomux_lib.search import search_indexer
 
 
 def _clear_registry():
     with file_index._REGISTRY_LOCK:
         file_index._REGISTRY.clear()
+
+
+def _reset_lifecycle_registry():
+    """Hard reset of the registry, retiring set, and pending drops for a lifecycle integration test."""
+    with file_index._REGISTRY_LOCK:
+        indexes = list(file_index._REGISTRY.values()) + list(file_index._RETIRING.values())
+        file_index._REGISTRY.clear()
+        file_index._RETIRING.clear()
+        file_index._PENDING_DROPS.clear()
+    for index in indexes:
+        index.stop_event.set()
+        index.close_root_fd()
 
 
 def _make_tree(root):
@@ -205,11 +221,16 @@ def test_build_persists_sqlite_without_large_json_payload(tmp_path, monkeypatch)
     assert count >= 2
 
 
-def test_oversized_index_is_partial_in_memory_and_not_persisted_across_restart(tmp_path, monkeypatch):
+def test_total_entry_cap_partial_is_durable_and_reloads(tmp_path, monkeypatch):
+    # BFS index lifecycle item 6: a total-row cap produces a v5 TYPED PARTIAL store, not a deletion.
+    # A three-file root capped at two publishes two rows, reports partial coverage
+    # (truncated=True / full_coverage=False), and KEEPS its SQLite + manifest. History: the cap path
+    # called `_drop_persisted_index`, blanking a large root's index on every build and leaving it
+    # permanently "Indexing...". The partial must instead survive a registry clear and stay searchable.
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     monkeypatch.setattr(file_index, "MAX_INDEX_FILES", 2)
-    for name in ("one.txt", "two.txt", "three.txt"):
+    for name in ("one.txt", "three.txt", "two.txt"):
         (tmp_path / name).write_text(name, encoding="utf-8")
 
     built = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
@@ -218,15 +239,26 @@ def test_oversized_index_is_partial_in_memory_and_not_persisted_across_restart(t
     assert built.truncated is True
     assert built.too_large is True
     assert len(built.entries) == 2
-    assert built.persisted is False
-    assert not file_index._index_disk_path(tmp_path).exists()
+    # The typed partial is DURABLE: its SQLite database and its manifest both survive.
+    assert built.persisted is True
+    assert file_index._index_disk_path(tmp_path).exists()
+    assert file_index._index_manifest_path(tmp_path).exists()
+    # The manifest names it partial, never full coverage.
+    manifest = json.loads(file_index._index_manifest_path(tmp_path).read_text(encoding="utf-8"))
+    assert manifest["truncated"] is True
+    assert manifest["full_coverage"] is False
+    with sqlite3.connect(file_index._index_disk_path(tmp_path)) as conn:
+        assert conn.execute("SELECT value FROM metadata WHERE key='full_coverage'").fetchone()[0] == "0"
+
+    # A registry clear (a demoted owner) followed by a fresh ensure must RELOAD the retained partial
+    # from disk and answer a shallow target from it -- not rebuild from scratch and not go empty.
     _clear_registry()
-    # A restart begins an asynchronous cold build. Hold that build here so this
-    # persistence contract cannot race a three-file tree and turn ready before
-    # the assertion observes the new RootIndex.
-    monkeypatch.setattr(file_index, "_start_build", lambda *_args, **_kwargs: None)
     reloaded = file_index.ensure_index(tmp_path, SEARCH_SKIP_DIRS)
-    assert reloaded.ready is False
+    assert reloaded.ready is True
+    assert reloaded.truncated is True
+    assert len(reloaded.entries) == 2
+    names = {name for _p, name, _r, _s, _m in reloaded.entries}
+    assert "one.txt" in names  # the retained shallow target is searchable after reload
 
 
 def test_persistence_can_be_disabled_or_rejected_by_file_budget(tmp_path, monkeypatch):
@@ -302,6 +334,10 @@ def test_run_build_off_list_exception_still_clears_building_flag(tmp_path, monke
     def boom(*args, **kwargs):
         raise sqlite3.OperationalError("disk I/O error")
 
+    # `_persist` is only on the retired DFS full-build path, kept as the fallback when no
+    # breadth-first runner is registered; unset the runner so this exercises that fallback. The
+    # breadth-first path has its own off-list backstop, proven in test_search_indexer_bfs_cutover.
+    monkeypatch.setattr(file_index, "_BFS_FULL_BUILD_RUNNER", None)
     monkeypatch.setattr(file_index, "_persist", boom)
     (root / "b.txt").write_text("b", encoding="utf-8")
     file_index.mark_path_dirty(root)
@@ -807,8 +843,11 @@ def test_index_status_reports_rich_state(tmp_path, monkeypatch):
     assert status["truncated"] is False
 
 
-def test_unindex_writes_tombstone_then_rebuild_clears_it(tmp_path, monkeypatch):
-    # C11 #2: unindex leaves a tombstone; a later fresh build supersedes it and clears it.
+def test_unindex_writes_tombstone_then_rebuild_supersedes_it_by_identity(tmp_path, monkeypatch):
+    # C11 #2 (no-clear identity model): unindex leaves a DURABLE tombstone that is NEVER cleared; a
+    # later fresh build supersedes it by STAMPING the current tombstone identity into its snapshot, so
+    # the rebuilt store is accepted while the marker stays present. (The old model deleted the marker on
+    # rebuild -- that guarded-clear was the P0 cross-process race codex's protocol #1 removed.)
     _clear_registry()
     monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "idx")
     _make_tree(tmp_path)
@@ -816,8 +855,18 @@ def test_unindex_writes_tombstone_then_rebuild_clears_it(tmp_path, monkeypatch):
     file_index.unindex(tmp_path)
     assert file_index._tombstone_path(tmp_path).exists()
     assert file_index._tombstone_time(tmp_path) > 0
-    file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
-    assert not file_index._tombstone_path(tmp_path).exists()
+    identity = file_index._current_tombstone_identity(tmp_path)
+    rebuilt = file_index.build_now(tmp_path, SEARCH_SKIP_DIRS)
+    assert rebuilt.ready
+    # The marker is durable (still present), and the fresh snapshot is accepted by identity.
+    assert file_index._tombstone_path(tmp_path).exists()
+    opened = file_index._read_sqlite_index(tmp_path, SEARCH_SKIP_DIRS)
+    assert opened is not None
+    conn, metadata = opened
+    try:
+        assert metadata.get("tombstone_identity") == identity
+    finally:
+        conn.close()
 
 
 def test_tombstone_evicts_stale_inmemory_copy(tmp_path, monkeypatch):
@@ -846,3 +895,147 @@ def test_unindex_drops_registry_and_disk(tmp_path, monkeypatch):
     with file_index._REGISTRY_LOCK:
         assert str(tmp_path) not in file_index._REGISTRY
     assert not file_index._index_disk_path(tmp_path).exists()
+
+
+# --- P0 round 2: reindex prefilter judges lexical ignored symlink aliases ------------
+#
+# The item-6 prefilter resolved every changed path before the shared exclusion owner
+# saw it, so a symlink named inside an ignored directory (root/.git/link -> root/src/file)
+# collapsed to its clean target and slipped past the all-ignored zero-work short-circuit
+# into safe_parent, dirty-mark, promotion and RPC work. The fix judges the LEXICAL path
+# (and resolved) through the one shared owner. These pin both the zero-work ignored path
+# and the ordinary-admitted path.
+#
+# NOTE: `file_index._iter_candidate_index_roots` is provided by a later commit than this
+# worktree's base; it is monkeypatched here to isolate the candidate-root seam so the
+# `_admits` exclusion logic is exercised deterministically regardless of that seam.
+
+
+def _reindex_fixture(monkeypatch, root, *, exclude_rules=(), dirty_result=None):
+    search = fs_search
+    monkeypatch.setattr(
+        search,
+        "settings_payload",
+        lambda: {"settings": {"file_explorer": {"index_exclude_paths": list(exclude_rules)}}},
+    )
+    monkeypatch.setattr(file_index, "_iter_candidate_index_roots", lambda: [root], raising=False)
+    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: False)
+    monkeypatch.setattr(file_index, "request_background_owner_refresh", lambda payload: {}, raising=False)
+    dirty_calls = []
+
+    def record_dirty(paths, **kwargs):
+        dirty_calls.append([str(path) for path in paths])
+        # mark_paths_dirty returns a {root: {changed_paths}} mapping.
+        return dict(dirty_result or {})
+
+    monkeypatch.setattr(file_index, "mark_paths_dirty", record_dirty)
+    return search, dirty_calls
+
+
+@pytest.mark.parametrize(
+    "label, subdir, exclude_rules",
+    (
+        ("git_control", ".git", ()),
+        ("skip_dir", "node_modules", ()),
+        ("configured_glob", "build", ("glob:**/build/**",)),
+        ("configured_regex", "cache", ("regex:(^|/)cache(/|$)",)),
+        ("secret_dir", ".ssh", ()),
+    ),
+)
+def test_reindex_all_ignored_alias_batch_does_zero_work(tmp_path, monkeypatch, label, subdir, exclude_rules):
+    """A changed path that is an ignored-tree symlink alias produces no dirty subtree."""
+    _clear_registry()
+    root = (tmp_path / "repo").resolve()
+    visible = root / "src"
+    visible.mkdir(parents=True)
+    target = visible / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    ignored = root / subdir
+    ignored.mkdir(parents=True)
+    alias = ignored / "link"
+    os.symlink(target, alias)
+
+    search, dirty_calls = _reindex_fixture(monkeypatch, root, exclude_rules=exclude_rules)
+    # All-ignored batch: the lexical ignored alias is excluded before safe_parent, so the
+    # batch does zero dirty-mark / promotion / RPC work and returns no dirty root.
+    assert search.reindex_roots_for_paths([str(alias)]) == []
+    assert dirty_calls == []
+    _clear_registry()
+
+
+def test_reindex_symlink_escaping_the_root_does_zero_work(tmp_path, monkeypatch):
+    """resolved-escape: a symlink whose target leaves the root is excluded (zero work)."""
+    _clear_registry()
+    root = (tmp_path / "repo").resolve()
+    root.mkdir()
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+    target = outside / "secret.txt"
+    target.write_text("x", encoding="utf-8")
+    alias = root / "escape"
+    os.symlink(target, alias)
+
+    search, dirty_calls = _reindex_fixture(monkeypatch, root)
+    assert search.reindex_roots_for_paths([str(alias)]) == []
+    assert dirty_calls == []
+    _clear_registry()
+
+
+def test_reindex_ordinary_symlink_is_admitted_and_marks_its_root_dirty(tmp_path, monkeypatch):
+    """Positive control: a symlink NOT inside any ignored tree is admitted and does work."""
+    _clear_registry()
+    root = (tmp_path / "repo").resolve()
+    visible = root / "src"
+    visible.mkdir(parents=True)
+    target = visible / "file.txt"
+    target.write_text("x", encoding="utf-8")
+    alias = visible / "shortcut.txt"
+    os.symlink(target, alias)
+
+    search, dirty_calls = _reindex_fixture(monkeypatch, root, dirty_result={root: {target}})
+    assert search.reindex_roots_for_paths([str(alias)]) == [str(root)]
+    # The admitted alias reached mark_paths_dirty with its resolved target.
+    assert dirty_calls and any(str(target) in batch for batch in dirty_calls)
+    _clear_registry()
+
+
+def test_indexer_restart_resumes_a_durable_partial_frontier_without_waiting_for_ttl(tmp_path, monkeypatch):
+    # P0-4 (integration through process_due): searchable state and crawl completion are SEPARATE facts.
+    # A compatible partial loads ready=True with a durable pending frontier; a restart's startup enqueue
+    # + process_due must RESUME that generation's crawl, not wait out the 30-minute TTL ("Indexing...").
+    _reset_lifecycle_registry()
+    monkeypatch.setattr(file_index, "INDEX_DIR", tmp_path / "index")
+    monkeypatch.setattr(file_index, "background_owner_can_build", lambda: True)
+    root = tmp_path / "root"
+    (root / "deep").mkdir(parents=True)
+    (root / "top.txt").write_text("top", encoding="utf-8")
+    (root / "deep" / "buried.txt").write_text("buried", encoding="utf-8")
+    policy = fs_search._search_index_policy(root)
+
+    build = bfs_index.ProgressiveBuild(
+        root,
+        policy["skip_dirs"],
+        exclude_path=policy["exclude_path"],
+        exclude_signature=policy["exclude_signature"],
+        generation=1,
+    )
+    with build:
+        assert build.enqueue_startup()
+        build.step()
+    before = file_index.read_index_coverage(root)
+    assert before is not None and before["frontier_size"] > 0
+
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+    assert service.enqueue(str(root), [], reason=bfs_index.REASON_STARTUP)["ok"]
+    service.pending_due_at[str(root.resolve())] = 0.0
+    assert service.process_due() == 1
+    with file_index._REGISTRY_LOCK:
+        index = file_index._REGISTRY[str(root.resolve())]
+    with index.lock:
+        active = index.building or index.thread is not None
+    after = file_index.read_index_coverage(root)
+    try:
+        assert after is not None
+        assert active or after["frontier_size"] == 0
+    finally:
+        _reset_lifecycle_registry()

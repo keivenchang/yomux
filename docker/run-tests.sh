@@ -112,12 +112,23 @@ fi
 agent_mounts+=(-v "$evidence_dir:$evidence_dir")
 test_env+=(-e "YOLOMUX_E2E_EVIDENCE_DIR=$evidence_dir")
 
+# Stamp the container with this gate run's owner label when tools/check.py minted a token, so its
+# retirement probe can prove ownership by the exact token instead of the shared image ancestor - a
+# foreign agent's container from the identical image then neither blocks nor falsely clears our
+# certification. Absent the token (a bare `docker/run-tests.sh` invocation) the container carries no
+# owner label and image-ancestor discovery remains the fallback.
+owner_label=()
+if [ -n "${YOLOMUX_CHECK_RUN_TOKEN:-}" ]; then
+  owner_label+=(--label "yolomux.check.run=$YOLOMUX_CHECK_RUN_TOKEN")
+fi
+
 # --rm provides a fresh writable layer and HOME. Do not tmpfs-mount /home/runner: that
 # would hide image-owned ~/.local/bin. --init reaps tmux/chromium children; the enlarged
 # shared-memory segment prevents Chromium renderer crashes.
 set +e
 docker run --rm --init \
   --shm-size=1g \
+  "${owner_label[@]+"${owner_label[@]}"}" \
   -v "$REPO_ROOT:/w" \
   "${git_mount[@]+"${git_mount[@]}"}" \
   "${agent_mounts[@]+"${agent_mounts[@]}"}" \

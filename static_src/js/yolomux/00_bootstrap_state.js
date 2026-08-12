@@ -731,6 +731,7 @@ let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'stale' | 'too_large' | 'error'
 const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
+const fileExplorerIndexPublishedGeneration = new Map();  // normalized indexed root -> last-seen progressive published generation (drives Quick Open re-query as BFS publishes rows)
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
@@ -772,8 +773,13 @@ const fileQuickOpenState = {
   error: '',
   requestId: 0,
   debounce: null,
-  indexRetry: null,
   abortController: null,
+  // The active search text the delta cursors below belong to, and the per-root incremental-read state
+  // for the CURRENT requestId. Each searched root keeps one opaque cursor + `more` flag + its opaque
+  // scope digest (so a path-free search_progress signal correlates back to the root it names) so the
+  // server can stream committed match deltas instead of the client re-issuing the whole query.
+  deltaQuery: '',
+  deltaRoots: new Map(),
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -1786,6 +1792,14 @@ const clientEventTransportState = {
   demand: null,
   demandSignature: '',
   demandTimer: null,
+  // The client-event EventSource is modelled as three explicit roles, not one socket. `demand` is the
+  // REQUESTED state (the channels/operations the page currently wants). `source` is the ACTIVE stream:
+  // the one that has fired `ready` and is serving delivered frames. `replacementSource` is the
+  // CANDIDATE: a newly opened stream for a changed demand that has NOT yet fired `ready`, so it is not
+  // yet allowed to serve. `candidateEpisode` is the ONE bounded retry episode governing that candidate
+  // between open and ready; a pre-ready candidate failure that exhausts it must re-drive demand and
+  // demote the active stream rather than strand demand or let the old stream claim to serve the new one.
+  candidateEpisode: null,
   queue: new Map(),
   resourceEpoch: '',
   resourceRevisions: new Map(),
@@ -1793,6 +1807,11 @@ const clientEventTransportState = {
   frame: 0,
   resyncTimer: null,
 };
+// A candidate stream may error transiently before it is ever ready; the browser EventSource
+// auto-reconnects the same URL, so a small bound tolerates those retries within ONE episode before
+// the candidate is abandoned and demand is re-driven. Keep it small so a persistently rejected demand
+// falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
+const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
 // server: client-event resource revisions AND the session-metadata build generation. They all
 // restart at zero in a replacement process, so they reset together, here, once.

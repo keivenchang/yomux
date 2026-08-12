@@ -3,6 +3,7 @@ import time
 
 from yolomux_lib import search_indexer
 from yolomux_lib.filesystem import search
+from yolomux_lib.infra import jobd
 from yolomux_lib.local_services.registry import LocalServiceRegistry
 from yolomux_lib.local_services.registry import LocalServiceSpec
 
@@ -73,12 +74,44 @@ def test_persistent_indexer_serves_its_ready_snapshot_to_read_only_servers(tmp_p
     service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
     expected = {"root": "/repo", "query": "t5t.md", "files": [{"name": "t5t.md"}]}
     calls = []
-    monkeypatch.setattr(search, "search_files", lambda root, query, limit, recursive: calls.append((root, query, limit, recursive)) or expected)
+    monkeypatch.setattr(search, "search_files", lambda root, query, limit, recursive, cursor=None: calls.append((root, query, limit, recursive, cursor)) or expected)
 
     response = service.handle({"action": "search", "root": "/repo", "query": "t5t.md", "limit": 20})
 
-    assert calls == [("/repo", "t5t.md", 20, True)]
+    assert calls == [("/repo", "t5t.md", 20, True, None)]
     assert response == {"ok": True, "payload": expected}
+
+
+def test_indexer_search_action_threads_the_opaque_delta_cursor(tmp_path, monkeypatch):
+    # Step 4: a delta request carries an opaque cursor; the indexer read path must forward it so the
+    # follower gets fenced committed journal deltas, not a fresh snapshot.
+    service = search_indexer.PersistentSearchIndexer(tmp_path / "indexer.sock")
+    expected = {"root": "/repo", "query": "t5t", "changes": [], "cursor": "C2", "more": False}
+    calls = []
+    monkeypatch.setattr(search, "search_files", lambda root, query, limit, recursive, cursor=None: calls.append((root, query, limit, recursive, cursor)) or expected)
+
+    response = service.handle({"action": "search", "root": "/repo", "query": "t5t", "limit": 20, "cursor": "C1"})
+
+    assert calls == [("/repo", "t5t", 20, True, "C1")]
+    assert response == {"ok": True, "payload": expected}
+
+
+def test_http_search_descriptor_threads_cursor_through_the_jobd_executor(monkeypatch):
+    # Step 4: the HTTP `/api/fs/search?cursor=` param reaches `filesystem.search_files` through the
+    # jobd filesystem-operation descriptor. An absent cursor is a snapshot; an opaque cursor selects
+    # the bounded committed-journal delta read.
+    calls = []
+
+    def _capture(path, query, limit, *, recursive, cursor):
+        calls.append((path, query, limit, recursive, cursor))
+        return {"root": path, "query": query, "changes": [], "cursor": "C2", "more": False}
+
+    monkeypatch.setattr(jobd.filesystem, "search_files", _capture)
+
+    jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "limit": 25, "recursive": True, "cursor": "C1"}})
+    jobd._filesystem_operation_authorized({"op": "search", "path": "/repo", "args": {"query": "t5t", "recursive": True}})
+
+    assert calls == [("/repo", "t5t", 25, True, "C1"), ("/repo", "t5t", 400, True, None)]
 
 
 def test_search_client_deadline_is_typed_and_uses_the_bounded_search_timeout(tmp_path, monkeypatch):

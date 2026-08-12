@@ -263,7 +263,7 @@ def test_request_query_is_request_scoped_and_routes_use_the_shared_accessor(monk
     assert first == {"session": ["one", "two"]}
     assert calls == ["session=one&session=two"]
     source = inspect.getsource(http_routes)
-    assert source.count("request_query(request, parsed)") == 35
+    assert source.count("request_query(request, parsed)") == 36
     assert source.count("parse_qs(parsed.query)") == 1
 
 
@@ -519,6 +519,98 @@ def test_generic_route_profile_uses_this_request_dispatch_timer(monkeypatch):
     assert kwargs["details"]["request_parse_to_route_ms"] == pytest.approx(0.0)
     assert kwargs["details"]["accept_to_route_ms"] == pytest.approx(10.0)
     assert kwargs["details"]["request_total_ms"] == pytest.approx(35.0)
+
+
+def test_route_to_representation_ready_is_stamped_at_the_pre_write_boundary(monkeypatch):
+    # W9: the shared response writer must stamp route_to_representation_ready_ms once the final wire
+    # bytes exist but BEFORE any header/body byte is written. The number is route entry (dispatch
+    # start) -> representation ready, so it must exclude the body write and the whole-request total.
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/system-status"
+    handler.headers = {}  # no Accept-Encoding: keep the body identity-encoded, one compression tick
+    handler.close_connection = False
+    handler.wfile = io.BytesIO()
+    handler._api_request_id = "r-fixture"
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = 100.0
+    handler._http_request_line_read_at = None
+    handler._http_request_parse_completed_at = None
+    handler._http_request_dispatch_started_at = 100.0
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)),
+    ))
+    handler.send_response = lambda *args, **kwargs: None
+    handler.send_header = lambda *args, **kwargs: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+
+    # dispatch=100.0; compression_started=100.005; representation_ready=100.012 (=> 12ms boundary);
+    # write_started=100.020; write end=100.050 (write_ms=30); record response_started=100.060.
+    clock = iter([100.005, 100.012, 100.020, 100.050, 100.060])
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: next(clock))
+
+    body = b'{"ok":true}'
+    Handler._write_product_representation(
+        handler,
+        body,
+        status=HTTPStatus.OK,
+        content_type="application/json; charset=utf-8",
+        disposition="inline",
+        filename="",
+    )
+
+    assert len(records) == 1
+    _args, kwargs = records[0]
+    details = kwargs["details"]
+    assert details["route_to_representation_ready_ms"] == pytest.approx(12.0)
+    # The boundary number excludes the body write (30ms) and is not the whole-request compute (60ms).
+    assert details["write_ms"] == pytest.approx(30.0)
+    assert kwargs["compute_ms"] == pytest.approx(60.0)
+    assert details["route_to_representation_ready_ms"] < details["write_ms"]
+    assert details["route_to_representation_ready_ms"] < kwargs["compute_ms"]
+
+
+def test_route_to_representation_ready_is_absent_without_a_dispatch_timer(monkeypatch):
+    # A response written on a path that never set the dispatch timer must not fabricate a zero; the
+    # boundary field is simply absent so no reader can cite an unmeasured latency as measured.
+    records = []
+    handler = object.__new__(Handler)
+    handler.command = "GET"
+    handler.path = "/api/system-status"
+    handler.headers = {}
+    handler.close_connection = False
+    handler.wfile = io.BytesIO()
+    handler._api_request_id = "r-fixture"
+    handler._http_response_compute_ms = None
+    handler._http_response_performance_details = None
+    handler._http_request_started_at = None
+    handler._http_request_line_read_at = None
+    handler._http_request_parse_completed_at = None
+    handler._http_request_dispatch_started_at = None
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        record_performance_sample=lambda *args, **kwargs: records.append((args, kwargs)),
+    ))
+    handler.send_response = lambda *args, **kwargs: None
+    handler.send_header = lambda *args, **kwargs: None
+    handler.send_auth_cookie_if_needed = lambda: None
+    handler.end_headers = lambda: None
+    monkeypatch.setattr(server_module.time, "perf_counter", lambda: 100.0)
+
+    Handler._write_product_representation(
+        handler,
+        b'{"ok":true}',
+        status=HTTPStatus.OK,
+        content_type="application/json; charset=utf-8",
+        disposition="inline",
+        filename="",
+    )
+
+    assert len(records) == 1
+    _args, kwargs = records[0]
+    assert "route_to_representation_ready_ms" not in kwargs["details"]
 
 
 class FakeShareConnection:
@@ -3973,7 +4065,10 @@ def _api_response_capturing_handler(method: str = "GET", path: str = "/api/fs/li
     handler._route_response_written = False
     handler._api_request_id = ""
     handler.headers = {}
-    handler.server = SimpleNamespace(app=SimpleNamespace(observe_http_delivery=lambda *_args: None))
+    handler.server = SimpleNamespace(app=SimpleNamespace(
+        observe_http_commit=lambda *_args: None,
+        observe_http_receipt=lambda *_args: None,
+    ))
     writes = []
 
     def capture(_self, data, status=HTTPStatus.OK, *, json_encode_ms=0.0, product_metadata=None):

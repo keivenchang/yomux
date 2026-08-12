@@ -33,17 +33,22 @@ nothing and retains nothing.
 The snapshot is the schema. ``LocalServicesSnapshot.payload()`` renders the dict the
 HTTP projection publishes, including ``schema_version``.
 
-WHY M8 BUMPED ``schema_version`` TO 2
--------------------------------------
-Every service row grew a ``health`` block and the payload grew a snapshot-level
-``health`` block. ``static_src/js/yolomux/85_debug_panel.js:7792`` guards the whole
-normalized Local-services render on ``schema_version === 1``, so a shape change without
-a bump would have left the panel rendering the new payload through the schema-1 table
-and silently ignoring every new field -- a mismatch nothing would report. With the bump
-the guard now REJECTS this payload and falls through to the legacy per-cell renderer
-until the front end is updated; that is the intended, visible consequence, and
-``tests/test_local_service_projection.py`` pins the mismatch as a strict xfail so the
-day the guard moves to 2 the pin fails and has to be deleted.
+WHY ``schema_version`` IS 3
+---------------------------
+``static_src/js/yolomux/85_debug_panel.js`` guards the whole normalized Local-services
+render on ``schema_version === <this number>`` (exact, not ``>=``), so any shape change
+without a matching bump would leave the panel rendering the new payload through the old
+table and silently ignoring or fabricating fields -- a mismatch nothing would report.
+Each bump is one shape change, and the front-end guard moves with it in the same change:
+
+* M3 preserved ``1``.
+* M8 moved it to ``2``: every service row grew a ``health`` block and the payload grew a
+  snapshot-level ``health`` block.
+* W13 moved it to ``3``: the rolled-up ``alert`` summary was removed from the payload. It
+  was a dead contract -- nothing in the UI read it; every consumer reads each row's own
+  ``alerting``/``reason_code``. Removing a published key is a shape change, so the guard
+  moves to 3 and a schema-2 payload is now refused rather than rendered through the new
+  table.
 
 WHY THE COUNTERS SAY ``web_process``
 ------------------------------------
@@ -81,11 +86,11 @@ from .local_services import registry as local_services_registry
 # declared; `tests/test_gate_panels.py:12,227` pins the same six for the panel.
 LOCAL_SERVICE_INVENTORY: tuple[str, ...] = ("indexd", "statsd", "jobd", "statusd", "watchd", "approvald")
 
-# Bumping this is a browser-visible change: `85_debug_panel.js:7792` guards the whole
-# Local-services render on this number. M3 preserved 1 deliberately; M8 moved it to 2
-# because every row grew a `health` block. See the module docstring for what the front
-# end must do and why the guard is expected to reject this payload until it does.
-LOCAL_SERVICES_SCHEMA_VERSION = 2
+# Bumping this is a browser-visible change: `85_debug_panel.js` guards the whole
+# Local-services render on this exact number. M3 preserved 1 deliberately; M8 moved it to 2
+# because every row grew a `health` block; W13 moved it to 3 when the dead `alert` summary
+# was removed from the payload. See the module docstring for the shape each version froze.
+LOCAL_SERVICES_SCHEMA_VERSION = 3
 
 # How many of a resource's retained transition rows the HTTP projection publishes. The
 # store keeps 128 per resource; six services times 128 rows would put ~5000 rows into
@@ -565,14 +570,15 @@ class LocalServicesSnapshot:
     def payload(
         self,
         project_row: Callable[[dict[str, Any]], dict[str, Any]],
-        alert: Callable[[list[dict[str, Any]]], dict[str, Any]],
         *,
         health: "RetainedHealth | None" = None,
     ) -> dict[str, Any]:
         """Render the `/api/system-status` `local_services` dict.
 
         The typed projection (`state`/`reason_code`/`essential`/`alerting`/`metrics`)
-        and the alert summary stay with their existing owners; this only feeds them.
+        stays with its existing owner; this only feeds it. There is no separate `alert`
+        summary: every consumer reads each row's own `alerting`/`reason_code`, and a second
+        rolled-up copy of that fact was a dead contract nothing in the UI ever read.
 
         `health` is the snapshot-level retained-health provenance (M8). The per-row health
         block is rendered by `project_row`, which already has the same `RetainedHealth`;
@@ -584,7 +590,6 @@ class LocalServicesSnapshot:
             "schema_version": self.schema_version,
             "inventory": self.inventory,
             "services": services,
-            "alert": alert(services),
             "totals": self.totals,
             "ledger": dict(self.ledger),
             "recovery_events": [dict(event) for event in self.recovery_events],

@@ -100,12 +100,21 @@ const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
 // signal a first-time viewer needs. Info/Debug remain one toggle away and their
 // selection persists (see save/load of jsDebugStatsUiPreferences).
 const jsDebugLogDefaultLevels = Object.freeze(['warning', 'error']);
+// Logs Clear identity is a per-producer (epoch, sequence) cursor, never wall time:
+// `serverEpoch`/`serverSequence` track the last validated server envelope, and
+// `clearedCursors` holds the {epoch, sequence} captured by the most recent Clear for
+// each producer. A record is hidden only while its producer epoch still matches the
+// cursor and its sequence is at or below it, so a clock rollback cannot resurface a
+// hidden record and a producer epoch reset resurfaces everything.
+const jsDebugClientLogEpoch = reloadClientJourneyId;
 const jsDebugLogsState = {
   payload: [],
   error: '',
   inFlight: false,
   updatedAt: 0,
-  clearedAt: 0,
+  serverEpoch: '',
+  serverSequence: 0,
+  clearedCursors: {server: null, client: null},
   levels: new Set(jsDebugLogDefaultLevels),
 };
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
@@ -239,7 +248,6 @@ const jsDebugGraphMiddleWindowMs = jsDebugGraphTiers[1].maxAgeMs;
 const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
 const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
 const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
-const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
@@ -255,7 +263,9 @@ const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
 // non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
 // left between the coarser (60s) data fetches — the chart stays visibly live even where
-// data no longer streams. Ranges over 1h, zoomed, and hidden views stay static.
+// data no longer streams. Ranges over 1h and fixed historical zooms are static by design.
+// A hidden document or a hidden panel is different: neither is inherently static, they simply
+// do not repaint, so the axis holds where it was until the tab/document is shown again.
 const jsDebugGraphSlideMaxRangeSeconds = 60 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
@@ -413,7 +423,6 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 // jsDebugGraphTiers graduated-compaction owner rewrites keys as buckets age); the
 // former raw/rollup Map split was only bookkeeping over the same keyspace.
 const jsDebugGraphBuckets = new Map();
-const jsDebugGraphEventRecords = new Map();
 // NOT display cache: short-lived staging retained for the established renderer's
 // bucket bookkeeping. Current browser observations are uploaded separately.
 const jsDebugGraphPendingServerBuckets = new Map();
@@ -1221,6 +1230,7 @@ function debugClientLogRecord(event, index = 0) {
   return {
     id: `client:${redacted?.id ?? index}`,
     owner: 'client',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestampMs) ? timestampMs / 1000 : 0,
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(timestampMs)),
     level: debugClientLogLevel(redacted),
@@ -1241,6 +1251,7 @@ function debugServerLogRecord(entry, index = 0) {
   return {
     id: `server:${redacted?.id ?? index}`,
     owner: 'server',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestamp) ? timestamp : (Number.isFinite(timestampMs) ? timestampMs / 1000 : 0),
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(
       Number.isFinite(timestamp) ? timestamp * 1000 : timestampMs,
@@ -1262,15 +1273,79 @@ function debugMergedLogRecords() {
     .map(debugServerLogRecord);
   const client = jsDebugEvents.map(debugClientLogRecord);
   const seen = new Set();
+  const cursors = jsDebugLogsState.clearedCursors || {};
+  const producerEpoch = owner => owner === 'server' ? jsDebugLogsState.serverEpoch : jsDebugClientLogEpoch;
   return [...server, ...client]
     .filter(entry => {
       if (seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
     })
-    .filter(entry => Number(entry.timestamp || 0) * 1000 > jsDebugLogsState.clearedAt)
+    // Clear hides only records at or below the per-producer cleared sequence, and only while
+    // the producer's epoch still matches — a ring/epoch reset resurfaces everything. Wall time
+    // is never consulted, so a clock rollback cannot resurface a record hidden by a later Clear.
+    .filter(entry => {
+      const cursor = cursors[entry.owner];
+      if (!cursor) return true;
+      return !(cursor.epoch === producerEpoch(entry.owner) && Number(entry.sequence) <= Number(cursor.sequence));
+    })
     .sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)) || String(b.id || '').localeCompare(String(a.id || '')))
     .slice(0, 500);
+}
+
+// Clear captures the current per-producer high-water sequence under its live epoch, so
+// only records visible at Clear time are hidden. A later record above the cursor, a clock
+// rollback, or a producer epoch reset all correctly resurface. This is the ONE owner of the
+// cleared-cursor identity; nothing consults wall time.
+function jsDebugLogRecordCleared() {
+  const highWaterSequence = ids => ids.reduce((max, id) => (Number.isSafeInteger(id) && id > max ? id : max), 0);
+  jsDebugLogsState.clearedCursors = {
+    server: {
+      epoch: jsDebugLogsState.serverEpoch,
+      sequence: highWaterSequence(jsDebugLogsState.payload.map(entry => Number(entry?.id))),
+    },
+    client: {
+      epoch: jsDebugClientLogEpoch,
+      sequence: highWaterSequence(jsDebugEvents.map(event => Number(event?.id))),
+    },
+  };
+}
+
+// Validate a raw /api/logs envelope before it is adopted. A malformed, missing-epoch, or
+// sequence-inconsistent envelope is rejected with a bounded reason so the poll can keep the
+// last good snapshot and surface the failure visibly. Duplicate or repeated ids are NOT an
+// envelope error: the server may legitimately re-emit a record, so the poll stores the raw
+// logs and de-duplication happens at render time in debugMergedLogRecords (dedup by id).
+function jsDebugValidateServerLogEnvelope(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.ok !== true) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (typeof payload.epoch !== 'string' || payload.epoch === '') {
+    return {ok: false, reason: 'missing epoch'};
+  }
+  const sequence = Number(payload.sequence);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (!Array.isArray(payload.logs)) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  for (const entry of payload.logs) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    const id = Number(entry.id);
+    if (!Number.isSafeInteger(id) || id < 0) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    // Duplicate or nonmonotonic ids are accepted and stored raw; the render owner
+    // (debugMergedLogRecords) de-duplicates by id. Only an id beyond the envelope's own
+    // declared sequence is envelope-inconsistent and rejected.
+    if (id > sequence) {
+      return {ok: false, reason: 'log id exceeds envelope sequence'};
+    }
+  }
+  return {ok: true, epoch: payload.epoch, sequence, logs: payload.logs};
 }
 
 function debugVisibleLogRecords() {
@@ -1960,11 +2035,6 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
     debugGraphMergeBucket(target, bucket);
     jsDebugGraphBuckets.delete(key);
   }
-  const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
-  for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
-    if (Number(record?.lastSeenAt || 0) >= refCutoff) continue;
-    jsDebugGraphEventRecords.delete(id);
-  }
 }
 
 function recordJsDebugEventForGraph(event) {
@@ -1993,6 +2063,18 @@ function jsDebugCurrentObservationEventSnapshot(event) {
   return snapshot;
 }
 
+// Finalize a reserved observation EXACTLY ONCE: snapshot its current live content into the
+// immutable upload event, then release the live-event reference so no later measurement can
+// rewrite it. A failure's content is already complete, and a restored (pre-finalized) entry
+// is never re-snapshotted.
+function finalizeJsDebugCurrentObservation(entry) {
+  if (!entry || entry.finalized) return entry;
+  entry.event = jsDebugCurrentObservationEventSnapshot(entry.liveEvent || entry.event);
+  entry.finalized = true;
+  entry.liveEvent = null;
+  return entry;
+}
+
 function queueJsDebugCurrentObservation(key, event) {
   if (!clientCanUseUnscopedHostRequests()) return;
   if (jsDebugCurrentObservationState.keys.has(key)) return;
@@ -2002,9 +2084,15 @@ function queueJsDebugCurrentObservation(key, event) {
     jsDebugCurrentObservationState.drops += 1;
     return;
   }
-  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, releaseBlocking};
+  // Reserve identity immediately, keeping a reference to the live event. A failure reserves
+  // its already-complete identity and finalizes at once; a non-failure API observation stays
+  // open until its bounded byte/timing enrichment arrives (finalizeJsDebugCurrentObservationBytes)
+  // or the flush finalizes whatever it measured. Every other event has no post-queue enrichment,
+  // so it finalizes immediately.
+  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, liveEvent: event, releaseBlocking, finalized: false};
   jsDebugCurrentObservationState.keys.add(entry.key);
   jsDebugCurrentObservationState.queue.push(entry);
+  if (releaseBlocking || observationEvent.type !== 'api') finalizeJsDebugCurrentObservation(entry);
   if (releaseBlocking) {
     jsDebugCurrentObservationState.receipts.set(entry.key, {
       key: entry.key,
@@ -2418,7 +2506,9 @@ function restoreJsDebugCurrentObservationReceipts() {
       }
       restoredEntries.set(entry.key, entry);
       state.keys.add(entry.key);
-      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, releaseBlocking: true});
+      // A restored receipt journal carries already-finalized, immutable content; it is never
+      // re-snapshotted, so it has no live event and is marked finalized on adoption.
+      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, liveEvent: null, releaseBlocking: true, finalized: true});
     }
   }
   if (!jsDebugCurrentObservationReceiptStorageHealthy()) {
@@ -2676,6 +2766,9 @@ async function flushJsDebugCurrentObservations() {
   }
   if (state.inFlight) return state.inFlight;
   if (!state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  // Any observation still open at flush time (e.g. an API response that never reported bytes)
+  // finalizes with whatever it measured, so its content is immutable before it is uploaded.
+  for (const entry of state.queue) finalizeJsDebugCurrentObservation(entry);
   const entries = [...state.queue.filter(entry => entry.releaseBlocking), ...state.queue.filter(entry => !entry.releaseBlocking)]
     .slice(0, jsDebugObservationUploadMaxItems);
   const prepared = entries.map(entry => ({entry, observation: jsDebugCurrentObservationFromEvent(entry)}));
@@ -2762,19 +2855,16 @@ async function flushJsDebugCurrentObservations() {
   return inFlight;
 }
 
-function recordApiDebugResponseBytesForGraph(event, responseBytes) {
-  if (!event || !Number.isFinite(event.id)) return;
-  const record = jsDebugGraphEventRecords.get(event.id);
-  if (!record?.bucket) return;
-  const nextBytes = Number(responseBytes);
-  if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
-  const previousBytes = Number(record.responseBytes || 0);
-  const delta = nextBytes - previousBytes;
-  record.responseBytes = nextBytes;
-  record.lastSeenAt = Date.now();
-  if (delta === 0) return;
-  debugGraphAddBucketData(debugGraphBucketForTime(Number(record.bucket.startMs), Date.now()), {bandwidthBytes: delta});
-  debugGraphQueueServerDelta(record.bucket, {bandwidthBytes: delta});
+// The bytes finalizer for a still-open API observation. The live event already carries the
+// measured, bounded byte count (Content-Length or a response clone; rejected, hung, or
+// unconsumed bodies simply leave it absent), so this locates the reserved queue entry by live
+// identity and finalizes it exactly once. A late measurement for an already-finalized (or
+// immediate-failure) observation finds no open entry and cannot rewrite its immutable content.
+function finalizeJsDebugCurrentObservationBytes(liveEvent) {
+  if (!liveEvent || typeof liveEvent !== 'object') return;
+  const entry = jsDebugCurrentObservationState.queue.find(item => item && item.liveEvent === liveEvent && !item.finalized);
+  if (!entry) return;
+  finalizeJsDebugCurrentObservation(entry);
 }
 
 function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
@@ -2911,7 +3001,6 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 
 function clearJsDebugGraphData() {
   jsDebugGraphBuckets.clear();
-  jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
   // the cache we just cleared (kept the reload-idempotency of the rendered history).
@@ -4091,29 +4180,24 @@ function debugGraphClientMetricSeriesDefs(buckets) {
 
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
-  for (const [bucketIndex, bucket] of buckets.entries()) {
+  for (const bucket of buckets) {
     if (!(bucket.servers instanceof Map)) continue;
     for (const [processId, process] of bucket.servers.entries()) {
       if (Number(process?.cpuCount || 0) <= 0) continue;
-      processes.set(processId, {label: String(process?.label || processId), bucketIndex});
+      if (!processes.has(processId)) processes.set(processId, {label: String(process?.label || processId)});
     }
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
-  const fallbackSelf = {
-    key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
-    value: bucket => bucket.cpuCount ? bucket.cpuTotalPercent / bucket.cpuCount : 0,
-    hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
-  };
-  if (!processes.size) return [fallbackSelf];
-  const activeProcessId = processes.has(currentProcessId)
-    ? currentProcessId
-    : [...processes.entries()].sort((left, right) => right[1].bucketIndex - left[1].bucketIndex || left[0].localeCompare(right[0]))[0][0];
+  // Truthfulness: the exact serving `port:N` is ALWAYS the one solid series, even with zero
+  // samples in this window (it renders as an honest gap). It is never dropped, a peer is never
+  // promoted in its place, and there is no aggregate `cpu` fallback series.
+  if (!processes.has(currentProcessId)) processes.set(currentProcessId, {label: currentProcessId});
   let peerIndex = 0;
   const definitions = [...processes.entries()]
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
     .map(([processId, process]) => {
-      const current = processId === activeProcessId;
+      const current = processId === currentProcessId;
       const legacyWebPort = String(processId).match(/^port:(\d+)$/);
       const displayLabel = legacyWebPort && process.label === processId
         ? (current ? 'yolomux.py (web)' : `yolomux.py (web) :${legacyWebPort[1]}`)
@@ -5466,17 +5550,19 @@ function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
   // A stale revision means these rows may be old, not that the known roster is empty.
   // Keep the count and breakdown honest while the per-session stale text explains freshness.
   const sessions = new Set(rows.map(row => row.session));
-  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  // ONE compact summary carries the stale count; the per-session stale specifics move under the
+  // Live breakdown rather than being repeated as header prose.
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions${staleSessions.length ? ` (${staleSessions.length} stale)` : ''}`;
   const details = rows.map(({session, agent, kind}) => {
     const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
     const state = agentWindowStateKey(agent?.state);
     return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
   }).join('');
-  const staleText = staleSessions.length
-    ? ` ${staleSessions.map(item => `${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`).join('; ')}`
+  const stalePerSession = staleSessions.length
+    ? `<ul class="js-debug-agent-window-detail-stale">${staleSessions.map(item => `<li>${esc(`${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`)}</li>`).join('')}</ul>`
     : '';
   const state = staleSessions.length ? 'stale' : 'current';
-  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span>${staleText ? `<span class="js-debug-agent-window-detail-stale">${esc(staleText.trim())}</span>` : ''}<details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul>${stalePerSession}</details></div>`;
 }
 
 function refreshDebugAgentWindowLiveDetails() {
@@ -6663,7 +6749,6 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
-    eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
     rangeSeconds: jsDebugGraphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
@@ -6917,8 +7002,11 @@ function pollJsDebugStatsOnInterval() {
 }
 
 // Fire the full-retention prefetch once shortly after the current range lands, then on a
-// slow cadence. Visibility is enforced by the poll loop itself (it stops when hidden) plus
-// the guard inside prefetchJsDebugHistoryFullRetention, so a hidden panel does zero work.
+// slow cadence. The poll loop stops when the panel is hidden and the prefetch itself is
+// retired (see below), so neither does any work while the panel is hidden. This is only the
+// poll/prefetch path: the live SSE stream is separate and tracks DOCUMENT visibility, not the
+// active tab, so a hidden panel on a still-visible page keeps applying deltas (it just does
+// not repaint); only a hidden document tears the stream down.
 function maybePrefetchJsDebugHistory() {
   if (!jsDebugStatsPollState.firstSampleReceived) return;
   if (jsDebugHistoryPrefetchState.inFlight) return;
@@ -7145,7 +7233,9 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name.startsWith('cpu_percent:')) {
       const source = name.slice('cpu_percent:'.length);
       record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
-      if (!record.cpu_count || source.includes(':8881')) {
+      // No serving-port preference: the exact serving port owns the solid CPU series in
+      // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
+      if (!record.cpu_count) {
         record.cpu_total_percent = value;
         record.cpu_count = 1;
       }
@@ -7828,6 +7918,8 @@ function debugSystemHealthSnapshotHtml(health = {}) {
   // change" beside a short "Last checked" is a QUIET system and not a broken one.
   const checked = debugSystemScalar(cycleAgeSeconds, 'no_observer_cycle_recorded', value => `${relativeTimeFormat(value)} (${debugSystemNumber(value, 1)}s ago)`);
   const cycles = debugSystemScalar(health.observer_cycles, health.observer_liveness_reason_code || 'observer_unattached');
+  const rawEpochStartedAt = Number(health.observer_epoch_started_at);
+  const epochStartedAt = Number.isFinite(rawEpochStartedAt) ? rawEpochStartedAt : 0;
   const rows = [
     ['Snapshot revision', Number(health.revision) > 0 ? `#${String(health.revision)}` : t('common.notAvailable')],
     ['Observer last checked', checked.text, checked.reason],
@@ -7836,6 +7928,12 @@ function debugSystemHealthSnapshotHtml(health = {}) {
     ['Observer cycles', cycles.text, cycles.reason],
     ['Last state change', ageSeconds == null ? 'never' : `${relativeTimeFormat(ageSeconds)} (${debugSystemNumber(ageSeconds, 1)}s old)`],
     ['Observer epoch', String(health.observer_epoch || '') || t('common.notAvailable')],
+    // The wall-clock instant this observer epoch began collecting -- i.e. how far back the
+    // retained history actually reaches. The backend already publishes it as
+    // `observer_epoch_started_at`; this is the reader-facing label for it. Absent (never
+    // available) reads as not-available rather than the epoch-zero date a bare `new Date(0)`
+    // would print.
+    ['History retained since', epochStartedAt > 0 ? debugGraphTimeLabel(epochStartedAt * 1000, {includeDate: true, includeSeconds: true}) : t('common.notAvailable')],
     ['Services retained', Number.isFinite(Number(health.resources)) ? debugSystemNumber(health.resources) : t('common.notAvailable')],
   ];
   // The reason CODE, not its sentence. The sentence is an explanation and the alert slot above the
@@ -8398,10 +8496,11 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
   </div>`;
 }
 
-// M8 bumped `local_services.schema_version` to 2 when every row grew a `health` block and the
-// payload grew a snapshot-level one. The guard is exact, not `>=`: rendering an older payload
-// through the roster would print absent health as though it had been measured, which is the defect
-// the version number exists to prevent.
+// The schema this panel renders. M8 bumped it to 2 when every row grew a `health` block and the
+// payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed
+// from the payload. The guard is exact, not `>=`: rendering an older payload through the roster
+// would print absent health as though it had been measured, which is the defect the version number
+// exists to prevent.
 //
 // It has ONE reader: `debugSystemRosterServiceRow`, which turns a false answer into the typed
 // `schema_unsupported` row state. There used to be a second -- a whole retained per-cell table,
@@ -8410,7 +8509,7 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
 // condition the roster already covers is the divergent-copies defect; the roster says it in one
 // typed state now, and the legacy view is gone.
 function debugSystemLocalServicesSchemaSupported(payload = {}) {
-  return Number(payload.local_services?.schema_version) === 2;
+  return Number(payload.local_services?.schema_version) === 3;
 }
 
 // The ONE reader of `payload.local_services`, and the reason the rule above is absolute rather
@@ -8420,7 +8519,7 @@ function debugSystemLocalServicesSchemaSupported(payload = {}) {
 //
 // This exists because the guard used to live inside `debugSystemRosterRows`, one branch DOWN from
 // the reads: `inventory`, `services` and `health.port` were all pulled out of the payload above
-// it, and the port was handed to the web row before the branch was ever evaluated. A schema-3
+// it, and the port was handed to the web row before the branch was ever evaluated. An unsupported
 // payload therefore still changed the rendered HTML while the tests asserted it was interpreted
 // nowhere, and the suite stayed green. A rule written at one call site is not a rule; a rule that
 // owns the only read is.
@@ -9166,9 +9265,17 @@ async function pollDebugLogs({force = false} = {}) {
   refreshDebugLogsViews();
   try {
     const payload = await apiFetchJsonQuiet('/api/logs', {cache: 'no-store'});
-    jsDebugLogsState.payload = Array.isArray(payload?.logs)
-      ? shareRedactDiagnosticValue(payload.logs.slice(-500))
-      : [];
+    const envelope = jsDebugValidateServerLogEnvelope(payload);
+    if (!envelope.ok) {
+      // A malformed, missing-epoch, or envelope-inconsistent poll fails visibly and keeps the
+      // last good snapshot rather than adopting an untrustworthy server response. Duplicate ids
+      // are not a rejectable error: they are stored raw and de-duplicated at render time.
+      jsDebugLogsState.error = envelope.reason;
+      return false;
+    }
+    jsDebugLogsState.payload = shareRedactDiagnosticValue(envelope.logs.slice(-500));
+    jsDebugLogsState.serverEpoch = envelope.epoch;
+    jsDebugLogsState.serverSequence = envelope.sequence;
     jsDebugLogsState.updatedAt = Date.now();
     return true;
   } catch (error) {
@@ -9591,7 +9698,8 @@ function debugGraphSlideIntervalMs(resolutionMs) {
 function debugGraphSlidingAxisActive() {
   // Live ranges up to 1h advance continuously with the wall clock so the axis
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
-  // (>1h), zoomed, and hidden views stay static per the range-scaled cadence contract.
+  // (>1h) ranges and fixed historical zooms are static by design; a hidden document or
+  // hidden panel is not static but simply does not repaint until it is shown again.
   return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
@@ -10571,7 +10679,7 @@ function bindDebugPanel(panel) {
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
     if (logsClear && panel.contains(logsClear)) {
       event.preventDefault();
-      jsDebugLogsState.clearedAt = Date.now();
+      jsDebugLogRecordCleared();
       refreshDebugLogsViews();
       statusEl.textContent = t('debug.logs.cleared');
       return;

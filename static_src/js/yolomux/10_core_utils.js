@@ -140,39 +140,83 @@ function backendHealthIndicatorHost() {
   return topbar.querySelector('.topbar-right-tools') || topbar;
 }
 
-function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
-  if (!host) return null;
-  // Look the existing node up across the whole topbar, not just the host: if .topbar-right-tools
-  // appears after the first render, a host-scoped lookup would build a second indicator.
-  const scope = topbar || host;
-  let indicator = scope.querySelector('[data-backend-health]');
-  const model = backendHealthIndicatorModel();
-  if (!model) {
-    indicator?.remove();
-    return null;
-  }
-  if (!indicator) {
-    indicator = document.createElement('span');
-    indicator.className = 'backend-health-indicator';
-    indicator.setAttribute('role', 'status');
-    const message = document.createElement('span');
-    message.className = 'backend-health-indicator-text';
-    indicator.append(message, makeButton({
-      className: 'backend-health-indicator-details',
-      label: t('common.details'),
-      ariaLabel: t('backendHealth.detailsAria'),
-      onClick: () => {
-        openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
-      },
-    }));
-    host.prepend(indicator);
-  }
-  indicator.dataset.backendHealth = model.severity;
-  if (model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
+// One glyph for the fixed icon shell. It is a marker, never the message: the severity is carried by
+// the WORDS in the role=status label, so a monochrome or forced-colours theme still reads correctly.
+function backendHealthIndicatorGlyph(severity) {
+  return severity ? '⚠' : '';
+}
+
+// The permanently mounted, fixed-size backend-health control. It is built once by
+// createTopbarRightTools() and NEVER inserted or removed on a health transition: a change only
+// repaints it and rewrites its accessible sentence, so the topbar, #grid, and every xterm keep the
+// same geometry before, during, and after a warning. The full localized sentence lives in the
+// role=status live region AND on the control's aria-label/title; the whole control is the System
+// Details route, so there is no separate variable-width Details button to grow the row.
+function createBackendHealthIndicator() {
+  const indicator = makeButton({
+    id: 'backendHealthIndicator',
+    className: 'backend-health-indicator',
+    onClick: () => {
+      openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
+    },
+  });
+  const icon = document.createElement('span');
+  icon.className = 'backend-health-indicator-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  const message = document.createElement('span');
+  message.className = 'backend-health-indicator-text';
+  message.setAttribute('role', 'status');
+  message.setAttribute('aria-live', 'polite');
+  indicator.append(icon, message);
+  applyBackendHealthIndicatorState(indicator, backendHealthIndicatorModel());
+  return indicator;
+}
+
+// Push one model (or null when healthy) into the existing control. Healthy is a state of the SAME
+// node -- an inert, empty, transparent icon shell that still occupies its fixed slot -- not the
+// node's absence, so recovery does not remove layout content.
+function applyBackendHealthIndicatorState(indicator, model) {
+  const severity = model ? model.severity : '';
+  indicator.dataset.backendHealth = severity;
+  if (model && model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
   else delete indicator.dataset.backendHealthReason;
+  indicator.querySelector('.backend-health-indicator-icon').textContent = backendHealthIndicatorGlyph(severity);
   // The severity is carried by the WORDS ("is not running" vs "is degraded"), not by the colour the
   // data-backend-health token selects, so the warning survives a monochrome or high-contrast theme.
-  indicator.querySelector('.backend-health-indicator-text').textContent = model.text;
+  indicator.querySelector('.backend-health-indicator-text').textContent = model ? model.text : '';
+  if (model) {
+    indicator.disabled = false;
+    // The accessible NAME describes what activating the control does (open the System details); the
+    // live-region text above announces the STATE sentence, and the tooltip carries the full sentence.
+    indicator.setAttribute('aria-label', t('backendHealth.detailsAria'));
+    indicator.setAttribute('title', model.text);
+    indicator.removeAttribute('aria-hidden');
+  } else {
+    indicator.disabled = true;
+    indicator.removeAttribute('aria-label');
+    indicator.removeAttribute('title');
+    indicator.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
+  const model = backendHealthIndicatorModel();
+  // Look the existing node up across the whole topbar, not just the host: the control is normally
+  // built into .topbar-right-tools, but if that host is torn down and rebuilt -- fallback-mounting a
+  // control in the topbar while a detached one waits to be re-inserted -- there must still be exactly
+  // ONE. Keep the first in document order and collapse any extra so a rebuild cannot leave two owners.
+  const scope = topbar || host || document;
+  const existing = Array.from(scope.querySelectorAll('[data-backend-health]'));
+  let indicator = existing[0] || null;
+  for (let index = 1; index < existing.length; index += 1) existing[index].remove();
+  if (!indicator) {
+    // The control is missing only before the right-tools builder has run, or in the fallback where
+    // .topbar-right-tools was removed at runtime. Mount one and keep updating it in place thereafter.
+    if (!host) return null;
+    indicator = createBackendHealthIndicator();
+    host.prepend(indicator);
+  }
+  applyBackendHealthIndicatorState(indicator, model);
   return indicator;
 }
 
@@ -297,6 +341,14 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
+  // Some internal probes have an EXPECTED non-2xx outcome (e.g. an open-editor deletion-confirmation
+  // read that a genuine 404 answers). Recording that expected status as a jsDebug API failure is a false
+  // positive the strict browser error gate flags. quietStatuses suppresses the debug event ONLY for those
+  // exact expected response statuses; every other status, and any thrown transport/network error, still
+  // records loud, so genuine failures never go silent.
+  const quietStatuses = Array.isArray(internalOptions.quietStatuses)
+    ? new Set(internalOptions.quietStatuses.map(Number))
+    : null;
   const diagnosticProvenance = ['controlled_probe', 'confirmed_real'].includes(internalOptions.provenance)
     ? internalOptions.provenance
     : '';
@@ -365,7 +417,9 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   noteBackendHealthSuccess();
   if (recordDebug) notePageLoadApiCompleted();
   let debugEvent = null;
-  if (recordDebug) {
+  // An expected status (a controlled probe's own verdict) is not an API failure; do not record it.
+  const suppressExpectedStatus = Boolean(quietStatuses && quietStatuses.has(Number(response.status)));
+  if (recordDebug && !suppressExpectedStatus) {
     debugEvent = recordApiDebugEvent(url, method, startedAt, {
       status: response.status,
       ok: response.ok,
@@ -625,6 +679,11 @@ function apiOperationTerminalData(record, payload = {}) {
 function recordApiOperationTerminalFailure(record, error, expected = {}) {
   if (error?.name !== 'ApiOperationTerminalError' || !expected.url) return;
   const status = Number(error.status);
+  // An expected terminal status (a controlled probe's own verdict, e.g. a deletion-confirmation 404) is
+  // not an API failure; suppress it. Any other status, and non-status transport errors, still record.
+  if (Array.isArray(expected.quietStatuses)
+    && Number.isSafeInteger(status)
+    && expected.quietStatuses.map(Number).includes(status)) return;
   recordApiDebugEvent(expected.url, expected.method || 'GET', record.acceptedAt, {
     ...(Number.isSafeInteger(status) && status >= 100 && status <= 599 ? {status, ok: false} : {error}),
     requestId: record.request?.id,
@@ -842,7 +901,7 @@ async function apiJsonResponse(response) {
   return payload;
 }
 
-async function apiFetchJson(url, options = {}) {
+async function apiFetchJson(url, options = {}, internalOptions = {}) {
   const lifecycle = typeof tmuxSessionLifecycleRequestLease === 'function'
     ? tmuxSessionLifecycleRequestLease(url, options)
     : {session: '', lease: null, blocked: false};
@@ -855,7 +914,7 @@ async function apiFetchJson(url, options = {}) {
     lifecycle.lease?.release?.();
   };
   try {
-    const result = await apiJsonResponse(await apiFetch(url, options));
+    const result = await apiJsonResponse(await apiFetch(url, options, internalOptions));
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
     }
@@ -870,6 +929,7 @@ async function apiFetchJson(url, options = {}) {
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),
+      quietStatuses: internalOptions.quietStatuses,
     });
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
@@ -1350,14 +1410,14 @@ function recordApiDebugResponseBytes(event, response) {
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
     return;
   }
   if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
@@ -1387,12 +1447,19 @@ function diagnosticPacificWallTime(value) {
 
 function recordJsDebugEvent(type, payload = {}) {
   const timestampMs = Date.now();
+  // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
+  // fields AFTER the spread so a payload carrying its own id/ts/type can never overwrite the
+  // trusted monotonic identity this producer assigns. `wallTime` is NOT one of those fields: a
+  // browser-lifecycle failure records the Pacific wall time it observed the failure at, and the
+  // finalizer reports THAT time, not the later moment this event was retained -- so a caller
+  // wallTime is preserved and the producer only stamps its own when the caller supplied none.
+  const redacted = shareRedactDiagnosticValue(payload);
   const event = {
+    ...redacted,
     id: ++jsDebugEventSeq,
     ts: new Date(timestampMs).toISOString(),
-    wallTime: diagnosticPacificWallTime(timestampMs),
+    wallTime: String(redacted.wallTime || diagnosticPacificWallTime(timestampMs)),
     type: String(type || 'event'),
-    ...shareRedactDiagnosticValue(payload),
   };
   jsDebugEvents.push(event);
   if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
@@ -3006,6 +3073,73 @@ function writeStoredFileExplorerIndexedDirs() {
     .filter(Boolean)
     .sort((left, right) => left.localeCompare(right));
   storageSet(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
+}
+
+// A synchronous SHA-256 over a string's UTF-8 bytes, returning the lowercase hex digest. The
+// search-progress bus keys every root by the server's opaque digest sha256(canonical_root_key)[:16]
+// (yolomux_lib/search/file_index.py::_root_scope_id): a filesystem path in a signal's payload would
+// disclose one client's directory to every other client on the globally-fanned-out bus, so the frame
+// carries only the digest. The browser recomputes the SAME digest from a snapshot's root_realpath to
+// correlate a path-free progress signal back to the root it searched. crypto.subtle.digest is async
+// and absent from the node test VM, so this is a self-contained synchronous implementation.
+const SHA256_ROUND_CONSTANTS = Object.freeze([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexOfString(text) {
+  const bytes = new TextEncoder().encode(String(text ?? ''));
+  const length = bytes.length;
+  // Message padding: 0x80, then zeros to a 56-mod-64 boundary, then the 64-bit big-endian bit length.
+  const withPadding = new Uint8Array((((length + 8) >> 6) + 1) << 6);
+  withPadding.set(bytes);
+  withPadding[length] = 0x80;
+  const bitLength = length * 8;
+  const view = new DataView(withPadding.buffer);
+  view.setUint32(withPadding.length - 4, bitLength >>> 0, false);
+  view.setUint32(withPadding.length - 8, Math.floor(bitLength / 0x100000000), false);
+  const hash = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const words = new Uint32Array(64);
+  const rotr = (value, bits) => (value >>> bits) | (value << (32 - bits));
+  for (let offset = 0; offset < withPadding.length; offset += 64) {
+    for (let i = 0; i < 16; i += 1) words[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(words[i - 15], 7) ^ rotr(words[i - 15], 18) ^ (words[i - 15] >>> 3);
+      const s1 = rotr(words[i - 2], 17) ^ rotr(words[i - 2], 19) ^ (words[i - 2] >>> 10);
+      words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hash;
+    for (let i = 0; i < 64; i += 1) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_ROUND_CONSTANTS[i] + words[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    hash[0] = (hash[0] + a) >>> 0; hash[1] = (hash[1] + b) >>> 0;
+    hash[2] = (hash[2] + c) >>> 0; hash[3] = (hash[3] + d) >>> 0;
+    hash[4] = (hash[4] + e) >>> 0; hash[5] = (hash[5] + f) >>> 0;
+    hash[6] = (hash[6] + g) >>> 0; hash[7] = (hash[7] + h) >>> 0;
+  }
+  return Array.from(hash, value => value.toString(16).padStart(8, '0')).join('');
+}
+
+// The 16-hex-char opaque root digest the search-progress bus uses (the first 16 hex chars of the
+// SHA-256 of the canonical root path). Correlates a path-free progress signal to a searched root.
+function fileSearchScopeId(realpath) {
+  const canonical = String(realpath ?? '').trim();
+  return canonical ? sha256HexOfString(canonical).slice(0, 16) : '';
 }
 
 function nestedSetting(source, path, fallback) {

@@ -116,6 +116,88 @@ def git_branch_name(
     return "" if name == "HEAD" else name
 
 
+# A repository whose HEAD identity cannot be read -- not a repository, an unborn repository with
+# no commit yet, or a Git failure -- gets this typed sentinel.  It is deliberately UNIQUE and can
+# never equal a valid ``(symbolic_head, oid)`` signature, so a malformed read for ONE repository
+# neither advances its own generation nor can be mistaken for another repository's state.  The
+# leading NUL keeps it out of the space of real branch names and object IDs.
+REPOSITORY_SIGNATURE_UNKNOWN: tuple[str, ...] = ("\x00repository-signature-unknown",)
+
+_REPOSITORY_GENERATION_LOCK = threading.Lock()
+# root text -> (last observed private signature, generation last reported for it)
+_REPOSITORY_GENERATIONS: dict[str, tuple[tuple[str, ...], int]] = {}
+
+
+def private_repository_signature(
+    root: Path,
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> tuple[str, ...]:
+    """Return a path-free identity of a repository's checked-out HEAD.
+
+    The signature is ``(symbolic HEAD ref, HEAD commit OID)``.  Two branches that point at
+    the SAME commit share an OID but differ in their symbolic ref, so switching between them
+    over an identical working tree still changes the signature -- and therefore advances the
+    typed generation below -- WITHOUT ever naming a ``.git`` path.  A detached HEAD has no
+    symbolic ref, so its ref component is empty; switching from detached to a branch at the
+    same commit is still a change.  Nothing here reads or returns a control-file path, so the
+    value is safe to compare inside a public consumer's cache identity while ``.git`` itself
+    stays excluded everywhere.
+
+    An unreadable HEAD (no repository, no commit yet, or a Git error) returns the typed
+    unknown sentinel rather than a fabricated empty signature, so "could not read" stays a
+    distinct answer from "detached at no branch".
+    """
+
+    run = runner or (lambda args: git(args, cwd=str(root), timeout=1.0))
+    head = run(["rev-parse", "HEAD"])
+    if head.returncode != 0:
+        return REPOSITORY_SIGNATURE_UNKNOWN
+    oid = head.stdout.strip()
+    if not oid:
+        return REPOSITORY_SIGNATURE_UNKNOWN
+    symbolic = run(["symbolic-ref", "--quiet", "--short", "HEAD"])
+    symbolic_head = symbolic.stdout.strip() if symbolic.returncode == 0 else ""
+    return (symbolic_head, oid)
+
+
+def repository_generation(
+    root: Path,
+    *,
+    runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> int:
+    """Advance and return a per-repository generation that ticks on each HEAD identity change.
+
+    This is the typed repository generation a consumer compares to decide whether a cached,
+    branch-scoped view is still current.  It advances by one every time the private signature
+    changes -- including an identical-tree branch switch, which no working-tree filesystem event
+    reports -- and stays put while the signature is unchanged.  It is keyed by resolved root, so
+    one tenant's repository can never advance another's counter.
+
+    An unreadable HEAD is inconclusive, not a change: it holds the last known generation and does
+    NOT overwrite a previously known signature, so a transient Git failure in one repository can
+    neither manufacture churn nor leak into a co-tenant repository's generation.
+    """
+
+    root_text = str(Path(root).expanduser().resolve(strict=False))
+    signature = private_repository_signature(root, runner=runner)
+    with _REPOSITORY_GENERATION_LOCK:
+        previous = _REPOSITORY_GENERATIONS.get(root_text)
+        if signature == REPOSITORY_SIGNATURE_UNKNOWN:
+            if previous is None:
+                _REPOSITORY_GENERATIONS[root_text] = (signature, 0)
+                return 0
+            return previous[1]
+        if previous is None:
+            generation = 1
+        elif previous[0] == signature:
+            generation = previous[1]
+        else:
+            generation = previous[1] + 1
+        _REPOSITORY_GENERATIONS[root_text] = (signature, generation)
+        return generation
+
+
 # Finder lists can contain many worktrees.  Keep their small branch/status payload behind one
 # bounded, process-local owner: browser cache only avoids repeat HTTP calls and cannot save a cold
 # `/api/fs/list` or `/api/fs/info` request.  The control-file signature catches direct callers;

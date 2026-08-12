@@ -30,6 +30,9 @@ from tests.serving_process import process_group_has_serving_member
 from tests.tmux_runtime import run_isolated_tmux
 from tests.tmux_runtime import wait_for_isolated_tmux_panes
 from yolomux_lib.local_services.registry import process_state
+from yolomux_lib.tmux.session_retirement import capture_tmux_session_retirement
+from yolomux_lib.tmux.session_retirement import join_tmux_session_retirement
+from yolomux_lib.tmux.session_retirement import retained_tmux_session_births
 from yolomux_lib.tmux.sessions import discover_sessions
 
 
@@ -267,6 +270,31 @@ def _start_foreign_socket_session(tmux_runtime, socket_path: Path) -> None:
     assert started.returncode == 0, started.stderr or started.stdout
 
 
+def _start_ready_retirement_session(tmux_runtime) -> None:
+    """Launch a deterministic long-lived process and wait for its explicit READY."""
+
+    source = "import signal; print('R6_RETIREMENT_READY', flush=True); signal.pause()"
+    created = run_isolated_tmux(
+        tmux_runtime,
+        "new-session",
+        "-d",
+        "-s",
+        NEW_SESSION,
+        sys.executable,
+        "-u",
+        "-c",
+        source,
+    )
+    assert created.returncode == 0, created.stderr or created.stdout
+    ready, panes = wait_for_isolated_tmux_panes(
+        tmux_runtime,
+        (NEW_SESSION,),
+        lambda captures: "R6_RETIREMENT_READY" in captures.get(NEW_SESSION, ""),
+        timeout=5,
+    )
+    assert ready, panes
+
+
 def _foreign_socket_has_session(tmux_runtime, socket_path: Path) -> int:
     return subprocess.run(
         (tmux_runtime.tmux_binary, "-S", str(socket_path), "has-session", "-t", f"{NEW_SESSION}:"),
@@ -413,12 +441,13 @@ def test_r6_kill_removes_row_and_process_group_without_touching_another_socket(b
     _assert_agent_detected(browser, gate_live_server, "claude")
     pane_pid, process_group_id = _pane_process_group(gate_live_server.tmux)
     assert pane_pid > 1 and process_group_id > 1
+    retirement_identity = capture_tmux_session_retirement(NEW_SESSION)
 
     foreign_socket = gate_live_server.tmux.socket_dir / "foreign-s"
     _start_foreign_socket_session(gate_live_server.tmux, foreign_socket)
     try:
         _kill_session_in_browser(browser)
-        WebDriverWait(browser, 5, poll_frequency=0.05).until(lambda _driver: not _process_group_exists(process_group_id))
+        join_tmux_session_retirement(retirement_identity, timeout=0)
         assert run_isolated_tmux(gate_live_server.tmux, "has-session", "-t", f"{NEW_SESSION}:").returncode != 0
         assert _foreign_socket_has_session(gate_live_server.tmux, foreign_socket) == 0
     finally:
@@ -442,26 +471,25 @@ def test_r6_kill_invariants_reject_a_surviving_group_and_a_killed_foreign_socket
     discriminating rather than merely satisfied.
     """
 
-    created = run_isolated_tmux(gate_tmux, "new-session", "-d", "-s", NEW_SESSION)
-    assert created.returncode == 0, created.stderr or created.stdout
+    _start_ready_retirement_session(gate_tmux)
     pane_pid, process_group_id = _pane_process_group(gate_tmux)
     assert pane_pid > 1 and process_group_id > 1
+    retirement_identity = capture_tmux_session_retirement(NEW_SESSION)
 
     foreign_socket = gate_tmux.socket_dir / "negative-control-s"
     _start_foreign_socket_session(gate_tmux, foreign_socket)
     try:
         # Live state: every predicate reports the session and its process group as present.
         assert _process_group_exists(process_group_id) is True
+        assert retained_tmux_session_births(retirement_identity)
         assert run_isolated_tmux(gate_tmux, "has-session", "-t", f"{NEW_SESSION}:").returncode == 0
         assert _foreign_socket_has_session(gate_tmux, foreign_socket) == 0
 
         # A kill scoped to the fixture socket must be visible in both fixture-socket predicates.
         killed = run_isolated_tmux(gate_tmux, "kill-session", "-t", f"{NEW_SESSION}:")
         assert killed.returncode == 0, killed.stderr or killed.stdout
-        deadline = time.monotonic() + 5.0
-        while _process_group_exists(process_group_id) and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert _process_group_exists(process_group_id) is False
+        join_tmux_session_retirement(retirement_identity)
+        assert retained_tmux_session_births(retirement_identity) == ()
         assert run_isolated_tmux(gate_tmux, "has-session", "-t", f"{NEW_SESSION}:").returncode != 0
 
         # The foreign-socket predicate is the one that catches a kill leaking to another server.

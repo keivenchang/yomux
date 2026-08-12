@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 Keiven Chang. All rights reserved.
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 //
-// The Daemons roster front end: the System panel renders `local_services` schema 2 -- the
+// The Daemons roster front end: the System panel renders `local_services` schema 3 -- the
 // snapshot-level `health` provenance block and the per-row `health` block -- through the ONE
 // metric-envelope cell renderer, as ONE service roster with one disclosure per row.
 //
@@ -86,6 +86,11 @@ const SHARED_SOURCE = [
   sourceFunction('debugGraphTerseTimeText', 'debugGraphTerseBytesText'),
   sourceFunction('debugGraphTerseBytesText', 'debugGraphAxisValueText'),
   sourceFunction('debugGraphUptimeText', 'debugGraphBytesText'),
+  // The absolute wall-clock label the "History retained since" row renders from
+  // `observer_epoch_started_at`. `debugGraphTimeLabel` typeof-guards the optional
+  // `localizedDateTimeFormat`, so it renders here without the full i18n date module.
+  sourceFunction('debugGraphLocalDateKey', 'debugGraphTimeLabel'),
+  sourceFunction('debugGraphTimeLabel', 'debugGraphExactTimeLabel'),
   sourceFunction('debugSystemNumber', 'debugSystemRowsHtml'),
   sourceFunction('debugSystemRowsHtml', 'debugSystemCardHtml'),
   // The card shell, needed by the CPU-budget card below: it is the surface that coerced the
@@ -220,7 +225,7 @@ function serviceRow(id, overrides = {}, healthOverrides = {}) {
 
 function localServices(overrides = {}, serviceOverrides = {}) {
   return {
-    schema_version: 2,
+    schema_version: 3,
     inventory: ['statsd'],
     services: [serviceRow('statsd', overrides.serviceExtra || {}, serviceOverrides)],
     health: healthSnapshot(overrides.health || {}),
@@ -309,19 +314,21 @@ function renderAlerts(healthOverrides = {}) {
 
 // -- the guard ---------------------------------------------------------------------------------
 
-test('the panel guard renders schema 2, the version yolomux_lib/local_service_projection.py publishes', () => {
+test('the panel guard renders schema 3, the version yolomux_lib/local_service_projection.py publishes', () => {
   const guarded = [...source.matchAll(/Number\(payload\.local_services\?\.schema_version\) === (\d+)/g)].map(match => match[1]);
-  assert.deepEqual(guarded, ['2'], 'the panel must guard exactly once, on the published schema version');
+  assert.deepEqual(guarded, ['3'], 'the panel must guard exactly once, on the published schema version');
   const projection = fs.readFileSync('yolomux_lib/local_service_projection.py', 'utf8');
-  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 2$/m, 'producer and consumer pin the same number');
+  assert.match(projection, /^LOCAL_SERVICES_SCHEMA_VERSION = 3$/m, 'producer and consumer pin the same number');
 });
 
 test('an unsupported schema renders every health column as its reason, never as a number', () => {
   const supported = renderRoster(localServices());
   assert.match(supported, /data-subsystem-health-metric="restart_count" data-metric-state="measured" data-metric-coverage="full">3</);
 
+  // The immediately-previous schema (2) is now refused: removing the dead `alert` key was a shape
+  // change, so a schema-2 payload must fall through to the typed unsupported state, not render.
   const stale = localServices();
-  stale.schema_version = 1;
+  stale.schema_version = 2;
   const unsupported = renderRoster(stale);
   // `coverage="unavailable"`, not `"full"`. Coverage is read out of the payload's own health block,
   // and this panel has just said it cannot read that payload -- so claiming full coverage was one
@@ -343,7 +350,7 @@ test('an unsupported schema is ONE typed roster state, through the same tone and
   // one typed state that goes through `debugSystemStateTone` and `debugSystemRosterStateLabel`
   // exactly like every other state.
   const stale = localServices();
-  stale.schema_version = 1;
+  stale.schema_version = 2;
   const html = renderRoster(stale);
   // ONE row, and it is not a per-service row. A schema mismatch means the panel does not know
   // which services exist, so it lists none of them -- `statsd` is in this payload's inventory and
@@ -372,13 +379,13 @@ test('an unsupported schema is ONE typed roster state, through the same tone and
 });
 
 test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () => {
-  // THE REPRO. The earlier test set `schema_version: 1` on an otherwise schema-2 fixture, so every
-  // familiar field was still present and the per-service rows got built anyway -- the typed state
-  // appeared, but only because the payload happened to have the shape this panel knows. A payload
-  // from a genuinely newer schema need not carry `inventory` or `services` at all, and then the
-  // adapter produced NO service rows and the roster rendered as though the web process were the
+  // THE REPRO. The earlier test set a previous schema on an otherwise current-shaped fixture, so
+  // every familiar field was still present and the per-service rows got built anyway -- the typed
+  // state appeared, but only because the payload happened to have the shape this panel knows. A
+  // payload from a genuinely newer schema need not carry `inventory` or `services` at all, and then
+  // the adapter produced NO service rows and the roster rendered as though the web process were the
   // only thing running. Nothing anywhere said the panel could not read it.
-  for (const shape of [{schema_version: 3}, {schema_version: 3, inventory: [], services: []}]) {
+  for (const shape of [{schema_version: 4}, {schema_version: 4, inventory: [], services: []}]) {
     const html = renderRoster(shape);
     const ids = [...html.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
     assert.deepEqual(ids, ['web', 'tmux-signal-watcher', 'local-services'], JSON.stringify(shape));
@@ -393,7 +400,7 @@ test('a genuinely FUTURE-shaped payload still says it cannot be rendered', () =>
 
   // NEGATIVE CONTROL: a SUPPORTED payload with an empty inventory has genuinely nothing to list
   // and must not grow a warning row.
-  const supported = renderRoster({schema_version: 2, inventory: [], services: []});
+  const supported = renderRoster({schema_version: 3, inventory: [], services: []});
   const supportedIds = [...supported.matchAll(/data-subsystem-row data-subsystem-id="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(supportedIds, ['web', 'tmux-signal-watcher']);
   assert.doesNotMatch(supported, /schema_unsupported/);
@@ -406,7 +413,7 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
   // The rule is now absolute rather than field-by-field: an unreadable payload is never iterated
   // and never read, so there is no per-service row for any of it to reach.
   const future = {
-    schema_version: 3,
+    schema_version: 4,
     inventory: ['statsd'],
     services: [serviceRow('statsd', {pid: 4242, state: 'running'})],
   };
@@ -421,9 +428,9 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
   const detail = slice(html, 'id="js-debug-roster-detail-local-services"', '</tr>');
   assert.match(detail, /the backend published a local-services schema this panel does not render/);
 
-  // NEGATIVE CONTROL: the SAME fixture at schema 2 renders all of it, so the assertions above are
+  // NEGATIVE CONTROL: the SAME fixture at schema 3 renders all of it, so the assertions above are
   // measuring the guard and not a fixture that never had the data.
-  const supported = {...future, schema_version: 2};
+  const supported = {...future, schema_version: 3};
   const supportedRow = rosterRow(renderStatsdOpen(supported), 'statsd');
   assert.match(supportedRow, /data-subsystem-metric="rss_bytes" data-metric-state="measured"/);
   assert.match(slice(renderStatsdOpen(supported), 'id="js-debug-roster-detail-statsd"', '</tr>'), /observer samples: 450/);
@@ -432,8 +439,8 @@ test('an unsupported schema row interprets NO field from the schema it cannot re
 test('NO value from an unreadable payload reaches the HTML, by whole-output sweep', () => {
   // THE REPRO for a false green. The previous version of this contract asserted per-FIELD absence
   // -- no pid here, no memory there -- and passed while `health.port` was read one branch ABOVE
-  // the schema guard and handed to the web row as its qualifier. A schema-3 payload still changed
-  // the rendered output, and 49 tests stayed green.
+  // the schema guard and handed to the web row as its qualifier. An unsupported payload still
+  // changed the rendered output, and 49 tests stayed green.
   //
   // So this asserts over the whole rendered string, once per sentinel, rather than over the fields
   // someone thought to check. Each sentinel is a value that only this payload could have supplied.
@@ -449,7 +456,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   };
   const hostile = {
     // Familiar-LOOKING, so nothing about its shape warns a reader off it. Only the version differs.
-    schema_version: 3,
+    schema_version: 4,
     health: {
       available: true,
       port: Number(sentinels.port),
@@ -497,9 +504,9 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   assert.doesNotMatch(rosterRow(renderRoster(hostile), 'web'), /js-debug-roster-qualifier/);
   assert.equal(renderAlerts(hostile), '', 'an unreadable payload cannot raise a health or recovery alert');
 
-  // NEGATIVE CONTROL: at schema 2 the SAME payload renders those sentinels, so the sweep above is
+  // NEGATIVE CONTROL: at schema 3 the SAME payload renders those sentinels, so the sweep above is
   // measuring the guard and not a fixture that never carried the values.
-  const readable = {...hostile, schema_version: 2};
+  const readable = {...hostile, schema_version: 3};
   const supported = renderRoster(readable, {expanded: [sentinels.inventory]});
   for (const key of ['port', 'inventory', 'label', 'pid']) {
     assert.equal(supported.includes(sentinels[key]), true, `${key} must render when the schema IS supported`);
@@ -510,7 +517,7 @@ test('NO value from an unreadable payload reaches the HTML, by whole-output swee
   const direct = source.split('\n')
     .filter(line => line.includes('payload.local_services') && !line.trim().startsWith('//'));
   assert.deepEqual(direct.map(line => line.trim()), [
-    'return Number(payload.local_services?.schema_version) === 2;',
+    'return Number(payload.local_services?.schema_version) === 3;',
     "return payload.local_services && typeof payload.local_services === 'object' ? payload.local_services : {};",
   ], 'exactly two direct reads survive: the version guard, and the one owner it gates');
   assert.match(sourceFunction('debugSystemRenderableLocalServices', 'debugSystemRolesHtml'),
@@ -616,7 +623,7 @@ test('there is exactly one roster renderer, one row adapter and one status-tone 
   const advanced = sourceFunction('debugSystemAdvancedHtml', 'debugSystemRegionHtml');
   assert.match(advanced, /js-debug-system-grid/, 'the card grid survives only inside Advanced diagnostics');
   // No second inventory, no second label map, no ordering array in the browser.
-  const roster = slice(source, 'const DEBUG_SYSTEM_ROSTER_WEB_ID', '\n// M8 bumped `local_services.schema_version`');
+  const roster = slice(source, 'const DEBUG_SYSTEM_ROSTER_WEB_ID', '\n// The schema this panel renders.');
   assert.doesNotMatch(roster, /indexd/, 'the roster must not name a service id; the inventory owns them');
   assert.doesNotMatch(roster, /Quick Open|YO!stats'|Filesystem jobs/, 'the roster must not carry a label map');
 });
@@ -1062,6 +1069,20 @@ test('a quiet healthy observer is not reported as a dead one', () => {
   // The panel must hold NO threshold of its own: it cannot see the observer's cadence, and a
   // second copy of the deadline is exactly how the two drift apart again.
   assert.doesNotMatch(source, /DEBUG_SYSTEM_HEALTH_STALE_SECONDS\s*=/, 'the liveness deadline has one owner, in the observer');
+});
+
+test('the snapshot names when the retained history begins, from the observer epoch start', () => {
+  // W13 surfaced the already-published `observer_epoch_started_at` as a reader-facing row: how far
+  // back the retained history actually reaches. A present wall-clock renders an absolute label; an
+  // absent one reads as not-available, never the epoch-zero date a bare `new Date(0)` would print.
+  const present = renderSnapshot(healthSnapshot({observer_epoch_started_at: 1000}));
+  const presentMatch = present.match(/<dt>History retained since<\/dt><dd[^>]*>([^<]*)<\/dd>/);
+  assert.ok(presentMatch, 'the History retained since row is present');
+  assert.notEqual(presentMatch[1], 'not available', 'a present epoch start renders a real timestamp, not the absent marker');
+  assert.notEqual(presentMatch[1].trim(), '', 'the timestamp is non-empty');
+
+  const absent = renderSnapshot(healthSnapshot({observer_epoch_started_at: 0}));
+  assert.match(absent, /<dt>History retained since<\/dt><dd[^>]*>not available<\/dd>/);
 });
 
 test('an observer that stopped looking is still reported as stopped', () => {

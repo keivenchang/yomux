@@ -105,6 +105,11 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
     "tests/test_yostats_active_browser_window.py:test_benchmark_child_runs_in_its_own_process_group_and_is_group_stopped": "The benchmark subprocess group boundary is an operator cleanup contract.",
     "tests/test_yostats_active_browser_window.py:test_main_installs_signal_handlers_deadline_and_selenium_timeouts": "The capture CLI's bounded signal, deadline, and Selenium setup is an operator safety contract.",
     "tests/test_filesystem_access_policy.py:test_one_owner_builds_every_filesystem_job_descriptor": "The one-owner scan IS a source-shape contract: a filesystem job descriptor built by hand anywhere in app.py, jobd.py or tests/ is the second construction site that reintroduces the cross-port authorization bypass. Its allowlist is keyed by occurrence count so a second copy of an allowlisted literal still fails, and it was watched firing on a reverted fixture.",
+    "tests/test_launcher_row_wiring.py:test_launcher_has_no_inherited_global_primary_port_export": "The retired global background-owner primary-port export, the Darwin launchctl setenv, and the two dropped early/managed instance-port vars must remain ABSENT from the live launcher; a negative source search is the only way to prove a removed global env export never returns, and the launcher starts real dev servers so it cannot be exercised at runtime here.",
+    "tests/test_launcher_row_wiring.py:test_launcher_captures_one_row_plan_and_reuses_it_for_server_and_both_probes": "The supported bash launcher's per-row wiring is a source contract: one plan captured per row and reused for the server launch and BOTH authenticated probes, bound to the unique listener PID, with no drift. The launcher spawns real dev servers, so its script wiring cannot be unit-run here; the exec-mode and owner-probe primitives are separately proven at runtime by test_exec_launched_server_passes_the_real_owner_probe_and_tears_down_by_pid, but the launcher script itself (plan capture, sessions probe, per-row reuse) is only checkable as source.",
+    "tests/test_launcher_row_wiring.py:test_launcher_macos_carries_the_plan_through_the_shared_launcher": "The macOS launcher row carries the captured plan through the shared launcher and injects a primary only for the default/durable row; Darwin execution is deferred (W14) and cannot run on this Linux host, so the macOS launch wiring is a source-only contract.",
+    "tests/test_launcher_row_wiring.py:test_shared_macos_launcher_execs_plan_when_present_and_stays_direct_otherwise": "The one shared macOS launcher must route through the exec plan when a row plan is present and keep the historical direct exec otherwise, so the supported launcher and boot.sh never drift into two macOS launch copies; this single-owner branch is macOS-only and checkable only as source on this host.",
+    "tests/test_check_runner.py:test_run_tests_sh_stamps_the_owner_label_only_when_a_run_token_is_present": "docker/run-tests.sh must stamp each container it launches with this run's ownership token (YOLOMUX_CHECK_RUN_TOKEN via the CONTAINER_OWNER_LABEL --label, threaded into the real docker run). The label lives in a shell script that cannot be exercised without a real docker run here, so pinning that exact wiring is the only way to keep W10's run-owned-container retirement from silently regressing to image-wide discovery; container ownership is proven behaviourally elsewhere.",
 }
 
 # A function-level reason covers related assertions in that one source-contract
@@ -112,7 +117,7 @@ TEXT_SHAPE_ASSERTION_ALLOWLIST: Final[dict[str, str]] = {
 # text-shape assertion to an already allowlisted function still fails the guard
 # until a reviewer deliberately updates this value and its reason. The sequence
 # is stable when unrelated code moves an assertion to a different source line.
-TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "7d19d89efe0f3741032f53de5f630dd48f9b62e2e6d637011b49fe8fed59e005"
+TEXT_SHAPE_ASSERTION_INVENTORY_SHA256: Final[str] = "5661eef28a087fb78ede00b006830aac7d50aa48e2c1f0c8b25bcb63c65aa517"
 
 
 @dataclass(frozen=True, slots=True)

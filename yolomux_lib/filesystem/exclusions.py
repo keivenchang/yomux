@@ -230,26 +230,50 @@ def _exclude_rule(raw_rule: str, root: Path) -> tuple[str, str, "Path | re.Patte
 
 
 def _exclude_rule_matches(rule: tuple[str, str, "Path | re.Pattern[str]"], path: Path, root: Path) -> bool:
+    """Match one configured rule against BOTH the lexical path and its resolved target.
+
+    A symlink named inside a rule-covered subtree (``root/build/link -> root/src/file``,
+    or the ignored-directory case ``root/.git/link``) resolves to a clean target, so a
+    rule derived only from the resolved relative path would admit a lexical alias of an
+    excluded path. Deriving both relative forms preserves the excluded-producer identity
+    (the lexical form) while still catching an alias whose resolved target lands under the
+    rule (the resolved form). ``resolve`` is a false-skip TOCTOU concern only, never an
+    admission of an ignored alias, because the lexical form is judged too.
+    """
+
     kind, _value, matcher = rule
-    try:
-        relative_path = path.expanduser().resolve(strict=False).relative_to(root).as_posix()
-    except ValueError:
-        return False
+    expanded = path.expanduser()
+    resolved = expanded.resolve(strict=False)
     if kind == "path":
         assert isinstance(matcher, Path)
+        for candidate in (expanded, resolved):
+            try:
+                candidate.relative_to(matcher)
+                return True
+            except ValueError:
+                continue
+        return False
+    relatives: list[str] = []
+    for candidate in (expanded, resolved):
         try:
-            path.expanduser().resolve(strict=False).relative_to(matcher)
-            return True
+            relative = candidate.relative_to(root).as_posix()
         except ValueError:
-            return False
+            continue
+        if relative not in relatives:
+            relatives.append(relative)
+    if not relatives:
+        return False
     if kind == "glob":
         pattern = _value
         # Try the directory form too: a familiar rule such as `glob:**/.uploads/**`
         # must prune `.uploads` itself, not merely reject files after walking it.
-        candidates = (relative_path, f"_/{relative_path}", f"{relative_path}/", f"_/{relative_path}/")
-        return any(fnmatchcase(candidate, pattern) for candidate in candidates)
+        for relative_path in relatives:
+            candidates = (relative_path, f"_/{relative_path}", f"{relative_path}/", f"_/{relative_path}/")
+            if any(fnmatchcase(candidate, pattern) for candidate in candidates):
+                return True
+        return False
     assert isinstance(matcher, re.Pattern)
-    return matcher.search(relative_path) is not None
+    return any(matcher.search(relative_path) is not None for relative_path in relatives)
 
 
 @dataclass(frozen=True)
@@ -280,14 +304,24 @@ def _skip_dir_hit(
     beneath a directory whose name is ignored, and indexing a root the user
     explicitly asked for is not the same as indexing an ignored subtree.  The
     watch daemon passes ``None`` and tests every part, including ancestors.
+
+    Both the requested lexical ``path`` and its resolved target are inspected.  A
+    symlink named inside an ignored directory (``root/.git/link -> root/src/file``)
+    resolves to a clean target, so checking only the resolved relative components
+    would admit an ignored-directory alias -- the fail-closed exact-file invariant
+    would be false for exactly that alias.  The lexical relative form preserves the
+    ignored-producer identity; the resolved form still catches an alias whose
+    target lands inside an ignored subtree after resolution.
     """
 
     names = frozenset(skip_dirs) | ALWAYS_IGNORED_DIRECTORY_NAMES
     if relative_to is not None:
-        try:
-            candidates = resolved.relative_to(relative_to).parts
-        except ValueError:
-            return ""
+        candidates: tuple[str, ...] = ()
+        for scoped in (path, resolved):
+            try:
+                candidates = (*candidates, *scoped.relative_to(relative_to).parts)
+            except ValueError:
+                continue
     else:
         candidates = (*path.parts, *resolved.parts)
     for part in candidates:

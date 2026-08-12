@@ -149,25 +149,37 @@ def local_socket_capability() -> tuple[bool, str]:
     return _SOCKET_AVAILABILITY
 
 
+def reset_file_index_background_hooks():
+    """Clear every process-global producer `file_index` fans a background write through.
+
+    `app.TmuxWebtermApp.__init__` wires all of these to bound methods of one App; in production one
+    process owns exactly one App for its lifetime, so nothing clears them there. Under pytest a single
+    worker constructs many Apps, so a hook left pointing at a torn-down App fires from a later test's
+    background crawl and writes/chmods that App's host-state dir -- the cross-test PermissionError this
+    resets. The search-progress notifier is the same shape as the other five and MUST be cleared with
+    them; leaving it out let a coalesced `notify_search_progress` (its daemon Timer, too) reach the
+    shared background-client-events bus after its owning test was gone. One list, cleared identically
+    at setup and teardown, so no producer can drift back in unbalanced.
+    """
+    file_index.set_background_owner_checker(None)
+    file_index.set_background_owner_refresh_requester(None)
+    file_index.set_background_index_search_requester(None)
+    file_index.set_background_owner_bytes_recorder(None)
+    file_index.set_background_owner_done_notifier(None)
+    file_index.set_search_progress_notifier(None)
+    file_index._reset_search_progress_coalescing()
+    file_index.clear_memory_indexes()
+
+
 @pytest.fixture(autouse=True)
 def isolated_file_index_background_hooks(monkeypatch):
     # The real indexer is intentionally detached and persistent. Test cases
     # use a temporary state directory that pytest removes at process exit, so
     # never leave a detached child pointed at that vanished state behind.
     monkeypatch.setattr(app_module.SearchIndexerClient, "ensure_started", lambda self: False)
-    file_index.set_background_owner_checker(None)
-    file_index.set_background_owner_refresh_requester(None)
-    file_index.set_background_index_search_requester(None)
-    file_index.set_background_owner_bytes_recorder(None)
-    file_index.set_background_owner_done_notifier(None)
-    file_index.clear_memory_indexes()
+    reset_file_index_background_hooks()
     yield
-    file_index.set_background_owner_checker(None)
-    file_index.set_background_owner_refresh_requester(None)
-    file_index.set_background_index_search_requester(None)
-    file_index.set_background_owner_bytes_recorder(None)
-    file_index.set_background_owner_done_notifier(None)
-    file_index.clear_memory_indexes()
+    reset_file_index_background_hooks()
 
 
 @pytest.fixture(autouse=True)

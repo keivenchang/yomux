@@ -483,17 +483,19 @@ class QueuedDeliveryLedger:
             if not self._terminalize_qualified_promise_locked(identity, "done"):
                 raise ValueError("ready product promise was not registered as outstanding")
 
-    def observe_http_response(self, payload: object, status: HTTPStatus | int) -> None:
+    def observe_http_commit(self, payload: object, status: HTTPStatus | int) -> None:
+        """Register accepted/committed OUTSTANDING queued state and terminal transitions.
+
+        Invariant: outstanding registration reflects server-side queued state and is honest
+        BEFORE the response flush -- the operation is queued server-side regardless of whether the
+        accepted-response bytes reach the client. The server calls this before the flush so a
+        causally-later client read cannot out-race this writer thread's ledger update. It records
+        no client-delivery outcome; that is observe_http_receipt's job, run only after the write.
+        """
+
         status_code = int(status)
         with self._lock:
             for candidate in self._candidate_payloads(payload):
-                operation = candidate.get("operation") if isinstance(candidate.get("operation"), dict) else {}
-                operation_id = str(operation.get("id") or "")
-                if status_code == int(HTTPStatus.ACCEPTED) and operation_id:
-                    record = self._operations.get(operation_id)
-                    if isinstance(record, dict) and not bool(record.get("receipt_exposed")):
-                        record["receipt_exposed"] = True
-                        self._append_operation_locked(record)
                 identity = self._identity(candidate)
                 if identity is None:
                     continue
@@ -524,6 +526,40 @@ class QueuedDeliveryLedger:
                     continue
                 reason = str(candidate.get("reason") or candidate.get("error") or "").strip()
                 self._terminalize_qualified_promise_locked(identity, terminal_state, reason=reason)
+
+    def observe_http_receipt(self, payload: object, status: HTTPStatus | int) -> None:
+        """Record that an ACCEPTED operation receipt actually reached the client.
+
+        Invariant: receipt_exposed reflects the ACTUAL client write and must run only AFTER a
+        successful flush -- it must never claim exposure on a failed write. The server calls this
+        after the write returns, so a BrokenPipe/OSError on the flush leaves receipt_exposed unset
+        and the operation honestly recorded as committed-but-undelivered.
+        """
+
+        status_code = int(status)
+        if status_code != int(HTTPStatus.ACCEPTED):
+            return
+        with self._lock:
+            for candidate in self._candidate_payloads(payload):
+                operation = candidate.get("operation") if isinstance(candidate.get("operation"), dict) else {}
+                operation_id = str(operation.get("id") or "")
+                if not operation_id:
+                    continue
+                record = self._operations.get(operation_id)
+                if isinstance(record, dict) and not bool(record.get("receipt_exposed")):
+                    record["receipt_exposed"] = True
+                    self._append_operation_locked(record)
+
+    def observe_http_response(self, payload: object, status: HTTPStatus | int) -> None:
+        """Record a fully delivered response: server-side commit then client receipt exposure.
+
+        The single-call composition for callers that model a completed delivery (the bytes reached
+        the client). The server does not call this; it splits the two halves around the flush so a
+        failed write never claims receipt exposure. See observe_http_commit / observe_http_receipt.
+        """
+
+        self.observe_http_commit(payload, status)
+        self.observe_http_receipt(payload, status)
 
     def diagnostics(self) -> dict[str, Any]:
         with self._lock:

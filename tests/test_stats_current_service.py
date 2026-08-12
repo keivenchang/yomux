@@ -1614,6 +1614,79 @@ def test_vacuum_runs_only_after_idle_and_persists_its_schedule(tmp_path):
     }
 
 
+def _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store):
+    service = service_module.StatsCurrentService(
+        tmp_path / "statsd.sock",
+        tmp_path / storage.DATABASE_FILENAME,
+        idle_seconds=60.0,
+        monotonic=lambda: monotonic_now[0],
+        clock=lambda: wall_now[0],
+        randomizer=lambda: 0.0,
+    )
+    service.writer = store
+    # Isolate the quiet-gate: no first-build work is pending, so a deferral can
+    # only be the busy gate, not the building/pending guard.
+    service._pending_full = False
+    service._next_vacuum_at = 0.0
+    return service
+
+
+def test_vacuum_defers_while_due_but_busy(tmp_path):
+    # (a) Due + a recent RPC (busy) -> the rewrite DEFERS rather than block the
+    # serial listener; on the pre-change code it ran on schedule regardless.
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = FakeStore()
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    service._on_client()  # last_client_at = 100.0
+    monotonic_now[0] = 150.0  # only 50s since the last RPC; inside the 60s window
+
+    assert service._vacuum_if_due_while_idle() is False
+    assert store.vacuums == []
+    # It is owed and the max-defer clock has started, but it waits for quiet.
+    assert service._vacuum_due_since == 150.0
+
+
+def test_vacuum_runs_when_due_and_quiet(tmp_path):
+    # (b) Due + no RPC within idle_seconds (quiet) -> the rewrite RUNS.
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = FakeStore()
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    service._on_client()  # last_client_at = 100.0
+    monotonic_now[0] = 200.0  # 100s since the last RPC; past the 60s quiet window
+
+    assert service._vacuum_if_due_while_idle() is True
+    assert store.vacuums == [5_000.0]
+    assert service._vacuum_due_since is None
+
+
+def test_vacuum_cap_overrides_quiet_gate_on_a_continuously_busy_box(tmp_path):
+    # (c) Due + continuously busy past the 1h cap -> the cap overrides the
+    # quiet-gate and the rewrite RUNS anyway; the pre-change code, gated behind
+    # full idle, would never run the cap on a box that is never quiet.
+    monotonic_now = [100.0]
+    wall_now = [5_000.0]
+    store = FakeStore()
+    service = _quiet_gated_vacuum_service(tmp_path, monotonic_now, wall_now, store)
+
+    # First due tick while busy: defers and starts the max-defer clock at 100.0.
+    service._on_client()  # last_client_at = 100.0
+    assert service._vacuum_if_due_while_idle() is False
+    assert store.vacuums == []
+    assert service._vacuum_due_since == 100.0
+
+    # Still busy (a fresh RPC each tick) just past the cap, measured from the
+    # first due tick rather than the last vacuum: the rewrite runs regardless.
+    monotonic_now[0] = 100.0 + service_module.VACUUM_MAX_DEFER_SECONDS + 1.0
+    service._on_client()  # last_client_at = 3701.0; quiet is still False
+    assert service._vacuum_if_due_while_idle() is True
+    assert store.vacuums == [5_000.0]
+    assert service._vacuum_due_since is None
+
+
 @pytest.mark.parametrize(
     ("collector", "dirty", "ring_deadline", "host_deadlines", "now", "expected"),
     (

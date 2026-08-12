@@ -555,25 +555,40 @@ def test_m2_api_fetch_applies_timeout_and_abort_signal(browser, gate_live_server
         const done = arguments[arguments.length - 1];
         const originalFetch = window.fetch;
         (async () => {
-          window.fetch = async url => {
-            if (String(url) === '/api/gate-unmarked-abort') {
+          window.fetch = async (url, options) => {
+            const target = String(url);
+            if (target === '/api/gate-unmarked-abort') {
               throw new DOMException('unmarked abort', 'AbortError');
             }
-            return new Response(JSON.stringify({error: 'forced failure'}), {
-              status: 500,
-              headers: {'Content-Type': 'application/json'},
-            });
+            if (target === '/api/gate-500') {
+              return new Response(JSON.stringify({error: 'forced failure'}), {
+                status: 500,
+                headers: {'Content-Type': 'application/json'},
+              });
+            }
+            // Every OTHER request must pass through to the real server. A broad stub that returned
+            // 500 to every URL turned the ambient 3s client-health /api/ping (measureClientHealth)
+            // into a spurious extra blocking event, so the deliberate three-event sequence could not
+            // be asserted exactly under load.
+            return originalFetch(target, options);
           };
           await apiFetch('/api/gate-unmarked-abort').catch(() => null);
           const response = await apiFetch('/api/gate-500');
           await response.text();
+          // Deterministic ambient client-health ping in the same stub window: with the narrow stub it
+          // passes through to the live server and records nothing; with the old broad stub it would
+          // 500 and add a fourth blocking event. This is the ambient producer the oracle must tolerate.
+          await apiFetch('/api/ping').catch(() => null);
           recordJsDebugEvent('unhandledrejection', {
             ...jsDebugFailureDetails('unhandledrejection', new Error('rejected upload')),
             endpoint: '/api/upload',
           });
-          done(jsDebugFailureEvents());
-        })().catch(error => done({error: String(error?.stack || error)})).finally(() => {
+          const events = jsDebugFailureEvents();
           window.fetch = originalFetch;
+          done(events);
+        })().catch(error => {
+          window.fetch = originalFetch;
+          done({error: String(error?.stack || error)});
         });
         """
     )
@@ -629,7 +644,7 @@ def test_m3_live_daemon_transport_failure_is_not_reported_as_process_down(browse
         """
         const published = arguments[0];
         const html = debugSystemRosterHtml({
-          local_services: {schema_version: 2, inventory: ['statsd'], services: [published]},
+          local_services: {schema_version: 3, inventory: ['statsd'], services: [published]},
         }, {nowSeconds: 0});
         const host = document.createElement('div');
         host.innerHTML = html;

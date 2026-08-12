@@ -3242,22 +3242,85 @@ function shareDebugSecretValues() {
   return Array.from(values).sort((a, b) => b.length - a.length);
 }
 
+// W2 diagnostic redaction contract. This is the JavaScript conformance implementation of the ONE
+// neutral redaction contract whose authoritative fixture is tests/fixtures/diagnostic_redaction.json
+// (also enforced against yolomux_lib/diagnostic_redaction.py). JS and Python cannot share a regex
+// engine, so the shared fixture is the single parent: both sides must produce byte-identical output
+// for every case. Any change here that diverges from the Python owner must update the fixture and
+// keep both green. Grammar is anchored (^...$) so exact credential names match while near names like
+// `tokenizer`/`secretary` do not; the string path redacts share URLs, share-token query parameters,
+// Authorization/Cookie headers (including malformed/unknown-scheme fail-closed), secret assignments,
+// and bare Bearer values, then bounds to 4000 chars. Redaction is a security boundary: fail closed.
+// The regex owners and replacer callbacks are declared below shareRedactDiagnosticValue so the
+// pair stays inside the historical [shareRedactSecretText, shareDebugNumber) slice window that
+// stats_current_panel.test.js evaluates in isolation; function hoisting and post-eval calls resolve
+// the const temporal-dead-zone before either redactor runs.
 function shareRedactSecretText(value) {
-  return shareReplayRedactText(value);
+  let text = String(value ?? '');
+  const runtimeSecrets = typeof shareDebugSecretValues === 'function' ? shareDebugSecretValues() : [];
+  for (const secret of runtimeSecrets) {
+    if (secret) text = text.split(secret).join('[redacted-share-token]');
+  }
+  text = text
+    .replace(DIAGNOSTIC_SHARE_URL_RE, '[redacted-share-url]')
+    .replace(DIAGNOSTIC_SHARE_TOKEN_QUERY_RE, '$1[redacted-share-token]')
+    .replace(DIAGNOSTIC_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_SECRET_ASSIGNMENT_RE, diagnosticRedactSecretAssignment)
+    .replace(DIAGNOSTIC_BEARER_VALUE_RE, '$1$2[redacted-secret]');
+  return text.length > 4000 ? `${text.slice(0, 4000)}[truncated]` : text;
 }
 
-function shareRedactDiagnosticValue(value, depth = 0) {
+function shareRedactDiagnosticValue(value, key = '', depth = 0) {
   if (depth > 12) return '[truncated-depth]';
-  if (typeof value === 'string') return shareRedactSecretText(value);
-  if (typeof value !== 'object' || value === null) return value;
-  if (Array.isArray(value)) return value.map(item => shareRedactDiagnosticValue(item, depth + 1));
-  const result = {};
-  for (const [key, rawValue] of Object.entries(value)) {
-    result[key] = /token|secret/i.test(key) && typeof rawValue === 'string'
-      ? '[redacted-share-token]'
-      : shareRedactDiagnosticValue(rawValue, depth + 1);
+  if (DIAGNOSTIC_SECRET_KEY_RE.test(String(key || ''))) return '[redacted-share-token]';
+  if (Array.isArray(value)) {
+    return value.slice(0, 256).map(item => shareRedactDiagnosticValue(item, key, depth + 1));
   }
-  return result;
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [name, rawValue] of Object.entries(value)) {
+      result[String(name).slice(0, 120)] = shareRedactDiagnosticValue(rawValue, String(name), depth + 1);
+    }
+    return result;
+  }
+  if (typeof value === 'string') return shareRedactSecretText(value);
+  return value;
+}
+
+const DIAGNOSTIC_SECRET_NAME_SOURCE = '(?:token|secret|password|passwd|(?:proxy[_-]?)?authorization|'
+  + '(?:set[_-]?)?cookie|bearer|(?:x[_-]?)?api[_-]?key|client[_-]?secret|'
+  + '(?:access|refresh|share)[_-]?token|x[_-]?share[_-]?token)';
+const DIAGNOSTIC_SECRET_KEY_RE = new RegExp(`^${DIAGNOSTIC_SECRET_NAME_SOURCE}$`, 'i');
+const DIAGNOSTIC_SHARE_URL_RE = /(?:https?:\/\/[^"'\s<>]+)?\/share\/[A-Za-z0-9_-]+(?:#[^"'\s<>]*)?/g;
+const DIAGNOSTIC_SHARE_TOKEN_QUERY_RE = /([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s"']+/gi;
+const DIAGNOSTIC_AUTHORIZATION_HEADER_RE = /\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)(?:Basic|Bearer)[ \t]+[^\s,;"'<>}]+(?![^\r\n]*=)(?=[ \t]+(?:failed\b|after\b|at[ \t]+\/|Cookie[ \t]*:)|[;\r\n]|$)/gi;
+const DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE = /(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*\[redacted-secret\])(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*(?:\r?\n|$))(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*["'])\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_COOKIE_HEADER_RE = /\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$)(?:[ \t]*;[ \t]*[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$))*(?![ \t]*;)(?![^\r\n]*=)/gi;
+const DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE = /(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*\[redacted-secret\])(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*(?:\r?\n|$))\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_SECRET_ASSIGNMENT_RE = new RegExp(
+  '\\b(?<prefix>' + DIAGNOSTIC_SECRET_NAME_SOURCE + '\\b["\']?[ \\t]*(?:=|:)[ \\t]*)'
+  + '(?:(?<quote>["\'])(?<quoted_value>(?:\\\\[^\\r\\n]|(?!\\k<quote>)[^\\\\\\r\\n])*)\\k<quote>|'
+  + '(?<unterminated_quote>["\'])(?<unterminated_value>[^\\r\\n]*)|'
+  + '(?<value>[^&#\\s,;"\'<>}]+))',
+  'gi',
+);
+const DIAGNOSTIC_BEARER_VALUE_RE = /\b(Bearer)([ \t]+)([^\s,;:="'<>]+)/gi;
+
+function diagnosticRedactSecretHeader(...args) {
+  const groups = args[args.length - 1];
+  return `${groups.name}${groups.separator}[redacted-secret]`;
+}
+
+function diagnosticRedactSecretAssignment(...args) {
+  const groups = args[args.length - 1];
+  const quote = groups.quote || '';
+  if (groups.unterminated_quote) return `${groups.prefix}[redacted-secret]`;
+  const value = quote ? groups.quoted_value : groups.value;
+  if (typeof value === 'string' && value.startsWith('[redacted-')) return args[0];
+  return `${groups.prefix}${quote}[redacted-secret]${quote}`;
 }
 
 function shareDebugNumber(value) {
@@ -3424,7 +3487,11 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 }
 
 function shareReplayFrameByteLength(value = {}) {
-  const text = stableDigestJson(shareRedactDiagnosticValue(value));
+  // Measure the true serialized wire size of the frame. The diagnostic redactor bounds strings to
+  // 4000 chars, arrays to 256 entries, and keys to 120 chars, which collapses a large DOM keyframe
+  // to a fraction of its real size; the byte length is a number that is never emitted as text, so
+  // redaction is not needed here and must not be applied to the size measurement.
+  const text = stableDigestJson(value);
   return utf8ByteLength(text);
 }
 

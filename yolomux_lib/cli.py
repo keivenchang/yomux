@@ -440,11 +440,11 @@ BACKEND_HEALTH_OBSERVE_SECONDS_ENV = "YOLOMUX_BACKEND_HEALTH_OBSERVE_SECONDS"
 def backend_health_label_source(app: TmuxWebtermApp) -> Any:
     """Return the callable that names a service the way the System row names it.
 
-    Deliberately NOT a label map of its own. `system_status_service` (`app.py:10664`) owns the
-    id -> capability-name table, `local_services_alert` already copies its output into the
-    persistent indicator, and a second table here is precisely the divergent copy that made
-    watchd show up as the raw id in one place and "File watching" in another. The call is a pure
-    function of the row it is handed; it reads no client and starts nothing.
+    Deliberately NOT a label map of its own. `system_status_service` owns the
+    id -> capability-name table that the System row and Daemons roster already display, and a
+    second table here is precisely the divergent copy that made watchd show up as the raw id in
+    one place and "File watching" in another. The call is a pure function of the row it is handed;
+    it reads no client and starts nothing.
     """
 
     def label(service: str) -> str:

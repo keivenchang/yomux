@@ -42,14 +42,20 @@ class LocalRpcError(ValueError):
     """A peer sent a malformed, incompatible, or oversized local RPC frame."""
 
 
-# The single owner of "the peer could not answer inside the caller's deadline".  Which of these
-# a caller sees is decided by milliseconds of jitter -- whether the peer's response landed just
-# inside the per-recv timer or just outside the total budget -- so they must classify
-# identically.  `response exceeded deadline` is the pre-rename spelling kept here, not copied
-# elsewhere, so no consumer grows its own list.
+# A complete, request-id-matched response that lands past the caller's deadline is a DELIVERED
+# response that also overran a telemetry budget -- never a failure.  The deadline is a telemetry
+# budget, not a correctness bound, so these two labels are DIAGNOSTIC attributions carried on the
+# delivered record, not raised errors.  Which span overran is decided by the peer's own handler
+# duration versus the budget.
+LOCAL_RPC_OVER_BUDGET_HANDLER = "peer_handler_slow"
+LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED = "unattributed_latency"
+
+# Retained so a rolling peer that still speaks the pre-0.7.3 spelling classifies identically.
+# `response exceeded deadline` is the pre-rename spelling kept here, not copied elsewhere, so no
+# consumer grows its own list.
 LOCAL_RPC_DEADLINE_REASONS = frozenset({
-    "peer_handler_slow",
-    "unattributed_latency",
+    LOCAL_RPC_OVER_BUDGET_HANDLER,
+    LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED,
     "response exceeded deadline",
 })
 
@@ -195,7 +201,17 @@ def _new_latency() -> dict[str, float]:
 
 
 def _new_class_counters() -> dict[str, Any]:
-    counters: dict[str, Any] = {"accepted": 0, "completed": 0, "errors": 0, "errors_by_reason": {}}
+    counters: dict[str, Any] = {
+        "accepted": 0,
+        "completed": 0,
+        "errors": 0,
+        "errors_by_reason": {},
+        # Delivered responses that also overran the telemetry budget.  These are a subset of
+        # `completed`, tracked separately as diagnostics -- a delivered-but-slow response is a
+        # completion that also carries a budget-breach label, never an error.
+        "over_budget": 0,
+        "over_budget_by_reason": {},
+    }
     counters.update({name: _new_latency() for name in LOCAL_SERVICE_TRAFFIC_LATENCIES})
     return counters
 
@@ -271,14 +287,22 @@ class LocalServiceTrafficLedger:
         client_elapsed_ms: float = 0.0,
         service_duration_ms: float = 0.0,
         queue_wait_ms: float = 0.0,
+        over_budget_reason: str = "",
     ) -> None:
         counters = self._counters(traffic_class)
         samples = (client_elapsed_ms, service_duration_ms, queue_wait_ms)
+        label = str(over_budget_reason or "")[:48]
         with self._lock:
             counters["accepted"] += 1
             counters["completed"] += 1
             for name, sample in zip(LOCAL_SERVICE_TRAFFIC_LATENCIES, samples):
                 self._add_sample(counters[name], sample)
+            if label:
+                # A delivered response that overran the telemetry budget: a completion that also
+                # carries a diagnostic breach label, never a failure.
+                counters["over_budget"] += 1
+                budgets = counters["over_budget_by_reason"]
+                budgets[label] = budgets.get(label, 0) + 1
 
     def record_failure(self, traffic_class: str, reason: str) -> None:
         counters = self._counters(traffic_class)
@@ -307,6 +331,8 @@ class LocalServiceTrafficLedger:
                     "completed": int(counters["completed"]),
                     "errors": int(counters["errors"]),
                     "errors_by_reason": dict(sorted(counters["errors_by_reason"].items())),
+                    "over_budget": int(counters["over_budget"]),
+                    "over_budget_by_reason": dict(sorted(counters["over_budget_by_reason"].items())),
                 }
                 published.update({latency: _publish_latency(counters[latency]) for latency in LOCAL_SERVICE_TRAFFIC_LATENCIES})
                 result[name] = published
@@ -615,6 +641,20 @@ def encode_metadata(
     ).encode("utf-8")
 
 
+def _over_budget_attribution(response_envelope: LocalRpcEnvelope, deadline_ms: int) -> str:
+    """Name which span a delivered-but-slow response overran, as diagnostics only.
+
+    The response is complete and request-id matched, so this is never a failure: the deadline is
+    a telemetry budget, not a correctness bound.  Which span overran is decided by the one
+    measurement this path already holds -- the peer's own handler duration versus the budget --
+    so it separates a slow handler from latency that happened before the handler ever ran.
+    """
+
+    if response_envelope.service_duration_ms > deadline_ms:
+        return LOCAL_RPC_OVER_BUDGET_HANDLER
+    return LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED
+
+
 def _record_delivered_response(
     ledger: LocalServiceTrafficLedger,
     traffic_class: str,
@@ -622,8 +662,15 @@ def _record_delivered_response(
     response_envelope: LocalRpcEnvelope | None,
     payload: Mapping[str, Any],
     elapsed_ms: float,
+    over_budget_reason: str = "",
 ) -> None:
-    """Account one delivered response, typed by its own outcome."""
+    """Account one delivered response, typed by its own outcome.
+
+    ``over_budget_reason`` is an optional diagnostic label for a delivered response that also
+    overran the caller's telemetry budget.  It rides on the completion here rather than forking a
+    second recorder: a delivered-but-slow response is a delivered response that also carries a
+    budget-breach label, so exactly one owner accounts it.
+    """
 
     reason = local_service_response_reason(payload)
     if reason:
@@ -638,6 +685,7 @@ def _record_delivered_response(
         client_elapsed_ms=elapsed_ms,
         service_duration_ms=response_envelope.service_duration_ms if response_envelope is not None else 0.0,
         queue_wait_ms=response_envelope.queue_wait_ms if response_envelope is not None else 0.0,
+        over_budget_reason=over_budget_reason,
     )
 
 
@@ -742,17 +790,18 @@ def request_with_envelope(
         ledger.record_failure(traffic_class, local_service_failure_reason(mismatch))
         raise mismatch
     elapsed_ms = (monotonic_clock() - started) * 1000
+    # A complete, request-id-matched response is valid even when the client elapsed time or the
+    # peer handler duration exceeds the caller's deadline: the deadline is a telemetry budget,
+    # not a correctness bound.  Never raise here -- returning the bytes is what lets a slow
+    # product poll deliver instead of collapsing into a 503.  Only a connect/send/receive timeout
+    # BEFORE any response envelope exists is a transport failure, and that already raised above.
+    # Retain which span overran as a diagnostic on the delivered record, not as an error.
+    over_budget_reason = ""
     if elapsed_ms > envelope.deadline_ms:
-        # Reuse the measured elapsed time rather than reading the clock again: this branch
-        # is the only place that can separate expiry attributed to the handler from expiry
-        # that happened before it ever ran.
-        if response_envelope.service_duration_ms > envelope.deadline_ms:
-            expired = LocalRpcError("peer_handler_slow")
-        else:
-            expired = LocalRpcError("unattributed_latency")
-        ledger.record_failure(traffic_class, local_service_failure_reason(expired))
-        raise expired
-    _record_delivered_response(ledger, traffic_class, envelope, response_envelope, payload, elapsed_ms)
+        over_budget_reason = _over_budget_attribution(response_envelope, envelope.deadline_ms)
+    _record_delivered_response(
+        ledger, traffic_class, envelope, response_envelope, payload, elapsed_ms, over_budget_reason=over_budget_reason
+    )
     return response_envelope, payload, response_binary
 
 

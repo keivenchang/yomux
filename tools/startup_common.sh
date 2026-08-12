@@ -8,6 +8,36 @@ yolomux_default_server_optin() {
   printf '%s' 'YOLOMUX_TMUX_ALLOW_DEFAULT_SERVER=1'
 }
 
+# One listener scanner shared by boot.sh and the supported launcher, so ownership
+# checks and stop logic never drift between two copies.
+yolomux_port_listener_pids() {
+  local port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u
+    return
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u
+    return
+  fi
+  printf 'need ss or lsof to find the listener for port %s\n' "$port" >&2
+  return 2
+}
+
+# Require EXACTLY one listener on a port and print its pid. The managed owner
+# probe binds its ownership assertion to this unique pid; more than one (or none)
+# is a hard failure, never a silent pick.
+yolomux_unique_listener_pid() {
+  local port="$1" pids count
+  pids="$(yolomux_port_listener_pids "$port")" || return 2
+  count="$(printf '%s\n' "$pids" | grep -c '[0-9]')"
+  if [ "$count" -ne 1 ]; then
+    printf 'port %s must have exactly one listener; found %s\n' "$port" "$count" >&2
+    return 1
+  fi
+  printf '%s\n' "$pids" | grep '[0-9]'
+}
+
 yolomux_validate_instance_isolation() {
   local repo_root="$1"
   local python_bin="$2"
@@ -133,7 +163,14 @@ yolomux_bootout_macos_server() {
 }
 
 yolomux_macos_server_launcher() {
-  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; log_path=$7; shift 7; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE && exec "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1'
+  # Two launch paths share this one supervised macOS launcher so they never drift:
+  #   * DIRECT (boot.sh, and any caller that sets no YOLOMUX_ROW_PLAN_FILE): keep
+  #     the historical behavior -- export the primary port and exec the server.
+  #   * EXEC PLAN (the supported launcher's per-row clean environment): apply the
+  #     one captured RowPlan through tools/instance_isolation.py exec, then run the
+  #     server under it. The primary port is passed only when non-empty (the
+  #     default/durable row); a managed self-owner receives none.
+  printf '%s' 'repo=$1; launch_path=$2; shell_bin=$3; python_bin=$4; script=$5; primary_port=$6; log_path=$7; shift 7; cd "$repo" && export PATH="$launch_path" SHELL="$shell_bin" PYTHONUNBUFFERED=1 TERM=xterm-256color MALLOC_ARENA_MAX=2 '"$(yolomux_default_server_optin)"' && unset TMUX TMUX_PANE; if [ -n "${YOLOMUX_ROW_PLAN_FILE:-}" ]; then if [ -n "$primary_port" ]; then set -- env YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port" "$python_bin" -u "$script" "$@"; else set -- "$python_bin" -u "$script" "$@"; fi; exec "$python_bin" "$repo/tools/instance_isolation.py" exec --plan-file "$YOLOMUX_ROW_PLAN_FILE" -- "$@" >> "$log_path" 2>&1; else export YOLOMUX_BACKGROUND_OWNER_PRIMARY_PORT="$primary_port"; exec "$python_bin" -u "$script" "$@" >> "$log_path" 2>&1; fi'
 }
 
 yolomux_submit_macos_server() {

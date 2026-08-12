@@ -1454,7 +1454,7 @@ def test_current_stats_system_usage_warning_renders_and_clears(browser, tmp_path
             const base = {
               ok: true, generated_at: Date.now() / 1000, server: {}, owner: {}, refresh: {}, search_index: {}, caches: {},
               client_events: {}, chat: {}, cpu_budget: {}, local_services: {
-                schema_version: 2, inventory: ['statsd'], totals: {}, services: [{
+                schema_version: 3, inventory: ['statsd'], totals: {}, services: [{
                   id: 'statsd', service: 'statsd', label: 'YO!stats', state: 'running', pid: 4242, metrics: {},
                   sampler_families: {}, usage: {quarantined_conflict_count: 1, health: {
                     state: 'warning', reason: 'transcripts are advancing but usage atoms are stale', last_accepted_atom_age_seconds: 130,
@@ -9618,7 +9618,9 @@ def test_terminal_navigation_acknowledges_within_one_frame_while_backend_hangs_o
             return {
               tabAck, tabFrameAck, failedTab, windowAck, windowFrameAck,
               windowCleared: !terminalConnectionStateNode('1'),
-              backendHealth: {shown: Boolean(degraded), cleared: !document.querySelector('[data-backend-health]')},
+              // Permanently-mounted control (GUI.md invariant): healthy is data-backend-health="" on the
+              // same node, never its absence. "cleared" therefore means recovered to the empty/inert state.
+              backendHealth: {shown: Boolean(degraded), cleared: document.querySelector('[data-backend-health]')?.dataset.backendHealth === ''},
             };
           } finally {
             ensureSession = originalEnsureSession;
@@ -11575,10 +11577,10 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
     assert activity_metrics["inActions"] is True, activity_metrics
     assert activity_metrics["actionChildren"] == 1, activity_metrics
     assert activity_metrics["activityRight"] <= activity_metrics["refreshLeft"] + 1, activity_metrics
-    button = WebDriverWait(browser, 5).until(
-        lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
-    )
-    button.click()
+    # W12: re-resolve the compact root button and click by coordinate. A retained WebElement would go
+    # stale if a legitimate coalesced topbar re-render (renderSessionButtons rebuilds the menu bar)
+    # lands in the WebDriver round-trip gap - the -n8 load failure this whole test class removes.
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     metrics = browser.execute_async_script(
         """
         const done = arguments[arguments.length - 1];
@@ -11663,12 +11665,11 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
 
     # A second phone tap is a disclosure toggle, not a grace-period reopen. This keeps the compact
     # root usable as a one-tap close affordance without changing full desktop menu hover behavior.
-    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
-    button.click()
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     assert WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script("return document.querySelector('.app-menu--nested-root')?.classList.contains('open') || false")
     )
-    browser.execute_script("arguments[0].click()", button)
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     closed = WebDriverWait(browser, 5).until(
         lambda driver: (state if not (state := driver.execute_script(
             """
@@ -11688,8 +11689,7 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
 
     # Checked navigation is still navigation: File -> Finder must close the compact root instead of
     # inheriting keep-open behavior merely because Finder is currently visible/checked.
-    button = browser.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
-    button.click()
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
     file_button = WebDriverWait(browser, 5).until(
         lambda driver: driver.execute_script(
             """
@@ -11744,6 +11744,68 @@ def test_live_compact_menus_root_opens_on_touch_sized_topbar(browser, tmp_path):
         )
     )
     assert finder_closed is True
+
+
+def test_live_compact_menus_root_button_survives_coalesced_rerender_at_tap(browser, tmp_path):
+    # A legitimate coalesced topbar re-render (SSE/status/locale/metrics) can land between resolving
+    # the closed compact menu root button and the tap that opens it. renderSessionButtons wipes and
+    # rebuilds the whole menu bar (30_app_menus.js: sessionButtons.innerHTML = '' -> createAppMenuBar()),
+    # so a *retained* WebElement is torn down and the tap strands - this is what the -n8 browser lane
+    # caught at test_live_compact_menus_root_opens_on_touch_sized_topbar. A real finger hit-tests the
+    # live DOM at event time, so the oracle must re-resolve the selector at the point of use. This test
+    # forces that exact re-render deterministically (no load dependence) and proves both halves.
+    load_live_runtime_boot_fixture(browser, tmp_path, sessions=["1", "2"], dangerously_yolo=True, available_agents=["claude", "codex", "term"])
+    WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return window.__terminalOpened >= 1 && typeof renderSessionButtons === 'function'")
+    )
+    browser.execute_script(
+        """
+        mobileSinglePaneMode = () => true;
+        syncTopbarPacking = () => [];
+        terminalCommands.push('bash', 'csh', 'dash', 'rbash', 'zsh');
+        document.body.classList.add('app-topbar-touch-compact', 'app-vw-lte-600', 'app-vw-lte-760', 'topbar-pack-compact-activity', 'topbar-pack-compact-menu');
+        renderSessionButtons({force: true});
+        """
+    )
+    browser.execute_async_script(
+        """
+        const done = arguments[arguments.length - 1];
+        requestAnimationFrame(() => requestAnimationFrame(done));
+        """
+    )
+
+    # RED-before: a retained handle, then the coalesced re-render, then the click -> stale element.
+    # This is the removed anti-pattern; it documents that the race is real and load-independent.
+    stranded = WebDriverWait(browser, 5).until(
+        lambda driver: driver.find_element("css selector", ".app-menu--nested-root > .app-menu-button")
+    )
+    browser.execute_script("renderSessionButtons({force: true});")  # menu is CLOSED -> not deferred, rebuilds the bar
+    with pytest.raises(WebDriverException, match="stale element reference"):
+        stranded.click()
+
+    # GREEN-after: force the SAME re-render, then re-resolve-and-click via the shared W12 parent. It
+    # resolves the selector fresh and clicks by coordinate (no retained WebElement), so the rebuilt
+    # button is tapped and the compact root opens.
+    browser.execute_script("renderSessionButtons({force: true});")
+    click_visible_selector(browser, ".app-menu--nested-root > .app-menu-button")
+    assert WebDriverWait(browser, 5).until(
+        lambda driver: driver.execute_script("return document.querySelector('.app-menu--nested-root')?.classList.contains('open') || false")
+    )
+
+    # Property (root-class contract): once the root is OPEN, renderSessionButtonsMeasured DEFERS every
+    # coalesced re-render (the appMenuIsOpen() guard in 30_app_menus.js), so command nodes resolved
+    # while a menu is open cannot be rebuilt/stranded. This is why the File/Finder taps in the sibling
+    # test - resolved with the menu open, then acted on immediately - stay safe without re-resolution.
+    probed = browser.execute_script(
+        """
+        const command = document.querySelector('.app-menu--nested-root > .app-menu-popover .app-menu-command');
+        window.__probeMenuCommand = command || null;
+        return Boolean(command);
+        """
+    )
+    assert probed is True
+    browser.execute_script("renderSessionButtons({force: true});")
+    assert browser.execute_script("return window.__probeMenuCommand?.isConnected === true") is True
 
 
 def test_client_events_ready_refetches_yolo_marker_after_reconnect(browser, tmp_path):

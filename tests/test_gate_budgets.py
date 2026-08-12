@@ -26,7 +26,8 @@ from yolomux_lib.infra.jobd import JobClient
 from yolomux_lib.infra.jobd import PersistentJobBroker
 from yolomux_lib.local_services.client import LocalServiceClient
 from yolomux_lib.local_services.client import local_service_failure_is_transient
-from yolomux_lib.local_services.rpc import LOCAL_RPC_DEADLINE_REASONS
+from yolomux_lib.local_services.rpc import local_service_traffic_ledger
+from yolomux_lib.local_services.rpc import reset_local_service_traffic
 from yolomux_lib.observability.pricing_catalog import PricingRefreshCoordinator
 from yolomux_lib.server_logs import SERVER_LOGS
 from yolomux_lib.stats_current.http import SnapshotHttpResult
@@ -71,15 +72,57 @@ def test_gate_runtime_paths_are_fixture_owned(gate_runtime_paths):
     assert patched_paths["yolomux_lib.auth.AUTH_CONFIG_PATH"] == gate_runtime_paths.auth_config_path
 
 
+def _leave_predecessor_time_wait(host: str, port: int) -> None:
+    """Retain one predecessor TIME_WAIT on this exact ``(host, port)``, deterministically.
+
+    A server-side active close of an established connection leaves the server's local
+    endpoint -- here the fixture-owned candidate port -- in TIME_WAIT. That is the retained
+    kernel state a plain bind rejects with ``EADDRINUSE`` and a ``SO_REUSEADDR`` bind (the
+    real ``HttpPortLease`` reuse owner) must tolerate. Creating it in-sequence removes any
+    dependency on ambient port history, which is what let the old oracle pass alone and fail
+    after real gate traffic.
+    """
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((host, port))
+    listener.listen(1)
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        client.connect((host, port))
+        server_conn, _peer = listener.accept()
+        server_conn.close()  # server-side active close -> (host, port) enters TIME_WAIT
+    finally:
+        client.close()
+        listener.close()
+
+
 def test_gate_http_port_is_reserved_until_release(gate_http_port):
+    host, _reserved_port = gate_http_port.address
+    # A competitor with the SAME reuse semantics as the real subject server
+    # (TmuxWebtermHTTPServer.allow_reuse_address == 1) still cannot take the port while the lease
+    # holds it. The lease is an exclusive LISTENING reservation, so a like-for-like SO_REUSEADDR
+    # competitor's bind is refused -- the negative must exclude a reuse-enabled server, not merely
+    # a plain binder, or it would not model what actually races for the port under gate load.
     competing = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    competing.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         with pytest.raises(OSError):
             competing.bind(gate_http_port.address)
-        gate_http_port.release()
-        competing.bind(gate_http_port.address)
     finally:
         competing.close()
+    port = gate_http_port.release()
+    # The real defect this oracle now covers: the post-release rebind must tolerate retained
+    # kernel state. Deliberately leave a predecessor TIME_WAIT on this exact port, then prove the
+    # real reuse owner (HttpPortLease.reacquire, the SO_REUSEADDR path the subject server uses)
+    # rebinds immediately. The old oracle rebound with a plain socket, which false-negatived on
+    # ambient TIME_WAIT from prior gate traffic -- passing alone and failing after real load.
+    _leave_predecessor_time_wait(host, port)
+    try:
+        assert gate_http_port.reacquire() == port
+        assert gate_http_port.reserved is True
+    finally:
+        gate_http_port.release()
 
 
 def test_gate_http_port_candidates_are_partitioned_by_xdist_worker():
@@ -796,49 +839,77 @@ def test_l6_jobd_serves_a_product_read_while_another_handler_is_occupied(
         WebDriverWait(service_thread, 4.0, poll_frequency=0.02).until(lambda thread: not thread.is_alive())
 
 
-def test_l6_local_service_deadline_breach_classifies_like_its_timeout_twin():
-    """One physical event -- a peer that missed the deadline -- must classify one way.
+def test_l6_local_service_over_budget_response_is_delivered_not_raised():
+    """A complete, request-id-matched response past the budget is DELIVERED, never a raised error.
 
-    Whether the caller sees `TimeoutError` or a post-hoc `LocalRpcError` is decided by which
-    timer noticed first: the per-recv socket timer or the total envelope budget.  Classifying
-    only one of them as retryable turned a few milliseconds of jitter into the difference
-    between a bounded pending response and a hard 503.
+    The deadline is a telemetry budget, not a correctness bound. The former behavior raised
+    `peer_handler_slow`/`unattributed_latency` post-response, turning a few milliseconds of jitter
+    into a hard 503 on a slow product poll. That post-response error vocabulary is retired: the
+    over-budget attribution is now a diagnostic label on the delivered record, decided by the
+    peer's own handler duration versus the budget.
     """
+    # No obsolete post-response error vocabulary: rpc no longer RAISES either over-budget label.
     emitted = set(re.findall(r'LocalRpcError\("([^"]+)"\)', inspect.getsource(local_service_rpc_module)))
-    # Guard the defect that produced this test: a reason recognized by the classifier that no
-    # producer ever raises. `response exceeded deadline` is the documented pre-rename spelling.
-    assert (LOCAL_RPC_DEADLINE_REASONS - emitted - {"response exceeded deadline"}) == set()
-    # Negative control for that guard: a spelling nothing raises must be reported, not absorbed.
-    assert (
-        frozenset({*LOCAL_RPC_DEADLINE_REASONS, "never_emitted_by_any_producer"})
-        - emitted
-        - {"response exceeded deadline"}
-    ) == {"never_emitted_by_any_producer"}
+    assert local_service_rpc_module.LOCAL_RPC_OVER_BUDGET_HANDLER not in emitted
+    assert local_service_rpc_module.LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED not in emitted
+    # Oracle preserved: a wrong response (request_id mismatch) IS still a genuine raised failure.
+    assert "response request_id mismatch" in emitted
 
-    timeout_twin = {"ok": False, "_transport_error": "timeout", "error": "timed out"}
-    breaches = [
-        {"ok": False, "_transport_error": "rpc", "error": reason}
-        for reason in sorted(LOCAL_RPC_DEADLINE_REASONS)
-    ]
-    assert local_service_failure_is_transient(timeout_twin) is True
-    assert [local_service_failure_is_transient(breach) for breach in breaches] == [True] * len(breaches)
-    # Negative controls: the branch must still discriminate rather than approve every `rpc`
-    # failure, and an explicitly terminal response still outranks the deadline reason.
+    # The over-budget attribution separates a slow handler from latency before the handler ran,
+    # from the one measurement the delivery path already holds.
+    envelope = local_service_rpc_module.new_envelope("testd", "history", {"action": "history"}, timeout_seconds=0.01)
+
+    def response_with_service_ms(service_duration_ms):
+        return local_service_rpc_module.LocalRpcEnvelope(
+            service="testd",
+            method="history",
+            request_id=envelope.request_id,
+            trace_id=envelope.trace_id,
+            deadline_ms=envelope.deadline_ms,
+            priority=envelope.priority,
+            owner_generation=envelope.owner_generation,
+            config_generation=envelope.config_generation,
+            payload={"ok": True},
+            service_duration_ms=service_duration_ms,
+        )
+
+    slow_handler = response_with_service_ms(envelope.deadline_ms + 5.0)
+    pre_handler_latency = response_with_service_ms(0.0)
+    assert (
+        local_service_rpc_module._over_budget_attribution(slow_handler, envelope.deadline_ms)
+        == local_service_rpc_module.LOCAL_RPC_OVER_BUDGET_HANDLER
+    )
+    assert (
+        local_service_rpc_module._over_budget_attribution(pre_handler_latency, envelope.deadline_ms)
+        == local_service_rpc_module.LOCAL_RPC_OVER_BUDGET_UNATTRIBUTED
+    )
+
+    # A real connect/send/receive timeout BEFORE any response envelope exists remains the only
+    # transport failure, and it is still transient for a bounded retry.
+    assert local_service_failure_is_transient(
+        {"ok": False, "_transport_error": "timeout", "error": "timed out"}
+    ) is True
+    # Negative controls: a terminal or protocol failure is not retryable.
     assert local_service_failure_is_transient(
         {"ok": False, "_transport_error": "rpc", "error": "unsupported RPC version"}
     ) is False
     assert local_service_failure_is_transient(
-        {"ok": False, "_transport_error": "rpc", "error": "invalid RPC envelope"}
-    ) is False
-    assert local_service_failure_is_transient(
-        {"ok": False, "terminal": True, "_transport_error": "rpc", "error": "unattributed_latency"}
+        {"ok": False, "terminal": True, "_transport_error": "timeout", "error": "timed out"}
     ) is False
 
 
-def test_l6_jobd_product_response_past_deadline_is_rpc_error_without_recovery(
+def test_l6_jobd_product_response_past_deadline_is_delivered_not_retried(
     gate_runtime_paths,
     monkeypatch,
 ):
+    """A real over-budget product response off the real transport is DELIVERED, not retried.
+
+    The peer handler runs past the envelope's telemetry budget (10 ms) but well inside the socket
+    receive timeout (0.5 s), so a complete, request-id-matched response arrives. The former
+    behavior raised `peer_handler_slow`, logged an Error, and a slow product poll collapsed into a
+    503 on GET /api/fs/read. Now the late-valid bytes are simply returned: there is no error to
+    retry, no Error is logged, and the budget breach is visible only as telemetry.
+    """
     socket_path = gate_runtime_paths.runtime_dir / "services" / "jobd-product-deadline.sock"
     service = PersistentJobBroker(socket_path, idle_seconds=10.0, workers=1)
     handle = service.handle
@@ -865,6 +936,8 @@ def test_l6_jobd_product_response_past_deadline_is_rpc_error_without_recovery(
     monkeypatch.setattr(local_service_client_module, "new_envelope", deadline_before_transport_timeout)
     monkeypatch.setattr(client.registry, "ensure_started", lambda: recovery_attempts.append(True) or True)
     boundary = SERVER_LOGS.payload()["sequence"]
+    # Measure only this call's telemetry: the health warmup ran above, before the reset.
+    reset_local_service_traffic()
     try:
         payload, body = client.product("gate-product-deadline", timeout=0.5)
         errors = [
@@ -874,18 +947,21 @@ def test_l6_jobd_product_response_past_deadline_is_rpc_error_without_recovery(
             and entry["source"] == "local-service:jobd"
         ]
 
+        # The complete late-valid response is returned: no product for the key means state none.
         assert body == b""
-        assert payload.get("ok") is False
-        assert payload.get("exception_type") == "LocalRpcError"
-        assert payload.get("_transport_error") == "rpc"
-        assert payload.get("error") == "peer_handler_slow"
-        # A real deadline breach off the real transport must be retryable for the same reason a
-        # socket timeout is: the peer was too slow, not wrong. Classifying it terminal is what
-        # collapsed one slow product poll into a 503 on GET /api/fs/read.
-        assert local_service_failure_is_transient(payload) is True
+        assert payload.get("ok") is True
+        assert payload.get("state") == "none"
+        # There is no error to retry and no post-response error vocabulary on the delivered record.
+        assert local_service_failure_is_transient(payload) is False
         assert recovery_attempts == []
-        assert len(errors) == 1
-        assert "LocalRpcError: peer_handler_slow" in errors[0]["message"]
+        assert errors == []
+        assert "exception_type" not in payload and "_transport_error" not in payload
+
+        # The budget breach is visible only as telemetry: a completion carrying a diagnostic label.
+        work = local_service_traffic_ledger("jobd").snapshot()["work"]
+        assert (work["completed"], work["errors"]) == (1, 0)
+        assert work["over_budget"] == 1
+        assert work["over_budget_by_reason"] == {"peer_handler_slow": 1}
     finally:
         service.stop_event.set()
         WebDriverWait(service_thread, 2.0, poll_frequency=0.02).until(lambda thread: not thread.is_alive())

@@ -219,6 +219,12 @@ BACKEND_HEALTH_REASON_CODES = frozenset(
         "probe_failed",
         "probe_timeout",
         "start_blocked",
+        # A RUNNING process that reported a fault this cycle: reconnecting, `healthy=False`, a
+        # recorded `last_failure`. Kept DISTINCT from `terminal_failure` because a live pid is
+        # not terminally failed -- `terminal_failure` is the registry's latched permanent
+        # start-failure fence that gates recovery, and collapsing a transient running-degraded
+        # window into it was the misclassification the daemon-monitor DOIT names.
+        "service_unhealthy",
         "terminal_failure",
         "upgrade_required",
         "exited",

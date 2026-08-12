@@ -91,7 +91,12 @@ from ..web import html_preview_document
 # v21: adds the bounded `mutation` scheduler lane so a point write/rename/mkdir no longer queues
 # behind unbounded recursive work on the shared `interactive` slot. A v20 daemon rejects
 # `priority="mutation"` as an invalid priority, so the fence must retire it.
-JOBD_PROTOCOL_VERSION = 21
+# v22: retires the blocking `relay` action.  A browser byte download now submits with a zero-wait
+# `produce` and polls `product` on the web side, so no handler blocks a serial listener slot for a
+# whole job.  A v21 daemon still accepts `relay` and would block; a v22 web process never sends it,
+# and a v21 web process sending `relay` to a v22 daemon gets `unknown jobd action`, so the fence
+# retires the mismatched pair.
+JOBD_PROTOCOL_VERSION = 22
 JOBD_DEFAULT_IDLE_SECONDS = 60.0
 
 # jobd is NOT demand-scoped, so it must never declare `demand_started`. The elected background
@@ -106,12 +111,12 @@ JOBD_DEFAULT_IDLE_SECONDS = 60.0
 # published as a bounded `absence_expected_reason` token and NOT as `demand_started` -- see
 # `yolomux_lib/backend_health/observer.py:ABSENCE_EXPECTED_REASON_FIELD`.
 JOBD_ABSENT_WITHOUT_SCHEDULER_LEASE = "scheduler_not_owned"
-# jobd is the one local service with a handler that waits by contract: `_relay` blocks on
-# `record.completion_event` for up to JOBD_MAX_DEADLINE_MS.  On a serial listener that wait is
-# charged to every other client, including the cheap last-known-good `product` reads that poll
-# on a 500 ms deadline, and the wait is invisible on the wire.  jobd's handler is lock-safe --
-# every mutation runs under `state_lock` and `_relay` drops it around the wait -- so it takes
-# the same shared concurrency limit as watchd and statusd.
+# No jobd handler waits by contract anymore: every action is zero-wait.  `produce` atomically
+# submits and inspects the product store and returns a receipt; the web process polls `product`
+# for cold work on its own side (the former blocking `relay` action, which held one handler slot
+# for the whole job, has been retired).  So jobd takes the same shared concurrency limit as
+# watchd and statusd, and no cheap last-known-good `product` read is charged for another client's
+# in-flight job.
 JOBD_CONCURRENT_HANDLER_LIMIT = LOCAL_SERVICE_CONCURRENT_HANDLER_LIMIT
 # One scheduler owner, three explicitly bounded lanes.  Every declared priority maps to exactly
 # one executor through JOBD_PRIORITY_LANES, and JOBD_PRIORITIES is derived from that same table so
@@ -175,7 +180,7 @@ JOBD_SCHEDULER_POLL_SECONDS = 0.05
 JOBD_SOCKET_NAME = "jobd.sock"
 JOBD_PRIORITIES = tuple(JOBD_PRIORITY_LANES)
 JOBD_REQUEST_ACTIONS = frozenset({
-    "ping", "status", "profile", "submit", "result", "product", "produce", "relay", "cancel",
+    "ping", "status", "profile", "submit", "result", "product", "produce", "cancel",
     "lease", "release", "shutdown", "shutdown_if_idle",
 })
 JOBD_PRODUCT_DELIVERY_MODES = frozenset({"ready_or_receipt", "receipt"})
@@ -379,7 +384,10 @@ def _filesystem_operation_authorized(value: dict[str, Any]) -> bytes:
     elif operation == "info":
         result = filesystem.path_info(path, operation="filesystem_operation.info")
     elif operation == "search":
-        result = filesystem.search_files(path, str(args.get("query") or ""), args.get("limit", 400), recursive=args.get("recursive") is True)
+        # Step 4: an opaque cursor selects delta mode; ``search_files`` serves committed journal
+        # deltas since it (no traversal) instead of a snapshot. An absent/empty cursor is a snapshot.
+        cursor = str(args.get("cursor") or "") or None
+        result = filesystem.search_files(path, str(args.get("query") or ""), args.get("limit", 400), recursive=args.get("recursive") is True, cursor=cursor)
     elif operation == "index_status":
         result = filesystem.index_status(path)
     elif operation == "count":
@@ -545,7 +553,6 @@ class JobRecord:
     deadline_at: float = 0.0
     running_started_at: float = 0.0
     running_started_monotonic: float = 0.0
-    completion_event: threading.Event = field(default_factory=threading.Event)
 
 
 class PersistentJobBroker:
@@ -787,7 +794,6 @@ class PersistentJobBroker:
         record.error = error
         record.failure = dict(failure or {})
         record.completed_at = time.time()
-        record.completion_event.set()
 
     def _future_slots(self, *, lane: str) -> int:
         """Count executor work in one lane, including timed-out work that cannot be killed safely."""
@@ -1114,9 +1120,10 @@ class PersistentJobBroker:
         This is intentionally a zero-wait operation. The broker can atomically submit and inspect
         its product store, but waiting here would hold one of JOBD_CONCURRENT_HANDLER_LIMIT
         handler slots for the whole job; enough of those and later callers are refused with
-        `service busy` instead of being served. `relay` is the one action that may wait, because
-        its caller has no receipt protocol to fall back on. Result bytes remain opaque so a
-        bounded batch keeps every item id and result exactly as its registered task emitted them.
+        `service busy` instead of being served. No jobd action waits: a caller with no receipt
+        protocol (a browser byte download) submits with `delivery="ready_or_receipt"` and polls
+        `product` on its own side. Result bytes remain opaque so a bounded batch keeps every item
+        id and result exactly as its registered task emitted them.
         """
         delivery = str(request.get("delivery") or "ready_or_receipt")
         if delivery not in JOBD_PRODUCT_DELIVERY_MODES:
@@ -1187,32 +1194,6 @@ class PersistentJobBroker:
             response["schedule"] = dict(product_response.get("schedule") or {})
             return response, body
         return response, b""
-
-    def _relay(self, request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
-        """Relay one worker-produced byte product without exposing a receipt to the web caller."""
-        if request.get("protocol_version", JOBD_PROTOCOL_VERSION) != JOBD_PROTOCOL_VERSION:
-            return {"ok": False, "error": "upgrade_required", "required_protocol_version": JOBD_PROTOCOL_VERSION}, b""
-        with self.state_lock:
-            self.request_counters["relay"] = self.request_counters.get("relay", 0) + 1
-            self._refresh_records()
-            submission, error = self._validated_submission(request)
-            if submission is None:
-                return error or {"ok": False, "error": "invalid submission"}, b""
-            submitted = self._submit_validated(submission)
-            if submitted.get("ok") is not True:
-                return submitted, b""
-            job = submitted.get("job") if isinstance(submitted.get("job"), dict) else {}
-            record = self.records.get(str(job.get("job_id") or ""))
-            if record is None:
-                return {"ok": False, "error": "relay job missing"}, b""
-            wait_seconds = max(0.001, float(submission["deadline_ms"]) / 1000.0) if int(submission["deadline_ms"]) else JOBD_MAX_DEADLINE_MS / 1000.0
-        if not record.completion_event.wait(wait_seconds):
-            return {"ok": False, "error": "relay deadline expired", "job": self._record_payload(record)}, b""
-        with self.state_lock:
-            self._refresh_records()
-            if record.status != "completed":
-                return {"ok": False, "error": record.error or f"relay job {record.status}", "job": self._record_payload(record)}, b""
-            return {"ok": True, "state": "ready", "job": self._record_payload(record), "product": dict(record.product)}, bytes(record.result)
 
     def common_status(self) -> dict[str, Any]:
         self._refresh_records()
@@ -1301,8 +1282,6 @@ class PersistentJobBroker:
         }
 
     def handle(self, request: dict[str, object], _request_binary: bytes = b"") -> tuple[dict[str, object], bytes]:
-        if request.get("action") == "relay":
-            return self._relay(request)
         with self.state_lock:
             return self._handle_locked(request)
 
@@ -1503,24 +1482,6 @@ class JobClient(LocalServiceClient):
             "delivery": delivery,
             "allow_stale": bool(allow_stale),
             "fresh_only": bool(fresh_only),
-        }, timeout=timeout)
-
-    def relay(
-        self,
-        task: str,
-        payload: dict[str, Any],
-        *,
-        priority: str = "interactive",
-        deadline_ms: int = 0,
-        timeout: float = 120.5,
-    ) -> tuple[dict[str, Any], bytes]:
-        """Wait at the daemon boundary for one browser-owned byte relay."""
-        return self.request_with_binary({
-            "action": "relay",
-            "task": task,
-            "payload": payload,
-            "priority": priority,
-            "deadline_ms": deadline_ms,
         }, timeout=timeout)
 
     def runtime_status(self) -> dict[str, Any]:

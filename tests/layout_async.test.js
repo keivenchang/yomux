@@ -110,6 +110,53 @@ async function runLayoutAsyncSuite() {
     );
   });
 
+  await testAsync('a share-scoped terminal close issues no host-only /api/event or /api/tmux-session-exists', async () => {
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'readonly', {
+      share: {view: true, id: 'share-host-poller-guard', mode: 'ro', session: '1', sessions: ['1']},
+    });
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET')});
+      return Promise.resolve(jsonResponse({exists: false}));
+    });
+    api.setShowToastForTest(() => {});
+    assert.equal(api.clientCanUseUnscopedHostRequestsForTest(), false, 'a read-only share viewer is not eligible for host-only requests');
+    const term = {write() {}, dispose() {}};
+    const item = api.registerTerminalForTest('1', term, {readyState: WebSocket.CLOSED, close() {}});
+    api.connectTerminalSocketForTest('1', item);
+    const socket = item.socket;
+    // A transient abnormal close (1006, not clean) is not "final": it drives the reconnect/confirm path,
+    // which for a host-scoped viewer would POST /api/event (terminal_disconnected) and GET
+    // /api/tmux-session-exists. A share viewer must issue NEITHER -- both are host-only (share_access=none)
+    // and the server returns 403 for a share token; a real 403 during teardown fails the strict browser
+    // server-log-ring gate. Both producers are gated on the shared clientCanUseUnscopedHostRequests() owner.
+    socket.onclose?.({target: socket, code: 1006, wasClean: false});
+    await flushAsyncWork();
+    assert.equal(requests.some(request => request.url.includes('/api/event')), false, 'a share viewer never posts terminal_disconnected to the host-only /api/event route');
+    assert.equal(requests.some(request => request.url.includes('/api/tmux-session-exists')), false, 'a share viewer never checks the host-only tmux roster');
+  });
+
+  await testAsync('a host-scoped terminal close still posts /api/event and checks /api/tmux-session-exists', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest((url, options = {}) => {
+      requests.push({url: String(url), method: String(options.method || 'GET')});
+      return Promise.resolve(jsonResponse({exists: true}));
+    });
+    api.setShowToastForTest(() => {});
+    assert.equal(api.clientCanUseUnscopedHostRequestsForTest(), true, 'a host viewer is eligible for host-only requests');
+    const term = {write() {}, dispose() {}};
+    const item = api.registerTerminalForTest('1', term, {readyState: WebSocket.CLOSED, close() {}});
+    api.connectTerminalSocketForTest('1', item);
+    const socket = item.socket;
+    // Positive control: the same abnormal close under host scope DOES post terminal_disconnected and DOES
+    // consult the tmux roster -- proving the fix gates on scope, not disables the feature.
+    socket.onclose?.({target: socket, code: 1006, wasClean: false});
+    await flushAsyncWork();
+    assert.equal(requests.some(request => request.url.includes('/api/event') && request.method === 'POST'), true, 'a host viewer posts terminal_disconnected to /api/event');
+    assert.equal(requests.some(request => request.url.includes('/api/tmux-session-exists')), true, 'a host viewer consults the tmux roster to decide reconnect vs prune');
+  });
+
   await testAsync('background 401s retain the document while interactive commands still redirect to login', async () => {
     const api = loadYolomux();
     api.setFetchForTest(() => Promise.resolve({
@@ -564,6 +611,64 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.jsDebugFailureEventsForTest('rejection').length, 0, 'the consumer owns its rejection before the terminal arrives');
     assert.equal(api.apiOperationStateForTest().pending, 0);
     assert.equal(api.apiOperationStateForTest().waiters, 0);
+  });
+
+  await testAsync('a pre-ready candidate failure does not strand demand and recovers on a fresh candidate', async () => {
+    const timers = [];
+    const api = loadYolomux('', ['1'], 'http:', 'Linux x86_64', 'admin', {
+      setTimeout(callback, delay) {
+        const handle = {callback, delay};
+        timers.push(handle);
+        return handle;
+      },
+      clearTimeout() {},
+    });
+    api.installClientEventStreamForTest();
+    const activeSource = api.clientEventTransportStateForTest().source;
+    assert.ok(activeSource, 'the active serving stream is open');
+
+    // A changed demand opens a CANDIDATE that has not yet fired ready.
+    api.registerApiOperationReceiptForTest({
+      request: {id: 'r-candidate'},
+      operation: {
+        id: 'op-candidate',
+        kind: 'fs_watch_diff',
+        status_url: '/api/operations/op-candidate',
+        events_url: '/api/client-events?operation_id=op-candidate',
+        cursor: {epoch: 'candidate-epoch', seq: 0},
+      },
+    });
+    const candidate = api.clientEventTransportStateForTest().replacementSource;
+    assert.ok(candidate && candidate !== activeSource, 'a candidate stream opens for the changed demand');
+    assert.equal(new URL(candidate.url, 'https://yolomux.test').searchParams.get('operations'), 'op-candidate');
+    assert.equal(api.clientEventTransportStateForTest().candidateEpisode.source, candidate, 'the candidate owns one bounded retry episode');
+
+    // Transient pre-ready errors are tolerated within the bounded episode: the candidate is kept and
+    // the active stream is never promoted-away or torn down.
+    candidate.onerror();
+    candidate.onerror();
+    assert.equal(api.clientEventTransportStateForTest().replacementSource, candidate, 'the candidate survives errors within the bounded episode');
+    assert.equal(api.clientEventTransportStateForTest().source, activeSource, 'the active stream is untouched while the candidate retries');
+    assert.equal(candidate.readyState, 1, 'the candidate is not closed within the bounded episode');
+
+    // Exhausting the episode must abandon the candidate, demote the active stream (it does not serve
+    // the new demand), and re-drive demand into ONE corrected candidate rather than stranding it.
+    candidate.onerror();
+    assert.equal(candidate.readyState, 2, 'the exhausted candidate is closed');
+    assert.equal(api.clientEventTransportStateForTest().connected, false, 'the active stream is demoted, not claimed to serve the new demand');
+    const freshCandidate = api.clientEventTransportStateForTest().replacementSource;
+    assert.ok(freshCandidate && freshCandidate !== candidate, 'demand is re-driven into a fresh candidate');
+    assert.equal(new URL(freshCandidate.url, 'https://yolomux.test').searchParams.get('operations'), 'op-candidate', 'the fresh candidate still carries the demanded operation');
+    assert.equal(api.clientEventTransportStateForTest().candidateEpisode.source, freshCandidate, 'a new bounded episode governs the fresh candidate');
+    assert.ok(timers.some(timer => timer.delay === api.reconnectResyncDebounceMsForTest?.() || timer.delay === 751), 'an HTTP resync is scheduled so no channel is stranded');
+
+    // The fresh candidate becoming ready promotes it to active and restores serving.
+    freshCandidate.listeners.get('ready')[0]({data: JSON.stringify({epoch: 'candidate-epoch', resource_revisions: {}}), type: 'ready', lastEventId: ''});
+    assert.equal(api.clientEventTransportStateForTest().source, freshCandidate, 'the recovered candidate becomes the active stream');
+    assert.equal(api.clientEventTransportStateForTest().replacementSource, null, 'no candidate remains after recovery');
+    assert.equal(api.clientEventTransportStateForTest().candidateEpisode, null, 'the retry episode is cleared once the candidate is serving');
+    assert.equal(api.clientEventTransportStateForTest().connected, true, 'serving is restored after recovery');
+    assert.equal(activeSource.readyState, 2, 'the old active stream closes only after the corrected demand is ready');
   });
 
   await testAsync('filesystem operation waiters preserve the caller deadline with one request', async () => {
@@ -1548,6 +1653,201 @@ async function runLayoutAsyncSuite() {
     assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {state: 'building', generation: 6}), false, 'the event-owned generation fences a stale later HTTP response');
   });
 
+  // Live 7771: /home/keivenc/dev held 22k+ rows while a progressive BFS kept crawling. The index-status
+  // payload still carried a SUPERSEDED generation's `too_large`/`coverage:partial` verdict, so the badge
+  // read "file limit reached" and the Finder banner claimed "Indexed 0 files" — both false. The live
+  // truth is `progressive_coverage`: a crawl that is not truncated and not yet full is still BUILDING.
+  test('a progressive BFS crawl reads as building, not the terminal file-limit state, and clears a superseded warning', () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    api.clearFileIndexPartialWarningsForTest();
+
+    const building = {
+      ready: true,
+      too_large: true,            // a superseded persisted snapshot was capped ...
+      state: 'too_large',
+      coverage: 'partial',
+      count: 100000,
+      max_files: 100000,
+      generation: 6,
+      progressive_coverage: {truncated: false, full_coverage: false, published_generation: 6, entry_count: 54945},
+    };
+    assert.equal(api.fileIndexStatusFromPayloadForTest(building), 'building',
+      'the live crawl is not truncated, so the root is building rather than the terminal file-limit state');
+    assert.equal(
+      api.fileIndexStatusFromPayloadForTest({...building, progressive_coverage: {truncated: true, full_coverage: false, published_generation: 7, entry_count: 100000}}),
+      'too_large',
+      'a genuinely truncated crawl still maps to the file-limit state');
+    assert.equal(
+      api.fileIndexStatusFromPayloadForTest({ready: true, state: 'ready', progressive_coverage: {truncated: false, full_coverage: true, published_generation: 8, entry_count: 100000}}),
+      'ready',
+      'a completed full-coverage crawl reads ready');
+
+    // A superseded "file limit reached" warning must clear the moment the live crawl is building again,
+    // so its stale count cannot linger on screen.
+    api.seedFileIndexPartialWarningRootForTest('/repo');
+    assert.equal(api.fileIndexPartialWarningRootWarnedForTest('/repo'), true, 'the root starts with a prior capped-index warning');
+    assert.equal(api.applyFileIndexStatusPayloadForTest('/repo', {...building, generation: 11}), true);
+    assert.equal(api.fileExplorerIndexStatusForTest('/repo'), 'building', 'the live crawl re-derives as building');
+    assert.equal(api.fileIndexPartialWarningRootWarnedForTest('/repo'), false,
+      'a superseded capped-index warning is cleared once the crawl is building again');
+  });
+
+  // Live 7771: a fully-qualified name typed while /home/keivenc/dev was still warming settled on the
+  // empty snapshot and never refreshed, even though the file was later indexed. The palette must
+  // re-issue the CURRENT typed query when the index advances, with no retype.
+  await testAsync('a search_progress signal streams the crawl\'s newly-published matches by cursor, not a repeated full query', async () => {
+    const api = loadYolomux();
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const searches = [];
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (target.includes('/api/fs/search')) {
+        searches.push(target);
+        if (target.includes('cursor=')) {
+          // The delta read: one committed match published since the baseline cursor.
+          return Promise.resolve(jsonResponse({
+            root: '/repo', root_realpath: '/repo', query: 't5t.md', limit: 500, more: false,
+            cursor: 'CUR1',
+            changes: [{operation: 'upsert', path: '/repo/notes/t5t/t5t.md', name: 't5t.md', relative_path: 'notes/t5t/t5t.md', realpath: '/repo/notes/t5t/t5t.md'}],
+            coverage: {published_depth: 2, frontier_depth: 3, frontier_size: 4, entry_count: 12000, full_coverage: false, truncated: false},
+          }));
+        }
+        // The warming snapshot returns nothing yet, but hands back a baseline cursor to stream from.
+        return Promise.resolve(jsonResponse({
+          root: '/repo', root_realpath: '/repo', query: 't5t.md', index_state: 'warming', index_coverage: 'pending',
+          files: [], initial_cursor: 'CUR0',
+        }));
+      }
+      return Promise.resolve(jsonResponse({state: 'building'}));
+    });
+
+    // Palette open in files mode; the warming snapshot seeds one baseline cursor for /repo.
+    api.installCommandPaletteFixtureForTest();
+    api.setCommandPaletteStateForTest('files', 't5t.md');
+    api.setCommandPaletteQueryForTest('t5t.md');
+    await api.refreshFileQuickOpenCandidatesForTest('t5t.md');
+    const seeded = api.fileQuickOpenDeltaRootsForTest();
+    assert.equal(seeded.length, 1, 'the warming snapshot seeds exactly one delta cursor');
+    assert.equal(seeded[0].cursor, 'CUR0', 'the baseline cursor from initial_cursor is stored per root');
+    const snapshotSearches = searches.filter(target => !target.includes('cursor=')).length;
+
+    // The crawl publishes a directory: a path-free search_progress signal names this root's scope.
+    api.handleClientPushEventNowForTest('search_progress', {
+      scope_id: api.fileSearchScopeIdForTest('/repo'),
+      generation: 5, revision: 7,
+      coverage: {published_depth: 2, frontier_depth: 3, frontier_size: 4, entry_count: 12000, full_coverage: false, truncated: false},
+    });
+    await flushAsyncWork();
+
+    const deltaSearches = searches.filter(target => target.includes('cursor=CUR0'));
+    assert.equal(deltaSearches.length, 1, 'the signal issues exactly one bounded delta read against the baseline cursor');
+    assert.equal(searches.filter(target => !target.includes('cursor=')).length, snapshotSearches,
+      'the signal issues a delta, NOT a repeated full snapshot search');
+    assert.ok(api.fileQuickOpenStateForTest().candidates.some(candidate => candidate.path === '/repo/notes/t5t/t5t.md'),
+      'the freshly-published file streams into the palette candidates without a retype');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, 'CUR1', 'the root advances to the returned cursor');
+  });
+
+  // Seed one delta cursor for /repo through a real snapshot fetch, returning the recorded requests and
+  // a fetch-response controller so each streaming test drives its own delta/rebase/pagination replies.
+  async function seedQuickOpenDeltaCursor(api, {snapshotFiles = [], initialCursor = 'CUR0', deltaReply} = {}) {
+    api.setFileExplorerIndexedDirsForTest(['/repo']);
+    const searches = [];
+    api.setFetchForTest(url => {
+      const target = String(url);
+      if (target.includes('/api/fs/search')) {
+        searches.push(target);
+        if (target.includes('cursor=')) return Promise.resolve(jsonResponse(deltaReply(target)));
+        return Promise.resolve(jsonResponse({
+          root: '/repo', root_realpath: '/repo', query: 't5t', index_state: 'warming',
+          files: snapshotFiles, initial_cursor: initialCursor,
+        }));
+      }
+      return Promise.resolve(jsonResponse({state: 'building'}));
+    });
+    api.installCommandPaletteFixtureForTest();
+    api.setFileQuickOpenCandidatesForTest('/repo', []);
+    api.setCommandPaletteStateForTest('files', 't5t');
+    api.setCommandPaletteQueryForTest('t5t');
+    await api.refreshFileQuickOpenCandidatesForTest('t5t');
+    return {searches, scopeId: api.fileSearchScopeIdForTest('/repo')};
+  }
+
+  await testAsync('an out-of-order delta for a superseded request cannot mutate a newer palette', async () => {
+    const api = loadYolomux();
+    const {searches} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    const staleRequestId = api.fileQuickOpenDeltaRootsForTest()[0].requestId;
+    // A newer search supersedes the cursor set (a query change bumps requestId + reseeds).
+    await api.refreshFileQuickOpenCandidatesForTest('t5t');
+    searches.length = 0;
+    const status = api.ingestFileQuickOpenDeltaForTest('/repo', staleRequestId, {
+      changes: [{operation: 'upsert', path: '/repo/stale.md', name: 'stale.md', relative_path: 'stale.md', realpath: '/repo/stale.md'}],
+      more: false, cursor: 'STALE',
+    });
+    assert.equal(status.stale, true, 'a delta for the retired requestId is rejected as stale');
+    assert.equal(api.fileQuickOpenStateForTest().candidates.some(file => file.path === '/repo/stale.md'), false,
+      'the stale response never mutates the current candidate set');
+  });
+
+  await testAsync('a rebase_required verdict performs one full-snapshot repair, not a mixed merge', async () => {
+    const api = loadYolomux();
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {
+      deltaReply: () => ({root: '/repo', root_realpath: '/repo', rebase_required: true, reason: 'generation_superseded'}),
+    });
+    const snapshotsBefore = searches.filter(target => !target.includes('cursor=')).length;
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 6, revision: 9, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 1, 'the stale cursor is read exactly once before rebasing');
+    assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBefore,
+      'rebase_required repairs by re-issuing one full snapshot search');
+  });
+
+  await testAsync('a signal drains a paginated backlog bounded, advancing the cursor once settled', async () => {
+    const api = loadYolomux();
+    const pages = [
+      {changes: [{operation: 'upsert', path: '/repo/one.md', name: 'one.md', relative_path: 'one.md', realpath: '/repo/one.md'}], more: true, cursor: 'CUR1'},
+      {changes: [{operation: 'upsert', path: '/repo/two.md', name: 'two.md', relative_path: 'two.md', realpath: '/repo/two.md'}], more: false, cursor: 'CUR2'},
+    ];
+    let page = 0;
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => pages[Math.min(page++, pages.length - 1)]});
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 2, 'more=true continues paging until the server says done');
+    assert.deepStrictEqual(
+      canonical(api.fileQuickOpenStateForTest().candidates.map(file => file.path).sort()),
+      ['/repo/one.md', '/repo/two.md'], 'both paged deltas merge into the candidate set');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, 'CUR2', 'the cursor advances to the final page');
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].fetching, false, 'the in-flight guard is released once the backlog drains');
+  });
+
+  await testAsync('a search_progress signal after close or for another root pumps nothing', async () => {
+    const api = loadYolomux();
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    searches.length = 0;
+    // A non-matching scope digest correlates to no open root.
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: api.fileSearchScopeIdForTest('/somewhere/else'), generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.length, 0, 'a signal for another root issues no delta read');
+    // After close, the matching scope must not stream against a dead palette.
+    api.closeCommandPaletteForTest();
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.length, 0, 'a signal after the palette closes pumps nothing');
+  });
+
+  await testAsync('a root with no committed baseline repairs from a full snapshot on its first signal', async () => {
+    const api = loadYolomux();
+    // initial_cursor null: nothing committed yet, so a signal cannot delta-read and must repair.
+    const {searches, scopeId} = await seedQuickOpenDeltaCursor(api, {initialCursor: null, deltaReply: () => ({changes: [], more: false, cursor: 'CUR1'})});
+    assert.equal(api.fileQuickOpenDeltaRootsForTest()[0].cursor, null, 'a warming root with nothing committed stores a null baseline');
+    const snapshotsBefore = searches.filter(target => !target.includes('cursor=')).length;
+    api.handleClientPushEventNowForTest('search_progress', {scope_id: scopeId, generation: 5, revision: 7, coverage: {}});
+    await flushAsyncWork();
+    assert.equal(searches.filter(target => target.includes('cursor=')).length, 0, 'a null-cursor root never issues a delta read');
+    assert.ok(searches.filter(target => !target.includes('cursor=')).length > snapshotsBefore, 'it repairs from one full snapshot to pick up pre-cursor rows');
+  });
+
   await testAsync('background-owner takeover revalidates visible indexed roots once', async () => {
     const api = loadYolomux('', ['1']);
     const requests = [];
@@ -2039,6 +2339,78 @@ async function runLayoutAsyncSuite() {
       assert.deepStrictEqual(canonical(client.api.clientEventTransportStateForTest().resourceRevisions), {auto_approve_changed: 3, tmux_signals_changed: 3});
       assert.deepStrictEqual(client.requests.sort(), ['/api/auto-approve', '/api/tmux-signals?force=1']);
     }
+  });
+
+  await testAsync('keyed patches at revisions 401/402/403 apply in one frame strictly in order', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
+    api.setDocumentVisibilityForTest('hidden');
+    const base = {
+      agent_window_snapshot_revision: 400,
+      session_order: ['1'],
+      sessions: {'1': {target: '1', enabled: false, agent_windows: [{window_index: 0, state: 'idle'}]}},
+      rules: {mode: 'safe'},
+    };
+    // Seed the single applied revision at 400 with a full snapshot.
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', {data: base}, {epoch: 'server-a', resource: 'auto_approve_changed', resource_revision: 400}), true);
+    const patch = revision => ({
+      patch: true,
+      collection: 'sessions',
+      changes: {'1': {target: '1', enabled: revision % 2 === 1, agent_windows: [{window_index: 0, state: `rev-${revision}`}]}},
+      removed_keys: [],
+      fields: {agent_window_snapshot_revision: revision},
+      removed_fields: [],
+    });
+    // 401, 402, 403 each carry the immediately preceding base and apply in order.
+    for (const revision of [401, 402, 403]) {
+      assert.equal(
+        api.handleClientPushEventForTest('auto_approve_changed', patch(revision), {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: revision - 1, resource_revision: revision}),
+        true,
+        `revision ${revision} applies on its immediate predecessor`,
+      );
+      assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, revision, 'the single applied revision advances only at validated apply');
+    }
+    assert.equal(api.autoApproveStateForTest('1').agent_windows[0].state, 'rev-403', 'the last in-order patch is the applied state');
+    // A re-delivered 402 (<= the applied 403) is superseded and cannot walk the applied revision back.
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', patch(402), {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: 401, resource_revision: 402}), false, 'a superseded revision cannot walk the applied revision backward');
+    assert.equal(api.clientEventTransportStateForTest().resourceRevisions.auto_approve_changed, 403, 'a rejected out-of-order frame never advances the applied revision');
+    await flushAsyncWork();
+    assert.deepStrictEqual(requests.filter(url => url === '/api/auto-approve'), [], 'in-order patches repair nothing over ordinary HTTP');
+  });
+
+  await testAsync('a revision-only agent-window patch advances the revision without HTTP or a row rebuild', async () => {
+    const api = loadYolomux('', ['1']);
+    const requests = [];
+    api.setFetchForTest(url => { requests.push(String(url)); return Promise.resolve(jsonResponse({})); });
+    api.setDocumentVisibilityForTest('hidden');
+    const base = {
+      agent_window_snapshot_revision: 7,
+      session_order: ['1'],
+      sessions: {'1': {target: '1', enabled: true, agent_windows: [{window_index: 0, state: 'working'}]}},
+      rules: {mode: 'safe'},
+    };
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', {data: base}, {epoch: 'server-a', resource: 'auto_approve_changed', resource_revision: 1}), true);
+    assert.equal(api.autoApproveStateForTest('1').agent_window_snapshot_revision, 7);
+    // The server re-measured the same rows under a new snapshot revision: a MINIMAL patch (empty
+    // changes, one field) advances the revision on every row without changing row content.
+    const revisionOnly = {
+      patch: true,
+      collection: 'sessions',
+      changes: {},
+      removed_keys: [],
+      fields: {agent_window_snapshot_revision: 8},
+      removed_fields: [],
+    };
+    const before = api.autoApproveStateForTest('1');
+    const httpBefore = requests.filter(url => url === '/api/auto-approve').length;
+    assert.equal(api.handleClientPushEventForTest('auto_approve_changed', revisionOnly, {epoch: 'server-a', resource: 'auto_approve_changed', base_resource_revision: 1, resource_revision: 2}), true);
+    const after = api.autoApproveStateForTest('1');
+    assert.equal(after.agent_window_snapshot_revision, 8, 'the revision-only patch advances the snapshot revision');
+    assert.deepStrictEqual(after.agent_windows, before.agent_windows, 'the row content is unchanged by a revision-only patch');
+    assert.equal(after.state, before.state, 'no row field beyond the revision changes');
+    await flushAsyncWork();
+    assert.equal(requests.filter(url => url === '/api/auto-approve').length - httpBefore, 0, 'a revision-only patch performs no HTTP refetch');
   });
 
   test('client-event queue overflow maps every dropped resource to a scoped repair owner', () => {

@@ -732,6 +732,7 @@ let fileExplorerIndexedDirs = readStoredFileExplorerIndexedDirs();
 let fileExplorerIndexExcludePaths = new Set();
 const fileExplorerIndexStatus = new Map();  // normalized indexed root -> 'building' | 'ready' | 'stale' | 'too_large' | 'error'
 const fileExplorerIndexGeneration = new Map();  // normalized indexed root -> accepted backend lifecycle generation
+const fileExplorerIndexPublishedGeneration = new Map();  // normalized indexed root -> last-seen progressive published generation (drives Quick Open re-query as BFS publishes rows)
 const fileIndexStatusPollRoots = new Set();  // normalized indexed roots still building
 const fileIndexPartialWarningRoots = new Set();  // warned once per root until it regains full coverage
 let applyingIndexedDirsSetting = false;  // guard: reconciling the set FROM the setting must not write it back
@@ -773,8 +774,13 @@ const fileQuickOpenState = {
   error: '',
   requestId: 0,
   debounce: null,
-  indexRetry: null,
   abortController: null,
+  // The active search text the delta cursors below belong to, and the per-root incremental-read state
+  // for the CURRENT requestId. Each searched root keeps one opaque cursor + `more` flag + its opaque
+  // scope digest (so a path-free search_progress signal correlates back to the root it names) so the
+  // server can stream committed match deltas instead of the client re-issuing the whole query.
+  deltaQuery: '',
+  deltaRoots: new Map(),
 };
 let tabsMenuSearchText = '';
 let fileExplorerShortcutRestoreSlots = null;
@@ -1787,6 +1793,14 @@ const clientEventTransportState = {
   demand: null,
   demandSignature: '',
   demandTimer: null,
+  // The client-event EventSource is modelled as three explicit roles, not one socket. `demand` is the
+  // REQUESTED state (the channels/operations the page currently wants). `source` is the ACTIVE stream:
+  // the one that has fired `ready` and is serving delivered frames. `replacementSource` is the
+  // CANDIDATE: a newly opened stream for a changed demand that has NOT yet fired `ready`, so it is not
+  // yet allowed to serve. `candidateEpisode` is the ONE bounded retry episode governing that candidate
+  // between open and ready; a pre-ready candidate failure that exhausts it must re-drive demand and
+  // demote the active stream rather than strand demand or let the old stream claim to serve the new one.
+  candidateEpisode: null,
   queue: new Map(),
   resourceEpoch: '',
   resourceRevisions: new Map(),
@@ -1794,6 +1808,11 @@ const clientEventTransportState = {
   frame: 0,
   resyncTimer: null,
 };
+// A candidate stream may error transiently before it is ever ready; the browser EventSource
+// auto-reconnects the same URL, so a small bound tolerates those retries within ONE episode before
+// the candidate is abandoned and demand is re-driven. Keep it small so a persistently rejected demand
+// falls back to an HTTP resync quickly instead of holding a stale active stream indefinitely.
+const clientEventCandidateRetryLimit = 3;
 // One server process = one epoch = one sequence for every counter this client retains about that
 // server: client-event resource revisions AND the session-metadata build generation. They all
 // restart at zero in a replacement process, so they reset together, here, once.
@@ -2086,7 +2105,6 @@ const uiDelayMs = Object.freeze({
   tmuxWindowSwitchReveal: 4000,
   terminalRefreshAfterTabSelect: 120,
   fileQuickOpenDebounce: 160,
-  fileQuickOpenIndexRetry: 500,
   commandPaletteMissingPathRetry: 1001,
   clientEventDemandDebounce: 30,
   fileExplorerTypeaheadClear: 700,
@@ -2121,7 +2139,6 @@ const yolomuxTiming = Object.freeze({
   tmuxWindowSwitchPaintCapMs: 250,
   terminalRefreshAfterTabSelectMs: uiDelayMs.terminalRefreshAfterTabSelect,
   fileQuickOpenDebounceMs: uiDelayMs.fileQuickOpenDebounce,
-  fileQuickOpenIndexRetryMs: uiDelayMs.fileQuickOpenIndexRetry,
   commandPaletteMissingPathRetryMs: uiDelayMs.commandPaletteMissingPathRetry,
   clientEventDemandDebounceMs: uiDelayMs.clientEventDemandDebounce,
   fileExplorerTypeaheadClearMs: uiDelayMs.fileExplorerTypeaheadClear,
@@ -2152,7 +2169,6 @@ const {
   tmuxWindowSwitchPaintCapMs,
   terminalRefreshAfterTabSelectMs,
   fileQuickOpenDebounceMs,
-  fileQuickOpenIndexRetryMs,
   commandPaletteMissingPathRetryMs,
   clientEventDemandDebounceMs,
   fileExplorerTypeaheadClearMs,
@@ -2621,39 +2637,83 @@ function backendHealthIndicatorHost() {
   return topbar.querySelector('.topbar-right-tools') || topbar;
 }
 
-function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
-  if (!host) return null;
-  // Look the existing node up across the whole topbar, not just the host: if .topbar-right-tools
-  // appears after the first render, a host-scoped lookup would build a second indicator.
-  const scope = topbar || host;
-  let indicator = scope.querySelector('[data-backend-health]');
-  const model = backendHealthIndicatorModel();
-  if (!model) {
-    indicator?.remove();
-    return null;
-  }
-  if (!indicator) {
-    indicator = document.createElement('span');
-    indicator.className = 'backend-health-indicator';
-    indicator.setAttribute('role', 'status');
-    const message = document.createElement('span');
-    message.className = 'backend-health-indicator-text';
-    indicator.append(message, makeButton({
-      className: 'backend-health-indicator-details',
-      label: t('common.details'),
-      ariaLabel: t('backendHealth.detailsAria'),
-      onClick: () => {
-        openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
-      },
-    }));
-    host.prepend(indicator);
-  }
-  indicator.dataset.backendHealth = model.severity;
-  if (model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
+// One glyph for the fixed icon shell. It is a marker, never the message: the severity is carried by
+// the WORDS in the role=status label, so a monochrome or forced-colours theme still reads correctly.
+function backendHealthIndicatorGlyph(severity) {
+  return severity ? '⚠' : '';
+}
+
+// The permanently mounted, fixed-size backend-health control. It is built once by
+// createTopbarRightTools() and NEVER inserted or removed on a health transition: a change only
+// repaints it and rewrites its accessible sentence, so the topbar, #grid, and every xterm keep the
+// same geometry before, during, and after a warning. The full localized sentence lives in the
+// role=status live region AND on the control's aria-label/title; the whole control is the System
+// Details route, so there is no separate variable-width Details button to grow the row.
+function createBackendHealthIndicator() {
+  const indicator = makeButton({
+    id: 'backendHealthIndicator',
+    className: 'backend-health-indicator',
+    onClick: () => {
+      openBackendHealthDetails().catch(error => console.warn('backend health details failed to open', error));
+    },
+  });
+  const icon = document.createElement('span');
+  icon.className = 'backend-health-indicator-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  const message = document.createElement('span');
+  message.className = 'backend-health-indicator-text';
+  message.setAttribute('role', 'status');
+  message.setAttribute('aria-live', 'polite');
+  indicator.append(icon, message);
+  applyBackendHealthIndicatorState(indicator, backendHealthIndicatorModel());
+  return indicator;
+}
+
+// Push one model (or null when healthy) into the existing control. Healthy is a state of the SAME
+// node -- an inert, empty, transparent icon shell that still occupies its fixed slot -- not the
+// node's absence, so recovery does not remove layout content.
+function applyBackendHealthIndicatorState(indicator, model) {
+  const severity = model ? model.severity : '';
+  indicator.dataset.backendHealth = severity;
+  if (model && model.reasonCode) indicator.dataset.backendHealthReason = model.reasonCode;
   else delete indicator.dataset.backendHealthReason;
+  indicator.querySelector('.backend-health-indicator-icon').textContent = backendHealthIndicatorGlyph(severity);
   // The severity is carried by the WORDS ("is not running" vs "is degraded"), not by the colour the
   // data-backend-health token selects, so the warning survives a monochrome or high-contrast theme.
-  indicator.querySelector('.backend-health-indicator-text').textContent = model.text;
+  indicator.querySelector('.backend-health-indicator-text').textContent = model ? model.text : '';
+  if (model) {
+    indicator.disabled = false;
+    // The accessible NAME describes what activating the control does (open the System details); the
+    // live-region text above announces the STATE sentence, and the tooltip carries the full sentence.
+    indicator.setAttribute('aria-label', t('backendHealth.detailsAria'));
+    indicator.setAttribute('title', model.text);
+    indicator.removeAttribute('aria-hidden');
+  } else {
+    indicator.disabled = true;
+    indicator.removeAttribute('aria-label');
+    indicator.removeAttribute('title');
+    indicator.setAttribute('aria-hidden', 'true');
+  }
+}
+
+function syncBackendHealthIndicator(host = backendHealthIndicatorHost()) {
+  const model = backendHealthIndicatorModel();
+  // Look the existing node up across the whole topbar, not just the host: the control is normally
+  // built into .topbar-right-tools, but if that host is torn down and rebuilt -- fallback-mounting a
+  // control in the topbar while a detached one waits to be re-inserted -- there must still be exactly
+  // ONE. Keep the first in document order and collapse any extra so a rebuild cannot leave two owners.
+  const scope = topbar || host || document;
+  const existing = Array.from(scope.querySelectorAll('[data-backend-health]'));
+  let indicator = existing[0] || null;
+  for (let index = 1; index < existing.length; index += 1) existing[index].remove();
+  if (!indicator) {
+    // The control is missing only before the right-tools builder has run, or in the fallback where
+    // .topbar-right-tools was removed at runtime. Mount one and keep updating it in place thereafter.
+    if (!host) return null;
+    indicator = createBackendHealthIndicator();
+    host.prepend(indicator);
+  }
+  applyBackendHealthIndicatorState(indicator, model);
   return indicator;
 }
 
@@ -2778,6 +2838,14 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   if (!requestOptions.credentials) requestOptions.credentials = 'same-origin';
   applyShareTokenHeaders(requestOptions);
   const recordDebug = internalOptions.recordDebug !== false;
+  // Some internal probes have an EXPECTED non-2xx outcome (e.g. an open-editor deletion-confirmation
+  // read that a genuine 404 answers). Recording that expected status as a jsDebug API failure is a false
+  // positive the strict browser error gate flags. quietStatuses suppresses the debug event ONLY for those
+  // exact expected response statuses; every other status, and any thrown transport/network error, still
+  // records loud, so genuine failures never go silent.
+  const quietStatuses = Array.isArray(internalOptions.quietStatuses)
+    ? new Set(internalOptions.quietStatuses.map(Number))
+    : null;
   const diagnosticProvenance = ['controlled_probe', 'confirmed_real'].includes(internalOptions.provenance)
     ? internalOptions.provenance
     : '';
@@ -2846,7 +2914,9 @@ async function apiFetch(url, options = {}, internalOptions = {}) {
   noteBackendHealthSuccess();
   if (recordDebug) notePageLoadApiCompleted();
   let debugEvent = null;
-  if (recordDebug) {
+  // An expected status (a controlled probe's own verdict) is not an API failure; do not record it.
+  const suppressExpectedStatus = Boolean(quietStatuses && quietStatuses.has(Number(response.status)));
+  if (recordDebug && !suppressExpectedStatus) {
     debugEvent = recordApiDebugEvent(url, method, startedAt, {
       status: response.status,
       ok: response.ok,
@@ -3106,6 +3176,11 @@ function apiOperationTerminalData(record, payload = {}) {
 function recordApiOperationTerminalFailure(record, error, expected = {}) {
   if (error?.name !== 'ApiOperationTerminalError' || !expected.url) return;
   const status = Number(error.status);
+  // An expected terminal status (a controlled probe's own verdict, e.g. a deletion-confirmation 404) is
+  // not an API failure; suppress it. Any other status, and non-status transport errors, still record.
+  if (Array.isArray(expected.quietStatuses)
+    && Number.isSafeInteger(status)
+    && expected.quietStatuses.map(Number).includes(status)) return;
   recordApiDebugEvent(expected.url, expected.method || 'GET', record.acceptedAt, {
     ...(Number.isSafeInteger(status) && status >= 100 && status <= 599 ? {status, ok: false} : {error}),
     requestId: record.request?.id,
@@ -3323,7 +3398,7 @@ async function apiJsonResponse(response) {
   return payload;
 }
 
-async function apiFetchJson(url, options = {}) {
+async function apiFetchJson(url, options = {}, internalOptions = {}) {
   const lifecycle = typeof tmuxSessionLifecycleRequestLease === 'function'
     ? tmuxSessionLifecycleRequestLease(url, options)
     : {session: '', lease: null, blocked: false};
@@ -3336,7 +3411,7 @@ async function apiFetchJson(url, options = {}) {
     lifecycle.lease?.release?.();
   };
   try {
-    const result = await apiJsonResponse(await apiFetch(url, options));
+    const result = await apiJsonResponse(await apiFetch(url, options, internalOptions));
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
     }
@@ -3351,6 +3426,7 @@ async function apiFetchJson(url, options = {}) {
       signal: options.signal,
       url,
       method: jsDebugRequestMethod(options),
+      quietStatuses: internalOptions.quietStatuses,
     });
     if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) {
       throw tmuxSessionLifecycleStaleRequestError(lifecycle.session);
@@ -3831,14 +3907,14 @@ function recordApiDebugResponseBytes(event, response) {
   const headerBytes = Number(response.headers?.get?.('Content-Length') || NaN);
   if (Number.isFinite(headerBytes) && headerBytes >= 0) {
     event.responseBytes = headerBytes;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, headerBytes);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
     return;
   }
   if (typeof response.clone !== 'function') return;
   response.clone().arrayBuffer().then(buffer => {
     event.responseBytes = buffer.byteLength;
-    if (typeof recordApiDebugResponseBytesForGraph === 'function') recordApiDebugResponseBytesForGraph(event, buffer.byteLength);
+    finalizeJsDebugCurrentObservationBytes(event);
     scheduleJsDebugPanelRefresh();
   }).catch(() => {});
 }
@@ -3868,12 +3944,19 @@ function diagnosticPacificWallTime(value) {
 
 function recordJsDebugEvent(type, payload = {}) {
   const timestampMs = Date.now();
+  // W2: sanitize the caller payload BEFORE retention, then write the authoritative event identity
+  // fields AFTER the spread so a payload carrying its own id/ts/type can never overwrite the
+  // trusted monotonic identity this producer assigns. `wallTime` is NOT one of those fields: a
+  // browser-lifecycle failure records the Pacific wall time it observed the failure at, and the
+  // finalizer reports THAT time, not the later moment this event was retained -- so a caller
+  // wallTime is preserved and the producer only stamps its own when the caller supplied none.
+  const redacted = shareRedactDiagnosticValue(payload);
   const event = {
+    ...redacted,
     id: ++jsDebugEventSeq,
     ts: new Date(timestampMs).toISOString(),
-    wallTime: diagnosticPacificWallTime(timestampMs),
+    wallTime: String(redacted.wallTime || diagnosticPacificWallTime(timestampMs)),
     type: String(type || 'event'),
-    ...shareRedactDiagnosticValue(payload),
   };
   jsDebugEvents.push(event);
   if (typeof recordJsDebugEventForGraph === 'function') recordJsDebugEventForGraph(event);
@@ -5487,6 +5570,73 @@ function writeStoredFileExplorerIndexedDirs() {
     .filter(Boolean)
     .sort((left, right) => left.localeCompare(right));
   storageSet(fileExplorerIndexedDirsStorageKey, JSON.stringify(Array.from(new Set(paths))));
+}
+
+// A synchronous SHA-256 over a string's UTF-8 bytes, returning the lowercase hex digest. The
+// search-progress bus keys every root by the server's opaque digest sha256(canonical_root_key)[:16]
+// (yolomux_lib/search/file_index.py::_root_scope_id): a filesystem path in a signal's payload would
+// disclose one client's directory to every other client on the globally-fanned-out bus, so the frame
+// carries only the digest. The browser recomputes the SAME digest from a snapshot's root_realpath to
+// correlate a path-free progress signal back to the root it searched. crypto.subtle.digest is async
+// and absent from the node test VM, so this is a self-contained synchronous implementation.
+const SHA256_ROUND_CONSTANTS = Object.freeze([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexOfString(text) {
+  const bytes = new TextEncoder().encode(String(text ?? ''));
+  const length = bytes.length;
+  // Message padding: 0x80, then zeros to a 56-mod-64 boundary, then the 64-bit big-endian bit length.
+  const withPadding = new Uint8Array((((length + 8) >> 6) + 1) << 6);
+  withPadding.set(bytes);
+  withPadding[length] = 0x80;
+  const bitLength = length * 8;
+  const view = new DataView(withPadding.buffer);
+  view.setUint32(withPadding.length - 4, bitLength >>> 0, false);
+  view.setUint32(withPadding.length - 8, Math.floor(bitLength / 0x100000000), false);
+  const hash = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const words = new Uint32Array(64);
+  const rotr = (value, bits) => (value >>> bits) | (value << (32 - bits));
+  for (let offset = 0; offset < withPadding.length; offset += 64) {
+    for (let i = 0; i < 16; i += 1) words[i] = view.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i += 1) {
+      const s0 = rotr(words[i - 15], 7) ^ rotr(words[i - 15], 18) ^ (words[i - 15] >>> 3);
+      const s1 = rotr(words[i - 2], 17) ^ rotr(words[i - 2], 19) ^ (words[i - 2] >>> 10);
+      words[i] = (words[i - 16] + s0 + words[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = hash;
+    for (let i = 0; i < 64; i += 1) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + SHA256_ROUND_CONSTANTS[i] + words[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0;
+      d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    hash[0] = (hash[0] + a) >>> 0; hash[1] = (hash[1] + b) >>> 0;
+    hash[2] = (hash[2] + c) >>> 0; hash[3] = (hash[3] + d) >>> 0;
+    hash[4] = (hash[4] + e) >>> 0; hash[5] = (hash[5] + f) >>> 0;
+    hash[6] = (hash[6] + g) >>> 0; hash[7] = (hash[7] + h) >>> 0;
+  }
+  return Array.from(hash, value => value.toString(16).padStart(8, '0')).join('');
+}
+
+// The 16-hex-char opaque root digest the search-progress bus uses (the first 16 hex chars of the
+// SHA-256 of the canonical root path). Correlates a path-free progress signal to a searched root.
+function fileSearchScopeId(realpath) {
+  const canonical = String(realpath ?? '').trim();
+  return canonical ? sha256HexOfString(canonical).slice(0, 16) : '';
 }
 
 function nestedSetting(source, path, fallback) {
@@ -12730,16 +12880,20 @@ function commandPaletteValidateFileTabPaths(items = commandPaletteAllTabItems())
     const normalized = normalizeDirectoryPath(path || '');
     if (!normalized || commandPaletteFileTabValidationInflight.has(normalized) || !commandPaletteFilePathValidationDue(normalized)) continue;
     commandPaletteFileTabValidationInflight.add(normalized);
+    // Fence this validation's "missing" outcome against newer per-path state: a stale/late validation
+    // (kind-mismatch or exact-path 404) that completes after a newer valid render landed must not
+    // overwrite it. Same generation fence shared with the reload/poll/media producers.
+    const generation = openFileContentGeneration.get(normalized) || 0;
     fetchFilePathInfo(normalized, {user: true})
       .then(async info => {
         if (info?.kind === 'file') {
           await recoverOpenFileAfterMissing(normalized, info);
         } else if (info?.kind) {
-          markOpenFileMissing(normalized);
+          if (openFileContentGenerationIsCurrent(normalized, generation)) markOpenFileMissing(normalized);
         }
       })
       .catch(error => {
-        if (Number(error?.status) === 404) {
+        if (Number(error?.status) === 404 && openFileContentGenerationIsCurrent(normalized, generation)) {
           markOpenFileMissing(normalized);
           if (commandPaletteState.node && !commandPaletteState.node.hidden) renderCommandPaletteResults();
         }
@@ -13756,32 +13910,18 @@ function scheduleFileQuickOpenSearch(options = {}) {
   else fileQuickOpenState.debounce = setTimeout(run, fileQuickOpenDebounceMs);
 }
 
-function clearFileQuickOpenIndexRetry() {
-  if (fileQuickOpenState.indexRetry) clearTimeout(fileQuickOpenState.indexRetry);
-  fileQuickOpenState.indexRetry = null;
-}
-
-function scheduleFileQuickOpenIndexRetry(query, requestId) {
-  clearFileQuickOpenIndexRetry();
-  fileQuickOpenState.indexRetry = setTimeout(() => {
-    fileQuickOpenState.indexRetry = null;
-    if (requestId !== fileQuickOpenState.requestId) return;
-    if (commandPaletteState.node?.hidden) return;
-    if (commandPaletteState.query !== query) return;
-    refreshFileQuickOpenCandidates(query);
-  }, fileQuickOpenIndexRetryMs);
-}
-
 function abortFileQuickOpenSearch() {
   if (fileQuickOpenState.abortController) {
     try { fileQuickOpenState.abortController.abort(); } catch (_) {}
   }
   fileQuickOpenState.abortController = null;
-  clearFileQuickOpenIndexRetry();
   fileQuickOpenState.requestId += 1;
   fileQuickOpenState.loading = false;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  // Retire every cursor: bumping requestId already fences a late delta response, and clearing the map
+  // guarantees a search_progress signal after close/reopen cannot pump a stream against a dead palette.
+  resetFileQuickOpenDeltaCursors('');
 }
 
 // Fold TRUE duplicate file-search hits: same path, same resolved realpath (symlink / overlay
@@ -13805,7 +13945,13 @@ function dedupeFileSearchResults(files) {
 function fileQuickOpenSearchPayloadResult(payload, searchRoot) {
   return {
     root: normalizeStoredFileExplorerIndexedDir(payload?.root || payload?.root_realpath || searchRoot) || searchRoot,
+    searchRoot,
     files: Array.isArray(payload?.files) ? payload.files : [],
+    // The opaque baseline cursor the client seeds incremental delta reads with (null when nothing is
+    // committed yet — the client re-baselines from the next snapshot once the crawl publishes layer 1),
+    // and the canonical realpath whose digest correlates a path-free search_progress signal to this root.
+    cursor: payload?.initial_cursor ?? null,
+    realpath: String(payload?.root_realpath || payload?.root || searchRoot),
     // This is deliberately data-driven. The UI must not turn an explicit in-progress
     // backend response into a completed empty search just because it has no rows yet.
     indexWarming: payload?.index_state === 'warming' || payload?.index_coverage === 'pending',
@@ -13837,6 +13983,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
   fileQuickOpenState.loading = true;
   fileQuickOpenState.indexWarming = false;
   fileQuickOpenState.freshness = null;
+  // A new snapshot supersedes every prior cursor: a delta response for the old requestId can no longer
+  // mutate this palette, and the roots/query it belonged to may have changed entirely.
+  resetFileQuickOpenDeltaCursors(commandPaletteSearchQuery(query));
   renderCommandPaletteResults();
   try {
     const pathQuery = fileQuickOpenPathQuery(query);
@@ -13886,7 +14035,9 @@ async function refreshFileQuickOpenCandidates(query = '') {
       fileQuickOpenState.indexWarming = fileQuickOpenState.candidates.length === 0 && successful.some(result => result.indexWarming);
       // Stale rows stay in the list. What changes is that the palette now says they are stale.
       fileQuickOpenState.freshness = fileQuickOpenWorstFreshness(successful.map(result => result.freshness));
-      if (fileQuickOpenState.indexWarming) scheduleFileQuickOpenIndexRetry(query, requestId);
+      // Seed one delta cursor per answering root so a search_progress signal can stream the crawl's
+      // newly-published matches into this list without re-issuing the whole query (steps 6-7).
+      seedFileQuickOpenDeltaCursors(successful, requestId);
     }
     fileQuickOpenState.error = '';
   } catch (error) {
@@ -13907,6 +14058,223 @@ async function refreshFileQuickOpenCandidates(query = '') {
       renderCommandPaletteResults();
     }
   }
+}
+
+// One bounded delta page reads at most this many committed matches per root, matching the server's
+// per-response cap (yolomux_lib/filesystem/search.py). It also bounds the blended candidate array so a
+// long crawl cannot grow it without limit.
+const fileQuickOpenResultLimit = 500;
+// A single search_progress signal can fan out to at most this many delta pages per root, so a large
+// backlog drains across a few signals instead of one unbounded loop inside a push handler.
+const fileQuickOpenDeltaPagesPerSignal = 8;
+
+// Clear every cursor: a new query/root supersedes them, and delta responses for the retired requestId
+// must no longer mutate the palette. `deltaQuery` records the search text the surviving cursors serve.
+function resetFileQuickOpenDeltaCursors(query = '') {
+  fileQuickOpenState.deltaRoots = new Map();
+  fileQuickOpenState.deltaQuery = String(query || '');
+}
+
+// After a snapshot settles, register one incremental-read cursor per answering root. `cursor` is the
+// opaque baseline (null until the root commits its first rows); `scopeId` is the opaque digest a
+// path-free search_progress signal carries, so a signal correlates to the exact root it names.
+function seedFileQuickOpenDeltaCursors(results, requestId) {
+  const deltaRoots = new Map();
+  for (const result of Array.isArray(results) ? results : []) {
+    const searchRoot = result.searchRoot || result.root;
+    if (!searchRoot) continue;
+    const normalizedRoot = normalizeStoredFileExplorerIndexedDir(result.root) || String(result.root || '');
+    deltaRoots.set(normalizedRoot, {
+      searchRoot,
+      normalizedRoot,
+      cursor: result.cursor ?? null,
+      realpath: String(result.realpath || result.root || searchRoot),
+      scopeId: fileSearchScopeId(result.realpath || result.root || searchRoot),
+      more: false,
+      fetching: false,
+      requestId,
+    });
+  }
+  fileQuickOpenState.deltaRoots = deltaRoots;
+}
+
+// Fold true duplicates the way the snapshot read does, then keep only the best `limit` rows by the ONE
+// shared palette score. Ranked here solely to bound the array a delta stream keeps appending to; the
+// render path re-ranks for display, so a late high-rank upsert can still move above earlier rows.
+function rankAndPruneFileQuickOpenCandidates(candidates, query, limit = fileQuickOpenResultLimit) {
+  const deduped = dedupeFileSearchResults(candidates);
+  if (deduped.length <= limit) return deduped;
+  const scoreOf = file => commandPaletteItemScore(
+    fileQuickOpenItem(file.path || '', {
+      kind: file.kind || 'file',
+      relativePath: file.relative_path || file.name || '',
+      sortBonus: file.uploaded === true ? -500 : 0,
+    }),
+    query,
+    {surface: 'files'},
+  );
+  return deduped
+    .map((file, index) => ({file, index, score: scoreOf(file)}))
+    .sort((left, right) => (right.score - left.score) || (left.index - right.index))
+    .slice(0, limit)
+    .map(entry => entry.file);
+}
+
+// Apply one root's committed delta page to the blended candidate set: an `upsert` replaces (or adds)
+// the row for its path, a `delete` removes it. Cross-root isolation is inherent — every path is
+// absolute and each change is stamped with the root that produced it, so one root's delete can never
+// drop another root's row. Returns the deduped, bounded candidate array.
+function mergeFileQuickOpenChanges(candidates, changes, indexedRoot) {
+  const byPath = new Map();
+  const order = [];
+  for (const file of Array.isArray(candidates) ? candidates : []) {
+    const path = file?.path || '';
+    if (!path) continue;
+    if (!byPath.has(path)) order.push(path);
+    byPath.set(path, file);
+  }
+  for (const change of Array.isArray(changes) ? changes : []) {
+    const path = String(change?.path || '');
+    if (!path) continue;
+    const operation = String(change?.operation || 'upsert');
+    if (operation === 'delete') {
+      if (byPath.delete(path)) {
+        const at = order.indexOf(path);
+        if (at >= 0) order.splice(at, 1);
+      }
+      continue;
+    }
+    if (!byPath.has(path)) order.push(path);
+    byPath.set(path, {
+      name: change.name || basenameOf(path),
+      path,
+      relative_path: change.relative_path || change.name || '',
+      kind: change.kind || 'file',
+      size: change.size,
+      mtime: change.mtime,
+      realpath: change.realpath || path,
+      uploaded: change.uploaded === true,
+      indexed_root: indexedRoot,
+    });
+  }
+  return order.map(path => byPath.get(path)).filter(Boolean);
+}
+
+// Ingest one delta HTTP payload for `normalizedRoot`. A response for a superseded requestId is dropped
+// (a stale query can never mutate a newer palette). A rebase_required verdict is reported to the
+// caller for the one explicit snapshot-repair path; otherwise the changes merge in, dedupe, rerank
+// once, prune to the limit, and the root's cursor + `more` advance. Returns the delta status.
+function ingestFileQuickOpenDeltaPayload(normalizedRoot, requestId, payload) {
+  if (requestId !== fileQuickOpenState.requestId) return {applied: false, stale: true};
+  const deltaRoot = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+  if (!deltaRoot || deltaRoot.requestId !== requestId) return {applied: false, stale: true};
+  if (payload?.rebase_required) {
+    deltaRoot.more = false;
+    return {applied: false, rebase: true, reason: String(payload.reason || '')};
+  }
+  const changes = Array.isArray(payload?.changes) ? payload.changes : [];
+  deltaRoot.cursor = payload?.cursor ?? deltaRoot.cursor;
+  deltaRoot.more = payload?.more === true;
+  if (changes.length) {
+    fileQuickOpenState.candidates = rankAndPruneFileQuickOpenCandidates(
+      mergeFileQuickOpenChanges(fileQuickOpenState.candidates, changes, deltaRoot.normalizedRoot),
+      fileQuickOpenState.deltaQuery,
+    );
+    // A delta that lands rows clears the transient "Indexing…" state: the palette now has committed
+    // matches, so it must not keep claiming an empty warming index.
+    if (fileQuickOpenState.candidates.length) fileQuickOpenState.indexWarming = false;
+    renderCommandPaletteResults();
+  }
+  return {applied: true, more: deltaRoot.more, changed: changes.length};
+}
+
+// Incremental delta streaming is live only while a files-mode palette is open on a real search query;
+// a signal that arrives after close/reopen or in command mode must pump nothing.
+function fileQuickOpenDeltasActive() {
+  if (!commandPaletteState.node || commandPaletteState.node.hidden) return false;
+  if (commandPaletteEffectiveMode() !== 'files') return false;
+  return Boolean(commandPaletteSearchQuery(commandPaletteState.query));
+}
+
+// Read ONE bounded committed-delta page for a root through the same authenticated /api/fs/search
+// endpoint, appending `&cursor=`. Deltas deliberately do NOT share the snapshot's AbortController:
+// they outlive the initial fetch and are fenced by requestId inside ingest instead of by abort.
+async function fetchFileQuickOpenDeltaPage(deltaRoot) {
+  const requestId = deltaRoot.requestId;
+  const query = fileQuickOpenState.deltaQuery;
+  const recursive = fileExplorerDirectoryIsIndexed(deltaRoot.normalizedRoot) ? '&recursive=1' : '';
+  const url = `/api/fs/search?root=${encodeURIComponent(deltaRoot.searchRoot)}`
+    + `&query=${encodeURIComponent(query)}&limit=${fileQuickOpenResultLimit}${recursive}`
+    + `&cursor=${encodeURIComponent(deltaRoot.cursor)}`;
+  const payload = await apiFetchJson(url);
+  return ingestFileQuickOpenDeltaPayload(deltaRoot.normalizedRoot, requestId, payload);
+}
+
+// Drain a root's committed backlog after a progress signal: one in-flight request per root
+// (`fetching`), bounded pages per signal, looping while the server says `more`. A root with no
+// baseline cursor yet (its first layer just published) or a `rebase_required` verdict falls back to
+// the ONE explicit full-snapshot repair path rather than a second incremental path.
+async function pumpFileQuickOpenDeltasForRoot(normalizedRoot) {
+  const deltaRoot = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+  if (!deltaRoot || deltaRoot.fetching) return;
+  if (!fileQuickOpenDeltasActive()) return;
+  if (deltaRoot.cursor === null || deltaRoot.cursor === undefined) {
+    requeryOpenFileQuickOpenForIndexChange({force: true});
+    return;
+  }
+  deltaRoot.fetching = true;
+  try {
+    for (let page = 0; page < fileQuickOpenDeltaPagesPerSignal; page += 1) {
+      const current = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+      if (!current || current.requestId !== deltaRoot.requestId) return;
+      if (!fileQuickOpenDeltasActive()) return;
+      let status;
+      try {
+        status = await fetchFileQuickOpenDeltaPage(current);
+      } catch (error) {
+        console.warn('quick-open delta read failed', error);
+        return;
+      }
+      if (status.stale) return;
+      if (status.rebase) {
+        requeryOpenFileQuickOpenForIndexChange({force: true});
+        return;
+      }
+      if (!status.more) return;
+    }
+  } finally {
+    const current = fileQuickOpenState.deltaRoots.get(normalizedRoot);
+    if (current) current.fetching = false;
+  }
+}
+
+// The search_progress bus handler: a path-free {scope_id, generation, revision, coverage} frame. Pump
+// deltas only for the root whose opaque digest the frame names — a signal for any other root (or a
+// closed palette) does nothing, so one client's crawl never re-queries another root's palette.
+function handleFileSearchProgressSignal(payload) {
+  const scopeId = String(payload?.scope_id || '');
+  if (!scopeId || !fileQuickOpenDeltasActive()) return;
+  for (const deltaRoot of fileQuickOpenState.deltaRoots.values()) {
+    if (deltaRoot.scopeId !== scopeId) continue;
+    pumpFileQuickOpenDeltasForRoot(deltaRoot.normalizedRoot)
+      .catch(error => console.warn('quick-open delta pump failed', error));
+  }
+}
+
+// The ONE explicit repair path for Quick Open: a full snapshot re-query that re-baselines every cursor.
+// The incremental delta stream (steps 6-7) handles the ordinary crawl-advance case; this fires only for
+// the cases a cursor cannot bridge — a `rebase_required` verdict, a root that has no committed baseline
+// yet, or an authoritative background-refresh completion that rebuilt the index underneath the palette.
+// Guarded to the open files-mode palette with a live search query. It yields to an in-flight search
+// unless `force` (an authoritative completion event) is set, so a signal cannot abort a search
+// mid-flight into a stuck spinner.
+function requeryOpenFileQuickOpenForIndexChange({force = false} = {}) {
+  if (!commandPaletteState.node || commandPaletteState.node.hidden) return;
+  if (commandPaletteEffectiveMode() !== 'files') return;
+  if (!commandPaletteSearchQuery(commandPaletteState.query)) return;
+  if (!force && fileQuickOpenState.loading) return;
+  refreshFileQuickOpenCandidates(commandPaletteState.query)
+    .catch(error => console.warn('quick-open index-change refresh failed', error));
 }
 
 function shouldNotifyTransitionKey(key) {
@@ -16229,6 +16597,7 @@ const topbarPackingVisualItemSelectors = Object.freeze([
   '.topbar-nav',
   '.topbar-search',
   '.topbar-language-menu',
+  '#backendHealthIndicator',
   '#topbarOwnerStatus',
   '#topbarActivity',
   '.actions > :not(#topbarActivity):not(#status)',
@@ -16623,6 +16992,13 @@ function createTopbarCenterTools() {
 function createTopbarRightTools() {
   const group = document.createElement('div');
   group.className = 'topbar-right-tools';
+  // GUI.md invariant: the backend-health control is the ONE permanently mounted, fixed icon-sized
+  // shell in .topbar-right-tools, built once HERE and first in the row so it holds a stable slot
+  // while healthy (data-backend-health=""). It is never inserted or removed on a health transition;
+  // syncBackendHealthIndicator only repaints THIS same node (and its fallback re-mounts one solely
+  // if this host is torn down and rebuilt at runtime). That keeps one permanent mount owner.
+  // Order contract (#257) for the switchers follows: Language, Ownership, Activity.
+  group.append(createBackendHealthIndicator());
   group.append(createTopbarLanguageSwitcher(), createTopbarOwnerStatus(), createTopbarActivityStatus());
   return group;
 }
@@ -22517,12 +22893,40 @@ function fileIndexFreshnessMessage(freshness) {
   return lines.join(' ');
 }
 
+// A live progressive BFS crawl publishes usable rows while it keeps walking. Its authoritative live
+// state is `progressive_coverage`, not the top-level `coverage`/`too_large` fields, which can still
+// carry a superseded generation's terminal verdict. While the crawl is actively walking and has
+// neither been truncated nor reached full coverage, the root is BUILDING (partial-but-growing), not
+// the terminal "file limit reached" state — so results keep flowing and no capped-index warning fires.
+function fileIndexProgressiveCoverage(payload) {
+  const coverage = payload && typeof payload.progressive_coverage === 'object' ? payload.progressive_coverage : null;
+  return coverage;
+}
+
+function fileIndexProgressiveStillBuilding(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  return Boolean(coverage && coverage.truncated === false && coverage.full_coverage === false);
+}
+
+function fileIndexPublishedGeneration(payload) {
+  const coverage = fileIndexProgressiveCoverage(payload);
+  const published = coverage ? Number(coverage.published_generation) : NaN;
+  if (Number.isFinite(published) && published > 0) return published;
+  const generation = Number(payload?.generation || payload?.completed_generation || 0);
+  return Number.isFinite(generation) && generation > 0 ? generation : 0;
+}
+
 // Warm the backend index for a root (kicks the build) and preserve partial coverage as a distinct,
 // user-visible terminal state instead of silently presenting a capped index as complete.
 function fileIndexStatusFromPayload(payload) {
   if (!payload || typeof payload !== 'object') return 'building';
   const state = String(payload.state || '');
   const freshness = fileIndexFreshnessFromPayload(payload);
+  // A live progressive crawl that has not been truncated and has not reached full coverage is still
+  // building: it is not the terminal capped state, even if an older persisted snapshot for this root
+  // was truncated. This must be read before the too_large/partial derivation below so an in-progress
+  // BFS is never mislabelled "file limit reached".
+  if (fileIndexProgressiveStillBuilding(payload)) return 'building';
   if (payload.too_large === true || payload.coverage === 'partial' || state === 'too_large') return 'too_large';
   if (state === 'error' || payload.error) return 'error';
   // A served-but-unvouched snapshot is neither ready nor building: it answers, and it says so.
@@ -22548,7 +22952,10 @@ function showFileIndexPartialCoverageWarning(root, payload = {}) {
   const normalized = normalizeStoredFileExplorerIndexedDir(root);
   if (!normalized || fileIndexPartialWarningRoots.has(normalized)) return false;
   fileIndexPartialWarningRoots.add(normalized);
-  const count = Math.max(0, Number(payload.count) || 0);
+  // Report the live indexed count, not a stale 0 from a superseded snapshot: prefer the progressive
+  // crawl's entry_count when present, then the top-level count.
+  const progressiveCount = Number(fileIndexProgressiveCoverage(payload)?.entry_count);
+  const count = Math.max(0, Number.isFinite(progressiveCount) && progressiveCount > 0 ? progressiveCount : (Number(payload.count) || 0));
   const limit = Math.max(0, Number(payload.max_files) || count);
   emitNotification('indexCoverage', {
     key: normalized,
@@ -22571,11 +22978,24 @@ function applyFileIndexStatusPayload(root, payload) {
   const previous = fileExplorerIndexStatus.get(normalized);
   fileExplorerIndexStatus.set(normalized, status);
   if (status === 'too_large') showFileIndexPartialCoverageWarning(normalized, payload);
-  else if (status === 'ready' || status === 'stale') fileIndexPartialWarningRoots.delete(normalized);
+  // Any non-capped status clears a prior "file limit reached" warning: a superseded truncated
+  // generation must not keep a stale banner (with its stale count) on screen once the live crawl is
+  // partial-but-growing, ready, or stale again.
+  else fileIndexPartialWarningRoots.delete(normalized);
   if (status === 'building') fileIndexStatusPollRoots.add(normalized);
   else fileIndexStatusPollRoots.delete(normalized);
   syncFileIndexStatusPollInterval();
+  // Track the progressive published generation so newly-published BFS rows re-surface in an open
+  // Quick Open palette without a retype (below), independently of the top-level lifecycle generation.
+  const publishedGeneration = fileIndexPublishedGeneration(payload);
+  const previousPublished = Number(fileExplorerIndexPublishedGeneration.get(normalized) || 0);
+  if (publishedGeneration > previousPublished) fileExplorerIndexPublishedGeneration.set(normalized, publishedGeneration);
   if (previous !== status) updateFileExplorerIndexedDirectoryRows();
+  // An open Quick Open palette no longer re-issues the WHOLE query on every index-status poll or
+  // published-generation tick: the server-pushed search_progress signal now streams the newly-committed
+  // matches by cursor (steps 6-8), so the redundant full re-query per tick is retired here. The one
+  // explicit full-snapshot repair remains for the cases a cursor cannot bridge (rebase_required, a root
+  // with no committed baseline yet, or an authoritative background-refresh completion).
   return true;
 }
 
@@ -25691,6 +26111,9 @@ function openFilesSetAndShow(path, state, options = {}) {
   const item = options.item || fileEditorItemFor(path);
   const replacementSlots = setOpenFileOwner(path, item, options);
   setFileState(path, state);
+  // A freshly loaded editor payload is a newer render for this path; advance the content generation so a
+  // stale in-flight missing-verdict 404 (from a racing directory listing) cannot overwrite it.
+  if (openFileStateHasLoadedEditorPayload(state)) bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
   syncFileLayoutItems();
   if (replacementSlots) applyLayoutSlots(replacementSlots, {focusSession: item, prune: false});
@@ -25873,22 +26296,24 @@ async function refreshOpenFileGitMetadata(path) {
   }
 }
 
-async function fetchFilesystemOperationPayload(url, operation) {
+async function fetchFilesystemOperationPayload(url, operation, options = {}) {
   try {
-    return await apiFetchJson(url);
+    return await apiFetchJson(url, {}, {quietStatuses: options.quietStatuses});
   } catch (error) {
     if (!isApiPendingResponse(error)) throw error;
     return waitForApiOperationResult(error, {
       kind: 'filesystem_operation',
       operation,
+      quietStatuses: options.quietStatuses,
     });
   }
 }
 
-async function fetchFileReadPayload(path) {
+async function fetchFileReadPayload(path, options = {}) {
   return fetchFilesystemOperationPayload(
     `/api/fs/read?path=${encodeURIComponent(path)}`,
     'read',
+    options,
   );
 }
 
@@ -25994,6 +26419,17 @@ async function openFileInAdditionalEditorTab(fullPath, entryOrName, options = {}
   return openFileInEditor(fullPath, entryOrName, {...options, item, forceNewTab: true});
 }
 
+function textFileStateFromReadPayload(payload) {
+  return applyFileGitMetadata({
+    mtime: filePayloadMtime(payload),
+    size: payload.size,
+    kind: 'text',
+    original: payload.content,
+    content: payload.content,
+    dirty: false,
+  }, payload);
+}
+
 async function openFileStateFromDisk(path, entry = null) {
   const fetched = entry ? {entry, missing: false, error: '', network: false} : await fetchFileEntryStatus(path);
   const fileEntry = fetched.entry;
@@ -26022,14 +26458,7 @@ async function openFileStateFromDisk(path, entry = null) {
   }
   try {
     const payload = await fetchFileReadPayload(path);
-    return {state: applyFileGitMetadata({
-      mtime: filePayloadMtime(payload),
-      size: payload.size,
-      kind: 'text',
-      original: payload.content,
-      content: payload.content,
-      dirty: false,
-    }, payload)};
+    return {state: textFileStateFromReadPayload(payload)};
   } catch (error) {
     const status = Number(error?.status) || 0;
     if (status) {
@@ -26068,6 +26497,80 @@ function markOpenFileMissing(path) {
   }
   renderOpenFilePath(path);
   if (retainLoadedDiff) void refreshOpenFileDiff(path, {silent: true});
+}
+
+// Per-path content generation. Bumped whenever a VALID (loaded, non-error) editor payload is applied
+// for a path -- the open lane (openFilesSetAndShow), a disk reload (loadOpenFileStateFromDisk), or the
+// render-driven load (loadFileEditorState in 92_codemirror_editor.js). Every non-authoritative "missing"
+// producer captures this generation before its authoritative probe and re-checks it before marking an
+// open editor missing, so a stale/late verdict cannot overwrite a newer valid render
+// (last-writer-by-generation wins). This is the ONE fence shared by all four producers -- the two text
+// reload lanes, the media load lane, and the command-palette tab validator.
+const openFileContentGeneration = new Map();
+
+function bumpOpenFileContentGeneration(path) {
+  openFileContentGeneration.set(path, (openFileContentGeneration.get(path) || 0) + 1);
+}
+
+function openFileContentGenerationIsCurrent(path, generation) {
+  return (openFileContentGeneration.get(path) || 0) === generation;
+}
+
+// The ONE shared guard for the TEXT "open editor is missing" verdict. A directory-listing OMISSION or
+// tombstone is never proof an already-open file is gone: a stale or racing /api/fs/list can drop an
+// entry whose exact-path /api/fs/read still returns its bytes, and letting that omission mark the editor
+// missing clobbers loaded content and flops it to "(missing on disk)" (0.7.3 P0). Both text reload lanes
+// -- the explicit/background reload (loadOpenFileStateFromDisk) and the ~1/sec visible-tab poll
+// (refreshOpenFileFromFetchedStatus) -- route their omission-driven "missing" verdict through here.
+// ONLY an authoritative exact-path /api/fs/read 404 (genuine deletion) may mark an open editor missing,
+// and that 404 is fenced against newer per-path state: if a newer valid render landed while the read
+// was in flight, the stale 404 is dropped. Returns:
+//   {missing:true}  -- authoritative 404, still current: caller marks the editor missing
+//   {state}         -- exact read returned bytes: caller may apply it as recovered content
+//   null            -- inconclusive (non-404 error) or superseded by a newer render: keep loaded content
+async function resolveOpenFileMissingVerdict(path) {
+  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  let payload = null;
+  try {
+    // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet so
+    // the strict browser error gate does not flag an expected-outcome probe.
+    payload = await fetchFileReadPayload(path, {quietStatuses: [404]});
+  } catch (error) {
+    const status = Number(error?.status) || 0;
+    if (status !== 404) return null;                                            // not proof of absence
+    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    return {missing: true};
+  }
+  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;   // newer render won
+  if (openFileKindForPreviewPath(basenameOf(path)) !== 'text') return null;     // non-text: keep content
+  return {state: textFileStateFromReadPayload(payload)};
+}
+
+// Media sibling of resolveOpenFileMissingVerdict, sharing the same fence and rule but a media-appropriate
+// authoritative probe. Image/media editors are never read byte-for-byte to prove existence, so the
+// authoritative exact-path check is /api/fs/info (a single-path stat), not a directory listing. A
+// directory omission never marks a media editor missing; only an authoritative exact-path 404 (or the
+// path no longer being a file) does, and only if no newer render landed while the probe was in flight.
+// Returns:
+//   {missing:true}  -- authoritative 404 / non-file, still current: caller marks missing
+//   {state}         -- present: caller applies the rebuilt media/image/raw state
+//   {error}         -- inconclusive probe (non-404 network/error): caller shows an error, not "missing"
+//   null            -- superseded by a newer render: keep the newer content
+async function resolveOpenMediaMissingVerdict(path) {
+  const seenGeneration = openFileContentGeneration.get(path) || 0;
+  let info = null;
+  try {
+    // A 404 here is this confirmation probe's own deletion verdict, not an API failure: keep it quiet.
+    info = await apiFetchJson(`/api/fs/info?path=${encodeURIComponent(path)}`, {}, {quietStatuses: [404]});
+  } catch (error) {
+    if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null; // newer render won
+    if (Number(error?.status) === 404) return {missing: true};                  // authoritative absence
+    return {error};                                                             // inconclusive
+  }
+  if (!openFileContentGenerationIsCurrent(path, seenGeneration)) return null;    // newer render won
+  if (String(info?.kind || '') !== 'file') return {missing: true};              // path is not a file anymore
+  const built = await openFileStateFromDisk(path, info);                        // rebuild media/image/raw
+  return built.missing ? {missing: true} : built;
 }
 
 async function recoverOpenFileAfterMissing(path, entry = null) {
@@ -26135,11 +26638,19 @@ async function loadOpenFileStateFromDisk(path, entry = null) {
   });
   const loaded = await openFileStateFromDisk(path, entry);
   if (loaded.missing) {
-    markOpenFileMissing(path);
-    return false;
+    // A directory-listing omission is not proof of absence -- confirm through the shared guard, which
+    // only reports missing on an authoritative exact-path 404 and fences it against a newer render.
+    const verdict = await resolveOpenFileMissingVerdict(path);
+    if (!verdict) return false;                        // inconclusive/superseded: keep editor content
+    if (verdict.missing) {
+      markOpenFileMissing(path);
+      return false;
+    }
+    loaded.state = verdict.state;                      // recovered exact-path bytes: apply as a normal load
   }
   clearFileAutosaveTimer(path);
   setFileState(path, clearOpenFileExternalState(loaded.state));
+  bumpOpenFileContentGeneration(path);
   renderOpenFilePath(path);
   for (const {item} of viewStates) {
     const panel = panelNodes.get(item);
@@ -26201,8 +26712,14 @@ async function refreshOpenFileFromFetchedStatus(path, state, fetched) {
   if (!entry) {
     if (fetched.missing) {
       if (state.externalMissing) return;
-      clearFileAutosaveTimer(path);
-      markOpenFileMissing(path);
+      // Same shared guard as the explicit reload lane: a directory omission alone must not mark an open
+      // editor missing; only an authoritative exact-path 404 (fenced against a newer render) does.
+      const verdict = await resolveOpenFileMissingVerdict(path);
+      if (verdict && verdict.missing) {
+        clearFileAutosaveTimer(path);
+        markOpenFileMissing(path);
+      }
+      // verdict null (inconclusive/superseded) or {state} (file present) -> keep the loaded editor content.
     } else {
       markOpenFileExternalError(path, fetched.error);
     }
@@ -35256,6 +35773,15 @@ async function confirmSessionGoneOrReconnect(session, item, event = null, lifecy
   if (terminalSocketCloseLooksFinal(event) && isTmuxSession(session) && !isPendingTmuxSession(session)) {
     noteTerminalRemovalLatencyStart('session', session, closeDetails);
     pruneDeadSession(session);
+    return;
+  }
+  // A share-scoped viewer cannot confirm liveness against the host roster: /api/tmux-session-exists
+  // is host-only (share_access=none) and the server forbids it for a share token. Reconnect the
+  // share-view socket directly -- the same outcome as an unknown (null) roster answer -- instead of
+  // issuing a request the scope forbids. Gated on the shared scope owner every host-only producer uses.
+  if (!clientCanUseUnscopedHostRequests()) {
+    noteTerminalRemovalLatencyStart('session', session, closeDetails);
+    scheduleTerminalReconnect(session, item, lifecycleToken);
     return;
   }
   // one in-flight confirmation per terminal. A flapping WS could otherwise run several
@@ -45767,10 +46293,14 @@ function bindPreferencesPanel(panel) {
           if (tombstone.kind === 'bucket') bucketsByIdentity.delete(identity);
         }
         for (const [identity, bucket] of bucketReplacements) bucketsByIdentity.set(identity, bucket);
-        const candidateEnd = Math.max(
-          activeGeneration.window_end,
-          ...delta.buckets.map(bucket => bucket.start + bucket.duration),
-        );
+        const openBucketEnd = delta.buckets.find(bucket => bucket.open)?.start + concreteResolution();
+        const candidateEnd = delta.source_generation > activeGeneration.source_generation
+          && Number.isSafeInteger(openBucketEnd)
+          ? openBucketEnd
+          : Math.max(
+            activeGeneration.window_end,
+            ...delta.buckets.map(bucket => bucket.start + bucket.duration),
+          );
         const candidateStart = candidateEnd - selection.range_seconds;
         const buckets = [...bucketsByIdentity.values()]
           .filter(bucket => bucket.start >= candidateStart && bucket.start + bucket.duration <= candidateEnd);
@@ -48260,12 +48790,21 @@ const jsDebugLogLevels = Object.freeze(['info', 'warning', 'debug', 'error']);
 // signal a first-time viewer needs. Info/Debug remain one toggle away and their
 // selection persists (see save/load of jsDebugStatsUiPreferences).
 const jsDebugLogDefaultLevels = Object.freeze(['warning', 'error']);
+// Logs Clear identity is a per-producer (epoch, sequence) cursor, never wall time:
+// `serverEpoch`/`serverSequence` track the last validated server envelope, and
+// `clearedCursors` holds the {epoch, sequence} captured by the most recent Clear for
+// each producer. A record is hidden only while its producer epoch still matches the
+// cursor and its sequence is at or below it, so a clock rollback cannot resurface a
+// hidden record and a producer epoch reset resurfaces everything.
+const jsDebugClientLogEpoch = reloadClientJourneyId;
 const jsDebugLogsState = {
   payload: [],
   error: '',
   inFlight: false,
   updatedAt: 0,
-  clearedAt: 0,
+  serverEpoch: '',
+  serverSequence: 0,
+  clearedCursors: {server: null, client: null},
   levels: new Set(jsDebugLogDefaultLevels),
 };
 let jsDebugGraphRangeSeconds = jsDebugGraphDefaultRangeSeconds;
@@ -48399,7 +48938,6 @@ const jsDebugGraphMiddleWindowMs = jsDebugGraphTiers[1].maxAgeMs;
 const jsDebugGraphRawBucketMs = jsDebugGraphTiers[0].bucketMs;
 const jsDebugGraphMiddleBucketMs = jsDebugGraphTiers[1].bucketMs;
 const jsDebugGraphRollupBucketMs = jsDebugGraphTiers[2].bucketMs;
-const jsDebugGraphResponseRefRetentionMs = 5 * 60 * 1000;
 const jsDebugStatsPollFastMs = 2001;
 const jsDebugStatsPollMs = 30001;
 const jsDebugStatsCoarsePollMs = 60001;
@@ -48415,7 +48953,9 @@ const jsDebugStatsLivePushRangeSeconds = 30 * 60;
 // The wall-clock slide extends to 1h, independent of the 30m SSE-demand range: a live,
 // non-zoomed view up to an hour re-renders ~1/sec so its axis advances and content drifts
 // left between the coarser (60s) data fetches — the chart stays visibly live even where
-// data no longer streams. Ranges over 1h, zoomed, and hidden views stay static.
+// data no longer streams. Ranges over 1h and fixed historical zooms are static by design.
+// A hidden document or a hidden panel is different: neither is inherently static, they simply
+// do not repaint, so the axis holds where it was until the tab/document is shown again.
 const jsDebugGraphSlideMaxRangeSeconds = 60 * 60;
 const jsDebugStatsPollTimeoutMs = 8000;
 const jsDebugStatsHistoryMaxTimeoutMs = 30000;
@@ -48573,7 +49113,6 @@ const jsDebugGraphGpuDeviceColors = Object.freeze([
 // jsDebugGraphTiers graduated-compaction owner rewrites keys as buckets age); the
 // former raw/rollup Map split was only bookkeeping over the same keyspace.
 const jsDebugGraphBuckets = new Map();
-const jsDebugGraphEventRecords = new Map();
 // NOT display cache: short-lived staging retained for the established renderer's
 // bucket bookkeeping. Current browser observations are uploaded separately.
 const jsDebugGraphPendingServerBuckets = new Map();
@@ -49381,6 +49920,7 @@ function debugClientLogRecord(event, index = 0) {
   return {
     id: `client:${redacted?.id ?? index}`,
     owner: 'client',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestampMs) ? timestampMs / 1000 : 0,
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(timestampMs)),
     level: debugClientLogLevel(redacted),
@@ -49401,6 +49941,7 @@ function debugServerLogRecord(entry, index = 0) {
   return {
     id: `server:${redacted?.id ?? index}`,
     owner: 'server',
+    sequence: Number(redacted?.id),
     timestamp: Number.isFinite(timestamp) ? timestamp : (Number.isFinite(timestampMs) ? timestampMs / 1000 : 0),
     wallTime: String(redacted?.wallTime || diagnosticPacificWallTime(
       Number.isFinite(timestamp) ? timestamp * 1000 : timestampMs,
@@ -49422,15 +49963,79 @@ function debugMergedLogRecords() {
     .map(debugServerLogRecord);
   const client = jsDebugEvents.map(debugClientLogRecord);
   const seen = new Set();
+  const cursors = jsDebugLogsState.clearedCursors || {};
+  const producerEpoch = owner => owner === 'server' ? jsDebugLogsState.serverEpoch : jsDebugClientLogEpoch;
   return [...server, ...client]
     .filter(entry => {
       if (seen.has(entry.id)) return false;
       seen.add(entry.id);
       return true;
     })
-    .filter(entry => Number(entry.timestamp || 0) * 1000 > jsDebugLogsState.clearedAt)
+    // Clear hides only records at or below the per-producer cleared sequence, and only while
+    // the producer's epoch still matches — a ring/epoch reset resurfaces everything. Wall time
+    // is never consulted, so a clock rollback cannot resurface a record hidden by a later Clear.
+    .filter(entry => {
+      const cursor = cursors[entry.owner];
+      if (!cursor) return true;
+      return !(cursor.epoch === producerEpoch(entry.owner) && Number(entry.sequence) <= Number(cursor.sequence));
+    })
     .sort((a, b) => (Number(b.timestamp || 0) - Number(a.timestamp || 0)) || String(b.id || '').localeCompare(String(a.id || '')))
     .slice(0, 500);
+}
+
+// Clear captures the current per-producer high-water sequence under its live epoch, so
+// only records visible at Clear time are hidden. A later record above the cursor, a clock
+// rollback, or a producer epoch reset all correctly resurface. This is the ONE owner of the
+// cleared-cursor identity; nothing consults wall time.
+function jsDebugLogRecordCleared() {
+  const highWaterSequence = ids => ids.reduce((max, id) => (Number.isSafeInteger(id) && id > max ? id : max), 0);
+  jsDebugLogsState.clearedCursors = {
+    server: {
+      epoch: jsDebugLogsState.serverEpoch,
+      sequence: highWaterSequence(jsDebugLogsState.payload.map(entry => Number(entry?.id))),
+    },
+    client: {
+      epoch: jsDebugClientLogEpoch,
+      sequence: highWaterSequence(jsDebugEvents.map(event => Number(event?.id))),
+    },
+  };
+}
+
+// Validate a raw /api/logs envelope before it is adopted. A malformed, missing-epoch, or
+// sequence-inconsistent envelope is rejected with a bounded reason so the poll can keep the
+// last good snapshot and surface the failure visibly. Duplicate or repeated ids are NOT an
+// envelope error: the server may legitimately re-emit a record, so the poll stores the raw
+// logs and de-duplication happens at render time in debugMergedLogRecords (dedup by id).
+function jsDebugValidateServerLogEnvelope(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || payload.ok !== true) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (typeof payload.epoch !== 'string' || payload.epoch === '') {
+    return {ok: false, reason: 'missing epoch'};
+  }
+  const sequence = Number(payload.sequence);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  if (!Array.isArray(payload.logs)) {
+    return {ok: false, reason: 'malformed envelope'};
+  }
+  for (const entry of payload.logs) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    const id = Number(entry.id);
+    if (!Number.isSafeInteger(id) || id < 0) {
+      return {ok: false, reason: 'malformed envelope'};
+    }
+    // Duplicate or nonmonotonic ids are accepted and stored raw; the render owner
+    // (debugMergedLogRecords) de-duplicates by id. Only an id beyond the envelope's own
+    // declared sequence is envelope-inconsistent and rejected.
+    if (id > sequence) {
+      return {ok: false, reason: 'log id exceeds envelope sequence'};
+    }
+  }
+  return {ok: true, epoch: payload.epoch, sequence, logs: payload.logs};
 }
 
 function debugVisibleLogRecords() {
@@ -50120,11 +50725,6 @@ function compactJsDebugGraphBuckets(nowMs = Date.now()) {
     debugGraphMergeBucket(target, bucket);
     jsDebugGraphBuckets.delete(key);
   }
-  const refCutoff = nowMs - jsDebugGraphResponseRefRetentionMs;
-  for (const [id, record] of [...jsDebugGraphEventRecords.entries()]) {
-    if (Number(record?.lastSeenAt || 0) >= refCutoff) continue;
-    jsDebugGraphEventRecords.delete(id);
-  }
 }
 
 function recordJsDebugEventForGraph(event) {
@@ -50153,6 +50753,18 @@ function jsDebugCurrentObservationEventSnapshot(event) {
   return snapshot;
 }
 
+// Finalize a reserved observation EXACTLY ONCE: snapshot its current live content into the
+// immutable upload event, then release the live-event reference so no later measurement can
+// rewrite it. A failure's content is already complete, and a restored (pre-finalized) entry
+// is never re-snapshotted.
+function finalizeJsDebugCurrentObservation(entry) {
+  if (!entry || entry.finalized) return entry;
+  entry.event = jsDebugCurrentObservationEventSnapshot(entry.liveEvent || entry.event);
+  entry.finalized = true;
+  entry.liveEvent = null;
+  return entry;
+}
+
 function queueJsDebugCurrentObservation(key, event) {
   if (!clientCanUseUnscopedHostRequests()) return;
   if (jsDebugCurrentObservationState.keys.has(key)) return;
@@ -50162,9 +50774,15 @@ function queueJsDebugCurrentObservation(key, event) {
     jsDebugCurrentObservationState.drops += 1;
     return;
   }
-  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, releaseBlocking};
+  // Reserve identity immediately, keeping a reference to the live event. A failure reserves
+  // its already-complete identity and finalizes at once; a non-failure API observation stays
+  // open until its bounded byte/timing enrichment arrives (finalizeJsDebugCurrentObservationBytes)
+  // or the flush finalizes whatever it measured. Every other event has no post-queue enrichment,
+  // so it finalizes immediately.
+  const entry = {key, epoch: jsDebugCurrentObservationState.epoch, event: observationEvent, liveEvent: event, releaseBlocking, finalized: false};
   jsDebugCurrentObservationState.keys.add(entry.key);
   jsDebugCurrentObservationState.queue.push(entry);
+  if (releaseBlocking || observationEvent.type !== 'api') finalizeJsDebugCurrentObservation(entry);
   if (releaseBlocking) {
     jsDebugCurrentObservationState.receipts.set(entry.key, {
       key: entry.key,
@@ -50578,7 +51196,9 @@ function restoreJsDebugCurrentObservationReceipts() {
       }
       restoredEntries.set(entry.key, entry);
       state.keys.add(entry.key);
-      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, releaseBlocking: true});
+      // A restored receipt journal carries already-finalized, immutable content; it is never
+      // re-snapshotted, so it has no live event and is marked finalized on adoption.
+      state.queue.push({key: entry.key, epoch: entry.epoch, event: entry.event, liveEvent: null, releaseBlocking: true, finalized: true});
     }
   }
   if (!jsDebugCurrentObservationReceiptStorageHealthy()) {
@@ -50836,6 +51456,9 @@ async function flushJsDebugCurrentObservations() {
   }
   if (state.inFlight) return state.inFlight;
   if (!state.queue.length || typeof apiFetchJsonQuiet !== 'function') return;
+  // Any observation still open at flush time (e.g. an API response that never reported bytes)
+  // finalizes with whatever it measured, so its content is immutable before it is uploaded.
+  for (const entry of state.queue) finalizeJsDebugCurrentObservation(entry);
   const entries = [...state.queue.filter(entry => entry.releaseBlocking), ...state.queue.filter(entry => !entry.releaseBlocking)]
     .slice(0, jsDebugObservationUploadMaxItems);
   const prepared = entries.map(entry => ({entry, observation: jsDebugCurrentObservationFromEvent(entry)}));
@@ -50922,19 +51545,16 @@ async function flushJsDebugCurrentObservations() {
   return inFlight;
 }
 
-function recordApiDebugResponseBytesForGraph(event, responseBytes) {
-  if (!event || !Number.isFinite(event.id)) return;
-  const record = jsDebugGraphEventRecords.get(event.id);
-  if (!record?.bucket) return;
-  const nextBytes = Number(responseBytes);
-  if (!Number.isFinite(nextBytes) || nextBytes < 0) return;
-  const previousBytes = Number(record.responseBytes || 0);
-  const delta = nextBytes - previousBytes;
-  record.responseBytes = nextBytes;
-  record.lastSeenAt = Date.now();
-  if (delta === 0) return;
-  debugGraphAddBucketData(debugGraphBucketForTime(Number(record.bucket.startMs), Date.now()), {bandwidthBytes: delta});
-  debugGraphQueueServerDelta(record.bucket, {bandwidthBytes: delta});
+// The bytes finalizer for a still-open API observation. The live event already carries the
+// measured, bounded byte count (Content-Length or a response clone; rejected, hung, or
+// unconsumed bodies simply leave it absent), so this locates the reserved queue entry by live
+// identity and finalizes it exactly once. A late measurement for an already-finalized (or
+// immediate-failure) observation finds no open entry and cannot rewrite its immutable content.
+function finalizeJsDebugCurrentObservationBytes(liveEvent) {
+  if (!liveEvent || typeof liveEvent !== 'object') return;
+  const entry = jsDebugCurrentObservationState.queue.find(item => item && item.liveEvent === liveEvent && !item.finalized);
+  if (!entry) return;
+  finalizeJsDebugCurrentObservation(entry);
 }
 
 function recordJsDebugDisconnectedSpan(startMs, endMs = Date.now()) {
@@ -51071,7 +51691,6 @@ function applyJsDebugStatsSamplePush(payload = {}) {
 
 function clearJsDebugGraphData() {
   jsDebugGraphBuckets.clear();
-  jsDebugGraphEventRecords.clear();
   jsDebugGraphPendingServerBuckets.clear();
   // Invalidate any in-flight silent prefetch so its late response cannot repopulate
   // the cache we just cleared (kept the reload-idempotency of the rendered history).
@@ -52251,29 +52870,24 @@ function debugGraphClientMetricSeriesDefs(buckets) {
 
 function debugGraphProcessCpuSeriesDefs(buckets) {
   const processes = new Map();
-  for (const [bucketIndex, bucket] of buckets.entries()) {
+  for (const bucket of buckets) {
     if (!(bucket.servers instanceof Map)) continue;
     for (const [processId, process] of bucket.servers.entries()) {
       if (Number(process?.cpuCount || 0) <= 0) continue;
-      processes.set(processId, {label: String(process?.label || processId), bucketIndex});
+      if (!processes.has(processId)) processes.set(processId, {label: String(process?.label || processId)});
     }
   }
   const currentPort = String(location.port || (location.protocol === 'https:' ? '443' : '80')).trim();
   const currentProcessId = `port:${currentPort}`;
-  const fallbackSelf = {
-    key: 'cpu', labelKey: 'debug.graph.series.defaultProcessCpu', unit: 'percent', linePattern: 'solid', color: jsDebugGraphProcessCpuColors.current,
-    value: bucket => bucket.cpuCount ? bucket.cpuTotalPercent / bucket.cpuCount : 0,
-    hasData: bucket => Number(bucket?.cpuCount || 0) > 0,
-  };
-  if (!processes.size) return [fallbackSelf];
-  const activeProcessId = processes.has(currentProcessId)
-    ? currentProcessId
-    : [...processes.entries()].sort((left, right) => right[1].bucketIndex - left[1].bucketIndex || left[0].localeCompare(right[0]))[0][0];
+  // Truthfulness: the exact serving `port:N` is ALWAYS the one solid series, even with zero
+  // samples in this window (it renders as an honest gap). It is never dropped, a peer is never
+  // promoted in its place, and there is no aggregate `cpu` fallback series.
+  if (!processes.has(currentProcessId)) processes.set(currentProcessId, {label: currentProcessId});
   let peerIndex = 0;
   const definitions = [...processes.entries()]
     .sort((a, b) => a[1].label.localeCompare(b[1].label) || a[0].localeCompare(b[0]))
     .map(([processId, process]) => {
-      const current = processId === activeProcessId;
+      const current = processId === currentProcessId;
       const legacyWebPort = String(processId).match(/^port:(\d+)$/);
       const displayLabel = legacyWebPort && process.label === processId
         ? (current ? 'yolomux.py (web)' : `yolomux.py (web) :${legacyWebPort[1]}`)
@@ -53626,17 +54240,19 @@ function debugGraphLiveAgentWindowDetailHtml(groupKey = 'activity') {
   // A stale revision means these rows may be old, not that the known roster is empty.
   // Keep the count and breakdown honest while the per-session stale text explains freshness.
   const sessions = new Set(rows.map(row => row.session));
-  const summary = `${rows.length} agent windows across ${sessions.size} sessions`;
+  // ONE compact summary carries the stale count; the per-session stale specifics move under the
+  // Live breakdown rather than being repeated as header prose.
+  const summary = `${rows.length} agent windows across ${sessions.size} sessions${staleSessions.length ? ` (${staleSessions.length} stale)` : ''}`;
   const details = rows.map(({session, agent, kind}) => {
     const label = agentWindowCanonicalLabel(agentWindowIndex(agent), kind, kind);
     const state = agentWindowStateKey(agent?.state);
     return `<li>${esc(session)} → ${esc(label)} → ${esc(kind)} → ${esc(state)}</li>`;
   }).join('');
-  const staleText = staleSessions.length
-    ? ` ${staleSessions.map(item => `${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`).join('; ')}`
+  const stalePerSession = staleSessions.length
+    ? `<ul class="js-debug-agent-window-detail-stale">${staleSessions.map(item => `<li>${esc(`${item.session} status is stale (rev ${item.revision || 'missing'} vs ${chartRevision})`)}</li>`).join('')}</ul>`
     : '';
   const state = staleSessions.length ? 'stale' : 'current';
-  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span>${staleText ? `<span class="js-debug-agent-window-detail-stale">${esc(staleText.trim())}</span>` : ''}<details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul></details></div>`;
+  return `<div class="js-debug-agent-window-detail" data-js-debug-agent-window-detail="${esc(groupKey)}" data-js-debug-agent-window-detail-state="${state}"><span>${esc(summary)}</span><details><summary>${esc('Live breakdown')}</summary><ul>${details}</ul>${stalePerSession}</details></div>`;
 }
 
 function refreshDebugAgentWindowLiveDetails() {
@@ -54823,7 +55439,6 @@ function debugGraphBucketSummary(nowMs = Date.now()) {
     displayBucketSeconds: [...new Set(buckets.map(bucket => bucket.durationMs / 1000))].sort((left, right) => left - right),
     agentTokenDisplayFloorSeconds: Math.max(jsDebugGraphAgentTokenBucketSeconds, debugGraphAgentTokenResolution(nowMs)),
     displayBuckets: buckets.length,
-    eventRefs: jsDebugGraphEventRecords.size,
     resolutionSeconds: debugGraphDisplayResolutionMs(domain, 0, nowMs) / 1000,
     rangeSeconds: jsDebugGraphRangeSeconds,
     zoomed: debugGraphZoomDomainValid(),
@@ -55077,8 +55692,11 @@ function pollJsDebugStatsOnInterval() {
 }
 
 // Fire the full-retention prefetch once shortly after the current range lands, then on a
-// slow cadence. Visibility is enforced by the poll loop itself (it stops when hidden) plus
-// the guard inside prefetchJsDebugHistoryFullRetention, so a hidden panel does zero work.
+// slow cadence. The poll loop stops when the panel is hidden and the prefetch itself is
+// retired (see below), so neither does any work while the panel is hidden. This is only the
+// poll/prefetch path: the live SSE stream is separate and tracks DOCUMENT visibility, not the
+// active tab, so a hidden panel on a still-visible page keeps applying deltas (it just does
+// not repaint); only a hidden document tears the stream down.
 function maybePrefetchJsDebugHistory() {
   if (!jsDebugStatsPollState.firstSampleReceived) return;
   if (jsDebugHistoryPrefetchState.inFlight) return;
@@ -55305,7 +55923,9 @@ function jsDebugCurrentBucketRecord(bucket, includeRangeCost = false, rangeCost 
     } else if (name.startsWith('cpu_percent:')) {
       const source = name.slice('cpu_percent:'.length);
       record.servers[source] = {label: source, cpu_total_percent: value, cpu_count: 1};
-      if (!record.cpu_count || source.includes(':8881')) {
+      // No serving-port preference: the exact serving port owns the solid CPU series in
+      // debugGraphProcessCpuSeriesDefs, so this aggregate is just the first published sample.
+      if (!record.cpu_count) {
         record.cpu_total_percent = value;
         record.cpu_count = 1;
       }
@@ -55988,6 +56608,8 @@ function debugSystemHealthSnapshotHtml(health = {}) {
   // change" beside a short "Last checked" is a QUIET system and not a broken one.
   const checked = debugSystemScalar(cycleAgeSeconds, 'no_observer_cycle_recorded', value => `${relativeTimeFormat(value)} (${debugSystemNumber(value, 1)}s ago)`);
   const cycles = debugSystemScalar(health.observer_cycles, health.observer_liveness_reason_code || 'observer_unattached');
+  const rawEpochStartedAt = Number(health.observer_epoch_started_at);
+  const epochStartedAt = Number.isFinite(rawEpochStartedAt) ? rawEpochStartedAt : 0;
   const rows = [
     ['Snapshot revision', Number(health.revision) > 0 ? `#${String(health.revision)}` : t('common.notAvailable')],
     ['Observer last checked', checked.text, checked.reason],
@@ -55996,6 +56618,12 @@ function debugSystemHealthSnapshotHtml(health = {}) {
     ['Observer cycles', cycles.text, cycles.reason],
     ['Last state change', ageSeconds == null ? 'never' : `${relativeTimeFormat(ageSeconds)} (${debugSystemNumber(ageSeconds, 1)}s old)`],
     ['Observer epoch', String(health.observer_epoch || '') || t('common.notAvailable')],
+    // The wall-clock instant this observer epoch began collecting -- i.e. how far back the
+    // retained history actually reaches. The backend already publishes it as
+    // `observer_epoch_started_at`; this is the reader-facing label for it. Absent (never
+    // available) reads as not-available rather than the epoch-zero date a bare `new Date(0)`
+    // would print.
+    ['History retained since', epochStartedAt > 0 ? debugGraphTimeLabel(epochStartedAt * 1000, {includeDate: true, includeSeconds: true}) : t('common.notAvailable')],
     ['Services retained', Number.isFinite(Number(health.resources)) ? debugSystemNumber(health.resources) : t('common.notAvailable')],
   ];
   // The reason CODE, not its sentence. The sentence is an explanation and the alert slot above the
@@ -56558,10 +57186,11 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
   </div>`;
 }
 
-// M8 bumped `local_services.schema_version` to 2 when every row grew a `health` block and the
-// payload grew a snapshot-level one. The guard is exact, not `>=`: rendering an older payload
-// through the roster would print absent health as though it had been measured, which is the defect
-// the version number exists to prevent.
+// The schema this panel renders. M8 bumped it to 2 when every row grew a `health` block and the
+// payload grew a snapshot-level one; W13 bumped it to 3 when the dead `alert` summary was removed
+// from the payload. The guard is exact, not `>=`: rendering an older payload through the roster
+// would print absent health as though it had been measured, which is the defect the version number
+// exists to prevent.
 //
 // It has ONE reader: `debugSystemRosterServiceRow`, which turns a false answer into the typed
 // `schema_unsupported` row state. There used to be a second -- a whole retained per-cell table,
@@ -56570,7 +57199,7 @@ function debugSystemServiceHealthDetailHtml(health = {}, nowSeconds = Date.now()
 // condition the roster already covers is the divergent-copies defect; the roster says it in one
 // typed state now, and the legacy view is gone.
 function debugSystemLocalServicesSchemaSupported(payload = {}) {
-  return Number(payload.local_services?.schema_version) === 2;
+  return Number(payload.local_services?.schema_version) === 3;
 }
 
 // The ONE reader of `payload.local_services`, and the reason the rule above is absolute rather
@@ -56580,7 +57209,7 @@ function debugSystemLocalServicesSchemaSupported(payload = {}) {
 //
 // This exists because the guard used to live inside `debugSystemRosterRows`, one branch DOWN from
 // the reads: `inventory`, `services` and `health.port` were all pulled out of the payload above
-// it, and the port was handed to the web row before the branch was ever evaluated. A schema-3
+// it, and the port was handed to the web row before the branch was ever evaluated. An unsupported
 // payload therefore still changed the rendered HTML while the tests asserted it was interpreted
 // nowhere, and the suite stayed green. A rule written at one call site is not a rule; a rule that
 // owns the only read is.
@@ -57326,9 +57955,17 @@ async function pollDebugLogs({force = false} = {}) {
   refreshDebugLogsViews();
   try {
     const payload = await apiFetchJsonQuiet('/api/logs', {cache: 'no-store'});
-    jsDebugLogsState.payload = Array.isArray(payload?.logs)
-      ? shareRedactDiagnosticValue(payload.logs.slice(-500))
-      : [];
+    const envelope = jsDebugValidateServerLogEnvelope(payload);
+    if (!envelope.ok) {
+      // A malformed, missing-epoch, or envelope-inconsistent poll fails visibly and keeps the
+      // last good snapshot rather than adopting an untrustworthy server response. Duplicate ids
+      // are not a rejectable error: they are stored raw and de-duplicated at render time.
+      jsDebugLogsState.error = envelope.reason;
+      return false;
+    }
+    jsDebugLogsState.payload = shareRedactDiagnosticValue(envelope.logs.slice(-500));
+    jsDebugLogsState.serverEpoch = envelope.epoch;
+    jsDebugLogsState.serverSequence = envelope.sequence;
     jsDebugLogsState.updatedAt = Date.now();
     return true;
   } catch (error) {
@@ -57751,7 +58388,8 @@ function debugGraphSlideIntervalMs(resolutionMs) {
 function debugGraphSlidingAxisActive() {
   // Live ranges up to 1h advance continuously with the wall clock so the axis
   // slides and content drifts left even between (up to 60s) data ticks. Coarser
-  // (>1h), zoomed, and hidden views stay static per the range-scaled cadence contract.
+  // (>1h) ranges and fixed historical zooms are static by design; a hidden document or
+  // hidden panel is not static but simply does not repaint until it is shown again.
   return !debugGraphZoomDomainValid() && jsDebugGraphRangeSeconds <= jsDebugGraphSlideMaxRangeSeconds;
 }
 
@@ -58731,7 +59369,7 @@ function bindDebugPanel(panel) {
     const logsClear = event.target.closest('[data-js-debug-logs-clear]');
     if (logsClear && panel.contains(logsClear)) {
       event.preventDefault();
-      jsDebugLogsState.clearedAt = Date.now();
+      jsDebugLogRecordCleared();
       refreshDebugLogsViews();
       statusEl.textContent = t('debug.logs.cleared');
       return;
@@ -67745,8 +68383,24 @@ function loadFileEditorState(path, panel, item) {
       const fetched = await fetchFileEntryStatus(path);
       const entry = fetched.entry;
       if (!entry) {
-        if (fetched.missing) markOpenFileMissing(path);
-        else setFileState(path, fileErrorState(fetched.error));
+        if (fetched.missing) {
+          // A directory-listing omission is not proof a media file is gone. Confirm through the shared
+          // authoritative /api/fs/info guard (fenced against newer per-path state) before marking missing;
+          // a stale/racing omission must never clobber an open, valid media view.
+          const verdict = await resolveOpenMediaMissingVerdict(path);
+          if (verdict?.missing) {
+            markOpenFileMissing(path);
+          } else if (verdict?.state) {
+            setFileState(path, verdict.state);
+            bumpOpenFileContentGeneration(path);
+            if (panel) renderFileEditorPanel(panel, item);
+          } else if (verdict?.error) {
+            setFileState(path, fileErrorState(verdict.error));
+          }
+          // verdict null (superseded by a newer render): keep the newer content.
+        } else {
+          setFileState(path, fileErrorState(fetched.error));
+        }
         renderSessionButtons();
         renderPaneTabStrips();
         return;
@@ -67760,6 +68414,7 @@ function loadFileEditorState(path, panel, item) {
       } else {
         setFileState(path, rawPreviewFileState(path, entry));
       }
+      bumpOpenFileContentGeneration(path);
       if (panel) renderFileEditorPanel(panel, item);
       renderSessionButtons();
       renderPaneTabStrips();
@@ -67775,6 +68430,7 @@ function loadFileEditorState(path, panel, item) {
         content: payload.content,
         dirty: false,
       }, payload));
+      bumpOpenFileContentGeneration(path);
     } catch (err) {
       const status = Number(err?.status) || 0;
       if (status) {
@@ -72664,22 +73320,85 @@ function shareDebugSecretValues() {
   return Array.from(values).sort((a, b) => b.length - a.length);
 }
 
+// W2 diagnostic redaction contract. This is the JavaScript conformance implementation of the ONE
+// neutral redaction contract whose authoritative fixture is tests/fixtures/diagnostic_redaction.json
+// (also enforced against yolomux_lib/diagnostic_redaction.py). JS and Python cannot share a regex
+// engine, so the shared fixture is the single parent: both sides must produce byte-identical output
+// for every case. Any change here that diverges from the Python owner must update the fixture and
+// keep both green. Grammar is anchored (^...$) so exact credential names match while near names like
+// `tokenizer`/`secretary` do not; the string path redacts share URLs, share-token query parameters,
+// Authorization/Cookie headers (including malformed/unknown-scheme fail-closed), secret assignments,
+// and bare Bearer values, then bounds to 4000 chars. Redaction is a security boundary: fail closed.
+// The regex owners and replacer callbacks are declared below shareRedactDiagnosticValue so the
+// pair stays inside the historical [shareRedactSecretText, shareDebugNumber) slice window that
+// stats_current_panel.test.js evaluates in isolation; function hoisting and post-eval calls resolve
+// the const temporal-dead-zone before either redactor runs.
 function shareRedactSecretText(value) {
-  return shareReplayRedactText(value);
+  let text = String(value ?? '');
+  const runtimeSecrets = typeof shareDebugSecretValues === 'function' ? shareDebugSecretValues() : [];
+  for (const secret of runtimeSecrets) {
+    if (secret) text = text.split(secret).join('[redacted-share-token]');
+  }
+  text = text
+    .replace(DIAGNOSTIC_SHARE_URL_RE, '[redacted-share-url]')
+    .replace(DIAGNOSTIC_SHARE_TOKEN_QUERY_RE, '$1[redacted-share-token]')
+    .replace(DIAGNOSTIC_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE, diagnosticRedactSecretHeader)
+    .replace(DIAGNOSTIC_SECRET_ASSIGNMENT_RE, diagnosticRedactSecretAssignment)
+    .replace(DIAGNOSTIC_BEARER_VALUE_RE, '$1$2[redacted-secret]');
+  return text.length > 4000 ? `${text.slice(0, 4000)}[truncated]` : text;
 }
 
-function shareRedactDiagnosticValue(value, depth = 0) {
+function shareRedactDiagnosticValue(value, key = '', depth = 0) {
   if (depth > 12) return '[truncated-depth]';
-  if (typeof value === 'string') return shareRedactSecretText(value);
-  if (typeof value !== 'object' || value === null) return value;
-  if (Array.isArray(value)) return value.map(item => shareRedactDiagnosticValue(item, depth + 1));
-  const result = {};
-  for (const [key, rawValue] of Object.entries(value)) {
-    result[key] = /token|secret/i.test(key) && typeof rawValue === 'string'
-      ? '[redacted-share-token]'
-      : shareRedactDiagnosticValue(rawValue, depth + 1);
+  if (DIAGNOSTIC_SECRET_KEY_RE.test(String(key || ''))) return '[redacted-share-token]';
+  if (Array.isArray(value)) {
+    return value.slice(0, 256).map(item => shareRedactDiagnosticValue(item, key, depth + 1));
   }
-  return result;
+  if (value && typeof value === 'object') {
+    const result = {};
+    for (const [name, rawValue] of Object.entries(value)) {
+      result[String(name).slice(0, 120)] = shareRedactDiagnosticValue(rawValue, String(name), depth + 1);
+    }
+    return result;
+  }
+  if (typeof value === 'string') return shareRedactSecretText(value);
+  return value;
+}
+
+const DIAGNOSTIC_SECRET_NAME_SOURCE = '(?:token|secret|password|passwd|(?:proxy[_-]?)?authorization|'
+  + '(?:set[_-]?)?cookie|bearer|(?:x[_-]?)?api[_-]?key|client[_-]?secret|'
+  + '(?:access|refresh|share)[_-]?token|x[_-]?share[_-]?token)';
+const DIAGNOSTIC_SECRET_KEY_RE = new RegExp(`^${DIAGNOSTIC_SECRET_NAME_SOURCE}$`, 'i');
+const DIAGNOSTIC_SHARE_URL_RE = /(?:https?:\/\/[^"'\s<>]+)?\/share\/[A-Za-z0-9_-]+(?:#[^"'\s<>]*)?/g;
+const DIAGNOSTIC_SHARE_TOKEN_QUERY_RE = /([?#&](?:t|token|share|shareToken|share_token)=)[^&#\s"']+/gi;
+const DIAGNOSTIC_AUTHORIZATION_HEADER_RE = /\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)(?:Basic|Bearer)[ \t]+[^\s,;"'<>}]+(?![^\r\n]*=)(?=[ \t]+(?:failed\b|after\b|at[ \t]+\/|Cookie[ \t]*:)|[;\r\n]|$)/gi;
+const DIAGNOSTIC_MALFORMED_AUTHORIZATION_HEADER_RE = /(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*\[redacted-secret\])(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*(?:\r?\n|$))(?!\b(?:proxy[-_]?)?authorization[ \t]*(?::|=)[ \t]*["'])\b(?<name>(?:proxy[-_]?)?authorization)(?<separator>[ \t]*(?::|=)[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_COOKIE_HEADER_RE = /\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$)(?:[ \t]*;[ \t]*[^\s=;,"'<>}]+[ \t]*=[ \t]*(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|[^\s;,"'<>}]+)(?=\s|;|\r?$))*(?![ \t]*;)(?![^\r\n]*=)/gi;
+const DIAGNOSTIC_MALFORMED_COOKIE_HEADER_RE = /(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*\[redacted-secret\])(?!\b(?:Set-)?Cookie[ \t]*:[ \t]*(?:\r?\n|$))\b(?<name>(?:Set-)?Cookie)(?<separator>[ \t]*:[ \t]*)[^\r\n]+/gi;
+const DIAGNOSTIC_SECRET_ASSIGNMENT_RE = new RegExp(
+  '\\b(?<prefix>' + DIAGNOSTIC_SECRET_NAME_SOURCE + '\\b["\']?[ \\t]*(?:=|:)[ \\t]*)'
+  + '(?:(?<quote>["\'])(?<quoted_value>(?:\\\\[^\\r\\n]|(?!\\k<quote>)[^\\\\\\r\\n])*)\\k<quote>|'
+  + '(?<unterminated_quote>["\'])(?<unterminated_value>[^\\r\\n]*)|'
+  + '(?<value>[^&#\\s,;"\'<>}]+))',
+  'gi',
+);
+const DIAGNOSTIC_BEARER_VALUE_RE = /\b(Bearer)([ \t]+)([^\s,;:="'<>]+)/gi;
+
+function diagnosticRedactSecretHeader(...args) {
+  const groups = args[args.length - 1];
+  return `${groups.name}${groups.separator}[redacted-secret]`;
+}
+
+function diagnosticRedactSecretAssignment(...args) {
+  const groups = args[args.length - 1];
+  const quote = groups.quote || '';
+  if (groups.unterminated_quote) return `${groups.prefix}[redacted-secret]`;
+  const value = quote ? groups.quoted_value : groups.value;
+  if (typeof value === 'string' && value.startsWith('[redacted-')) return args[0];
+  return `${groups.prefix}${quote}[redacted-secret]${quote}`;
 }
 
 function shareDebugNumber(value) {
@@ -72846,7 +73565,11 @@ function shareGeometryDebugDeltas(hostSnapshot = {}, localSnapshot = {}) {
 }
 
 function shareReplayFrameByteLength(value = {}) {
-  const text = stableDigestJson(shareRedactDiagnosticValue(value));
+  // Measure the true serialized wire size of the frame. The diagnostic redactor bounds strings to
+  // 4000 chars, arrays to 256 entries, and keys to 120 chars, which collapses a large DOM keyframe
+  // to a fraction of its real size; the byte length is a number that is never emitted as text, so
+  // redaction is not needed here and must not be applied to the size measurement.
+  const text = stableDigestJson(value);
   return utf8ByteLength(text);
 }
 
@@ -81056,6 +81779,11 @@ function refreshEventLogsFromPush(payload = {}) {
 }
 
 function postEvent(session, type, message, details = {}) {
+  // /api/event is host-only (share_access=none); the server returns 403 for a share token, and a real
+  // 403 during teardown fails the strict browser server-log-ring gate. Gate every event producer
+  // (terminal_disconnected, state_changed, notifications, watched-PR, yoagent) at this one owner rather
+  // than per call site, so no share-reachable caller can leak a forbidden host-only request.
+  if (!clientCanUseUnscopedHostRequests()) return Promise.resolve(false);
   const lifecycleToken = session ? tmuxSessionLifecycleToken(session) : null;
   if (lifecycleToken && !tmuxSessionLifecycleTokenIsCurrent(lifecycleToken)) return Promise.resolve(false);
   return apiFetch('/api/event', {
@@ -81616,7 +82344,7 @@ const clientServerPushEventTypes = Object.freeze([
   'settings_changed', 'pricing_catalog_changed', 'stats_sample', 'attention_acks_changed', 'auto_approve_changed',
   'backend_health_changed',
   'background_owner_changed', 'background_refresh_done', 'background_refresh_requested', 'tmux_signals_changed',
-  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'session_files_ready', 'transcripts_changed',
+  'watched_prs_changed', 'files_changed', 'fs_changed', 'roots_changed', 'search_progress', 'session_files_ready', 'transcripts_changed',
   'operation_terminal',
   'context_changed', 'context_items_ready', 'activity_summary_ready', 'event_log_changed', 'update_available',
   'yoagent_conversation_changed', 'yoagent_jobs_changed', 'yoagent_skills_changed', 'yoagent_stream_delta',
@@ -81753,9 +82481,9 @@ function handleClientPushEventNowByType(type, payload = {}) {
       // A completion event contains the authoritative lifecycle snapshot.  Re-reading it
       // immediately recreates the retired building-index poll and can race a newer generation.
       if (payload.root && !applied) refreshFileIndexStatus(payload.root);
-      if (commandPaletteState.node && !commandPaletteState.node.hidden && commandPaletteEffectiveMode() === 'files') {
-        refreshFileQuickOpenCandidates(commandPaletteState.query).catch(error => console.warn('search-index quick-open refresh failed', error));
-      }
+      // A completed search-index refresh is authoritative: re-issue the open palette query through the
+      // one re-query owner, forcing past any in-flight search so the new snapshot's rows win.
+      requeryOpenFileQuickOpenForIndexChange({force: true});
     }
     if (payload.role === 'session-files') {
       const session = String(payload.session || '');
@@ -81853,6 +82581,12 @@ function handleClientPushEventNowByType(type, payload = {}) {
   }
   if (type === 'roots_changed') {
     if (typeof syncServerWatchRoots === 'function') syncServerWatchRoots({immediate: true, force: true});
+    return;
+  }
+  if (type === 'search_progress') {
+    // A per-root crawl-advance signal (path-free {scope_id, generation, revision, coverage}). The
+    // open Quick Open palette streams the newly-committed matches by cursor instead of re-querying.
+    if (typeof handleFileSearchProgressSignal === 'function') handleFileSearchProgressSignal(payload);
   }
 }
 
@@ -81990,12 +82724,29 @@ function scheduleClientEventDisconnectEpisode(source) {
   return true;
 }
 
+function clearClientEventCandidateEpisode(source) {
+  const episode = clientEventTransportState.candidateEpisode;
+  if (!episode || (source !== undefined && episode.source !== source)) return false;
+  clientEventTransportState.candidateEpisode = null;
+  return true;
+}
+
+// Abandon a pre-ready CANDIDATE stream and its retry episode without touching the ACTIVE stream.
+function abandonClientEventCandidate(source) {
+  if (clientEventTransportState.replacementSource !== source) return false;
+  clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode(source);
+  source?.close?.();
+  return true;
+}
+
 function closeClientEventStream() {
   const source = clientEventTransportState.source;
   clearClientEventDisconnectEpisode(source);
   clientEventTransportState.source = null;
   const replacementSource = clientEventTransportState.replacementSource;
   clientEventTransportState.replacementSource = null;
+  clearClientEventCandidateEpisode();
   clientEventTransportState.connected = false;
   source?.close?.();
   if (replacementSource !== source) replacementSource?.close?.();
@@ -82032,6 +82783,14 @@ function openClientEventStream(descriptor, options = {}) {
   if (replacing) {
     const priorReplacement = clientEventTransportState.replacementSource;
     clientEventTransportState.replacementSource = source;
+    // One bounded retry episode per candidate: opening a new candidate (whether the first for this
+    // demand or a corrected one for changed demand) starts a fresh episode.
+    clientEventTransportState.candidateEpisode = {
+      source,
+      demandSignature: String(options.demandSignature || ''),
+      attempts: 0,
+      startedAt: performance.now(),
+    };
     priorReplacement?.close?.();
   } else {
     clientEventTransportState.source = source;
@@ -82042,6 +82801,7 @@ function openClientEventStream(descriptor, options = {}) {
       const demandedSignature = String(options.demandSignature || '');
       if (demandedSignature && demandedSignature !== clientEventDemandSignature(clientEventDemandDescriptor())) {
         clientEventTransportState.replacementSource = null;
+        clearClientEventCandidateEpisode(source);
         source.close();
         syncClientEventDemand({immediate: true});
         return;
@@ -82049,6 +82809,8 @@ function openClientEventStream(descriptor, options = {}) {
       const previousSource = clientEventTransportState.source;
       clientEventTransportState.source = source;
       clientEventTransportState.replacementSource = null;
+      // The candidate is now the ACTIVE stream; its bounded retry episode is over.
+      clearClientEventCandidateEpisode(source);
       previousSource?.close?.();
     } else if (clientEventTransportState.source !== source) {
       return;
@@ -82088,7 +82850,33 @@ function openClientEventStream(descriptor, options = {}) {
     recordSseDebugEvent('ping', clientEventEnvelope(event), event);
   });
   source.onerror = () => {
-    if (clientEventTransportState.replacementSource === source) return;
+    if (clientEventTransportState.replacementSource === source) {
+      // A CANDIDATE that errors before it is ever ready must not be silently retried forever while the
+      // ACTIVE stream keeps claiming to serve demand it no longer covers. Bound the retry episode: the
+      // browser EventSource auto-reconnects the same URL, so tolerate a few transient errors, then
+      // abandon the candidate and re-drive demand so a fresh stream + HTTP resync repair current state.
+      const episode = clientEventTransportState.candidateEpisode;
+      if (!episode || episode.source !== source) return;
+      episode.attempts += 1;
+      if (episode.attempts < clientEventCandidateRetryLimit) return;
+      abandonClientEventCandidate(source);
+      // The active stream does not serve the new demand: demote it so consumers fall back to HTTP
+      // instead of trusting a stream that covers only the old channel set.
+      clientEventTransportState.connected = false;
+      clientEventTransportState.reconnectPending = true;
+      if (typeof recordJsDebugClientEventsConnectionState === 'function') recordJsDebugClientEventsConnectionState(false);
+      recordSseDebugEvent('client_events_candidate_failed', {
+        attempts: episode.attempts,
+        demandSignature: episode.demandSignature,
+        diagnosticFailure: true,
+      });
+      // Force demand to be re-driven (the signature was already advanced when this candidate opened),
+      // opening one corrected candidate, and schedule an HTTP resync so no channel is left stranded.
+      clientEventTransportState.demandSignature = '';
+      scheduleReconnectResync('candidate-failed');
+      syncClientEventDemand({immediate: true});
+      return;
+    }
     if (clientEventTransportState.source !== source) return;
     clientEventTransportState.connected = false;
     clientEventTransportState.reconnectPending = true;

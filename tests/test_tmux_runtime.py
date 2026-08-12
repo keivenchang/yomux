@@ -9,6 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from tests import tmux_runtime
+from yolomux_lib.tmux import session_retirement
+from yolomux_lib.local_services.registry import ProcessTableEntry
+from yolomux_lib.tmux.session_retirement import ProcessBirthIdentity
+from yolomux_lib.tmux.session_retirement import SessionRetirementIdentity
+from yolomux_lib.tmux.session_retirement import retained_tmux_session_births
 
 
 def test_stop_isolated_tmux_runtime_declares_private_socket_for_kill_server(monkeypatch, tmp_path):
@@ -100,6 +105,32 @@ def test_wait_for_isolated_tmux_pane_exit_accepts_proven_absent_pid(monkeypatch)
     monkeypatch.setattr(tmux_runtime, "pid_is_alive", lambda _pid: False)
 
     tmux_runtime.wait_for_isolated_tmux_pane_exit(((43212, "proc:124"),))
+
+
+def test_tmux_session_birth_retirement_excludes_zombies_and_same_pgid_foreign_births(monkeypatch):
+    identity = SessionRetirementIdentity(
+        session="fixture",
+        members=(ProcessBirthIdentity(43213, 43213, "proc:125", "fixture command"),),
+    )
+
+    # bounded_process_table is the owner that excludes zombies, so a zombie birth is absent.
+    assert retained_tmux_session_births(identity, table={}) == ()
+
+    # A new process may occupy the same PGID or even recycle the PID. Neither is the captured birth.
+    foreign = ProcessTableEntry(1, 43213, 0.0, "foreign command", 126, 43213, "proc:126")
+    assert retained_tmux_session_births(identity, table={43213: foreign}) == ()
+
+    monkeypatch.setattr(session_retirement, "process_state", lambda _pid: "S")
+    retained = ProcessTableEntry(1, 43213, 0.0, "fixture command", 125, 43213, "proc:125")
+    assert retained_tmux_session_births(identity, table={43213: retained}) == (
+        {
+            "pid": 43213,
+            "pgid": 43213,
+            "state": "S",
+            "start_identity": "proc:125",
+            "command": "fixture command",
+        },
+    )
 
 
 def test_stop_isolated_tmux_runtime_waits_for_the_exact_pane_exit_side_effect(monkeypatch, tmp_path):

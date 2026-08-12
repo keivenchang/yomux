@@ -128,6 +128,12 @@ def test_only_fanning_out_lanes_are_gated_on_inotify_capacity(monkeypatch):
     assert refused is not None and refused.admitted is False
 
 
+def test_darwin_heavy_lanes_do_not_probe_linux_inotify_capacity(monkeypatch):
+    monkeypatch.setattr(check_module, "inotify_capacity_verdict", lambda: (_ for _ in ()).throw(AssertionError("Darwin read Linux /proc")))
+    profile = {"uses_inotify_capacity": False}
+    assert admit_inotify_capacity([_lane("pytest-browser")], profile=profile) is None
+
+
 def test_capacity_is_admitted_before_any_lane_runs(monkeypatch):
     """The refusal must precede lane execution, not follow it."""
 

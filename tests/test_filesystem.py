@@ -64,7 +64,17 @@ def test_read_json_file_returns_default_for_missing_or_invalid_json(tmp_path):
 def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypatch, caplog, tmp_path):
     project = tmp_path / "project"
     project.mkdir()
-    blocked = str(tmp_path / ".azure" / "token")
+    # reindex only marks paths for EXISTING index roots. Register the project as the ONE
+    # candidate root so the shared prefilter has a covering root for `safe`; with no root
+    # configured there is genuinely nothing to reindex and the prefilter correctly returns [].
+    monkeypatch.setattr(filesystem_search.file_index, "_iter_candidate_index_roots", lambda: [project])
+    # A secret sibling OUTSIDE every index root: no candidate root covers it, so the shared
+    # exclusion prefilter drops it before authorization -- silently, and without a warning.
+    secret = str(tmp_path / ".azure" / "token")
+    # A change UNDER the index root whose parent no longer exists: admitted by the prefilter
+    # (inside the root, not excluded) but unindexable at authorization time (parent gone -> 404).
+    # It must be skipped with exactly ONE deduplicated warning, and never abort the batch.
+    vanished = str(project / "gone" / "app.py")
     safe = str(project / "app.py")
     dirty = []
     monkeypatch.setattr(
@@ -76,11 +86,16 @@ def test_reindex_batch_skips_blocked_paths_without_starving_safe_paths(monkeypat
     monkeypatch.setattr(filesystem_search.file_index, "schedule_refreshes", lambda: 0)
     filesystem_search._LOGGED_BLOCKED_REINDEX_PATHS.clear()
 
-    assert filesystem_search.reindex_roots_for_paths([blocked, safe], reason="fs-watch") == []
-    assert filesystem_search.reindex_roots_for_paths([blocked, safe], reason="fs-watch") == []
+    assert filesystem_search.reindex_roots_for_paths([secret, vanished, safe], reason="fs-watch") == []
+    assert filesystem_search.reindex_roots_for_paths([secret, vanished, safe], reason="fs-watch") == []
 
+    # The safe path under the index root is marked dirty on every batch: neither a blocked
+    # sibling nor an unindexable one starves it.
     assert dirty == [Path(safe), Path(safe)]
-    assert caplog.messages.count(f"Skipping blocked filesystem watch path: {blocked}") == 1
+    # The out-of-root secret is dropped by the prefilter without any log spam.
+    assert not any("token" in message for message in caplog.messages)
+    # The unindexable in-root path is warned about exactly once across both batches.
+    assert sum(vanished in message for message in caplog.messages) == 1
 
 
 def test_list_directory_returns_entries(tmp_path):
@@ -750,6 +765,30 @@ def test_filesystem_entrypoints_route_through_the_shared_safe_path_primitive():
     assert bypasses == []
 
 
+def test_unindex_follower_derives_refreshing_elsewhere_from_the_one_verdict(tmp_path, monkeypatch):
+    # W6: the follower unindex path is a background-refresh control outcome, so
+    # its `ok`/`refreshing_elsewhere` must come from the single classifier, not
+    # from reading the raw `accepted` boolean twice. A live remote owner that
+    # accepts the unindex is refreshing elsewhere; a rejected one is not.
+    monkeypatch.setattr(filesystem_search.file_index, "background_owner_can_build", lambda: False)
+
+    monkeypatch.setattr(
+        filesystem_search.file_index,
+        "request_background_owner_refresh",
+        lambda _payload: {"ok": True, "accepted": True, "role": "search-index", "fallback": False},
+    )
+    accepted = filesystem_search.unindex_root(str(tmp_path))
+    assert accepted == {"root": str(tmp_path), "ok": True, "refreshing_elsewhere": True}
+
+    monkeypatch.setattr(
+        filesystem_search.file_index,
+        "request_background_owner_refresh",
+        lambda _payload: {"ok": False, "accepted": False, "role": "search-index", "fallback": True},
+    )
+    rejected = filesystem_search.unindex_root(str(tmp_path))
+    assert rejected == {"root": str(tmp_path), "ok": False, "refreshing_elsewhere": False}
+
+
 def test_listing_reports_stage_timings_without_exposing_entry_names(tmp_path):
     (tmp_path / "child").mkdir()
     (tmp_path / "private-name.txt").write_text("content\n", encoding="utf-8")
@@ -1036,6 +1075,106 @@ def test_git_repo_info_cache_returns_independent_values_and_watcher_invalidation
     third = git_ops.git_repo_info(repo, include_status=False)
     assert third["branch"] == "main"
     assert len(calls) == 4, "watcher-owned invalidation must make Finder recompute"
+
+
+def _reset_repository_generation(root):
+    git_ops._REPOSITORY_GENERATIONS.pop(str(Path(root).expanduser().resolve(strict=False)), None)
+
+
+def test_private_repository_signature_distinguishes_same_commit_branch_switch_without_git_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "file.txt").write_text("content\n", encoding="utf-8")
+    git(repo, "add", "file.txt")
+    git(repo, "commit", "-m", "one")
+
+    on_master = git_ops.private_repository_signature(repo)
+    # A second branch at the SAME commit: identical tree, identical OID, different symbolic ref.
+    git(repo, "branch", "other")
+    git(repo, "checkout", "other")
+    on_other = git_ops.private_repository_signature(repo)
+
+    assert on_master != on_other, "an identical-tree branch switch must change the signature"
+    assert on_master[1] == on_other[1], "the OID is unchanged across a same-commit branch switch"
+    assert on_master[0] == "master" and on_other[0] == "other"
+    # The signature is path-free: it never names a `.git` control path.
+    assert not any(".git" in part for part in (*on_master, *on_other))
+
+
+def test_private_repository_signature_is_unknown_for_non_repo_and_unborn(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert git_ops.private_repository_signature(plain) == git_ops.REPOSITORY_SIGNATURE_UNKNOWN
+
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    init_repo(unborn)  # a repository with a symbolic HEAD but no commit yet
+    assert git_ops.private_repository_signature(unborn) == git_ops.REPOSITORY_SIGNATURE_UNKNOWN
+
+
+def test_repository_generation_advances_on_identical_tree_branch_switch(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_repo(repo)
+    (repo / "file.txt").write_text("content\n", encoding="utf-8")
+    git(repo, "add", "file.txt")
+    git(repo, "commit", "-m", "one")
+    _reset_repository_generation(repo)
+
+    first = git_ops.repository_generation(repo)
+    assert first == 1
+    assert git_ops.repository_generation(repo) == first, "an unchanged HEAD does not advance the generation"
+
+    git(repo, "branch", "other")
+    git(repo, "checkout", "other")
+    assert git_ops.repository_generation(repo) == first + 1, "a same-commit branch switch advances the generation"
+    assert git_ops.repository_generation(repo) == first + 1
+
+
+def test_repository_generation_isolates_a_malformed_signature_between_tenants(tmp_path):
+    tenant_a = tmp_path / "a"
+    tenant_b = tmp_path / "b"
+    tenant_a.mkdir()
+    tenant_b.mkdir()
+    # Tenant A is a healthy repository; tenant B is not a repository at all (malformed HEAD).
+    init_repo(tenant_a)
+    (tenant_a / "file.txt").write_text("a\n", encoding="utf-8")
+    git(tenant_a, "add", "file.txt")
+    git(tenant_a, "commit", "-m", "one")
+    _reset_repository_generation(tenant_a)
+    _reset_repository_generation(tenant_b)
+
+    assert git_ops.repository_generation(tenant_b) == 0, "an unreadable repository holds a null generation"
+    assert git_ops.repository_generation(tenant_a) == 1
+    git(tenant_a, "branch", "other")
+    git(tenant_a, "checkout", "other")
+    # A's real branch switch advances A; B's malformed state neither advances nor is disturbed.
+    assert git_ops.repository_generation(tenant_a) == 2
+    assert git_ops.repository_generation(tenant_b) == 0
+
+
+def test_repository_generation_holds_through_a_transient_unreadable_head(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    _reset_repository_generation(root)
+    state = {"head_oid": "c0ffee", "head_rc": 0}
+
+    def runner(args):
+        if args[:1] == ["rev-parse"]:
+            return subprocess.CompletedProcess(args, state["head_rc"], f"{state['head_oid']}\n", "")
+        return subprocess.CompletedProcess(args, 0, "master\n", "")
+
+    assert git_ops.repository_generation(root, runner=runner) == 1
+    # A transient failure to read HEAD is inconclusive: hold the generation.
+    state["head_rc"] = 1
+    assert git_ops.repository_generation(root, runner=runner) == 1
+    # Recovering to the SAME signature must not flap the generation.
+    state["head_rc"] = 0
+    assert git_ops.repository_generation(root, runner=runner) == 1
+    # A genuine HEAD change after recovery advances exactly once.
+    state["head_oid"] = "beefbeef"
+    assert git_ops.repository_generation(root, runner=runner) == 2
 
 
 def test_git_repo_info_cache_ttl_is_stable_and_desynchronizes_repo_roots():
